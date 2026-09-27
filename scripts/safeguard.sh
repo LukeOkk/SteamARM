@@ -82,6 +82,14 @@ while true; do
     elif [ "$mapent" -gt "$MAX_MAPENT" ]; then kill_guests "kernel VM.map.entries ${mapent} > ${MAX_MAPENT}"
     fi
     n=$((n + 1))
+    # FEXServer is shared by every x86 program. If it is gone while guests
+    # run (it crashed, or an older one timed out), a game started from Steam
+    # dies in 5 s with "Couldn't connect to FEXServer socket" (MEASURED):
+    # bring it back the way run-fex.sh starts it.
+    if [ $((n % 5)) -eq 0 ] && [ "$gcount" -gt 0 ] && ! pgrep -f 'lxrun .*FEXServer' >/dev/null; then
+        echo "$(date '+%F %T') FEXServer missing with ${gcount} guests: restarting it"
+        (cd "$(dirname "$0")/.." && scripts/run-fex.sh /bin/true >/dev/null 2>&1 &)
+    fi
     if [ $((n % 5)) -eq 0 ]; then
         echo "$(date '+%F %T') free=${level}% guests=${gcount} rss=${grss}MB fseventsd=${fse}MB vmobj=${vmobj} mapent=${mapent}"
         sync

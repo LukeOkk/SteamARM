@@ -54,12 +54,16 @@ FEXDIR="${FEXDIR:-/tmp/lxrt-root/usr/bin}"
 # (/var/folders/...) does not exist in the guest root -- bind failed with
 # ENOENT, the server exited, and every FEX client that could not reach it
 # started more processes until the safeguard killed 99 of them.
+# --persistent: FEXServer otherwise exits once it sees no clients, and a FEX
+# started later cannot bring it back here (it looks for FEXServer on its own
+# PATH): Steam's "Play" then died in 5 s with "Couldn't connect to FEXServer
+# socket" (MEASURED, Schedule I).
 if ! pgrep -f 'lxrun .*FEXServer' >/dev/null 2>&1; then
     # In a subshell: the server must not be a child of this shell, which is
     # about to exec the guest -- a program that reaps all its children (pressure-
     # vessel's pv-adverb) then waited for FEXServer forever (MEASURED).
     ( TMPDIR=/tmp LXRT_ROOT=/tmp/lxrt-root FEX_ROOTFS=/tmp/fexhome/.local/share/fex-emu/RootFS/Ubuntu_24_04 \
-        nohup ./build/lxrun "$FEXDIR"/FEXServer --foreground >"$FEXSERVER_LOG" 2>&1 & )
+        nohup ./build/lxrun "$FEXDIR"/FEXServer --foreground --persistent=0 >"$FEXSERVER_LOG" 2>&1 & )
     sleep 4
     if ! pgrep -f 'lxrun .*FEXServer' >/dev/null 2>&1; then
         echo "run-fex: FEXServer did not start (see $FEXSERVER_LOG); not starting the guest" >&2

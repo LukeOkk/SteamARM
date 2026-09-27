@@ -122,3 +122,28 @@ LXRT_NO_NETLINK=1 -> login window 85 s after start; with the socket, none
 in 5 minutes. The emulated netlink socket is now offered only inside a
 bwrap container (pressure-vessel: Proton's winebus/SDL3 need it there).
 Result: Steam's login window 86 s after start (17:14:21 -> 17:15:47).
+
+Games from Steam died in 5 s: FEXServer gone (0.3.3)
+----------------------------------------------------
+Schedule I (Play, three times): "Couldn't connect to FEXServer socket ...
+FEXServerClient: Failure to setup client" and the game stopped 5 s later.
+FEXServer exits when it has had no clients for a while, and a FEX started
+later looks for FEXServer on the game's PATH, where there is none. Now
+FEXServer runs with --persistent=0 (run-fex.sh), and the memory guard
+restarts it if it disappears while guests run.
+
+Proton ARM64 on macOS: measured, not viable natively
+-----------------------------------------------------
+Steam offers "Proton (ARM64)" when the host is ARM64 (a native arm64 Steam
+client, or FEX's hypervisor CPUID leaf -- which SteamARM hides). Its Wine is
+aarch64 Linux + ARM64EC with FEX as an in-process DLL (libarm64ecfex.dll,
+libwow64fex.dll). Run natively under lxrun (Proton 11.0 (ARM64), `wine cmd`):
+the preloader cannot reserve 0x10000-0x68000000 and 0x7f000000-0x7fff0000,
+and wine exits in 2 s. macOS keeps the low 4 GiB of every process unmapped
+(__PAGEZERO), where Windows needs KUSER_SHARED_DATA (0x7ffe0000) and every
+32-bit program lives; and Darwin clears x18, the ARM64 Windows TEB register,
+on context switches. The Android projects that offer it (Winlator/WinNative
+layers, DroidDeck with the arm64 Steam client) run on Linux kernels, where
+neither limit exists. SteamARM's x86 Proton path already runs the game's x86
+code through FEX -- the same translator ARM64 Proton would load -- with the
+guest address space relocated so both limits are handled.
