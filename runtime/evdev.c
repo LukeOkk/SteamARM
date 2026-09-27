@@ -44,6 +44,7 @@ struct absinfo { int32_t value, min, max, fuzz, flat, res; };
 
 struct evdev {
     int num;                            // N of eventN
+    uint64_t ino;                       // the socket's inode: the entry is stale once it differs
     char name[128], phys[64], uniq[64];
     uint16_t id[4];                     // bustype vendor product version
     uint8_t prop[8];
@@ -227,6 +228,8 @@ int lxrt_evdev_open(const char *host, int lflags)
     }
     int one = 1;
     setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, &one, sizeof one);
+    struct stat sst;
+    e->ino = fstat(fd, &sst) == 0 ? (uint64_t)sst.st_ino : 0;
     take_snapshot(fd, e);
     if (lflags & 02000000)                           // O_CLOEXEC
         fcntl(fd, F_SETFD, FD_CLOEXEC);
@@ -237,9 +240,20 @@ int lxrt_evdev_open(const char *host, int lflags)
     return fd;
 }
 
+// As in socket.c's netlink table: a number closed by close_range, dup2 or
+// exec never reaches lxrt_evdev_close, and must not make an unrelated
+// descriptor that later gets it behave like a controller.
 static struct evdev *get(int fd)
 {
-    return fd >= 0 && fd < EV_FDS ? atomic_load(&g_ev[fd]) : NULL;
+    struct evdev *e = fd >= 0 && fd < EV_FDS ? atomic_load(&g_ev[fd]) : NULL;
+    if (!e)
+        return NULL;
+    struct stat st;
+    if (fstat(fd, &st) == 0 && (uint64_t)st.st_ino == e->ino)
+        return e;
+    if (atomic_compare_exchange_strong(&g_ev[fd], &e, NULL))
+        free(e);
+    return NULL;
 }
 
 int lxrt_evdev_is(int fd) { return get(fd) != NULL; }

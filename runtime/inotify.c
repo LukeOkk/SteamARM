@@ -11,6 +11,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/event.h>
+#include <sys/ioctl.h>
 #include <sys/stat.h>
 #include <unistd.h>
 
@@ -145,6 +146,21 @@ static int snapshot(int fd, struct dir_entry **out)
     closedir(dir);
     if (error) { free_entries(*out); *out = NULL; }
     return error;
+}
+// Readiness is level-triggered: the private pipe holds bytes exactly while
+// events are queued. Drain every pending byte (not just one) whenever the
+// queue is empty; a stray byte left behind made poll() report the pipe
+// readable forever, and Chromium's inotify reader thread in Steam's web
+// helper spun at 100% CPU in lxrt_inotify_read -- the Steam window never
+// appeared (MEASURED with sample(1)).
+static void drain_ready(struct instance *i)
+{
+    int pending = 0;
+    char sink[64];
+    while (ioctl(i->reader, FIONREAD, &pending) == 0 && pending > 0) {
+        ssize_t n = read(i->reader, sink, pending < (int)sizeof sink ? (size_t)pending : sizeof sink);
+        if (n <= 0 && errno != EINTR) break;
+    }
 }
 static void signal_ready(struct instance *i)
 {
@@ -426,6 +442,7 @@ long lxrt_inotify_read(int fd, void *buf, size_t len)
         int n = poll(&p, 1, -1), error = errno;
         pthread_mutex_lock(&lock);
         if (n < 0) { result = LERR(error); break; }
+        if (!i->head && !i->stopping) drain_ready(i);   // readable but nothing queued
     }
     while (!result && i->head) {
         struct record *r = i->head;
@@ -448,9 +465,7 @@ long lxrt_inotify_read(int fd, void *buf, size_t len)
         } while (i->head);
         if (!i->head) {
             i->tail = NULL;
-            char byte;
-            ssize_t n;
-            do { n = read(i->reader, &byte, 1); } while (n < 0 && errno == EINTR);
+            drain_ready(i);
         }
         if (!result) result = (long)used;
     }

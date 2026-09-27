@@ -94,3 +94,21 @@ Regression (this stage)
 -----------------------
 tests/elf/run.sh 37/37 (new: opath_special, evdev); i386 18/18; tests/win/run.sh 11/11;
 tests/win/run_steam_path.sh 2/2 (tone, xinput).
+
+Regression found after release 0.3.0: Steam's window never appeared
+---------------------------------------------------------------------
+runtime/inotify.c began translating watched guest paths (for /dev/input
+hotplug). Chromium's watches in Steam's web helper, which used to fail on
+untranslated paths, now worked -- and exposed a readiness bug: the private
+pipe that marks "events queued" could keep a byte with the queue empty, so
+poll() said readable forever and the web helper's inotify_reader thread spun
+at 100% CPU (sample(1): lxrt_inotify_read -> poll/fcntl). The browser never
+created SharedJSContext and no window appeared. Fix: drain every pending byte
+whenever the queue is empty (level-triggered invariant). Also hardened: the
+netlink and evdev per-descriptor tables are validated by socket inode, since
+close_range/dup2/exec never pass through the runtime's close hooks.
+Result (MEASURED): Steam's main window created ~2 min after start;
+tests/elf/run.sh inotify 41/41.
+Lesson: the release was published after probe tests, without a full Steam
+start on the final runtime. scripts/make-release.sh is now preceded by a
+real Steam start in the release checklist (docs/INSTALL.md, "From source").

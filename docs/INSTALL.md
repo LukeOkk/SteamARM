@@ -133,4 +133,6 @@ open build/SteamARM.app     # or: scripts/run-steam.sh
 
 An app built this way uses the checkout it was built from. To build the
 downloadable package yourself: `scripts/make-release.sh` (output in
-`build/release/`).
+`build/release/`). Before publishing one, run the test suites **and** start
+Steam with the final runtime until its window appears: the probes alone do
+not exercise Steam's web helper.

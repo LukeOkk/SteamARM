@@ -91,7 +91,21 @@ final class LauncherModel: ObservableObject {
     var needsSetup: Bool {
         let fm = FileManager.default
         return !fm.fileExists(atPath: projectDir.appendingPathComponent("build/lxrun").path) ||
-            !fm.fileExists(atPath: Paths.steamRoot.appendingPathComponent("tmp/fexhome/.local/share/Steam/steam.sh").path)
+            !fm.fileExists(atPath: Paths.steamRoot.appendingPathComponent("tmp/fexhome/.local/share/Steam/steam.sh").path) ||
+            needsUpdate
+    }
+
+    var needsFirstInstall: Bool {
+        !FileManager.default.fileExists(atPath: projectDir.appendingPathComponent("build/lxrun").path)
+    }
+
+    /// The unpacked source is newer than what setup.sh last built from it
+    /// (a new SteamARM.app over an old install): rebuild before running.
+    var needsUpdate: Bool {
+        let unpacked = try? String(contentsOf: projectDir.appendingPathComponent(".bundle-version"), encoding: .utf8)
+        guard let unpacked else { return false }                 // a checkout: not ours to manage
+        let built = try? String(contentsOf: projectDir.appendingPathComponent("build/.setup-version"), encoding: .utf8)
+        return built != unpacked
     }
 
     /// scripts/setup.sh in a Terminal window: long (downloads and builds for

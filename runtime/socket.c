@@ -291,7 +291,23 @@ static int type_to_darwin(int ltype)
 #define L_NETLINK_KOBJECT_UEVENT 15
 static _Atomic int g_nl_peer[65536];        // peer fd + 1, 0 = not netlink
 static _Atomic uint32_t g_nl_groups[65536];
-static bool is_netlink(int fd) { return fd >= 0 && fd < 65536 && atomic_load(&g_nl_peer[fd]) != 0; }
+static _Atomic uint64_t g_nl_ino[65536];
+// A number can outlive its socket here: close_range, dup2 over it, exec of
+// a CLOEXEC descriptor and a forked child's mass close never pass through
+// lxrt_socket_close. Trusting the number alone turned the reused descriptor
+// -- Chromium's IPC sockets -- into a fake netlink socket whose bind and
+// getsockname lied, and Steam's web helper hung before its first window
+// (MEASURED). The entry counts only while it names the same socket.
+static bool is_netlink(int fd)
+{
+    if (fd < 0 || fd >= 65536 || atomic_load(&g_nl_peer[fd]) == 0)
+        return false;
+    struct stat st;
+    if (fstat(fd, &st) == 0 && (uint64_t)st.st_ino == atomic_load(&g_nl_ino[fd]))
+        return true;
+    atomic_store(&g_nl_peer[fd], 0);            // stale: forget it (the peer leaks, once)
+    return false;
+}
 
 long lxrt_socket(int ldomain, int ltype, int proto)
 {
@@ -306,6 +322,8 @@ long lxrt_socket(int ldomain, int ltype, int proto)
         }
         fcntl(sv[1], F_SETFD, FD_CLOEXEC);
         apply_type_flags(sv[0], ltype);
+        struct stat st;
+        atomic_store(&g_nl_ino[sv[0]], fstat(sv[0], &st) == 0 ? (uint64_t)st.st_ino : 0);
         atomic_store(&g_nl_groups[sv[0]], 0);
         atomic_store(&g_nl_peer[sv[0]], sv[1] + 1);
         return sv[0];

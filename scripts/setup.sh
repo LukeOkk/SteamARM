@@ -121,6 +121,9 @@ step_test() {
 }
 
 step_done() {
+    # The launcher of a downloaded app compares this with the version of the
+    # source it unpacked, and offers setup again after an update.
+    [ -f .bundle-version ] && cp .bundle-version build/.setup-version
     log "done. Start SteamARM:"
     echo "  open $REPO/build/SteamARM.app        (launcher: Steam and other apps)"
     echo "  scripts/run-steam.sh                  (Steam directly)"

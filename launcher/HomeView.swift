@@ -284,7 +284,8 @@ struct SetupBanner: View {
             Image(systemName: "shippingbox.and.arrow.backward")
                 .font(.system(size: 30)).foregroundStyle(Theme.accent)
             VStack(alignment: .leading, spacing: 6) {
-                Text("Falta instalar SteamARM").font(.headline)
+                Text(model.needsUpdate && !model.needsFirstInstall ? "SteamARM se actualizó: falta recompilar"
+                     : "Falta instalar SteamARM").font(.headline)
                 Text("El instalador compila el runtime y FEX, descarga los sistemas Linux y Steam, "
                      + "y lo deja todo listo sin máquina virtual. Necesita las Command Line Tools "
                      + "de Xcode, Homebrew, unos 25 GB libres y entre 20 y 60 minutos. Se abre en "
