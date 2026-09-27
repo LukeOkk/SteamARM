@@ -104,7 +104,6 @@ struct LauncherSettings: Codable, Equatable {
     var fexMultiblock: Bool = true
     var fexSMC: String = "mtrack"
     var fexX87Reduced: Bool = false
-    var showProtonARM64: Bool = false
     var graphicsBackend: String = "vulkan"
     var shaderCache: Bool = true
     var anisotropy: Int = 0
@@ -140,7 +139,6 @@ struct LauncherSettings: Codable, Equatable {
         fexMultiblock = try c.decodeIfPresent(Bool.self, forKey: .fexMultiblock) ?? true
         fexSMC = try c.decodeIfPresent(String.self, forKey: .fexSMC) ?? "mtrack"
         fexX87Reduced = try c.decodeIfPresent(Bool.self, forKey: .fexX87Reduced) ?? false
-        showProtonARM64 = try c.decodeIfPresent(Bool.self, forKey: .showProtonARM64) ?? false
         graphicsBackend = try c.decodeIfPresent(String.self, forKey: .graphicsBackend) ?? "vulkan"
         shaderCache = try c.decodeIfPresent(Bool.self, forKey: .shaderCache) ?? true
         anisotropy = try c.decodeIfPresent(Int.self, forKey: .anisotropy) ?? 0

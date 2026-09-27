@@ -26,7 +26,7 @@ affects games (the settings window reminds you).
 | **Interfaz** | Start Steam when the launcher opens; ask before stopping; native windows or a VNC desktop, and its resolution; the source folder the launcher runs scripts from |
 | **Entrada** | Controllers, one page per player (below) |
 | **Sistema** | Language and time zone of Linux programs; vsync (per game / on / off); **DRAM** and **VRAM** limits; esync/fsync |
-| **Procesador** | "Mostrar Proton ARM64 en Steam": lists Valve's ARM64 Protons in Steam (they do not start games on macOS; see TROUBLESHOOTING). FEX options: on-disk translation cache (experimental), x86 memory-ordering emulation (TSO full/fast/off), multiblock, self-modifying code detection, reduced-precision x87 |
+| **Procesador** | FEX options: on-disk translation cache (experimental), x86 memory-ordering emulation (TSO full/fast/off), multiblock, self-modifying code detection, reduced-precision x87 |
 | **Gráficos** | Shader cache, anisotropic filtering, frame-rate limit, DXVK HUD, Metal HUD |
 | **Sonido** | Sound on/off and volume |
 | **Atajos** | Keyboard shortcuts: screenshot (F8 by default, saved to `~/Pictures/SteamARM`), stop the running program, toggle the Metal HUD. Shortcuts while a game has focus need the Accessibility permission, and screenshots need Screen Recording |
