@@ -311,7 +311,14 @@ static bool is_netlink(int fd)
 
 long lxrt_socket(int ldomain, int ltype, int proto)
 {
-    if (ldomain == L_AF_NETLINK && proto == L_NETLINK_KOBJECT_UEVENT) {
+    // Only inside a (fake) bwrap container -- where Proton's winebus and the
+    // games' SDL live. The Steam client itself, outside, got stuck in its
+    // own udev/controller threads once the monitor opened, and its window
+    // never appeared (MEASURED: login window with the socket refused, none
+    // in 5 minutes with it). LXRT_NO_NETLINK=1 refuses it everywhere.
+    extern bool lxrt_mounts_active(void);
+    int nl_off = getenv("LXRT_NO_NETLINK") != NULL || !lxrt_mounts_active();
+    if (ldomain == L_AF_NETLINK && proto == L_NETLINK_KOBJECT_UEVENT && nl_off == 0) {
         int sv[2];
         if (socketpair(AF_UNIX, SOCK_DGRAM, 0, sv) != 0)
             return LERR(errno);
