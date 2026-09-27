@@ -1,0 +1,37 @@
+Two guest-kernel soft lockups in one working day, on the VM the project is
+replacing. Both wedged the guest hard enough that ssh stopped answering and
+the host process had to be killed; the second one truncated a file the guest
+was writing (FEX's freshly linked binary came back 0 bytes). Kept because
+'the VM is the stable part' is an assumption this plan keeps meeting.
+
+=== LOCKUP 1 (guest idle apart from a FEX build, 6153 s uptime) -- console.log.lockup, 1437 lines
+  [ 4736.617023] sh (5858): drop_caches: 3
+  [ 5518.580762] hrtimer: interrupt took 3029259 ns
+  [ 5987.983283] watchdog: BUG: soft lockup - CPU#1 stuck for 26s! [clang++:31507]
+  [ 5987.983292] CPU#1 Utilization every 4s during lockup:
+  [ 5987.983293] 	#1:   1% system,	  1% softirq,	  1% hardirq,	 36% idle
+  [ 5987.983294] 	#2:   3% system,	  0% softirq,	  1% hardirq,	 78% idle
+  [ 5987.983294] 	#3:   5% system,	  1% softirq,	  2% hardirq,	 11% idle
+  [ 5987.983295] 	#4:   1% system,	  0% softirq,	  2% hardirq,	  0% idle
+  [ 5987.983296] 	#5:   2% system,	  0% softirq,	  1% hardirq,	  0% idle
+  [ 5987.983297] Modules linked in: binfmt_misc vfat fat joydev virtio_net net_failover failover virtio_balloon virtio_input loop nfnetlink vsock_loopba
+  [ 5987.983445] CPU: 1 UID: 1000 PID: 31507 Comm: clang++ Tainted: G           OE       6.17.1-300.fc43.aarch64 #1 PREEMPT(voluntary) 
+  [ 5987.983449] Tainted: [O]=OOT_MODULE, [E]=UNSIGNED_MODULE
+
+=== LOCKUP 2 (Steam auto-started under FEX after boot, 14543 s uptime) -- console.log.lockup2, 658 lines
+  [   16.326386] [drm:virtio_gpu_dequeue_ctrl_func [virtio_gpu]] *ERROR* response 0x1200 (command 0x207)
+  [14509.192402] hrtimer: interrupt took 98941412 ns
+  [14543.778996] watchdog: BUG: soft lockup - CPU#2 stuck for 21s! [steamwebhelper:1455]
+  [14543.779011] CPU#2 Utilization every 4s during lockup:
+  [14543.779011] 	#1:   0% system,	  0% softirq,	  0% hardirq,	 17% idle
+  [14543.779013] 	#2:   0% system,	  0% softirq,	  0% hardirq,	 95% idle
+  [14543.779013] 	#3:   0% system,	  0% softirq,	 26% hardirq,	 33
+
+Host side, both times: the SteamARM process stayed alive holding instance.lock,
+gvproxy kept listening, and `ssh -p 2222` answered 'Connection reset by peer' or
+timed out. Recovery: kill -9 the host process, relaunch, wait ~150 s for boot,
+then `systemctl stop steamfex.service steamarm.service` so the guest stays a
+build toolchain. The second lockup left ~/FEX/Build/Bin/FEX at 0 bytes and
+cmake's depend files truncated ('Aborted (core dumped)' in cmake_depends);
+fixed by deleting the two target dirs and regenerating.
+

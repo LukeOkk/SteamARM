@@ -1,0 +1,104 @@
+Stage 15 -- Windows programs launched the way Steam launches them (2026-09-27)
+==============================================================================
+
+ZERO-VM status: NOT complete. This stage makes Steam's own launch path work
+up to the rendered window; real games (tested by the user), 32-bit WoW64
+games and the clean-Mac install are still open.
+
+Steam's path for a Windows game:
+  Steam -> reaper -> SteamLinuxRuntime_4/_v2-entry-point -> pressure-vessel
+  (bwrap container, interpreted by runtime/mounts.c) -> pv-adverb -> proton
+  (Python) -> wine -> DXVK / VKD3D-Proton -> Vulkan thunks -> shim ->
+  MoltenVK -> Metal.
+
+MEASURED, with the exact command line Steam uses (_v2-entry-point
+--verb=waitforexitandrun -- proton waitforexitandrun <exe>), executables
+placed in steamapps/common/SteamARM-Probe:
+  d3d11_clear.exe: window "SteamARM D3D11 probe", DXVK swapchain presented
+  d3d12_clear.exe: window "SteamARM D3D12 probe", cleared colour on screen
+  a fresh Proton prefix is created inside the container
+  (/bin/sh -c 'echo inside-ok' through the same entry point: 29 s, exits)
+
+Problems found and fixed, in the order they appeared
+---------------------------------------------------
+1. Steam chose ARM64 tools. FEX exposes CPUID 4000_0000h "FEXIFEXIEMU" and
+   4000_0001h (host arch = AArch64); the Steam client read them, called the
+   machine arm64 and installed Proton (ARM64), Steam Linux Runtime 4.0 -
+   Arm64 and Steam's own FEX. That path runs aarch64 Wine natively, which
+   needs the low 4 GiB Darwin's __PAGEZERO takes: it cannot work on macOS.
+   Fix: patches/fex-lxrt-hide-hypervisor.patch (HideHypervisorBit also hides
+   the leaves) + HideHypervisorBit=1 in the Steam root's FEX config
+   (scripts/install-steamroot-gfx.sh). MEASURED after: compat_log.txt
+   "Mapping AppID 0 to tool "proton_experimental"" (x86 Proton).
+
+2. x86 guests saw the Apple /proc/cpuinfo and ONE CPU. FEX recognises its
+   emulated files by readlink(/proc/self/fd/N) after the open; the runtime
+   answered with the materialised host path. runtime/procfs.c
+   lxrt_proc_untranslate() now answers /proc/cpuinfo, /proc/<pid>/status...
+   FEX counts CPUs by /sys/devices/system/cpu/cpu<N>: runtime/sysfs.c writes
+   that tree (online/present/possible, cpu0..N-1) into the guest root once.
+   MEASURED: cpuinfo GenuineIntel, 10 processors (was 1), nproc 10.
+
+3. Vulkan thunks inside containers. /opt is not visible in a pressure-vessel
+   container; /usr/lib/lxrt-emu is. scripts/install-steamroot-gfx.sh puts
+   the thunks, the shim, the aarch64 X libraries the host thunk dlopens and
+   the current FEX-emu there, and enables the thunks for every x86-64
+   process in FEX's config (ThunksDB Vulkan=1). The stale FEX-emu (00:07,
+   before the munmap fix) and a leftover of the VM (lxrt-emu/vm-build) were
+   found there; the latter was deleted.
+
+4. pressure-vessel's 32-bit capsule-capture-libs crashed (SIGSEGV on a NULL
+   from malloc). MemAllocator32Bit::Munmap refused lengths that are not a
+   page multiple (EINVAL), so mappings unmapped with their file size leaked:
+   Mesa's 154 MB driver, mapped once per DRI module, filled the 4 GiB
+   (MEASURED: 3.7 GB live). Fixed (rounds up, as Linux does); file mappings
+   at 16 KiB offsets are now placed on host pages and mapped instead of
+   copied, and the runtime maps private file mappings with a partial last
+   page directly when the rest of the host page is free.
+
+5. Proton's Python launcher ran under /bin/sh ("from: not found"). FEX looked
+   for the shebang interpreter only under its rootfs, which is not the
+   container's /usr; execve returned ENOEXEC and glibc's execvp fell back to
+   sh. patches/fex-lxrt-shebang.patch; the runtime also implements the
+   kernel's binfmt_script itself now (runtime/main.c).
+
+6. Z:\ found nothing inside the container. symlinkat stored absolute targets
+   as host paths through the root -- inside a sandbox that is a scratch
+   directory: Proton's dosdevices/z: -> "/" became
+   "/tmp/lxrt-sandbox-XXXX/" (and stayed in the prefix after the sandbox was
+   gone). Inside a sandbox a target outside the binds is now kept as the
+   guest path, which the runtime follows in guest terms. MEASURED: z: -> /.
+
+7. The container never exited. scripts/run-fex.sh started FEXServer as a
+   child of the shell that then exec'd the guest; pv-adverb reaps all its
+   children and waited for FEXServer forever. The server is now started
+   from a subshell (parent 1).
+
+8. The hidden hypervisor leaves broke pressure-vessel. It detects FEX by the
+   same CPUID leaves; without them it built no interpreter root, FEX looked
+   up /proc inside the container root, and every steamwebhelper zygote died
+   (FATAL thread_helpers.cc: fstatat(/proc, "self/task/") ENOENT). The leaves
+   are now hidden from the Steam client ONLY, through FEX's per-program
+   config (tmp/fexhome/.fex-emu/AppConfig/steam.json). MEASURED: Steam UI up,
+   compat_log still "Mapping AppID 0 to tool proton_experimental".
+
+9. Chromium's GPU process died with the Vulkan thunks enabled for every
+   program: it probes Vulkan, MoltenVK brings up Objective-C, the zygote
+   forks and libobjc kills the child ("+[NSPlaceholderString initialize] may
+   have been in progress in another thread when fork() was called";
+   "GPU process isn't usable. Goodbye."). steamwebhelper gets no Vulkan
+   thunks (AppConfig/steamwebhelper.json), and every runtime process now
+   starts with OBJC_DISABLE_INITIALIZE_FORK_SAFETY=YES (runtime/process.c,
+   scripts/run-fex.sh) for any other program that forks after using Vulkan.
+
+Known, not fixed
+----------------
+- "corrupted double-linked list" (glibc) printed by a process at the end of
+  a container run (not seen outside the container). Suspect: Proton's
+  steam.exe / lsteamclient without a running Steam client.
+- The probes' console output goes to Wine's console window, not the log.
+- pressure-vessel warns that /tmp/.X11-unix/X2 is not in the filesystem and
+  uses the abstract socket (works).
+
+Tests: tests/elf/run.sh 34/34, tests/elf/run_i386.sh 18/18,
+tests/win/run.sh 2/2 (D3D11 159.5 fps, D3D12 162.0 fps).

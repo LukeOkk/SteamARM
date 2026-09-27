@@ -1,0 +1,52 @@
+vulkaninfo: a real Vulkan tool, unmodified, running with no VM.
+Apple M4, macOS 27, MoltenVK 1.4.2. 2026-09-24.
+
+WHAT RUNS: Fedora's own `/usr/bin/vulkaninfo` (vulkan-tools 1.4.341.0,
+aarch64), a large C++ program linked against libstdc++, libX11, libxcb,
+libwayland-client, libffi and glibc. It dlopens libvulkan.so.1 at runtime, so
+it reaches the ELF shim through the guest's own ld.so with no cooperation from
+the binary at all.
+
+  $ LXRT_ROOT=/tmp/lxrt-root LD_LIBRARY_PATH=/lib64 \
+        ./build/lxrun /tmp/lxrt-root/usr/bin/vulkaninfo
+  exit 0, 1199 lines, 296 extensions enumerated
+
+  GPU0:
+    apiVersion         = 1.4.357
+    deviceName         = Apple M4
+    driverID           = DRIVER_ID_MOLTENVK
+    driverName         = MoltenVK
+    driverInfo         = 1.4.2
+    conformanceVersion = 1.4.4.0
+
+The VM reports this device as "Virtio-GPU Venus (Apple M4)", driverName
+"venus". Here it is the driver itself.
+
+The only stderr line is `XDG_RUNTIME_DIR is invalid or not set`, from
+libwayland-client looking for a compositor that does not exist. Harmless.
+
+IT CONFIRMS THE FEATURE GAPS ARE UNCHANGED, which matters because the DXVK
+patch this project carries was written for them:
+
+    geometryShader          = false
+    logicOp                 = false
+    shaderCullDistance      = false
+    variableMultisampleRate = false
+    nullDescriptor          = false
+    robustBufferAccess2     = false
+
+Identical to what the VM saw. MoltenVK's limits are MoltenVK's limits; removing
+the VM removes the VM's problems, not Metal's.
+
+THE BUG IT FOUND, which nothing smaller had:
+
+  SIGBUS in ld.so before the first syscall.
+
+  A file mapping can be longer than the file. A loader rounds a segment up to a
+  page boundary, and the tail past EOF is mapped but not backed -- reading it
+  raises SIGBUS. The rewriting pass scanned the whole mapping, including that
+  tail. Every test so far had segments that happened to end on a page, so it
+  never showed.
+
+  Fixed by fstat'ing the fd in the mmap hook and clamping the scan to what the
+  file can actually supply.

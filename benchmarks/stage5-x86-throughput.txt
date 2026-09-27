@@ -1,0 +1,52 @@
+Translation throughput: the same program, four ways. 2026-09-25.
+Apple M4, macOS 27; guest VM = Fedora 43 aarch64, 8 vCPU, 8 GiB, libkrun/HVF.
+
+benchmarks/x86_bench.c is freestanding (no libc, raw syscalls), so the very
+same source builds as an x86-64 static PIE (clang + lld on the Mac) and as an
+aarch64 static ELF (gcc on the guest). Three phases: sieve of Eratosthenes to
+16M (byte array, memory-bound, branchy), FNV-1a over 32 MiB x8 (tight integer
+loop), 4 MiB block copy x32 (bandwidth). Every run checks the prime count and
+prints the hash; all runs below agree (1077871 primes, fnv 325561042), so what
+FEX executed is what the program says.
+
+Three runs each, milliseconds (sieve / fnv / copy / total):
+
+  native aarch64, Linux kernel in the VM, no FEX:
+      207/1021/28/1256   184/975/26/1185   194/969/25/1188
+  x86-64 through FEX, Linux kernel in the VM (today's SteamARM path):
+      283/1030/25/1338   280/1001/23/1304   287/996/24/1307
+  aarch64 ELF under the runtime on macOS, no FEX, no VM:
+      42/254/4/300   25/249/4/278   25/249/4/278
+  x86-64 through FEX under the runtime on macOS, no VM:
+       35/254/2/291       32/251/3/286       27/251/2/280
+
+READINGS:
+1. FEX's own cost is small on this workload, and it is now isolated from the
+   runtime's: inside the VM, x86-64 through FEX is 1.10x native aarch64
+   (1304-1338 vs 1185-1256 ms); under the runtime on macOS it is 1.0x
+   (280-291 vs 278-300 ms). Translation is not where the time goes. This is
+   Stage 5's exit criterion ("FEX overhead isolated from runtime overhead"),
+   met.
+2. THE VM IS WHERE THE TIME GOES. The same x86-64 binary through the same
+   FEX runs 4.5x faster under the runtime on macOS than inside the VM
+   (280-291 vs 1304-1338 ms). It is also 4.2x faster than *native* aarch64
+   code inside the VM. The FNV loop -- pure integer work over 32 MiB -- is
+   4x slower in the VM (~1000 vs ~250 ms), and the sieve 7-8x. A memory-bound
+   loop paying 4x is the guest's 4 KiB pages under the host's 16 KiB pages,
+   nested translation, and virtio memory; PERFORMANCE_BASELINE §5 predicted
+   the page-size conflict as a wall, and here it is as a number.
+3. This is the ZERO-VM thesis measured on CPU work, not graphics: removing
+   the VM is worth more than any JIT tuning could be. What the runtime pays
+   instead (syscall rewriting, W^X flips, the private-syscall bridge) does not
+   show at all at this granularity: 7 flips, 269 syscalls for the whole run.
+
+CAVEATS, so this is not oversold: one workload, single-threaded, no I/O, no
+graphics, 30-40 ms of the runtime's total is process start-up (load-time
+rewriting of 630k words) that a longer run would amortise further. The guest
+VM was idle (load average 0.01) when measured. Frame-time captures on a real
+game remain the number that matters (Stage 0, still owed).
+
+WHAT IT TOOK TO GET THIS NUMBER, in order: the W^X patch (stage5-jit.txt),
+the sub-page guard adoption (stage5-fex.txt), and the CTR_EL0 line-size
+correction (stage5-sysreg.txt) -- the third one produced SIGILL on legal code
+because every other icache line was left stale after a JIT flush.

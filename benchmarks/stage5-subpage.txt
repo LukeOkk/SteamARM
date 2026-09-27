@@ -1,0 +1,64 @@
+4 KiB guest pages on 16 KiB host pages: the predicted wall, arriving.
+Apple M4, macOS 27. 2026-09-24.
+
+PERFORMANCE_BASELINE §5 predicted this would be the first wall of the whole
+project. Stage 2 found it was not -- every aarch64 Linux binary uses p_align
+0x10000, a clean multiple of Darwin's page -- and stage2-elf-survey noted the
+reason that was luck rather than design:
+
+  "Steam's x86 binaries use PT_LOAD p_align 0x1000, which would straddle
+   Darwin's 16 KiB pages. That does not block them, because under FEX guest
+   addresses are not host addresses."
+
+That last sentence turned out to be wrong. FEX does not relocate the guest's
+segments into some private space; it maps them at their own addresses with the
+host's mmap. So the alignment arrives after all:
+
+  mmap(0x108259000, 0x1000, PROT_READ|PROT_EXEC) -> EINVAL
+  E MapFile: Some elf mapping failed, 22, fd: 5
+  E Failed to map 64-bit elf file.
+
+0x108259000 is 4 KiB aligned and not 16 KiB aligned. Darwin's mmap refuses a
+MAP_FIXED address that is not host-page aligned, and no flag changes that.
+
+THE RESOLUTION. The host page cannot be subdivided, so the bookkeeping is
+subdivided instead (runtime/subpage.c):
+
+  * the enclosing host pages are backed with anonymous memory;
+  * file content is READ into place with pread rather than mapped;
+  * every 4 KiB guest mapping is recorded, and each host page is given the
+    UNION of the protections of the guest pages inside it.
+
+TWO COSTS, stated rather than hidden:
+
+  * A file mapped this way is private and duplicated, not shared with the page
+    cache. For a game's executables that is memory spent once per process.
+  * A host page containing both an executable guest page and a writable one
+    carries both. Executable is never granted unless some guest page inside
+    asked for it, but write can leak across 4 KiB boundaries within one 16 KiB
+    page. This is inherent to the hardware -- a 16 KiB Linux kernel does the
+    same thing -- and it is a real weakening of what the guest asked for.
+
+A REGRESSION I CAUSED AND CAUGHT, worth recording because the shape recurs:
+the first version routed a mapping through this path whenever the LENGTH was
+not a multiple of the host page. That is ordinary -- the kernel rounds lengths
+up -- so every normal mapping went through the union bookkeeping and lost its
+neighbours' protections. Seven tests failed immediately. Only the ADDRESS and
+the file OFFSET can force the sub-page path.
+
+RESULT: FEX now maps the x86-64 guest ELF successfully. It gets further and
+then stops without a message, before reaching code generation -- no MAP_JIT
+request has been observed yet, so the JIT path in stage5-jit.txt is still
+untested by anything real.
+
+MAP_FIXED_NOREPLACE AT GUEST GRANULARITY (2026-09-25):
+FEX's allocator asked for mmap(0x3007b726000, 0x21000, MAP_FIXED_NOREPLACE)
+right after mprotect(0x3007b724000, 0x1000, PROT_READ) -- a 4 KiB guard in
+the same 16 KiB host page. Darwin said the page was busy; the runtime
+returned EEXIST; on a real Linux kernel the range is free. Two changes in
+runtime/subpage.c: adopt_untracked() no longer re-adopts a page the table
+already knows (its unrecorded slots were created by this module and are
+free), and lxrt_subpage_mmap_noreplace() succeeds when every 4 KiB page
+asked for is free in the table, mapping through the ordinary sub-page path.
+Traced dash loop: 26 of 26 such requests per run now succeed ("subpage
+noreplace ... free at guest granularity, mapping"); before, all 26 failed.

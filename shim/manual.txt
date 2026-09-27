@@ -1,0 +1,39 @@
+# Entry points implemented by hand, as lxrt_inner_<name>; shim/vk_rebase.c
+# (generated) exports <name>, rebases guest pointers, and calls them.
+# wsi.c
+vkGetInstanceProcAddr
+vkEnumerateInstanceExtensionProperties
+vkCreateInstance
+vkCreateXlibSurfaceKHR
+vkCreateXcbSurfaceKHR
+vkGetPhysicalDeviceXlibPresentationSupportKHR
+vkGetPhysicalDeviceXcbPresentationSupportKHR
+vkDestroySurfaceKHR
+vkGetPhysicalDeviceSurfaceCapabilitiesKHR
+vkGetPhysicalDeviceSurfaceCapabilities2KHR
+# features.c
+vkGetPhysicalDeviceFeatures
+vkGetPhysicalDeviceFeatures2
+vkGetPhysicalDeviceFeatures2KHR
+vkEnumerateDeviceExtensionProperties
+vkCreateDevice
+vkCreateGraphicsPipelines
+vkGetDeviceProcAddr
+vkGetPhysicalDeviceProperties2
+vkGetPhysicalDeviceProperties2KHR
+vkCmdBindTransformFeedbackBuffersEXT
+vkCmdBeginTransformFeedbackEXT
+vkCmdEndTransformFeedbackEXT
+vkCmdBeginQueryIndexedEXT
+vkCmdEndQueryIndexedEXT
+vkCmdDrawIndirectByteCountEXT
+vkCreateComputePipelines
+# map32.c
+vkAllocateMemory
+vkFreeMemory
+vkMapMemory
+vkUnmapMemory
+# memcap.c
+vkGetPhysicalDeviceMemoryProperties
+vkGetPhysicalDeviceMemoryProperties2
+vkGetPhysicalDeviceMemoryProperties2KHR

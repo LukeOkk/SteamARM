@@ -1,0 +1,20 @@
+SteamARM's own code (runtime/, shim/, launcher/, tools/, scripts/, tests/)
+is under the MIT license (LICENSE).
+
+The files in patches/ modify other projects and are offered under the
+license of the project they apply to:
+
+  fex-*.patch, LxrtJit.h   FEX-Emu            MIT
+  xquartz-*.patch          XQuartz / X.Org     MIT/X11
+  quartz-wm-*.patch        quartz-wm           APSL 2.0
+
+scripts/setup.sh downloads and builds, at install time, software that is not
+part of this repository and keeps its own license: FEX-Emu, XQuartz,
+quartz-wm, Fedora and Ubuntu packages, and Homebrew formulae (LLVM, MoltenVK,
+SDL, PulseAudio, mingw-w64...). The Steam client, the Steam Linux Runtime,
+Proton, DXVK and VKD3D-Proton are downloaded by Steam under Valve's terms and
+their own licenses. The release package bundles SDL2 (sdl2-compat) and SDL3
+(zlib license) in SteamARM.app/Contents/Frameworks.
+
+SteamARM is not affiliated with or endorsed by Valve, Apple, Microsoft, Sony
+or Nintendo. Product names identify compatibility only.

@@ -1,0 +1,68 @@
+System registers Darwin refuses, and the one that blocks every JIT.
+Apple M4, macOS 27, 2026-09-24.
+
+Measured from ordinary Mach-O native code, so this is Darwin's policy and not
+something the runtime imposes:
+
+  mrs CTR_EL0            *** SIGILL ***
+  mrs DCZID_EL0          permitido
+  mrs MIDR_EL1           *** SIGILL ***
+  mrs ID_AA64ISAR0_EL1   *** SIGILL ***
+  dc cvau                permitido
+  ic ivau                permitido
+  dsb ish / isb          permitido
+  sysctl hw.cachelinesize = 128
+
+CTR_EL0 IS THE IMPORTANT ONE. Every icache flush reads it to find the cache
+line size: __builtin___clear_cache, glibc's cacheflush, and any JIT that
+manages a code cache -- which is FEX, constantly. Linux emulates the read at
+EL0; Darwin traps it, for its own code too.
+
+The cache maintenance instructions themselves are allowed, so only the register
+read needs replacing. It is rewritten like TPIDR_EL0 and svc: two instructions
+that materialise a synthesised value.
+
+  CTR_EL0 = RES1 | CWG | ERG | DminLine | L1Ip=PIPT | IminLine
+
+built from `hw.cachelinesize`. A SMALLER line size is always safe -- it makes a
+flush loop do more, smaller operations over the same range -- so the fallback
+when sysctl gives nothing is 16 bytes, not a guess upward.
+
+Counted on real binaries: 3 sites in a static glibc, 1 in FEXGetConfig, 1 in
+FEX. Rare, and fatal every time.
+
+MIDR_EL1 / ID_AA64* are also trapped, which was already found in Stage 2: the
+fix there was to stop advertising HWCAP_CPUID in the auxiliary vector so glibc
+never reads them. Something that reads them anyway -- FEX might, to identify
+the host CPU -- would need the same rewriting treatment.
+
+EXECUTABLE MEMORY, the other half of the JIT question:
+
+  mmap RWX directo             FALLO: Permission denied
+  mmap RW -> mprotect RX       OK
+  mmap RW -> mprotect RWX      FALLO: Permission denied
+  ciclo W^X 200 veces          OK
+
+Darwin will not give a page write and execute at once, and no entitlement
+changes that for a mapping the guest asked for as RWX. But the W^X cycle --
+write, mprotect to executable, run, mprotect back -- works, 200 iterations
+verified with freshly generated code each time. A JIT that can run in W^X mode
+works here. One that insists on RWX does not.
+
+CORRECTION, 2026-09-25 later: the synthesised CTR_EL0 took its line size from
+hw.cachelinesize, which is 128 on Apple Silicon -- the L2 line, not the line
+`ic ivau` / `dc cvau` operate on. Apple's own sys_icache_invalidate in
+libsystem_platform strides by 64:
+
+    and   x9, x0, #0xffffffffffffffc0
+    ...
+    ic    ivau, x9
+    add   x9, x9, #0x40
+
+With IminLine = 128 every flush skipped every other icache line. FEX's JIT
+emits a block, flushes it with the guest's __builtin___clear_cache, and the
+core then fetched stale bytes: SIGILL at pc 0x10b97c540 on a legal
+`ldrb w21, [x28, #0x3fe]` (the bytes in memory were fine; the icache was not).
+benchmarks/x86_bench under FEX died in its third phase 3/3 runs; with IminLine
+= DminLine = 64 it completes (see stage5-x86-throughput.txt). The static
+rewriter's own code never showed this because it flushes whole pages.

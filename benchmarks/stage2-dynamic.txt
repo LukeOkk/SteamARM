@@ -1,0 +1,48 @@
+Dynamic linking under the runtime: what breaks and why.
+2026-09-23.
+
+A dynamic Linux binary does not load itself. PT_INTERP names ld.so, and ld.so
+maps every shared library with its own mmap calls. Those pages never pass
+through runtime/elf.c, so they arrive full of raw `svc` -- which, per Stage 1,
+does not fault on Darwin but silently runs whatever Darwin syscall x16 holds.
+
+Implemented:
+  * PT_INTERP parsed; the interpreter is loaded as a second image, rewritten,
+    and it -- not the executable -- is what the runtime jumps to.
+  * AT_BASE in the auxiliary vector carries the interpreter's load address.
+    ld.so relocates itself against it.
+  * mmap and mprotect hooks: any mapping that asks for PROT_EXEC is brought in
+    writable, rewritten, and only then sealed to what the guest asked for.
+    MAP_SHARED is forced to MAP_PRIVATE for executable mappings, because
+    writing a rewrite into a shared file mapping would modify the library on
+    disk.
+  * LXRT_ROOT: absolute paths the guest opens resolve inside a Linux tree,
+    since /lib64/libc.so.6 does not exist on macOS.
+
+WORKS:
+  $ LXRT_ROOT=/tmp/lxrt-root ./build/lxrun /tmp/lxrt-samples/hello_dyn
+  [lxrt] PT_INTERP /lib/ld-linux-aarch64.so.1 -> /tmp/lxrt-root/lib/...
+  [lxrt] rewrite: 41918 words scanned, 54 svc sites, 54 rewritten, 0 poisoned
+  [lxrt] interpreter at 0x107988000, entry 0x1079a43c0
+  [lxrt] mapped code at 0x1060d0000: 415 svc sites, 415 rewritten, 0 poisoned
+  glibc static-pie alive: argc=1 argv0=... monotonic=129070.299967250
+  malloc+stdio+snprintf ok, strlen=27
+
+THE BUG THAT COST THE MOST, because the symptom was nowhere near the cause:
+
+  SIGSEGV inside libc, long after it had been mapped and correctly rewritten.
+
+  A trampoline must sit within a single `b` (+/-128 MiB) of the site it serves,
+  so the pool is allocated near the code. The first implementation placed it on
+  the page immediately after the mapping. But glibc's ld.so reserves a library's
+  whole span with one mmap and then fills segments into it with MAP_FIXED --
+  so "immediately after the first mapping" was still inside a span the loader
+  owned, and the loader mapped straight over the live trampolines.
+
+  Fixed by probing distant placements first (+/-96 MiB down to +/-16 MiB) and
+  only falling back to adjacency, and by tracking every pool so a guest
+  MAP_FIXED or munmap that lands on one is reported instead of silently
+  corrupting execution. tests/elf/run.sh asserts that no such warning appears.
+
+STILL MISSING, and glibc tolerates both by design:
+  rseq (293) and, before it was implemented, faccessat (48).

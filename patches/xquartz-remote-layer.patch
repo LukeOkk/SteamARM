@@ -1,0 +1,699 @@
+--- a/hw/xquartz/meson.build
++++ b/hw/xquartz/meson.build
+@@ -53,6 +53,7 @@
+     'quartzKeyboard.c',
+     'quartzStartup.c',
+     'quartzRandR.c',
++    'remoteLayerCocoa.m',
+     '../../mi/miinitext.c',
+     '../../mi/miinitext.h',
+ ]
+--- a/hw/xquartz/mach-startup/meson.build
++++ b/hw/xquartz/mach-startup/meson.build
+@@ -31,7 +31,8 @@
+      dependency('Carbon', method: 'extraframework'),
+      cocoa,
+      dependency('CoreAudio', method: 'extraframework'),
+-     dependency('IOKit', method: 'extraframework')
++     dependency('IOKit', method: 'extraframework'),
++     dependency('QuartzCore', method: 'extraframework'),
+ ]
+ 
+ if build_glx
+--- a/hw/xquartz/xpr/meson.build
++++ b/hw/xquartz/xpr/meson.build
+@@ -7,6 +7,7 @@
+      'xprCursor.c',
+      'xprEvent.c',
+      'xprFrame.c',
++     'xprRemoteLayer.c',
+      'xprScreen.c',
+      'x-hash.c',
+      'x-hook.c',
+--- a/hw/xquartz/xpr/xprScreen.c
++++ b/hw/xquartz/xpr/xprScreen.c
+@@ -37,6 +37,8 @@
+ #include "quartz.h"
+ #include "quartzRandR.h"
+ #include "xpr.h"
++#define XQUARTZ_REMOTE_LAYER_DIX 1
++#include "xprRemoteLayer.h"
+ #include "xprEvent.h"
+ #include "pseudoramiX.h"
+ #include "darwinEvents.h"
+@@ -449,7 +451,11 @@
+     if (!xprInit(pScreen))
+         return FALSE;
+ 
+-    return DRIFinishScreenInit(pScreen);
++    if (!DRIFinishScreenInit(pScreen))
++        return FALSE;
++
++    /* SteamARM: CALayerHost overlays for windows with _STEAMARM_LAYER */
++    return xprRemoteLayerScreenInit(pScreen);
+ }
+ 
+ /*
+--- a/hw/xquartz/xpr/xprFrame.c
++++ b/hw/xquartz/xpr/xprFrame.c
+@@ -32,6 +32,8 @@
+ #endif
+ 
+ #include "xpr.h"
++#define XQUARTZ_REMOTE_LAYER_DIX 1
++#include "xprRemoteLayer.h"
+ #include "rootlessCommon.h"
+ #include <Xplugin.h>
+ #include "x-hash.h"
+@@ -299,6 +301,9 @@
+     }
+ 
+     xprConfigureWindow(x_cvt_vptr_to_uint(wid), mask, &wc);
++
++    /* SteamARM: keep remote-layer overlays directly above their frames. */
++    xprRemoteLayerFrameRestacked();
+ }
+ 
+ /*
+--- a/hw/xquartz/xpr/xprRemoteLayer.h
++++ b/hw/xquartz/xpr/xprRemoteLayer.h
+@@ -0,0 +1,42 @@
++/*
++ * SteamARM: show a remote Core Animation layer (CAContext id published by a
++ * client in the X property _STEAMARM_LAYER, CARDINAL/32) over an X window.
++ *
++ * X-server side (xprRemoteLayer.c, dix thread) tracks the windows and their
++ * geometry; the AppKit side (remoteLayerCocoa.m, main thread) owns one
++ * borderless, click-through overlay NSWindow per tracked X window, holding a
++ * CALayerHost for the context id.  All rectangles are in global CoreGraphics
++ * coordinates (origin top-left of the main display, y down), the space
++ * Xplugin frames use.
++ */
++#ifndef XPR_REMOTE_LAYER_H
++#define XPR_REMOTE_LAYER_H 1
++
++#include <stdint.h>
++
++typedef struct {
++    uint32_t xid;         /* X window id (overlay key) */
++    uint32_t ctx;         /* CAContext id */
++    int visible;
++    int cx, cy, cw, ch;   /* visible (clipped) area of the X window */
++    int lx, ly, lw, lh;   /* full X window area = where the layer goes */
++    uint32_t native;      /* CGWindowID of the X toplevel's native frame */
++    int level;            /* CGWindowLevel of that frame */
++    int reorder;          /* re-assert ordering above `native` */
++} XQRemoteLayerState;
++
++/* AppKit side; must run on the main thread. */
++void XQRemoteLayerApply(const XQRemoteLayerState *st);
++void XQRemoteLayerRemove(uint32_t xid);
++void XQRemoteLayerRemoveAll(void);
++
++/* X side (only for files built with the X server headers). */
++#ifdef XQUARTZ_REMOTE_LAYER_DIX
++#include "scrnintstr.h"
++/* X side: a toplevel frame was restacked (xprRestackFrame). */
++void xprRemoteLayerFrameRestacked(void);
++/* X side: call once per screen after RootlessInit (xprSetupScreen). */
++Bool xprRemoteLayerScreenInit(ScreenPtr pScreen);
++#endif
++
++#endif
+--- a/hw/xquartz/xpr/xprRemoteLayer.c
++++ b/hw/xquartz/xpr/xprRemoteLayer.c
+@@ -0,0 +1,381 @@
++/*
++ * SteamARM: remote Core Animation layers over X windows (X-server side).
++ *
++ * A client (the SteamARM Vulkan shim) renders into a CAMetalLayer that lives
++ * in a CAContext of ITS process and publishes the context id on the X window
++ * it presents to, as property _STEAMARM_LAYER (CARDINAL, format 32, 1 item).
++ * For every such window we keep an overlay: a borderless, click-through
++ * NSWindow ordered directly above the window's toplevel Xplugin frame, whose
++ * content is a CALayerHost for that context id (see remoteLayerCocoa.m).
++ *
++ * This file runs on the X server (dix) thread.  It watches the property
++ * (PropertyStateCallback), follows window geometry / mapping / stacking
++ * (screen-proc wrappers + a 33 ms timer for anything they miss) and hands
++ * plain-value snapshots to the main thread with dispatch_async.  Only state
++ * changes are sent.
++ */
++
++#ifdef HAVE_DIX_CONFIG_H
++#include <dix-config.h>
++#endif
++
++#define XQUARTZ_REMOTE_LAYER_DIX 1
++
++#include "xpr.h"
++#include "rootlessCommon.h"
++#include <Xplugin.h>
++#include "quartz.h"
++#include "propertyst.h"
++#include "windowstr.h"
++#include "scrnintstr.h"
++#include "dixstruct.h"
++#include "os.h"
++#include "xprRemoteLayer.h"
++
++#include <X11/Xatom.h>
++#include <dispatch/dispatch.h>
++#include <string.h>
++
++#define RL_ATOM_NAME   "_STEAMARM_LAYER"
++#define RL_MAX         64
++#define RL_POLL_MS     33
++
++typedef struct {
++    WindowPtr win;
++    uint32_t xid;
++    uint32_t ctx;
++    RootlessFrameID frame;        /* cached toplevel frame ... */
++    xp_native_window_id native;   /* ... and its CGWindowID */
++    XQRemoteLayerState sent;      /* last state handed to AppKit */
++    int have_sent;
++} RLEntry;
++
++static RLEntry rl_entries[RL_MAX];
++static int rl_count;
++static Atom rl_atom = None;
++static OsTimerPtr rl_timer;
++static int rl_callback_added;
++
++static CloseScreenProcPtr rl_CloseScreen;
++static DestroyWindowProcPtr rl_DestroyWindow;
++static PositionWindowProcPtr rl_PositionWindow;
++static RealizeWindowProcPtr rl_RealizeWindow;
++static UnrealizeWindowProcPtr rl_UnrealizeWindow;
++static RestackWindowProcPtr rl_RestackWindow;
++
++static void
++rl_send(const XQRemoteLayerState *st)
++{
++    XQRemoteLayerState s = *st;
++    dispatch_async(dispatch_get_main_queue(), ^{
++        XQRemoteLayerApply(&s);
++    });
++}
++
++static void
++rl_send_remove(uint32_t xid)
++{
++    dispatch_async(dispatch_get_main_queue(), ^{
++        XQRemoteLayerRemove(xid);
++    });
++}
++
++/* Snapshot the geometry of e->win in global CoreGraphics coordinates. */
++static void
++rl_compute(RLEntry *e, XQRemoteLayerState *st)
++{
++    WindowPtr w = e->win, top, p;
++    ScreenPtr s = w->drawable.pScreen;
++    RootlessWindowRec *wr;
++    int gx, gy, x1, y1, x2, y2;
++
++    memset(st, 0, sizeof(*st));
++    st->xid = e->xid;
++    st->ctx = e->ctx;
++
++    if (!w->realized || !w->parent)
++        return;
++    for (top = w; top->parent && top->parent->parent; top = top->parent)
++        ;
++    wr = WINREC(top);
++    if (!wr || !wr->wid || wr->is_offscreen)
++        return;
++    if (wr->wid != e->frame) {
++        xp_native_window_id nid = 0;
++        if (xp_get_native_window((xp_window_id)(uintptr_t)wr->wid, &nid) != Success)
++            return;
++        e->frame = wr->wid;
++        e->native = nid;
++    }
++
++    /* Same transform rootless uses for frames (SCREEN_TO_GLOBAL_X/Y). */
++    gx = s->x + rootlessGlobalOffsetX;
++    gy = s->y + rootlessGlobalOffsetY;
++
++    x1 = w->drawable.x;
++    y1 = w->drawable.y;
++    x2 = x1 + w->drawable.width;
++    y2 = y1 + w->drawable.height;
++    st->lx = x1 + gx;
++    st->ly = y1 + gy;
++    st->lw = w->drawable.width;
++    st->lh = w->drawable.height;
++
++    /* Clip to every ancestor's inside area up to (and including) the
++     * toplevel: a child window only shows inside its parents. */
++    for (p = w->parent; p && p->parent; p = p->parent) {
++        int px1 = p->drawable.x, py1 = p->drawable.y;
++        int px2 = px1 + p->drawable.width, py2 = py1 + p->drawable.height;
++        if (x1 < px1) x1 = px1;
++        if (y1 < py1) y1 = py1;
++        if (x2 > px2) x2 = px2;
++        if (y2 > py2) y2 = py2;
++    }
++    if (x2 <= x1 || y2 <= y1)
++        return;
++
++    st->cx = x1 + gx;
++    st->cy = y1 + gy;
++    st->cw = x2 - x1;
++    st->ch = y2 - y1;
++    st->native = (uint32_t)e->native;
++    st->level = XQuartzIsRootless ? normal_window_levels[wr->level]
++                                  : rooted_window_levels[wr->level];
++    st->visible = 1;
++}
++
++static void
++rl_update(RLEntry *e, Bool reorder)
++{
++    XQRemoteLayerState st;
++
++    rl_compute(e, &st);
++    if (e->have_sent) {
++        XQRemoteLayerState old = e->sent;
++        old.reorder = 0;
++        if (!memcmp(&old, &st, sizeof(st)) && !(reorder && st.visible))
++            return;
++        if (st.visible && (!old.visible || old.native != st.native))
++            reorder = TRUE;
++    }
++    else {
++        reorder = TRUE;
++    }
++    st.reorder = reorder && st.visible;
++    /* Xplugin performs frame map/restack asynchronously; let it finish so
++     * our "order above the frame" lands after its own ordering. */
++    if (st.reorder)
++        xp_synchronize();
++    e->sent = st;
++    e->sent.reorder = 0;
++    e->have_sent = 1;
++    rl_send(&st);
++}
++
++static void
++rl_update_all(Bool reorder)
++{
++    int i;
++    for (i = 0; i < rl_count; i++)
++        rl_update(&rl_entries[i], reorder);
++}
++
++void
++xprRemoteLayerFrameRestacked(void)
++{
++    if (rl_count)
++        rl_update_all(TRUE);
++}
++
++static CARD32
++rl_timer_cb(OsTimerPtr timer, CARD32 now, void *arg)
++{
++    if (!rl_count)
++        return 0;
++    rl_update_all(FALSE);
++    return RL_POLL_MS;
++}
++
++static RLEntry *
++rl_find(WindowPtr w)
++{
++    int i;
++    for (i = 0; i < rl_count; i++)
++        if (rl_entries[i].win == w)
++            return &rl_entries[i];
++    return NULL;
++}
++
++static void
++rl_untrack(WindowPtr w)
++{
++    RLEntry *e = rl_find(w);
++    if (!e)
++        return;
++    rl_send_remove(e->xid);
++    *e = rl_entries[--rl_count];
++    memset(&rl_entries[rl_count], 0, sizeof(RLEntry));
++}
++
++static void
++rl_track(WindowPtr w, uint32_t ctx)
++{
++    RLEntry *e = rl_find(w);
++    if (!e) {
++        if (rl_count >= RL_MAX) {
++            ErrorF("remote layer: too many windows, ignoring 0x%x\n",
++                   (unsigned)w->drawable.id);
++            return;
++        }
++        e = &rl_entries[rl_count++];
++        memset(e, 0, sizeof(*e));
++        e->win = w;
++        e->xid = w->drawable.id;
++    }
++    if (e->ctx != ctx)
++        e->have_sent = 0;
++    e->ctx = ctx;
++    ErrorF("remote layer: window 0x%x -> CAContext %u\n",
++           (unsigned)e->xid, (unsigned)ctx);
++    rl_update(e, TRUE);
++    rl_timer = TimerSet(rl_timer, 0, RL_POLL_MS, rl_timer_cb, NULL);
++}
++
++static void
++rl_property_cb(CallbackListPtr *pcbl, void *closure, void *calldata)
++{
++    PropertyStateRec *rec = calldata;
++    PropertyPtr prop = rec->prop;
++
++    if (rl_atom == None || !prop || prop->propertyName != rl_atom)
++        return;
++    if (rec->state == PropertyNewValue && prop->format == 32 &&
++        prop->size >= 1 && prop->data) {
++        uint32_t ctx = ((CARD32 *)prop->data)[0];
++        if (ctx)
++            rl_track(rec->win, ctx);
++        else
++            rl_untrack(rec->win);
++    }
++    else if (rec->state == PropertyDelete) {
++        rl_untrack(rec->win);
++    }
++}
++
++/* Screen-proc wrappers.  Rootless re-wraps itself inside the call, so we
++ * put our own pointer back afterwards (the usual unwrap/call/wrap dance). */
++#define RL_CALL(pScreen, field, saved, ours, call) \
++    do {                                          \
++        (pScreen)->field = (saved);               \
++        call;                                     \
++        (saved) = (pScreen)->field;               \
++        (pScreen)->field = (ours);                \
++    } while (0)
++
++static Bool
++rl_DestroyWindowProc(WindowPtr pWin)
++{
++    ScreenPtr s = pWin->drawable.pScreen;
++    Bool ret;
++    rl_untrack(pWin);
++    RL_CALL(s, DestroyWindow, rl_DestroyWindow, rl_DestroyWindowProc,
++            ret = s->DestroyWindow(pWin));
++    return ret;
++}
++
++static Bool
++rl_PositionWindowProc(WindowPtr pWin, int x, int y)
++{
++    ScreenPtr s = pWin->drawable.pScreen;
++    Bool ret;
++    RL_CALL(s, PositionWindow, rl_PositionWindow, rl_PositionWindowProc,
++            ret = s->PositionWindow(pWin, x, y));
++    if (rl_count)
++        rl_update_all(FALSE);
++    return ret;
++}
++
++static Bool
++rl_RealizeWindowProc(WindowPtr pWin)
++{
++    ScreenPtr s = pWin->drawable.pScreen;
++    Bool ret;
++    RL_CALL(s, RealizeWindow, rl_RealizeWindow, rl_RealizeWindowProc,
++            ret = s->RealizeWindow(pWin));
++    if (rl_count)
++        rl_update_all(FALSE);
++    return ret;
++}
++
++static Bool
++rl_UnrealizeWindowProc(WindowPtr pWin)
++{
++    ScreenPtr s = pWin->drawable.pScreen;
++    Bool ret;
++    RL_CALL(s, UnrealizeWindow, rl_UnrealizeWindow, rl_UnrealizeWindowProc,
++            ret = s->UnrealizeWindow(pWin));
++    /* dix clears realized after this returns for descendants; the timer
++     * catches anything still marked realized here. */
++    if (rl_count)
++        rl_update_all(FALSE);
++    return ret;
++}
++
++static void
++rl_RestackWindowProc(WindowPtr pWin, WindowPtr pOldNextSib)
++{
++    ScreenPtr s = pWin->drawable.pScreen;
++    RL_CALL(s, RestackWindow, rl_RestackWindow, rl_RestackWindowProc,
++            s->RestackWindow(pWin, pOldNextSib));
++    if (rl_count)
++        rl_update_all(TRUE);
++}
++
++static Bool
++rl_CloseScreenProc(ScreenPtr s)
++{
++    int i;
++    for (i = 0; i < rl_count; i++)
++        rl_send_remove(rl_entries[i].xid);
++    rl_count = 0;
++    if (rl_timer) {
++        TimerFree(rl_timer);
++        rl_timer = NULL;
++    }
++    s->DestroyWindow = rl_DestroyWindow;
++    s->PositionWindow = rl_PositionWindow;
++    s->RealizeWindow = rl_RealizeWindow;
++    s->UnrealizeWindow = rl_UnrealizeWindow;
++    s->RestackWindow = rl_RestackWindow;
++    s->CloseScreen = rl_CloseScreen;
++    rl_callback_added = 0;   /* callback lists are freed on reset */
++    return s->CloseScreen(s);
++}
++
++Bool
++xprRemoteLayerScreenInit(ScreenPtr s)
++{
++    if (s->myNum != 0)
++        return TRUE;
++
++    rl_atom = MakeAtom(RL_ATOM_NAME, strlen(RL_ATOM_NAME), TRUE);
++    if (!rl_callback_added) {
++        if (!AddCallback(&PropertyStateCallback, rl_property_cb, NULL))
++            return FALSE;
++        rl_callback_added = 1;
++    }
++
++    rl_CloseScreen = s->CloseScreen;
++    s->CloseScreen = rl_CloseScreenProc;
++    rl_DestroyWindow = s->DestroyWindow;
++    s->DestroyWindow = rl_DestroyWindowProc;
++    rl_PositionWindow = s->PositionWindow;
++    s->PositionWindow = rl_PositionWindowProc;
++    rl_RealizeWindow = s->RealizeWindow;
++    s->RealizeWindow = rl_RealizeWindowProc;
++    rl_UnrealizeWindow = s->UnrealizeWindow;
++    s->UnrealizeWindow = rl_UnrealizeWindowProc;
++    rl_RestackWindow = s->RestackWindow;
++    s->RestackWindow = rl_RestackWindowProc;
++    return TRUE;
++}
+--- a/hw/xquartz/remoteLayerCocoa.m
++++ b/hw/xquartz/remoteLayerCocoa.m
+@@ -0,0 +1,190 @@
++/*
++ * SteamARM: remote Core Animation layers over X windows (AppKit side).
++ * See xpr/xprRemoteLayer.[ch].  Everything here runs on the main thread.
++ *
++ * One overlay NSWindow per X window carrying _STEAMARM_LAYER: borderless,
++ * transparent, click-through (input goes to the Xplugin frame below), never
++ * key/main, no shadow, no animation, ordered directly above the X toplevel's
++ * native frame.  Its content view is layer-hosting; a CALayerHost (private
++ * QuartzCore class) shows the client's CAContext.  The overlay covers only
++ * the visible (clipped) part of the X window; the CALayerHost keeps the full
++ * X window size and is offset inside it, the root layer clips.
++ */
++#import <Cocoa/Cocoa.h>
++#import <QuartzCore/QuartzCore.h>
++#include "xpr/xprRemoteLayer.h"
++
++extern void ErrorF(const char *f, ...) __attribute__((format(printf, 1, 2)));
++static int rl_debug = -1;
++#define RLDBG(...) do { if (rl_debug < 0) rl_debug = getenv("XQUARTZ_RL_DEBUG") != NULL; \
++                        if (rl_debug) ErrorF(__VA_ARGS__); } while (0)
++
++@interface CALayerHost : CALayer
++@property uint32_t contextId;
++@end
++
++@interface XQRemoteLayerWindow : NSWindow
++@property (nonatomic) uint32_t nativeBelow;
++@property (nonatomic, retain) CALayerHost *host;
++@end
++
++@implementation XQRemoteLayerWindow
++- (BOOL)canBecomeKeyWindow  { return NO; }
++- (BOOL)canBecomeMainWindow { return NO; }
++- (void)dealloc
++{
++    [_host release];
++    [super dealloc];
++}
++@end
++
++static NSMutableDictionary<NSNumber *, XQRemoteLayerWindow *> *overlays;
++static id observerActive, observerUnhide;
++
++static void
++reorder_all(void)
++{
++    for (XQRemoteLayerWindow *w in overlays.allValues) {
++        if (w.isVisible && w.nativeBelow)
++            [w orderWindow:NSWindowAbove relativeTo:w.nativeBelow];
++    }
++}
++
++static XQRemoteLayerWindow *
++make_overlay(void)
++{
++    XQRemoteLayerWindow *w =
++        [[XQRemoteLayerWindow alloc] initWithContentRect:NSMakeRect(0, 0, 1, 1)
++                                               styleMask:NSWindowStyleMaskBorderless
++                                                 backing:NSBackingStoreBuffered
++                                                   defer:NO];
++    w.releasedWhenClosed = NO;
++    w.opaque = NO;
++    w.backgroundColor = NSColor.clearColor;
++    w.hasShadow = NO;
++    w.ignoresMouseEvents = YES;
++    w.animationBehavior = NSWindowAnimationBehaviorNone;
++    w.collectionBehavior = NSWindowCollectionBehaviorManaged |
++                           NSWindowCollectionBehaviorIgnoresCycle |
++                           NSWindowCollectionBehaviorFullScreenAuxiliary;
++    w.excludedFromWindowsMenu = YES;
++
++    NSView *v = [[NSView alloc] initWithFrame:NSMakeRect(0, 0, 1, 1)];
++    CALayer *root = [CALayer layer];
++    root.masksToBounds = YES;
++    root.backgroundColor = NULL;
++    v.layer = root;          /* layer-hosting: set the layer first ... */
++    v.wantsLayer = YES;      /* ... then wantsLayer */
++    w.contentView = v;
++    [v release];
++
++    CALayerHost *h = [CALayerHost layer];
++    h.anchorPoint = CGPointZero;
++    [root addSublayer:h];
++    w.host = h;
++
++    if (!observerActive) {
++        NSNotificationCenter *nc = NSNotificationCenter.defaultCenter;
++        observerActive = [nc addObserverForName:NSApplicationDidBecomeActiveNotification
++                                         object:nil queue:nil
++                                     usingBlock:^(NSNotification *n) { reorder_all(); }];
++        observerUnhide = [nc addObserverForName:NSApplicationDidUnhideNotification
++                                         object:nil queue:nil
++                                     usingBlock:^(NSNotification *n) { reorder_all(); }];
++        [observerActive retain];
++        [observerUnhide retain];
++    }
++    return w;
++}
++
++void
++XQRemoteLayerApply(const XQRemoteLayerState *st)
++{
++    @autoreleasepool {
++        if (!overlays)
++            overlays = [[NSMutableDictionary alloc] init];
++        NSNumber *key = @(st->xid);
++        XQRemoteLayerWindow *w = overlays[key];
++        RLDBG("rl apply 0x%x ctx %u vis %d clip %d,%d %dx%d layer %d,%d %dx%d native %u level %d reorder %d\n",
++              st->xid, st->ctx, st->visible, st->cx, st->cy, st->cw, st->ch,
++              st->lx, st->ly, st->lw, st->lh, st->native, st->level, st->reorder);
++
++        if (!st->visible) {
++            if (w)
++                [w orderOut:nil];
++            if (!w || !st->ctx)
++                return;
++        }
++        if (!w) {
++            w = make_overlay();
++            overlays[key] = w;
++            [w release];
++        }
++
++        [CATransaction begin];
++        [CATransaction setDisableActions:YES];
++        if (w.host.contextId != st->ctx)
++            w.host.contextId = st->ctx;
++        if (st->visible) {
++            /* Global CG (top-left origin, y down) -> Cocoa (bottom-left of
++             * the primary screen, y up). */
++            CGFloat H = NSScreen.screens.firstObject.frame.size.height;
++            NSRect r = NSMakeRect(st->cx, H - (st->cy + st->ch), st->cw, st->ch);
++            if (!NSEqualRects(w.frame, r))
++                [w setFrame:r display:NO animate:NO];
++            /* Layer position inside the (unflipped) root layer: bottom-left
++             * origin, so measure from the bottom edges. */
++            CGRect hf = CGRectMake(st->lx - st->cx,
++                                   (st->cy + st->ch) - (st->ly + st->lh),
++                                   st->lw, st->lh);
++            if (!CGRectEqualToRect(w.host.frame, hf))
++                w.host.frame = hf;
++            if (w.level != st->level)
++                w.level = st->level;
++        }
++        [CATransaction commit];
++
++        if (st->visible && (st->reorder || !w.isVisible ||
++                            w.nativeBelow != st->native)) {
++            w.nativeBelow = st->native;
++            [w orderWindow:NSWindowAbove relativeTo:st->native];
++            /* Xplugin applies its own frame changes asynchronously (it can
++             * re-raise its window after we ordered ours); assert the order
++             * again once it has settled. */
++            uint32_t xid = st->xid;
++            for (int i = 0; i < 2; i++) {
++                int64_t ns = (i == 0 ? 50 : 300) * NSEC_PER_MSEC;
++                dispatch_after(dispatch_time(DISPATCH_TIME_NOW, ns), dispatch_get_main_queue(), ^{
++                    XQRemoteLayerWindow *o = overlays[@(xid)];
++                    if (o && o.isVisible && o.nativeBelow) {
++                        RLDBG("rl reorder 0x%x above %u\n", xid, o.nativeBelow);
++                        [o orderWindow:NSWindowAbove relativeTo:o.nativeBelow];
++                    }
++                });
++            }
++        }
++    }
++}
++
++void
++XQRemoteLayerRemove(uint32_t xid)
++{
++    @autoreleasepool {
++        NSNumber *key = @(xid);
++        XQRemoteLayerWindow *w = overlays[key];
++        if (!w)
++            return;
++        [w orderOut:nil];
++        [w close];
++        [overlays removeObjectForKey:key];
++    }
++}
++
++void
++XQRemoteLayerRemoveAll(void)
++{
++    @autoreleasepool {
++        for (NSNumber *key in overlays.allKeys)
++            XQRemoteLayerRemove(key.unsignedIntValue);
++    }
++}

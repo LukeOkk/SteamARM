@@ -1,0 +1,80 @@
+Stage 14 -- D3D11 (DXVK) and D3D12 (VKD3D-Proton) without a VM (2026-09-27)
+============================================================================
+
+ZERO-VM status: NOT complete. Windows graphics now reach Metal through
+Proton's own DXVK and VKD3D-Proton; games, Steam-launched Proton (the
+pressure-vessel path) and the clean-Mac install are still open.
+
+Chain: game.exe (x86-64 PE) -> DXVK / VKD3D-Proton -> winevulkan ->
+libvulkan.so.1 (x86-64 guest thunk) -> FEX thunk -> libvulkan-host.so ->
+the runtime's Vulkan shim (aarch64 ELF, build/libvulkan.so.1) -> MoltenVK
+-> Metal, presented into a native macOS window through the X server's
+CALayerHost overlay (stage 12).
+
+Result (MEASURED, tests/win/run.sh, Proton Experimental, Apple M4):
+  d3d11: D3D11CreateDeviceAndSwapChain ok, feature level 11_0, adapter
+         "Apple M4", 600 presented frames, 161.6 fps; 3000 frames 164.4 fps
+  d3d12: D3D12CreateDevice ok, adapter "Apple M4", 600 frames with a fence
+         per frame, 161.9 fps; 4000 frames 164.6 fps
+  Both windows show the cleared colour (screen captures of the overlay),
+  exit code 0. Safeguard: nothing unusual (free 74 %, vm.objects ~134k).
+
+What it took
+------------
+1. Window manager. quartz-wm (XQuartz's own; pinned commit, one patch for a
+   QuickDraw/Xrender "Picture" clash) built by scripts/build-xquartz.sh and
+   started by scripts/run-x11-native.sh: X toplevels get native title bars,
+   traffic lights, moving and resizing. MEASURED: Notepad "Untitled - Notepad"
+   with a real macOS frame.
+
+2. Vulkan thunks in the Steam root (build-fex-thunks.sh install, now allowed
+   there with STEAMARM_THUNKS_STEAMROOT=1). The x86 probe
+   vkshim_test_x86_64 inside the Steam root: Apple M4, 17 ns per call.
+
+3. Guest pointers below 4 GiB (shim/gen_rebase.py -> build/vk_rebase.c).
+   Wine's 64-bit processes keep heaps and stacks in FEX's low window (guest
+   x = host base + x); the thunk hands those pointers to host code as they
+   are. MEASURED: DXVK's vkCreateInstance faulted at 0x31eca8 forever.
+   - A first answer, a fault-time fix-up that adds the base to the faulting
+     load/store's base register (runtime/gbase.c, lxrt_lowptr_fixup), got
+     further but is wrong in general: MoltenVK walked pSetLayouts with a
+     fixed pointer and an end computed from the unfixed one, and ran off the
+     array (MEASURED, vkCreatePipelineLayout -> 0xc0000005). It remains
+     only as a last resort for otherwise fatal faults (LXRT_NO_LOWPTR_FIXUP=1
+     disables it; both probes pass without it).
+   - The answer: wrappers generated from the Vulkan registry (vk.xml, 1191
+     structures, 425 entry points) rebase, in place, every pointer below
+     4 GiB the call can reach -- parameters, structures, arrays, pNext
+     chains by sType, string arrays -- call the next layer, and restore every
+     field afterwards. vkGetInstanceProcAddr/vkGetDeviceProcAddr hand out the
+     wrappers. Not rewritten: pUserData, unions, function pointers.
+   - Known limit (HYPOTHESIS): two threads passing the SAME structure at the
+     same moment -- one thread's restore can race the other's call.
+   - LXRT_VK_DEBUG=1 prints every entry point that returns an error.
+
+4. Features MoltenVK lacks (shim/features.c; LXRT_VK_NO_SPOOF=1 disables):
+     reported, then removed from vkCreateDevice's request:
+       geometryShader, shaderCullDistance (DXVK: required for FL 11_0);
+       robustBufferAccess2, nullDescriptor (DXVK, VKD3D-Proton)
+     extensions claimed and emulated:
+       VK_EXT_depth_clip_enable -> depthClampEnable = !depthClipEnable per
+         pipeline (Metal's clip/clamp mode); DXVK requires it
+       VK_EXT_transform_feedback -> limits and query support reported,
+         commands are no-ops, stream-0 indexed queries are plain queries;
+         VKD3D-Proton requires it ("Lacking support for transform feedback")
+       VK_EXT_dynamic_rendering_unused_attachments (validity relaxation)
+     properties: single-texel alignment for texel buffer views (Metal wants
+       16 bytes; VKD3D-Proton requires single texel).
+   HYPOTHESIS (not measured on games): programs that really use geometry
+   shaders, stream output or misaligned typed-buffer views render wrong.
+
+5. MoltenVK/SPIRV-Cross compile failure (shim/fallback.c). VKD3D-Proton's
+   DirectStorage decompression shader does atomicAdd on a vector component;
+   SPIRV-Cross emits "&region_buffer->region_count[0u]" and Metal refuses
+   ("address of vector element requested", MEASURED with
+   MVK_CONFIG_LOG_LEVEL=2). Such a compute pipeline is replaced by an empty
+   one and reported on stderr; D3D12 devices are created, only GPU
+   decompression for DirectStorage is missing. Proper fix: SPIRV-Cross.
+   LXRT_VK_NO_STUB_PIPELINES=1 disables it.
+
+Tests: tests/elf/run.sh 34/34 (+ memfd_private), tests/win/run.sh 2/2.

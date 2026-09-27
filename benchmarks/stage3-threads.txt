@@ -1,0 +1,67 @@
+Guest threads and futexes on Darwin.
+Apple M4, macOS 27, 2026-09-23.
+
+WHAT RUNS: a real Fedora glibc static-PIE binary that creates 4 pthreads, gates
+them on a condition variable, has each take a mutex 20000 times, checks its own
+__thread variable afterwards, and joins all four.
+
+  $ ./build/lxrun pth_test
+  [lxrt] rewrite: 164980 words scanned | svc 161 found, 161 rewritten, 0 poisoned
+                                       | tls 361 reads + 1 writes, 362 rewritten
+  creados 4 hilos
+  counter = 80000 (esperado 80000) OK, TLS malo en 0 hilos
+
+  15 consecutive runs, 15 correct.
+
+COST, same binary, same machine:
+  native, inside the Linux VM   0.056 s
+  under the runtime, no VM      0.0558 s   (best of 5)
+
+Indistinguishable. The thread and futex path costs nothing measurable against
+running the same binary on a real Linux kernel on the same hardware. (The Linux
+side is a VM on this host, so this is "Linux on this machine", not bare metal.)
+
+HOW IT MAPS:
+  clone/clone3      -> pthread_create, detached, with the guest's own stack
+  CLONE_SETTLS      -> the TSD slot from stage3-tls.txt
+  CLONE_*_SETTID    -> written before the thread starts
+  CLONE_CHILD_CLEARTID -> cleared and futex-woken on thread exit; glibc's
+                          pthread_join blocks on exactly this, so skipping it
+                          hangs rather than fails
+  futex WAIT/WAKE   -> __ulock_wait / __ulock_wake, UL_COMPARE_AND_WAIT
+  exit(93)          -> ends the thread; exit_group(94) ends the process
+
+NOT IMPLEMENTED, and reported rather than faked: FUTEX_REQUEUE, FUTEX_CMP_REQUEUE,
+FUTEX_WAKE_OP and the PI futexes -- Darwin has no equivalent primitive. fork()
+(clone without CLONE_VM) is also refused.
+
+TWO BUGS WORTH RECORDING, because both were silent and neither was in the plan.
+
+1. ERRNO NUMBERS ARE NOT THE SAME ON DARWIN AND LINUX.
+
+   Both inherit 1-34 from BSD and then diverge -- including a swapped pair:
+   EAGAIN is 35 on Darwin and 11 on Linux, EDEADLK is 11 on Darwin and 35 on
+   Linux. Returning a raw Darwin errno does not give a wrong-but-related error,
+   it gives a different error entirely.
+
+   Symptom: the runtime returned -ENOSYS (78 on Darwin) for an unimplemented
+   syscall; glibc read 78 as EREMCHG; and glibc's clone3 -> clone fallback,
+   which fires only on ENOSYS, stayed dead. What the user saw was
+   "pthread_create: Remote address changed".
+
+   Fixed with an explicit translation table (runtime/errno_map.c). Every return
+   path now goes through it; no path returns a host errno.
+
+2. CLONE'S CHILD INHERITS THE ENTIRE REGISTER FILE.
+
+   The syscall trampoline saved x0-x18 and x30 -- the registers the Linux
+   syscall ABI says are preserved. That is correct for a syscall and wrong for
+   clone: glibc's clone wrapper stashes the thread function and its argument in
+   registers before `svc` and calls them in the child. With x19-x29 zeroed, the
+   child branched through a null pointer.
+
+   Symptom: "SIGSEGV at pc 0x0" after all four threads had been created
+   successfully.
+
+   Fixed by snapshotting x0-x30 (256-byte block) and restoring all of them in
+   the child, with x0 forced to 0 as Linux promises.

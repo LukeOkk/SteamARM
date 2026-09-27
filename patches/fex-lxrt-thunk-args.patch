@@ -1,0 +1,47 @@
+FEX: thunk argument pointer through the guest base (SteamARM, Darwin host)
+
+The Thunk op hands host code the guest address of the packed arguments.
+With a guest base (32-bit guests) or the 64-bit low window that is not the
+host address: FEX faulted reading 0xf754a0f2 on the first 32-bit Vulkan
+thunk call (MEASURED). The base is added before the call, and to the
+Thunk opcode's 32-byte hash, which ThunkOp read at the raw guest RIP.
+
+diff --git a/FEXCore/Source/Interface/Core/JIT/BranchOps.cpp b/FEXCore/Source/Interface/Core/JIT/BranchOps.cpp
+index c2b1d8e28..2e6ea6eda 100644
+--- a/FEXCore/Source/Interface/Core/JIT/BranchOps.cpp
++++ b/FEXCore/Source/Interface/Core/JIT/BranchOps.cpp
+@@ -304,6 +304,14 @@ DEF_OP(Thunk) {
+   PushDynamicRegs(TMP1);
+ 
+   mov(ARMEmitter::Size::i64Bit, ARMEmitter::Reg::r0, GetReg(Op->ArgPtr));
++  // SteamARM (guest base): the packed arguments live on the guest stack, a
++  // guest address; host thunk code reads them through the host pointer.
++  if (GuestBaseActive()) {
++    add(ARMEmitter::Size::i64Bit, ARMEmitter::Reg::r0, GuestBaseReg(), ARMEmitter::Reg::r0);
++  } else if (GuestWindowActive()) {
++    mov(ARMEmitter::Size::i64Bit, ARMEmitter::Reg::r1, ARMEmitter::Reg::r0);
++    EmitGuestWindow(ARMEmitter::Reg::r0, ARMEmitter::Reg::r1);
++  }
+ 
+   InsertNamedThunkRelocation(ARMEmitter::Reg::r2, Op->ThunkNameHash);
+   if (!CTX->Config.DisableVixlIndirectCalls) [[unlikely]] {
+
+--- a/FEXCore/Source/Interface/Core/OpcodeDispatcher.cpp	2026-09-27 08:36:28
++++ b/FEXCore/Source/Interface/Core/OpcodeDispatcher.cpp	2026-09-27 08:36:28
+@@ -63,7 +63,15 @@
+ 
+ void OpDispatchBuilder::ThunkOp(OpcodeArgs) {
+   const auto GPRSize = GetGPROpSize();
+-  uint8_t* sha256 = (uint8_t*)(Op->PC + 2);
++  // The hash follows the instruction in guest code: a guest address, which
++  // under a guest base (or the 64-bit low window) is not the host one.
++  uint64_t HashAddr = Op->PC + 2;
++  if (GuestBase) {
++    HashAddr += GuestBase;
++  } else if (GuestWindowShift && HashAddr < (1ULL << 32)) {
++    HashAddr += 1ULL << GuestWindowShift;
++  }
++  uint8_t* sha256 = (uint8_t*)HashAddr;
+ 
+   if (Is64BitMode) {
+     // x86-64 ABI puts the function argument in RDI

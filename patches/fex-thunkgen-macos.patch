@@ -1,0 +1,14 @@
+diff --git a/ThunkLibs/Generator/gen.cpp b/ThunkLibs/Generator/gen.cpp
+index ccc7cbc19..b300825b0 100644
+--- a/ThunkLibs/Generator/gen.cpp
++++ b/ThunkLibs/Generator/gen.cpp
+@@ -840,6 +840,9 @@ bool GenerateThunkLibsActionFactory::runInvocation(std::shared_ptr<clang::Compil
+ 
+   const bool Success = Compiler.ExecuteAction(Action);
+ 
++#if LLVM_VERSION_MAJOR < 23
++  // Removed in LLVM 23 (the FileManager no longer keeps a stat cache).
+   Files->clearStatCache();
++#endif
+   return Success;
+ }

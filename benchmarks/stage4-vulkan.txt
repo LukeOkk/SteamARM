@@ -1,0 +1,60 @@
+Vulkan from a Linux ELF, with no VM.
+Apple M4, macOS 27, MoltenVK 1.4.2. 2026-09-24.
+
+WHAT RUNS: a Fedora glibc static-PIE aarch64 binary, loaded by runtime/, which
+opens MoltenVK, creates a Vulkan instance and enumerates the GPU.
+
+  MoltenVK cargado, handle 0x39ac5d9e0
+  vkGetInstanceProcAddr = 0x109ec1c3c   (host pointer, called with blr)
+  Vulkan 1.4.357
+  vkCreateInstance -> 0, instance 0x1044c7238
+  dispositivos fisicos: 1
+    [0] Apple M4  (API 1.0.357)
+
+Compare with the same project's VM path, which reports the device as
+"Virtio-GPU Venus (Apple M4)". Here it is the device itself. No Venus, no
+virtio-gpu, no virglrenderer, no second process.
+
+THE MECHANISM: a private syscall pair (0x4C580001 dlopen, 0x4C580002 dlsym)
+that hands the guest a real host function pointer. The guest then calls it with
+an ordinary `blr`. AAPCS64 is the same calling convention on both sides and
+there is one address space, so after the lookup there is nothing in between.
+
+MEASURED, same process, guest calling host:
+
+  direct host call from guest ELF          0.8 ns/op
+  rewritten svc into the dispatcher        3.9 ns/op
+  vkGetPhysicalDeviceProperties (MoltenVK) 11.6 ns/call
+
+0.8 ns is a plain function call -- the boundary costs nothing, because there
+isn't one. The 11.6 ns for a real Vulkan call is MoltenVK doing the work
+(it copies ~800 bytes of properties), not overhead.
+
+What that replaces: in the VM, every Vulkan call was serialised by Mesa venus
+into a virtio ring, taken across a VM exit, decoded by virglrenderer in a
+different process, and only then reached MoltenVK. PERFORMANCE_BASELINE §4
+lists five correctness walls that came from that bridge -- synthesised
+external-memory extensions, emulated sync-fd semaphores, a
+VkDeviceGroupDeviceCreateInfo that SIGSEGVed the host. None of them exist here.
+
+TWO BUGS FOUND, both mine, both worth recording:
+
+* dlsym(handle, NULL) faults inside dyld rather than returning an error. A
+  guest passing a null name would have crashed the host; the bridge now checks.
+* RTLD_DEFAULT is not NULL on Darwin, so dlsym(NULL, "getpid") does not mean
+  "search everything" as it does on Linux. libSystem must be opened explicitly.
+
+NOT DONE YET, and needed before a game:
+
+* An ELF `libvulkan.so.1` shim. DXVK dlopens the Linux Vulkan loader by name;
+  it will not call the private syscalls itself. The shim is an ordinary Linux
+  .so whose entry points forward through this bridge -- the guest's own ld.so
+  maps it and the runtime rewrites its `svc` sites on the way in, so the
+  machinery already exists.
+* Presentation. A swapchain needs a surface, which needs the runtime to own a
+  CAMetalLayer. The existing src/display.m window code is reusable; the
+  frame-transport half of it disappears entirely.
+* Everything MoltenVK still lacks is unchanged: no geometryShader, logicOp,
+  shaderCullDistance, variableMultisampleRate, transformFeedback,
+  nullDescriptor, robustBufferAccess2, VK_EXT_depth_clip_enable. The DXVK patch
+  this project already carries applies here as it did in the VM.

@@ -1,0 +1,3759 @@
+FEX thunks: 32-bit Vulkan for i386 guests under a guest base (SteamARM, Darwin host)
+
+A 32-bit guest lives at host = base + guest. Every guest pointer a 32-bit host
+thunk follows (get_pointer, host_layout<T*>) gets the base added, and a host
+pointer given back to the guest (to_guest) loses it. The base comes from the
+lxrt runtime. 64-bit thunks are unchanged.
+
+Host pointers outside the guest window (Vulkan's dispatchable handles are
+MoltenVK objects far above 4 GiB) are aliased into the window by the Vulkan
+shim (shim/map32.c, lxrt_handle_alias) and converted back on the way in.
+Guest-stack arguments of host->guest callbacks are built at their host
+address and handed over as guest addresses.
+
+Coverage: upstream leaves ~500 functions out of the 32-bit thunks, among them
+what DXVK and VKD3D-Proton need (vkCmdDrawIndexed, vkCmdCopyBuffer2,
+vkQueueSubmit2, push descriptors...). They are enabled here, except families
+MoltenVK does not implement and whose structures thunkgen cannot repack
+(ray tracing, video, micromaps, descriptor buffers/heaps, vendor extensions,
+device groups...). Arrays of structures are repacked element by element
+(generated custom implementations; thunkgen repacks one element), including
+the Vulkan 1.3 "*2" copy/blit/resolve/submit structures, specialization info
+and the shader stage of compute pipelines; the pNext table gains the
+extension structures of the pinned Vulkan headers, and an unknown one is left
+out of the chain instead of aborting.
+
+diff --git a/ThunkLibs/include/common/Host.h b/ThunkLibs/include/common/Host.h
+index 841509947..33fa93c3c 100644
+--- a/ThunkLibs/include/common/Host.h
++++ b/ThunkLibs/include/common/Host.h
+@@ -142,6 +142,61 @@ struct __attribute__((packed)) guest_layout {
+   }
+ };
+ 
++
++// SteamARM (Darwin host): a 32-bit guest lives at host = base + guest (FEX's
++// guest base, announced to the lxrt runtime); every guest pointer a host
++// thunk follows needs the base, and a host pointer handed to the guest loses
++// it. The base comes from the runtime (private syscall 0x4C580031).
++#ifdef IS_32BIT_THUNK
++inline uintptr_t fex_lxrt_guest_base() {
++  static uintptr_t base = [] {
++    register long x8 __asm__("x8") = 0x4C580031L;
++    register long x0 __asm__("x0") = 0;
++    __asm__ __volatile__("svc #0" : "+r"(x0) : "r"(x8) : "memory", "cc");
++    return x0 > 0 ? (uintptr_t)x0 : (uintptr_t)0;
++  }();
++  return base;
++}
++// Host pointers outside the guest window (Vulkan's dispatchable handles are
++// MoltenVK objects far above 4 GiB) are aliased into one guest range by the
++// Vulkan shim (shim/map32.c, lxrt_handle_alias); a guest address inside that
++// range converts back to the original host pointer.
++struct fex_lxrt_handle_alias {
++  uint64_t lo, hi;
++  uint32_t (*h2g)(uint64_t);
++  uint64_t (*g2h)(uint32_t);
++};
++inline fex_lxrt_handle_alias* fex_lxrt_handles() {
++  static fex_lxrt_handle_alias* a = (fex_lxrt_handle_alias*)dlsym(RTLD_DEFAULT, "lxrt_handle_alias");
++  return a;
++}
++inline uintptr_t fex_lxrt_g2h(uint64_t g) {
++  if (!g) {
++    return 0;
++  }
++  auto* a = fex_lxrt_handles();
++  if (a && g - a->lo < a->hi - a->lo) {
++    return a->g2h((uint32_t)g);
++  }
++  return (uintptr_t)g + fex_lxrt_guest_base();
++}
++inline uint64_t fex_lxrt_h2g(uintptr_t h) {
++  const uintptr_t b = fex_lxrt_guest_base();
++  if (!h || !b || (h >= b && h - b < (1ULL << 32))) {
++    return h ? h - b : 0;
++  }
++  auto* a = fex_lxrt_handles();
++  return a ? a->h2g(h) : h;
++}
++#else
++inline uintptr_t fex_lxrt_g2h(uint64_t g) {
++  return g;
++}
++inline uint64_t fex_lxrt_h2g(uintptr_t h) {
++  return h;
++}
++#endif
++
+ template<typename T, std::size_t N>
+ struct __attribute__((packed)) guest_layout<T[N]> {
+   using type = std::enable_if_t<!std::is_pointer_v<T>, T>;
+@@ -161,24 +216,26 @@ struct guest_layout<T*> {
+   guest_layout& operator=(const T* from) requires (std::is_function_v<T>)
+   {
+     // TODO: Assert upper 32 bits are zero
+-    data = reinterpret_cast<uintptr_t>(from);
++    // (SteamARM: a host function inside the guest window becomes its guest
++    // address; see fex_lxrt_h2g.)
++    data = fex_lxrt_h2g(reinterpret_cast<uintptr_t>(from));
+     return *this;
+   }
+ 
+   guest_layout<T>* get_pointer() {
+-    return reinterpret_cast<guest_layout<T>*>(uintptr_t {data});
++    return reinterpret_cast<guest_layout<T>*>(fex_lxrt_g2h(data));
+   }
+ 
+   const guest_layout<T>* get_pointer() const {
+-    return reinterpret_cast<const guest_layout<T>*>(uintptr_t {data});
++    return reinterpret_cast<const guest_layout<T>*>(fex_lxrt_g2h(data));
+   }
+ 
+   T* force_get_host_pointer() {
+-    return reinterpret_cast<T*>(uintptr_t {data});
++    return reinterpret_cast<T*>(fex_lxrt_g2h(data));
+   }
+ 
+   const T* force_get_host_pointer() const {
+-    return reinterpret_cast<const T*>(uintptr_t {data});
++    return reinterpret_cast<const T*>(fex_lxrt_g2h(data));
+   }
+ };
+ 
+@@ -195,16 +252,18 @@ struct guest_layout<T* const> {
+   guest_layout& operator=(const T* from) requires (std::is_function_v<T>)
+   {
+     // TODO: Assert upper 32 bits are zero
+-    data = reinterpret_cast<uintptr_t>(from);
++    // (SteamARM: a host function inside the guest window becomes its guest
++    // address; see fex_lxrt_h2g.)
++    data = fex_lxrt_h2g(reinterpret_cast<uintptr_t>(from));
+     return *this;
+   }
+ 
+   guest_layout<T>* get_pointer() {
+-    return reinterpret_cast<guest_layout<T>*>(uintptr_t {data});
++    return reinterpret_cast<guest_layout<T>*>(fex_lxrt_g2h(data));
+   }
+ 
+   const guest_layout<T>* get_pointer() const {
+-    return reinterpret_cast<const guest_layout<T>*>(uintptr_t {data});
++    return reinterpret_cast<const guest_layout<T>*>(fex_lxrt_g2h(data));
+   }
+ };
+ 
+@@ -272,7 +331,7 @@ struct host_layout<T*> {
+ 
+   // Assume underlying data is compatible and just convert the guest-sized pointer to 64-bit
+   explicit host_layout(const guest_layout<T*>& from)
+-    : data {(T*)(uintptr_t)from.data} {}
++    : data {(T*)fex_lxrt_g2h(from.data)} {}
+ 
+   host_layout() = default;
+ 
+@@ -288,7 +347,7 @@ struct host_layout<T*> {
+               && sizeof(T) == sizeof(U)
+ #endif
+                 )
+-    : data {(T*)(uintptr_t)from.data} {
++    : data {(T*)fex_lxrt_g2h(from.data)} {
+   }
+ 
+   // Allow conversion of pointers to 8-bit integer types to "char*".
+@@ -297,13 +356,13 @@ struct host_layout<T*> {
+   template<typename U>
+   explicit host_layout(const guest_layout<U*>& from)
+     requires (std::is_same_v<std::remove_cv_t<T>, char> && std::is_integral_v<U> && std::is_convertible_v<T, U> && sizeof(U) == 1)
+-    : data {(T*)(uintptr_t)from.data} {}
++    : data {(T*)fex_lxrt_g2h(from.data)} {}
+ 
+   // Allow conversion of pointers to 32-bit integer types to "wchar_t*".
+   template<typename U>
+   explicit host_layout(const guest_layout<U*>& from) requires (
+     std::is_same_v<std::remove_cv_t<T>, wchar_t> && std::is_integral_v<U> && std::is_convertible_v<T, U> && sizeof(U) == sizeof(wchar_t))
+-    : data {(T*)(uintptr_t)from.data} {}
++    : data {(T*)fex_lxrt_g2h(from.data)} {}
+ };
+ 
+ template<typename T>
+@@ -314,7 +373,7 @@ struct host_layout<T* const> {
+ 
+   // Assume underlying data is compatible and just convert the guest-sized pointer to 64-bit
+   explicit host_layout(const guest_layout<T* const>& from)
+-    : data {(T*)(uintptr_t)from.data} {}
++    : data {(T*)fex_lxrt_g2h(from.data)} {}
+ };
+ 
+ // Wrapper around host_layout that repacks from a guest_layout on construction
+@@ -412,7 +471,7 @@ struct host_to_guest_convertible {
+   {
+     // TODO: Assert upper 32 bits are zero
+     guest_layout<T> ret;
+-    ret.data = reinterpret_cast<uintptr_t>(from.data);
++    ret.data = fex_lxrt_h2g(reinterpret_cast<uintptr_t>(from.data));
+     return ret;
+   }
+ 
+@@ -534,7 +593,9 @@ public:
+     Next -= sizeof(T);
+     Next &= ~uintptr_t {alignof(T) - 1};
+     FEX::HLE::MoveGuestStack(Next);
+-    return new (reinterpret_cast<void*>(Next)) T {std::forward<Args>(args)...};
++    // SteamARM: the guest stack pointer is a guest address; the object is
++    // built at its host address (guest base).
++    return new (reinterpret_cast<void*>(fex_lxrt_g2h(Next))) T {std::forward<Args>(args)...};
+   }
+ };
+ #endif
+@@ -551,7 +612,12 @@ struct CallbackUnpack<Result(Args...)> {
+     GuestStackBumpAllocator GuestStack;
+     auto& packed_args = *GuestStack.New<PackedArguments<Result, guest_layout<Args>...>>(to_guest(to_host_layout(args))...);
+ #endif
++#ifndef IS_32BIT_THUNK
+     guestcall->CallCallback(guestcall->GuestUnpacker, guestcall->GuestTarget, &packed_args);
++#else
++    // The guest unpacker reads the arguments through their guest address.
++    guestcall->CallCallback(guestcall->GuestUnpacker, guestcall->GuestTarget, (void*)fex_lxrt_h2g(reinterpret_cast<uintptr_t>(&packed_args)));
++#endif
+ 
+     if constexpr (!std::is_void_v<Result>) {
+       return packed_args.rv;
+@@ -620,6 +686,14 @@ struct GuestWrapperForHostFunction<Result(Args...), GuestArgs...> {
+     } else if constexpr (CBIndex == 23) {
+       cb = args->a23;
+     }
++#ifdef IS_32BIT_THUNK
++    // A host function address an i386 guest holds is a window address (the
++    // runtime's Vulkan shim hands out trampolines inside the guest window,
++    // shim/wsi.c): the host reaches it through the base.
++    if (cb && cb < (1ULL << 32)) {
++      cb = fex_lxrt_g2h(cb);
++    }
++#endif
+ 
+     // This is almost the same type as "Result func(Args..., uintptr_t)", but
+     // individual types annotated as passthrough are wrapped in guest_layout<>
+diff --git a/ThunkLibs/libvulkan/Host.cpp b/ThunkLibs/libvulkan/Host.cpp
+index 592248e8c..ccb869bd0 100644
+--- a/ThunkLibs/libvulkan/Host.cpp
++++ b/ThunkLibs/libvulkan/Host.cpp
+@@ -1,3 +1,4 @@
++#include <dlfcn.h>
+ /*
+ $info$
+ tags: thunklibs|Vulkan
+@@ -16,6 +17,7 @@ $end_info$
+ 
+ #include <cassert>
+ #include <cstring>
++#include <memory>
+ #include <mutex>
+ #include <span>
+ #include <string_view>
+@@ -339,6 +341,515 @@ void fexfn_impl_libvulkan_vkFreeCommandBuffers(VkDevice device, VkCommandPool po
+   delete[] HostBuffers.data();
+ }
+ 
++// SteamARM: arrays of structures, repacked element by element (thunkgen
++// repacks a pointer parameter as one element; upstream leaves these
++// functions out of the 32-bit thunks). Generated for the functions DXVK,
++// VKD3D-Proton and Wine call.
++
++VkResult fexfn_impl_libvulkan_vkFlushMappedMemoryRanges(VkDevice a_0, uint32_t a_1, guest_layout<const VkMappedMemoryRange*> a_2) {
++  auto h_2 = RepackStructArray(a_1, a_2);
++  auto ret = fexldr_ptr_libvulkan_vkFlushMappedMemoryRanges(a_0, a_1, h_2.data());
++  delete[] h_2.data();
++  return ret;
++}
++
++VkResult fexfn_impl_libvulkan_vkInvalidateMappedMemoryRanges(VkDevice a_0, uint32_t a_1, guest_layout<const VkMappedMemoryRange*> a_2) {
++  auto h_2 = RepackStructArray(a_1, a_2);
++  auto ret = fexldr_ptr_libvulkan_vkInvalidateMappedMemoryRanges(a_0, a_1, h_2.data());
++  delete[] h_2.data();
++  return ret;
++}
++
++VkResult fexfn_impl_libvulkan_vkCreateGraphicsPipelines(VkDevice a_0, VkPipelineCache a_1, uint32_t a_2, guest_layout<const VkGraphicsPipelineCreateInfo*> a_3, const VkAllocationCallbacks* a_4, VkPipeline* a_5) {
++  auto h_3 = RepackStructArray(a_2, a_3);
++  auto ret = fexldr_ptr_libvulkan_vkCreateGraphicsPipelines(a_0, a_1, a_2, h_3.data(), a_4, a_5);
++  delete[] h_3.data();
++  return ret;
++}
++
++VkResult fexfn_impl_libvulkan_vkCreateComputePipelines(VkDevice a_0, VkPipelineCache a_1, uint32_t a_2, guest_layout<const VkComputePipelineCreateInfo*> a_3, const VkAllocationCallbacks* a_4, VkPipeline* a_5) {
++  auto h_3 = RepackStructArray(a_2, a_3);
++  auto ret = fexldr_ptr_libvulkan_vkCreateComputePipelines(a_0, a_1, a_2, h_3.data(), a_4, a_5);
++  delete[] h_3.data();
++  return ret;
++}
++
++void fexfn_impl_libvulkan_vkCmdCopyBuffer(VkCommandBuffer a_0, VkBuffer a_1, VkBuffer a_2, uint32_t a_3, guest_layout<const VkBufferCopy*> a_4) {
++  auto h_4 = RepackStructArray(a_3, a_4);
++  fexldr_ptr_libvulkan_vkCmdCopyBuffer(a_0, a_1, a_2, a_3, h_4.data());
++  delete[] h_4.data();
++}
++
++void fexfn_impl_libvulkan_vkCmdCopyBufferToImage(VkCommandBuffer a_0, VkBuffer a_1, VkImage a_2, VkImageLayout a_3, uint32_t a_4, guest_layout<const VkBufferImageCopy*> a_5) {
++  auto h_5 = RepackStructArray(a_4, a_5);
++  fexldr_ptr_libvulkan_vkCmdCopyBufferToImage(a_0, a_1, a_2, a_3, a_4, h_5.data());
++  delete[] h_5.data();
++}
++
++void fexfn_impl_libvulkan_vkCmdCopyImageToBuffer(VkCommandBuffer a_0, VkImage a_1, VkImageLayout a_2, VkBuffer a_3, uint32_t a_4, guest_layout<const VkBufferImageCopy*> a_5) {
++  auto h_5 = RepackStructArray(a_4, a_5);
++  fexldr_ptr_libvulkan_vkCmdCopyImageToBuffer(a_0, a_1, a_2, a_3, a_4, h_5.data());
++  delete[] h_5.data();
++}
++
++void fexfn_impl_libvulkan_vkCmdWaitEvents(VkCommandBuffer a_0, uint32_t a_1, const VkEvent* a_2, VkPipelineStageFlags a_3, VkPipelineStageFlags a_4, uint32_t a_5, guest_layout<const VkMemoryBarrier*> a_6, uint32_t a_7, guest_layout<const VkBufferMemoryBarrier*> a_8, uint32_t a_9, guest_layout<const VkImageMemoryBarrier*> a_10) {
++  auto h_6 = RepackStructArray(a_5, a_6);
++  auto h_8 = RepackStructArray(a_7, a_8);
++  auto h_10 = RepackStructArray(a_9, a_10);
++  fexldr_ptr_libvulkan_vkCmdWaitEvents(a_0, a_1, a_2, a_3, a_4, a_5, h_6.data(), a_7, h_8.data(), a_9, h_10.data());
++  delete[] h_6.data();
++  delete[] h_8.data();
++  delete[] h_10.data();
++}
++
++void fexfn_impl_libvulkan_vkCmdPipelineBarrier(VkCommandBuffer a_0, VkPipelineStageFlags a_1, VkPipelineStageFlags a_2, VkDependencyFlags a_3, uint32_t a_4, guest_layout<const VkMemoryBarrier*> a_5, uint32_t a_6, guest_layout<const VkBufferMemoryBarrier*> a_7, uint32_t a_8, guest_layout<const VkImageMemoryBarrier*> a_9) {
++  auto h_5 = RepackStructArray(a_4, a_5);
++  auto h_7 = RepackStructArray(a_6, a_7);
++  auto h_9 = RepackStructArray(a_8, a_9);
++  fexldr_ptr_libvulkan_vkCmdPipelineBarrier(a_0, a_1, a_2, a_3, a_4, h_5.data(), a_6, h_7.data(), a_8, h_9.data());
++  delete[] h_5.data();
++  delete[] h_7.data();
++  delete[] h_9.data();
++}
++
++VkResult fexfn_impl_libvulkan_vkBindBufferMemory2(VkDevice a_0, uint32_t a_1, guest_layout<const VkBindBufferMemoryInfo*> a_2) {
++  auto h_2 = RepackStructArray(a_1, a_2);
++  auto ret = fexldr_ptr_libvulkan_vkBindBufferMemory2(a_0, a_1, h_2.data());
++  delete[] h_2.data();
++  return ret;
++}
++
++VkResult fexfn_impl_libvulkan_vkBindBufferMemory2KHR(VkDevice a_0, uint32_t a_1, guest_layout<const VkBindBufferMemoryInfo*> a_2) {
++  auto h_2 = RepackStructArray(a_1, a_2);
++  auto ret = fexldr_ptr_libvulkan_vkBindBufferMemory2KHR(a_0, a_1, h_2.data());
++  delete[] h_2.data();
++  return ret;
++}
++
++VkResult fexfn_impl_libvulkan_vkBindImageMemory2(VkDevice a_0, uint32_t a_1, guest_layout<const VkBindImageMemoryInfo*> a_2) {
++  auto h_2 = RepackStructArray(a_1, a_2);
++  auto ret = fexldr_ptr_libvulkan_vkBindImageMemory2(a_0, a_1, h_2.data());
++  delete[] h_2.data();
++  return ret;
++}
++
++VkResult fexfn_impl_libvulkan_vkBindImageMemory2KHR(VkDevice a_0, uint32_t a_1, guest_layout<const VkBindImageMemoryInfo*> a_2) {
++  auto h_2 = RepackStructArray(a_1, a_2);
++  auto ret = fexldr_ptr_libvulkan_vkBindImageMemory2KHR(a_0, a_1, h_2.data());
++  delete[] h_2.data();
++  return ret;
++}
++
++VkResult fexfn_impl_libvulkan_vkGetCalibratedTimestampsKHR(VkDevice a_0, uint32_t a_1, guest_layout<const VkCalibratedTimestampInfoKHR*> a_2, uint64_t* a_3, uint64_t* a_4) {
++  auto h_2 = RepackStructArray(a_1, a_2);
++  auto ret = fexldr_ptr_libvulkan_vkGetCalibratedTimestampsKHR(a_0, a_1, h_2.data(), a_3, a_4);
++  delete[] h_2.data();
++  return ret;
++}
++
++VkResult fexfn_impl_libvulkan_vkGetCalibratedTimestampsEXT(VkDevice a_0, uint32_t a_1, guest_layout<const VkCalibratedTimestampInfoKHR*> a_2, uint64_t* a_3, uint64_t* a_4) {
++  auto h_2 = RepackStructArray(a_1, a_2);
++  auto ret = fexldr_ptr_libvulkan_vkGetCalibratedTimestampsEXT(a_0, a_1, h_2.data(), a_3, a_4);
++  delete[] h_2.data();
++  return ret;
++}
++
++void fexfn_impl_libvulkan_vkCmdWaitEvents2(VkCommandBuffer a_0, uint32_t a_1, const VkEvent* a_2, guest_layout<const VkDependencyInfo*> a_3) {
++  auto h_3 = RepackStructArray(a_1, a_3);
++  fexldr_ptr_libvulkan_vkCmdWaitEvents2(a_0, a_1, a_2, h_3.data());
++  delete[] h_3.data();
++}
++
++void fexfn_impl_libvulkan_vkCmdWaitEvents2KHR(VkCommandBuffer a_0, uint32_t a_1, const VkEvent* a_2, guest_layout<const VkDependencyInfo*> a_3) {
++  auto h_3 = RepackStructArray(a_1, a_3);
++  fexldr_ptr_libvulkan_vkCmdWaitEvents2KHR(a_0, a_1, a_2, h_3.data());
++  delete[] h_3.data();
++}
++
++VkResult fexfn_impl_libvulkan_vkQueueSubmit2(VkQueue a_0, uint32_t a_1, guest_layout<const VkSubmitInfo2*> a_2, VkFence a_3) {
++  auto h_2 = RepackStructArray(a_1, a_2);
++  auto ret = fexldr_ptr_libvulkan_vkQueueSubmit2(a_0, a_1, h_2.data(), a_3);
++  delete[] h_2.data();
++  return ret;
++}
++
++VkResult fexfn_impl_libvulkan_vkQueueSubmit2KHR(VkQueue a_0, uint32_t a_1, guest_layout<const VkSubmitInfo2*> a_2, VkFence a_3) {
++  auto h_2 = RepackStructArray(a_1, a_2);
++  auto ret = fexldr_ptr_libvulkan_vkQueueSubmit2KHR(a_0, a_1, h_2.data(), a_3);
++  delete[] h_2.data();
++  return ret;
++}
++
++void fexfn_impl_libvulkan_vkGetPhysicalDeviceQueueFamilyProperties2(VkPhysicalDevice a_0, uint32_t* a_1, guest_layout<VkQueueFamilyProperties2*> a_2) {
++  if (!a_2.get_pointer()) {
++    fexldr_ptr_libvulkan_vkGetPhysicalDeviceQueueFamilyProperties2(a_0, a_1, nullptr);
++    return;
++  }
++  const uint32_t n = *a_1;
++  auto h_2 = RepackStructArray(n, a_2);
++  fexldr_ptr_libvulkan_vkGetPhysicalDeviceQueueFamilyProperties2(a_0, a_1, h_2.data());
++  for (uint32_t i = 0; i < std::min(n, *a_1); ++i) {
++    auto& g = a_2.get_pointer()[i];
++    if (!fex_apply_custom_repacking_exit(g, to_host_layout(h_2[i]))) {
++      g = to_guest(to_host_layout(h_2[i]));
++    }
++  }
++  delete[] h_2.data();
++}
++
++void fexfn_impl_libvulkan_vkGetPhysicalDeviceQueueFamilyProperties2KHR(VkPhysicalDevice a_0, uint32_t* a_1, guest_layout<VkQueueFamilyProperties2*> a_2) {
++  if (!a_2.get_pointer()) {
++    fexldr_ptr_libvulkan_vkGetPhysicalDeviceQueueFamilyProperties2KHR(a_0, a_1, nullptr);
++    return;
++  }
++  const uint32_t n = *a_1;
++  auto h_2 = RepackStructArray(n, a_2);
++  fexldr_ptr_libvulkan_vkGetPhysicalDeviceQueueFamilyProperties2KHR(a_0, a_1, h_2.data());
++  for (uint32_t i = 0; i < std::min(n, *a_1); ++i) {
++    auto& g = a_2.get_pointer()[i];
++    if (!fex_apply_custom_repacking_exit(g, to_host_layout(h_2[i]))) {
++      g = to_guest(to_host_layout(h_2[i]));
++    }
++  }
++  delete[] h_2.data();
++}
++
++VkResult fexfn_impl_libvulkan_vkGetPhysicalDeviceSurfaceFormats2KHR(VkPhysicalDevice a_0, const VkPhysicalDeviceSurfaceInfo2KHR* a_1, uint32_t* a_2, guest_layout<VkSurfaceFormat2KHR*> a_3) {
++  if (!a_3.get_pointer()) {
++    return fexldr_ptr_libvulkan_vkGetPhysicalDeviceSurfaceFormats2KHR(a_0, a_1, a_2, nullptr);
++  }
++  const uint32_t n = *a_2;
++  auto h_3 = RepackStructArray(n, a_3);
++  auto ret = fexldr_ptr_libvulkan_vkGetPhysicalDeviceSurfaceFormats2KHR(a_0, a_1, a_2, h_3.data());
++  for (uint32_t i = 0; i < std::min(n, *a_2); ++i) {
++    auto& g = a_3.get_pointer()[i];
++    if (!fex_apply_custom_repacking_exit(g, to_host_layout(h_3[i]))) {
++      g = to_guest(to_host_layout(h_3[i]));
++    }
++  }
++  delete[] h_3.data();
++  return ret;
++}
++
++VkResult fexfn_impl_libvulkan_vkGetPhysicalDeviceToolProperties(VkPhysicalDevice a_0, uint32_t* a_1, guest_layout<VkPhysicalDeviceToolProperties*> a_2) {
++  if (!a_2.get_pointer()) {
++    return fexldr_ptr_libvulkan_vkGetPhysicalDeviceToolProperties(a_0, a_1, nullptr);
++  }
++  const uint32_t n = *a_1;
++  auto h_2 = RepackStructArray(n, a_2);
++  auto ret = fexldr_ptr_libvulkan_vkGetPhysicalDeviceToolProperties(a_0, a_1, h_2.data());
++  for (uint32_t i = 0; i < std::min(n, *a_1); ++i) {
++    auto& g = a_2.get_pointer()[i];
++    if (!fex_apply_custom_repacking_exit(g, to_host_layout(h_2[i]))) {
++      g = to_guest(to_host_layout(h_2[i]));
++    }
++  }
++  delete[] h_2.data();
++  return ret;
++}
++
++VkResult fexfn_impl_libvulkan_vkGetPhysicalDeviceToolPropertiesEXT(VkPhysicalDevice a_0, uint32_t* a_1, guest_layout<VkPhysicalDeviceToolProperties*> a_2) {
++  if (!a_2.get_pointer()) {
++    return fexldr_ptr_libvulkan_vkGetPhysicalDeviceToolPropertiesEXT(a_0, a_1, nullptr);
++  }
++  const uint32_t n = *a_1;
++  auto h_2 = RepackStructArray(n, a_2);
++  auto ret = fexldr_ptr_libvulkan_vkGetPhysicalDeviceToolPropertiesEXT(a_0, a_1, h_2.data());
++  for (uint32_t i = 0; i < std::min(n, *a_1); ++i) {
++    auto& g = a_2.get_pointer()[i];
++    if (!fex_apply_custom_repacking_exit(g, to_host_layout(h_2[i]))) {
++      g = to_guest(to_host_layout(h_2[i]));
++    }
++  }
++  delete[] h_2.data();
++  return ret;
++}
++
++VkResult fexfn_impl_libvulkan_vkGetPhysicalDeviceFragmentShadingRatesKHR(VkPhysicalDevice a_0, uint32_t* a_1, guest_layout<VkPhysicalDeviceFragmentShadingRateKHR*> a_2) {
++  if (!a_2.get_pointer()) {
++    return fexldr_ptr_libvulkan_vkGetPhysicalDeviceFragmentShadingRatesKHR(a_0, a_1, nullptr);
++  }
++  const uint32_t n = *a_1;
++  auto h_2 = RepackStructArray(n, a_2);
++  auto ret = fexldr_ptr_libvulkan_vkGetPhysicalDeviceFragmentShadingRatesKHR(a_0, a_1, h_2.data());
++  for (uint32_t i = 0; i < std::min(n, *a_1); ++i) {
++    auto& g = a_2.get_pointer()[i];
++    if (!fex_apply_custom_repacking_exit(g, to_host_layout(h_2[i]))) {
++      g = to_guest(to_host_layout(h_2[i]));
++    }
++  }
++  delete[] h_2.data();
++  return ret;
++}
++
++// SteamARM: push descriptors and push constants (DXVK's binding model),
++// which upstream leaves out of the 32-bit thunks. The *2 variants take one
++// info structure, decoded here from its i386 layout (64-bit handles are
++// 4-byte aligned there); its pNext chain is not forwarded.
++#define LXRT_PUSH_DESCRIPTOR_SET(Name)                                                                                           \
++  void fexfn_impl_libvulkan_##Name(VkCommandBuffer a_0, VkPipelineBindPoint a_1, VkPipelineLayout a_2, uint32_t a_3, uint32_t a_4, \
++                                   guest_layout<const VkWriteDescriptorSet*> a_5) {                                             \
++    auto h_5 = RepackStructArray(a_4, a_5);                                                                                     \
++    fexldr_ptr_libvulkan_##Name(a_0, a_1, a_2, a_3, a_4, h_5.data());                                                           \
++    delete[] h_5.data();                                                                                                        \
++  }
++LXRT_PUSH_DESCRIPTOR_SET(vkCmdPushDescriptorSet)
++LXRT_PUSH_DESCRIPTOR_SET(vkCmdPushDescriptorSetKHR)
++#undef LXRT_PUSH_DESCRIPTOR_SET
++
++template<typename T>
++static T lxrt_guest_field(const void* base, size_t offset) {
++  T v;
++  memcpy(&v, static_cast<const uint8_t*>(base) + offset, sizeof(v));
++  return v;
++}
++
++#define LXRT_PUSH_CONSTANTS2(Name)                                                                    \
++  void fexfn_impl_libvulkan_##Name(VkCommandBuffer a_0, guest_layout<const VkPushConstantsInfo*> a_1) { \
++    const void* g = a_1.get_pointer();                                                                \
++    VkPushConstantsInfo h {VK_STRUCTURE_TYPE_PUSH_CONSTANTS_INFO};                                    \
++    h.layout = lxrt_guest_field<VkPipelineLayout>(g, 8);                                              \
++    h.stageFlags = lxrt_guest_field<uint32_t>(g, 16);                                                 \
++    h.offset = lxrt_guest_field<uint32_t>(g, 20);                                                     \
++    h.size = lxrt_guest_field<uint32_t>(g, 24);                                                       \
++    h.pValues = reinterpret_cast<const void*>(fex_lxrt_g2h(lxrt_guest_field<uint32_t>(g, 28)));      \
++    fexldr_ptr_libvulkan_##Name(a_0, &h);                                                             \
++  }
++LXRT_PUSH_CONSTANTS2(vkCmdPushConstants2)
++LXRT_PUSH_CONSTANTS2(vkCmdPushConstants2KHR)
++#undef LXRT_PUSH_CONSTANTS2
++
++#define LXRT_PUSH_DESCRIPTOR_SET2(Name)                                                                    \
++  void fexfn_impl_libvulkan_##Name(VkCommandBuffer a_0, guest_layout<const VkPushDescriptorSetInfo*> a_1) { \
++    const void* g = a_1.get_pointer();                                                                    \
++    VkPushDescriptorSetInfo h {VK_STRUCTURE_TYPE_PUSH_DESCRIPTOR_SET_INFO};                               \
++    h.stageFlags = lxrt_guest_field<uint32_t>(g, 8);                                                      \
++    h.layout = lxrt_guest_field<VkPipelineLayout>(g, 12);                                                 \
++    h.set = lxrt_guest_field<uint32_t>(g, 20);                                                            \
++    h.descriptorWriteCount = lxrt_guest_field<uint32_t>(g, 24);                                           \
++    guest_layout<const VkWriteDescriptorSet*> writes;                                                     \
++    writes.data = lxrt_guest_field<uint32_t>(g, 28);                                                      \
++    auto hw = RepackStructArray(h.descriptorWriteCount, writes);                                          \
++    h.pDescriptorWrites = hw.data();                                                                      \
++    fexldr_ptr_libvulkan_##Name(a_0, &h);                                                                 \
++    delete[] hw.data();                                                                                   \
++  }
++LXRT_PUSH_DESCRIPTOR_SET2(vkCmdPushDescriptorSet2)
++LXRT_PUSH_DESCRIPTOR_SET2(vkCmdPushDescriptorSet2KHR)
++#undef LXRT_PUSH_DESCRIPTOR_SET2
++
++#define LXRT_PUSH_DESCRIPTOR_SET_WITH_TEMPLATE2(Name)                                                                  \
++  void fexfn_impl_libvulkan_##Name(VkCommandBuffer a_0, guest_layout<const VkPushDescriptorSetWithTemplateInfo*> a_1) { \
++    const void* g = a_1.get_pointer();                                                                                \
++    VkPushDescriptorSetWithTemplateInfo h {VK_STRUCTURE_TYPE_PUSH_DESCRIPTOR_SET_WITH_TEMPLATE_INFO};                 \
++    h.descriptorUpdateTemplate = lxrt_guest_field<VkDescriptorUpdateTemplate>(g, 8);                                  \
++    h.layout = lxrt_guest_field<VkPipelineLayout>(g, 16);                                                             \
++    h.set = lxrt_guest_field<uint32_t>(g, 24);                                                                        \
++    h.pData = reinterpret_cast<const void*>(fex_lxrt_g2h(lxrt_guest_field<uint32_t>(g, 28)));                        \
++    fexldr_ptr_libvulkan_##Name(a_0, &h);                                                                             \
++  }
++LXRT_PUSH_DESCRIPTOR_SET_WITH_TEMPLATE2(vkCmdPushDescriptorSetWithTemplate2)
++LXRT_PUSH_DESCRIPTOR_SET_WITH_TEMPLATE2(vkCmdPushDescriptorSetWithTemplate2KHR)
++#undef LXRT_PUSH_DESCRIPTOR_SET_WITH_TEMPLATE2
++
++// SteamARM: arrays of structures, repacked element by element (thunkgen
++// repacks a pointer parameter as one element; upstream leaves these
++// functions out of the 32-bit thunks). Generated for the functions DXVK,
++// VKD3D-Proton and Wine call.
++
++void fexfn_impl_libvulkan_vkGetPhysicalDeviceSparseImageFormatProperties2(VkPhysicalDevice a_0, const VkPhysicalDeviceSparseImageFormatInfo2* a_1, uint32_t* a_2, guest_layout<VkSparseImageFormatProperties2*> a_3) {
++  if (!a_3.get_pointer()) {
++    fexldr_ptr_libvulkan_vkGetPhysicalDeviceSparseImageFormatProperties2(a_0, a_1, a_2, nullptr);
++    return;
++  }
++  const uint32_t n = *a_2;
++  auto h_3 = RepackStructArray(n, a_3);
++  fexldr_ptr_libvulkan_vkGetPhysicalDeviceSparseImageFormatProperties2(a_0, a_1, a_2, h_3.data());
++  for (uint32_t i = 0; i < std::min(n, *a_2); ++i) {
++    auto& g = a_3.get_pointer()[i];
++    if (!fex_apply_custom_repacking_exit(g, to_host_layout(h_3[i]))) {
++      g = to_guest(to_host_layout(h_3[i]));
++    }
++  }
++  delete[] h_3.data();
++}
++
++void fexfn_impl_libvulkan_vkGetPhysicalDeviceSparseImageFormatProperties2KHR(VkPhysicalDevice a_0, const VkPhysicalDeviceSparseImageFormatInfo2* a_1, uint32_t* a_2, guest_layout<VkSparseImageFormatProperties2*> a_3) {
++  if (!a_3.get_pointer()) {
++    fexldr_ptr_libvulkan_vkGetPhysicalDeviceSparseImageFormatProperties2KHR(a_0, a_1, a_2, nullptr);
++    return;
++  }
++  const uint32_t n = *a_2;
++  auto h_3 = RepackStructArray(n, a_3);
++  fexldr_ptr_libvulkan_vkGetPhysicalDeviceSparseImageFormatProperties2KHR(a_0, a_1, a_2, h_3.data());
++  for (uint32_t i = 0; i < std::min(n, *a_2); ++i) {
++    auto& g = a_3.get_pointer()[i];
++    if (!fex_apply_custom_repacking_exit(g, to_host_layout(h_3[i]))) {
++      g = to_guest(to_host_layout(h_3[i]));
++    }
++  }
++  delete[] h_3.data();
++}
++
++void fexfn_impl_libvulkan_vkGetImageSparseMemoryRequirements2(VkDevice a_0, const VkImageSparseMemoryRequirementsInfo2* a_1, uint32_t* a_2, guest_layout<VkSparseImageMemoryRequirements2*> a_3) {
++  if (!a_3.get_pointer()) {
++    fexldr_ptr_libvulkan_vkGetImageSparseMemoryRequirements2(a_0, a_1, a_2, nullptr);
++    return;
++  }
++  const uint32_t n = *a_2;
++  auto h_3 = RepackStructArray(n, a_3);
++  fexldr_ptr_libvulkan_vkGetImageSparseMemoryRequirements2(a_0, a_1, a_2, h_3.data());
++  for (uint32_t i = 0; i < std::min(n, *a_2); ++i) {
++    auto& g = a_3.get_pointer()[i];
++    if (!fex_apply_custom_repacking_exit(g, to_host_layout(h_3[i]))) {
++      g = to_guest(to_host_layout(h_3[i]));
++    }
++  }
++  delete[] h_3.data();
++}
++
++void fexfn_impl_libvulkan_vkGetImageSparseMemoryRequirements2KHR(VkDevice a_0, const VkImageSparseMemoryRequirementsInfo2* a_1, uint32_t* a_2, guest_layout<VkSparseImageMemoryRequirements2*> a_3) {
++  if (!a_3.get_pointer()) {
++    fexldr_ptr_libvulkan_vkGetImageSparseMemoryRequirements2KHR(a_0, a_1, a_2, nullptr);
++    return;
++  }
++  const uint32_t n = *a_2;
++  auto h_3 = RepackStructArray(n, a_3);
++  fexldr_ptr_libvulkan_vkGetImageSparseMemoryRequirements2KHR(a_0, a_1, a_2, h_3.data());
++  for (uint32_t i = 0; i < std::min(n, *a_2); ++i) {
++    auto& g = a_3.get_pointer()[i];
++    if (!fex_apply_custom_repacking_exit(g, to_host_layout(h_3[i]))) {
++      g = to_guest(to_host_layout(h_3[i]));
++    }
++  }
++  delete[] h_3.data();
++}
++
++void fexfn_impl_libvulkan_vkGetDeviceImageSparseMemoryRequirements(VkDevice a_0, const VkDeviceImageMemoryRequirements* a_1, uint32_t* a_2, guest_layout<VkSparseImageMemoryRequirements2*> a_3) {
++  if (!a_3.get_pointer()) {
++    fexldr_ptr_libvulkan_vkGetDeviceImageSparseMemoryRequirements(a_0, a_1, a_2, nullptr);
++    return;
++  }
++  const uint32_t n = *a_2;
++  auto h_3 = RepackStructArray(n, a_3);
++  fexldr_ptr_libvulkan_vkGetDeviceImageSparseMemoryRequirements(a_0, a_1, a_2, h_3.data());
++  for (uint32_t i = 0; i < std::min(n, *a_2); ++i) {
++    auto& g = a_3.get_pointer()[i];
++    if (!fex_apply_custom_repacking_exit(g, to_host_layout(h_3[i]))) {
++      g = to_guest(to_host_layout(h_3[i]));
++    }
++  }
++  delete[] h_3.data();
++}
++
++void fexfn_impl_libvulkan_vkGetDeviceImageSparseMemoryRequirementsKHR(VkDevice a_0, const VkDeviceImageMemoryRequirements* a_1, uint32_t* a_2, guest_layout<VkSparseImageMemoryRequirements2*> a_3) {
++  if (!a_3.get_pointer()) {
++    fexldr_ptr_libvulkan_vkGetDeviceImageSparseMemoryRequirementsKHR(a_0, a_1, a_2, nullptr);
++    return;
++  }
++  const uint32_t n = *a_2;
++  auto h_3 = RepackStructArray(n, a_3);
++  fexldr_ptr_libvulkan_vkGetDeviceImageSparseMemoryRequirementsKHR(a_0, a_1, a_2, h_3.data());
++  for (uint32_t i = 0; i < std::min(n, *a_2); ++i) {
++    auto& g = a_3.get_pointer()[i];
++    if (!fex_apply_custom_repacking_exit(g, to_host_layout(h_3[i]))) {
++      g = to_guest(to_host_layout(h_3[i]));
++    }
++  }
++  delete[] h_3.data();
++}
++
++// SteamARM: sparse binding, decoded from the i386 layouts (64-bit members
++// 4-byte aligned: VkSparseMemoryBind is 36 bytes there, VkSparseImageMemoryBind
++// 56, the three *BindInfo 16, VkBindSparseInfo 48). VKD3D-Proton requires the
++// entry point; MoltenVK reports no sparse support, so it is rarely reached.
++static void default_fex_custom_repack_entry(VkBaseOutStructure& into, const guest_layout<VkBaseOutStructure>* from);
++
++static VkSparseMemoryBind* lxrt_sparse_binds(uint32_t n, uint32_t g) {
++  auto out = new VkSparseMemoryBind[n ? n : 1];
++  auto b = reinterpret_cast<const uint8_t*>(fex_lxrt_g2h(g));
++  for (uint32_t i = 0; i < n; ++i, b += 36) {
++    out[i] = {lxrt_guest_field<VkDeviceSize>(b, 0), lxrt_guest_field<VkDeviceSize>(b, 8), lxrt_guest_field<VkDeviceMemory>(b, 16),
++              lxrt_guest_field<VkDeviceSize>(b, 24), lxrt_guest_field<uint32_t>(b, 32)};
++  }
++  return out;
++}
++
++VkResult fexfn_impl_libvulkan_vkQueueBindSparse(VkQueue a_0, uint32_t a_1, guest_layout<const VkBindSparseInfo*> a_2, VkFence a_3) {
++  std::vector<VkBindSparseInfo> infos(a_1);
++  std::vector<std::vector<VkSparseBufferMemoryBindInfo>> buffers(a_1);
++  std::vector<std::vector<VkSparseImageOpaqueMemoryBindInfo>> opaques(a_1);
++  std::vector<std::vector<VkSparseImageMemoryBindInfo>> images(a_1);
++  std::vector<std::unique_ptr<VkSparseMemoryBind[]>> memory_binds;
++  std::vector<std::unique_ptr<VkSparseImageMemoryBind[]>> image_binds;
++  auto base = reinterpret_cast<const uint8_t*>(a_2.get_pointer());
++  for (uint32_t i = 0; i < a_1; ++i) {
++    auto g = base + 48 * i;
++    auto& h = infos[i];
++    h = {VK_STRUCTURE_TYPE_BIND_SPARSE_INFO};
++    VkBaseOutStructure chain {};
++    default_fex_custom_repack_entry(chain, reinterpret_cast<const guest_layout<VkBaseOutStructure>*>(g));
++    h.pNext = chain.pNext;
++    h.waitSemaphoreCount = lxrt_guest_field<uint32_t>(g, 8);
++    h.pWaitSemaphores = reinterpret_cast<const VkSemaphore*>(fex_lxrt_g2h(lxrt_guest_field<uint32_t>(g, 12)));
++    h.bufferBindCount = lxrt_guest_field<uint32_t>(g, 16);
++    auto gb = reinterpret_cast<const uint8_t*>(fex_lxrt_g2h(lxrt_guest_field<uint32_t>(g, 20)));
++    for (uint32_t j = 0; j < h.bufferBindCount; ++j, gb += 16) {
++      auto binds = lxrt_sparse_binds(lxrt_guest_field<uint32_t>(gb, 8), lxrt_guest_field<uint32_t>(gb, 12));
++      memory_binds.emplace_back(binds);
++      buffers[i].push_back({lxrt_guest_field<VkBuffer>(gb, 0), lxrt_guest_field<uint32_t>(gb, 8), binds});
++    }
++    h.pBufferBinds = buffers[i].data();
++    h.imageOpaqueBindCount = lxrt_guest_field<uint32_t>(g, 24);
++    auto go = reinterpret_cast<const uint8_t*>(fex_lxrt_g2h(lxrt_guest_field<uint32_t>(g, 28)));
++    for (uint32_t j = 0; j < h.imageOpaqueBindCount; ++j, go += 16) {
++      auto binds = lxrt_sparse_binds(lxrt_guest_field<uint32_t>(go, 8), lxrt_guest_field<uint32_t>(go, 12));
++      memory_binds.emplace_back(binds);
++      opaques[i].push_back({lxrt_guest_field<VkImage>(go, 0), lxrt_guest_field<uint32_t>(go, 8), binds});
++    }
++    h.pImageOpaqueBinds = opaques[i].data();
++    h.imageBindCount = lxrt_guest_field<uint32_t>(g, 32);
++    auto gi = reinterpret_cast<const uint8_t*>(fex_lxrt_g2h(lxrt_guest_field<uint32_t>(g, 36)));
++    for (uint32_t j = 0; j < h.imageBindCount; ++j, gi += 16) {
++      const uint32_t n = lxrt_guest_field<uint32_t>(gi, 8);
++      auto binds = new VkSparseImageMemoryBind[n ? n : 1];
++      image_binds.emplace_back(binds);
++      auto b = reinterpret_cast<const uint8_t*>(fex_lxrt_g2h(lxrt_guest_field<uint32_t>(gi, 12)));
++      for (uint32_t k = 0; k < n; ++k, b += 56) {
++        memcpy(&binds[k], b, 36); // subresource, offset, extent: 32-bit fields
++        binds[k].memory = lxrt_guest_field<VkDeviceMemory>(b, 36);
++        binds[k].memoryOffset = lxrt_guest_field<VkDeviceSize>(b, 44);
++        binds[k].flags = lxrt_guest_field<uint32_t>(b, 52);
++      }
++      images[i].push_back({lxrt_guest_field<VkImage>(gi, 0), n, binds});
++    }
++    h.pImageBinds = images[i].data();
++    h.signalSemaphoreCount = lxrt_guest_field<uint32_t>(g, 40);
++    h.pSignalSemaphores = reinterpret_cast<const VkSemaphore*>(fex_lxrt_g2h(lxrt_guest_field<uint32_t>(g, 44)));
++  }
++  return fexldr_ptr_libvulkan_vkQueueBindSparse(a_0, a_1, infos.data(), a_3);
++}
++
++void fexfn_impl_libvulkan_vkGetImageSparseMemoryRequirements(VkDevice a_0, VkImage a_1, uint32_t* a_2, guest_layout<VkSparseImageMemoryRequirements*> a_3) {
++  // Same size and member offsets in both layouts (48 bytes, the 64-bit
++  // members fall on 8-byte offsets): only the element stride matters.
++  static_assert(sizeof(VkSparseImageMemoryRequirements) == 48);
++  fexldr_ptr_libvulkan_vkGetImageSparseMemoryRequirements(a_0, a_1, a_2, reinterpret_cast<VkSparseImageMemoryRequirements*>(a_3.get_pointer()));
++}
++
++void fexfn_impl_libvulkan_vkGetDeviceQueue2(VkDevice device, const VkDeviceQueueInfo2* info, guest_layout<VkQueue*> queue) {
++  VkQueue out;
++  (void*&)fexldr_ptr_libvulkan_vkGetDeviceQueue2 = (void*)LDR_PTR(vkGetDeviceProcAddr)(device, "vkGetDeviceQueue2");
++  fexldr_ptr_libvulkan_vkGetDeviceQueue2(device, info, &out);
++  *queue.get_pointer() = to_guest(to_host_layout(out));
++}
++
++void fexfn_impl_libvulkan_vkCmdExecuteCommands(VkCommandBuffer buffer, uint32_t num_buffers, guest_layout<const VkCommandBuffer*> buffers) {
++  auto HostBuffers = RepackStructArray<false>(num_buffers, buffers);
++  fexldr_ptr_libvulkan_vkCmdExecuteCommands(buffer, num_buffers, HostBuffers.data());
++  delete[] HostBuffers.data();
++}
++
+ VkResult fexfn_impl_libvulkan_vkGetPipelineCacheData(VkDevice device, VkPipelineCache cache, guest_layout<uint32_t*> guest_data_size, void* data) {
+   size_t data_size = guest_data_size.get_pointer()->data;
+   (void*&)fexldr_ptr_libvulkan_vkGetPipelineCacheData = (void*)LDR_PTR(vkGetDeviceProcAddr)(device, "vkGetPipelineCacheData");
+@@ -349,6 +860,21 @@ VkResult fexfn_impl_libvulkan_vkGetPipelineCacheData(VkDevice device, VkPipeline
+ 
+ #endif
+ 
++// SteamARM (Darwin host): an i386 guest keeps host function pointers in 32
++// bits, and host code lives far above 4 GiB. The runtime's Vulkan shim
++// (libvulkan.so.1, loaded RTLD_GLOBAL) gives each function a trampoline
++// inside the guest window; this library's own entry points need one too.
++#ifdef IS_32BIT_THUNK
++static PFN_vkVoidFunction LxrtTramp32(PFN_vkVoidFunction f) {
++  static auto fn = reinterpret_cast<void* (*)(void*)>(dlsym(RTLD_DEFAULT, "lxrt_tramp32"));
++  return (fn && f) ? reinterpret_cast<PFN_vkVoidFunction>(fn(reinterpret_cast<void*>(f))) : f;
++}
++#else
++static PFN_vkVoidFunction LxrtTramp32(PFN_vkVoidFunction f) {
++  return f;
++}
++#endif
++
+ static PFN_vkVoidFunction LookupCustomVulkanFunction(const char* a_1) {
+   using namespace std::string_view_literals;
+ 
+@@ -389,6 +915,93 @@ static PFN_vkVoidFunction LookupCustomVulkanFunction(const char* a_1) {
+     return (PFN_vkVoidFunction)fexfn_impl_libvulkan_vkCmdSetVertexInputEXT;
+   } else if (a_1 == "vkUpdateDescriptorSets"sv) {
+     return (PFN_vkVoidFunction)fexfn_impl_libvulkan_vkUpdateDescriptorSets;
++    // SteamARM: the 32-bit custom implementations added in this file
++  } else if (a_1 == "vkQueueBindSparse"sv) {
++    return (PFN_vkVoidFunction)fexfn_impl_libvulkan_vkQueueBindSparse;
++  } else if (a_1 == "vkGetImageSparseMemoryRequirements"sv) {
++    return (PFN_vkVoidFunction)fexfn_impl_libvulkan_vkGetImageSparseMemoryRequirements;
++  } else if (a_1 == "vkGetPhysicalDeviceSparseImageFormatProperties2"sv) {
++    return (PFN_vkVoidFunction)fexfn_impl_libvulkan_vkGetPhysicalDeviceSparseImageFormatProperties2;
++  } else if (a_1 == "vkGetPhysicalDeviceSparseImageFormatProperties2KHR"sv) {
++    return (PFN_vkVoidFunction)fexfn_impl_libvulkan_vkGetPhysicalDeviceSparseImageFormatProperties2KHR;
++  } else if (a_1 == "vkGetImageSparseMemoryRequirements2"sv) {
++    return (PFN_vkVoidFunction)fexfn_impl_libvulkan_vkGetImageSparseMemoryRequirements2;
++  } else if (a_1 == "vkGetImageSparseMemoryRequirements2KHR"sv) {
++    return (PFN_vkVoidFunction)fexfn_impl_libvulkan_vkGetImageSparseMemoryRequirements2KHR;
++  } else if (a_1 == "vkGetDeviceImageSparseMemoryRequirements"sv) {
++    return (PFN_vkVoidFunction)fexfn_impl_libvulkan_vkGetDeviceImageSparseMemoryRequirements;
++  } else if (a_1 == "vkGetDeviceImageSparseMemoryRequirementsKHR"sv) {
++    return (PFN_vkVoidFunction)fexfn_impl_libvulkan_vkGetDeviceImageSparseMemoryRequirementsKHR;
++  } else if (a_1 == "vkCmdPushDescriptorSet"sv) {
++    return (PFN_vkVoidFunction)fexfn_impl_libvulkan_vkCmdPushDescriptorSet;
++  } else if (a_1 == "vkCmdPushDescriptorSetKHR"sv) {
++    return (PFN_vkVoidFunction)fexfn_impl_libvulkan_vkCmdPushDescriptorSetKHR;
++  } else if (a_1 == "vkCmdPushConstants2"sv) {
++    return (PFN_vkVoidFunction)fexfn_impl_libvulkan_vkCmdPushConstants2;
++  } else if (a_1 == "vkCmdPushConstants2KHR"sv) {
++    return (PFN_vkVoidFunction)fexfn_impl_libvulkan_vkCmdPushConstants2KHR;
++  } else if (a_1 == "vkCmdPushDescriptorSet2"sv) {
++    return (PFN_vkVoidFunction)fexfn_impl_libvulkan_vkCmdPushDescriptorSet2;
++  } else if (a_1 == "vkCmdPushDescriptorSet2KHR"sv) {
++    return (PFN_vkVoidFunction)fexfn_impl_libvulkan_vkCmdPushDescriptorSet2KHR;
++  } else if (a_1 == "vkCmdPushDescriptorSetWithTemplate2"sv) {
++    return (PFN_vkVoidFunction)fexfn_impl_libvulkan_vkCmdPushDescriptorSetWithTemplate2;
++  } else if (a_1 == "vkCmdPushDescriptorSetWithTemplate2KHR"sv) {
++    return (PFN_vkVoidFunction)fexfn_impl_libvulkan_vkCmdPushDescriptorSetWithTemplate2KHR;
++  } else if (a_1 == "vkFlushMappedMemoryRanges"sv) {
++    return (PFN_vkVoidFunction)fexfn_impl_libvulkan_vkFlushMappedMemoryRanges;
++  } else if (a_1 == "vkInvalidateMappedMemoryRanges"sv) {
++    return (PFN_vkVoidFunction)fexfn_impl_libvulkan_vkInvalidateMappedMemoryRanges;
++  } else if (a_1 == "vkCreateGraphicsPipelines"sv) {
++    return (PFN_vkVoidFunction)fexfn_impl_libvulkan_vkCreateGraphicsPipelines;
++  } else if (a_1 == "vkCreateComputePipelines"sv) {
++    return (PFN_vkVoidFunction)fexfn_impl_libvulkan_vkCreateComputePipelines;
++  } else if (a_1 == "vkCmdCopyBuffer"sv) {
++    return (PFN_vkVoidFunction)fexfn_impl_libvulkan_vkCmdCopyBuffer;
++  } else if (a_1 == "vkCmdCopyBufferToImage"sv) {
++    return (PFN_vkVoidFunction)fexfn_impl_libvulkan_vkCmdCopyBufferToImage;
++  } else if (a_1 == "vkCmdCopyImageToBuffer"sv) {
++    return (PFN_vkVoidFunction)fexfn_impl_libvulkan_vkCmdCopyImageToBuffer;
++  } else if (a_1 == "vkCmdWaitEvents"sv) {
++    return (PFN_vkVoidFunction)fexfn_impl_libvulkan_vkCmdWaitEvents;
++  } else if (a_1 == "vkCmdPipelineBarrier"sv) {
++    return (PFN_vkVoidFunction)fexfn_impl_libvulkan_vkCmdPipelineBarrier;
++  } else if (a_1 == "vkBindBufferMemory2"sv) {
++    return (PFN_vkVoidFunction)fexfn_impl_libvulkan_vkBindBufferMemory2;
++  } else if (a_1 == "vkBindBufferMemory2KHR"sv) {
++    return (PFN_vkVoidFunction)fexfn_impl_libvulkan_vkBindBufferMemory2KHR;
++  } else if (a_1 == "vkBindImageMemory2"sv) {
++    return (PFN_vkVoidFunction)fexfn_impl_libvulkan_vkBindImageMemory2;
++  } else if (a_1 == "vkBindImageMemory2KHR"sv) {
++    return (PFN_vkVoidFunction)fexfn_impl_libvulkan_vkBindImageMemory2KHR;
++  } else if (a_1 == "vkGetCalibratedTimestampsKHR"sv) {
++    return (PFN_vkVoidFunction)fexfn_impl_libvulkan_vkGetCalibratedTimestampsKHR;
++  } else if (a_1 == "vkGetCalibratedTimestampsEXT"sv) {
++    return (PFN_vkVoidFunction)fexfn_impl_libvulkan_vkGetCalibratedTimestampsEXT;
++  } else if (a_1 == "vkCmdWaitEvents2"sv) {
++    return (PFN_vkVoidFunction)fexfn_impl_libvulkan_vkCmdWaitEvents2;
++  } else if (a_1 == "vkCmdWaitEvents2KHR"sv) {
++    return (PFN_vkVoidFunction)fexfn_impl_libvulkan_vkCmdWaitEvents2KHR;
++  } else if (a_1 == "vkQueueSubmit2"sv) {
++    return (PFN_vkVoidFunction)fexfn_impl_libvulkan_vkQueueSubmit2;
++  } else if (a_1 == "vkQueueSubmit2KHR"sv) {
++    return (PFN_vkVoidFunction)fexfn_impl_libvulkan_vkQueueSubmit2KHR;
++  } else if (a_1 == "vkGetPhysicalDeviceQueueFamilyProperties2"sv) {
++    return (PFN_vkVoidFunction)fexfn_impl_libvulkan_vkGetPhysicalDeviceQueueFamilyProperties2;
++  } else if (a_1 == "vkGetPhysicalDeviceQueueFamilyProperties2KHR"sv) {
++    return (PFN_vkVoidFunction)fexfn_impl_libvulkan_vkGetPhysicalDeviceQueueFamilyProperties2KHR;
++  } else if (a_1 == "vkGetPhysicalDeviceSurfaceFormats2KHR"sv) {
++    return (PFN_vkVoidFunction)fexfn_impl_libvulkan_vkGetPhysicalDeviceSurfaceFormats2KHR;
++  } else if (a_1 == "vkGetPhysicalDeviceToolProperties"sv) {
++    return (PFN_vkVoidFunction)fexfn_impl_libvulkan_vkGetPhysicalDeviceToolProperties;
++  } else if (a_1 == "vkGetPhysicalDeviceToolPropertiesEXT"sv) {
++    return (PFN_vkVoidFunction)fexfn_impl_libvulkan_vkGetPhysicalDeviceToolPropertiesEXT;
++  } else if (a_1 == "vkGetPhysicalDeviceFragmentShadingRatesKHR"sv) {
++    return (PFN_vkVoidFunction)fexfn_impl_libvulkan_vkGetPhysicalDeviceFragmentShadingRatesKHR;
++  } else if (a_1 == "vkCmdExecuteCommands"sv) {
++    return (PFN_vkVoidFunction)fexfn_impl_libvulkan_vkCmdExecuteCommands;
++  } else if (a_1 == "vkGetDeviceQueue2"sv) {
++    return (PFN_vkVoidFunction)fexfn_impl_libvulkan_vkGetDeviceQueue2;
+ #endif
+   }
+   return nullptr;
+@@ -400,7 +1013,7 @@ static PFN_vkVoidFunction FEXFN_IMPL(vkGetDeviceProcAddr)(VkDevice a_0, const ch
+ 
+   // Check for functions with custom implementations first
+   if (auto ptr = LookupCustomVulkanFunction(a_1)) {
+-    return ptr;
++    return LxrtTramp32(ptr);
+   }
+ 
+   return LDR_PTR(vkGetDeviceProcAddr)(a_0, a_1);
+@@ -435,7 +1048,7 @@ static PFN_vkVoidFunction FEXFN_IMPL(vkGetInstanceProcAddr)(VkInstance a_0, cons
+       (void*&)LDR_PTR(vkGetPhysicalDeviceXlibPresentationSupportKHR) = (void*)LDR_PTR(vkGetInstanceProcAddr)(a_0, XlibPresent);
+     }
+ 
+-    return ptr;
++    return LxrtTramp32(ptr);
+   }
+ 
+   return LDR_PTR(vkGetInstanceProcAddr)(a_0, a_1);
+@@ -876,6 +1489,343 @@ static std::unordered_map<VkStructureType, std::pair<VkBaseOutStructure* (*)(con
+   converters<VkStructureType::VK_STRUCTURE_TYPE_VIDEO_PROFILE_INFO_KHR, VkVideoProfileInfoKHR>,
+   converters<VkStructureType::VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET_ACCELERATION_STRUCTURE_KHR, VkWriteDescriptorSetAccelerationStructureKHR>,
+   converters<VkStructureType::VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET_ACCELERATION_STRUCTURE_NV, VkWriteDescriptorSetAccelerationStructureNV>,
++  // SteamARM: extension structures of the Vulkan headers FEX builds with that
++  // the list above predates (vk.xml "structextends", registered in
++  // libvulkan_interface.cpp); DXVK chains e.g. VkPhysicalDeviceShaderFloatControls2Features.
++  converters<VkStructureType::VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_TRIANGLES_OPACITY_MICROMAP_KHR, VkAccelerationStructureTrianglesOpacityMicromapKHR>,
++  converters<VkStructureType::VK_STRUCTURE_TYPE_ATTACHMENT_FEEDBACK_LOOP_INFO_EXT, VkAttachmentFeedbackLoopInfoEXT>,
++  converters<VkStructureType::VK_STRUCTURE_TYPE_BIND_MEMORY_STATUS, VkBindMemoryStatus>,
++  converters<VkStructureType::VK_STRUCTURE_TYPE_BLIT_IMAGE_CUBIC_WEIGHTS_INFO_QCOM, VkBlitImageCubicWeightsInfoQCOM>,
++  converters<VkStructureType::VK_STRUCTURE_TYPE_BUFFER_DEVICE_ADDRESS_ALIGNMENT_ALLOCATE_INFO_VALVE, VkBufferDeviceAddressAlignmentAllocateInfoVALVE>,
++  converters<VkStructureType::VK_STRUCTURE_TYPE_BUFFER_USAGE_FLAGS_2_CREATE_INFO, VkBufferUsageFlags2CreateInfo>,
++  converters<VkStructureType::VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_INDIRECT_BUFFER_INFO_NV, VkComputePipelineIndirectBufferInfoNV>,
++  converters<VkStructureType::VK_STRUCTURE_TYPE_CU_MODULE_TEXTURING_MODE_CREATE_INFO_NVX, VkCuModuleTexturingModeCreateInfoNVX>,
++  converters<VkStructureType::VK_STRUCTURE_TYPE_CUSTOM_RESOLVE_CREATE_INFO_EXT, VkCustomResolveCreateInfoEXT>,
++  converters<VkStructureType::VK_STRUCTURE_TYPE_DATA_GRAPH_OPTICAL_FLOW_IMAGE_FORMAT_INFO_ARM, VkDataGraphOpticalFlowImageFormatInfoARM>,
++  converters<VkStructureType::VK_STRUCTURE_TYPE_DATA_GRAPH_PIPELINE_BUILTIN_MODEL_CREATE_INFO_QCOM, VkDataGraphPipelineBuiltinModelCreateInfoQCOM>,
++  converters<VkStructureType::VK_STRUCTURE_TYPE_DATA_GRAPH_PIPELINE_COMPILER_CONTROL_CREATE_INFO_ARM, VkDataGraphPipelineCompilerControlCreateInfoARM>,
++  converters<VkStructureType::VK_STRUCTURE_TYPE_DATA_GRAPH_PIPELINE_CONSTANT_TENSOR_SEMI_STRUCTURED_SPARSITY_INFO_ARM, VkDataGraphPipelineConstantTensorSemiStructuredSparsityInfoARM>,
++  converters<VkStructureType::VK_STRUCTURE_TYPE_DATA_GRAPH_PIPELINE_IDENTIFIER_CREATE_INFO_ARM, VkDataGraphPipelineIdentifierCreateInfoARM>,
++  converters<VkStructureType::VK_STRUCTURE_TYPE_DATA_GRAPH_PIPELINE_NEURAL_STATISTICS_CREATE_INFO_ARM, VkDataGraphPipelineNeuralStatisticsCreateInfoARM>,
++  converters<VkStructureType::VK_STRUCTURE_TYPE_DATA_GRAPH_PIPELINE_OPTICAL_FLOW_CREATE_INFO_ARM, VkDataGraphPipelineOpticalFlowCreateInfoARM>,
++  converters<VkStructureType::VK_STRUCTURE_TYPE_DATA_GRAPH_PIPELINE_OPTICAL_FLOW_DISPATCH_INFO_ARM, VkDataGraphPipelineOpticalFlowDispatchInfoARM>,
++  converters<VkStructureType::VK_STRUCTURE_TYPE_DATA_GRAPH_PIPELINE_RESOURCE_INFO_IMAGE_LAYOUT_ARM, VkDataGraphPipelineResourceInfoImageLayoutARM>,
++  converters<VkStructureType::VK_STRUCTURE_TYPE_DATA_GRAPH_PIPELINE_SESSION_NEURAL_STATISTICS_CREATE_INFO_ARM, VkDataGraphPipelineSessionNeuralStatisticsCreateInfoARM>,
++  converters<VkStructureType::VK_STRUCTURE_TYPE_DATA_GRAPH_PROCESSING_ENGINE_CREATE_INFO_ARM, VkDataGraphProcessingEngineCreateInfoARM>,
++  converters<VkStructureType::VK_STRUCTURE_TYPE_DESCRIPTOR_GET_TENSOR_INFO_ARM, VkDescriptorGetTensorInfoARM>,
++  converters<VkStructureType::VK_STRUCTURE_TYPE_DEVICE_PIPELINE_BINARY_INTERNAL_CACHE_CONTROL_KHR, VkDevicePipelineBinaryInternalCacheControlKHR>,
++  converters<VkStructureType::VK_STRUCTURE_TYPE_DEVICE_QUEUE_GLOBAL_PRIORITY_CREATE_INFO, VkDeviceQueueGlobalPriorityCreateInfo>,
++  converters<VkStructureType::VK_STRUCTURE_TYPE_DEVICE_QUEUE_SHADER_CORE_CONTROL_CREATE_INFO_ARM, VkDeviceQueueShaderCoreControlCreateInfoARM>,
++  converters<VkStructureType::VK_STRUCTURE_TYPE_DISPLAY_MODE_STEREO_PROPERTIES_NV, VkDisplayModeStereoPropertiesNV>,
++  converters<VkStructureType::VK_STRUCTURE_TYPE_DISPLAY_SURFACE_STEREO_CREATE_INFO_NV, VkDisplaySurfaceStereoCreateInfoNV>,
++  converters<VkStructureType::VK_STRUCTURE_TYPE_EXTERNAL_COMPUTE_QUEUE_DEVICE_CREATE_INFO_NV, VkExternalComputeQueueDeviceCreateInfoNV>,
++  converters<VkStructureType::VK_STRUCTURE_TYPE_EXTERNAL_MEMORY_TENSOR_CREATE_INFO_ARM, VkExternalMemoryTensorCreateInfoARM>,
++  converters<VkStructureType::VK_STRUCTURE_TYPE_FORMAT_PROPERTIES_4_KHR, VkFormatProperties4KHR>,
++  converters<VkStructureType::VK_STRUCTURE_TYPE_FRAME_BOUNDARY_TENSORS_ARM, VkFrameBoundaryTensorsARM>,
++  converters<VkStructureType::VK_STRUCTURE_TYPE_GENERATED_COMMANDS_PIPELINE_INFO_EXT, VkGeneratedCommandsPipelineInfoEXT>,
++  converters<VkStructureType::VK_STRUCTURE_TYPE_GENERATED_COMMANDS_SHADER_INFO_EXT, VkGeneratedCommandsShaderInfoEXT>,
++  converters<VkStructureType::VK_STRUCTURE_TYPE_HOST_IMAGE_COPY_DEVICE_PERFORMANCE_QUERY, VkHostImageCopyDevicePerformanceQuery>,
++  converters<VkStructureType::VK_STRUCTURE_TYPE_IMAGE_ALIGNMENT_CONTROL_CREATE_INFO_MESA, VkImageAlignmentControlCreateInfoMESA>,
++  converters<VkStructureType::VK_STRUCTURE_TYPE_IMAGE_CREATE_FLAGS_2_CREATE_INFO_KHR, VkImageCreateFlags2CreateInfoKHR>,
++  converters<VkStructureType::VK_STRUCTURE_TYPE_IMAGE_STENCIL_USAGE_2_CREATE_INFO_KHR, VkImageStencilUsage2CreateInfoKHR>,
++  converters<VkStructureType::VK_STRUCTURE_TYPE_IMAGE_TILING_CONTROL_CREATE_INFO_EXT, VkImageTilingControlCreateInfoEXT>,
++  converters<VkStructureType::VK_STRUCTURE_TYPE_IMAGE_USAGE_FLAGS_2_CREATE_INFO_KHR, VkImageUsageFlags2CreateInfoKHR>,
++  converters<VkStructureType::VK_STRUCTURE_TYPE_IMAGE_VIEW_USAGE_2_CREATE_INFO_KHR, VkImageViewUsage2CreateInfoKHR>,
++  converters<VkStructureType::VK_STRUCTURE_TYPE_INDIRECT_COMMANDS_LAYOUT_PUSH_DATA_TOKEN_NV, VkIndirectCommandsLayoutPushDataTokenNV>,
++  converters<VkStructureType::VK_STRUCTURE_TYPE_LATENCY_SUBMISSION_PRESENT_ID_NV, VkLatencySubmissionPresentIdNV>,
++  converters<VkStructureType::VK_STRUCTURE_TYPE_LATENCY_SURFACE_CAPABILITIES_NV, VkLatencySurfaceCapabilitiesNV>,
++  converters<VkStructureType::VK_STRUCTURE_TYPE_MEMORY_BARRIER_ACCESS_FLAGS_3_KHR, VkMemoryBarrierAccessFlags3KHR>,
++  converters<VkStructureType::VK_STRUCTURE_TYPE_MEMORY_DEDICATED_ALLOCATE_INFO_TENSOR_ARM, VkMemoryDedicatedAllocateInfoTensorARM>,
++  converters<VkStructureType::VK_STRUCTURE_TYPE_PARTITIONED_ACCELERATION_STRUCTURE_FLAGS_NV, VkPartitionedAccelerationStructureFlagsNV>,
++  converters<VkStructureType::VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ANTI_LAG_FEATURES_AMD, VkPhysicalDeviceAntiLagFeaturesAMD>,
++  converters<VkStructureType::VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_BUFFER_DEVICE_ADDRESS_ALLOCATION_ALIGNMENT_FEATURES_VALVE, VkPhysicalDeviceBufferDeviceAddressAllocationAlignmentFeaturesVALVE>,
++  converters<VkStructureType::VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_BUFFER_DEVICE_ADDRESS_ALLOCATION_ALIGNMENT_PROPERTIES_VALVE, VkPhysicalDeviceBufferDeviceAddressAllocationAlignmentPropertiesVALVE>,
++  converters<VkStructureType::VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_CLUSTER_ACCELERATION_STRUCTURE_FEATURES_NV, VkPhysicalDeviceClusterAccelerationStructureFeaturesNV>,
++  converters<VkStructureType::VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_CLUSTER_ACCELERATION_STRUCTURE_PROPERTIES_NV, VkPhysicalDeviceClusterAccelerationStructurePropertiesNV>,
++  converters<VkStructureType::VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_CLUSTER_CULLING_SHADER_VRS_FEATURES_HUAWEI, VkPhysicalDeviceClusterCullingShaderVrsFeaturesHUAWEI>,
++  converters<VkStructureType::VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_COMMAND_BUFFER_INHERITANCE_FEATURES_NV, VkPhysicalDeviceCommandBufferInheritanceFeaturesNV>,
++  converters<VkStructureType::VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_COMPUTE_OCCUPANCY_PRIORITY_FEATURES_NV, VkPhysicalDeviceComputeOccupancyPriorityFeaturesNV>,
++  converters<VkStructureType::VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_COMPUTE_SHADER_DERIVATIVES_FEATURES_KHR, VkPhysicalDeviceComputeShaderDerivativesFeaturesKHR>,
++  converters<VkStructureType::VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_COMPUTE_SHADER_DERIVATIVES_PROPERTIES_KHR, VkPhysicalDeviceComputeShaderDerivativesPropertiesKHR>,
++  converters<VkStructureType::VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_COOPERATIVE_MATRIX_2_FEATURES_NV, VkPhysicalDeviceCooperativeMatrix2FeaturesNV>,
++  converters<VkStructureType::VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_COOPERATIVE_MATRIX_2_PROPERTIES_NV, VkPhysicalDeviceCooperativeMatrix2PropertiesNV>,
++  converters<VkStructureType::VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_COOPERATIVE_MATRIX_CONVERSION_FEATURES_QCOM, VkPhysicalDeviceCooperativeMatrixConversionFeaturesQCOM>,
++  converters<VkStructureType::VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_COOPERATIVE_MATRIX_DECODE_VECTOR_FEATURES_NV, VkPhysicalDeviceCooperativeMatrixDecodeVectorFeaturesNV>,
++  converters<VkStructureType::VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_COOPERATIVE_MATRIX_MAINTENANCE_1_FEATURES_EXT, VkPhysicalDeviceCooperativeMatrixMaintenance1FeaturesEXT>,
++  converters<VkStructureType::VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_COOPERATIVE_VECTOR_FEATURES_NV, VkPhysicalDeviceCooperativeVectorFeaturesNV>,
++  converters<VkStructureType::VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_COOPERATIVE_VECTOR_PROPERTIES_NV, VkPhysicalDeviceCooperativeVectorPropertiesNV>,
++  converters<VkStructureType::VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_COPY_MEMORY_INDIRECT_FEATURES_KHR, VkPhysicalDeviceCopyMemoryIndirectFeaturesKHR>,
++  converters<VkStructureType::VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_COPY_MEMORY_INDIRECT_PROPERTIES_KHR, VkPhysicalDeviceCopyMemoryIndirectPropertiesKHR>,
++  converters<VkStructureType::VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_CUBIC_CLAMP_FEATURES_QCOM, VkPhysicalDeviceCubicClampFeaturesQCOM>,
++  converters<VkStructureType::VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_CUBIC_WEIGHTS_FEATURES_QCOM, VkPhysicalDeviceCubicWeightsFeaturesQCOM>,
++  converters<VkStructureType::VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_CUSTOM_RESOLVE_FEATURES_EXT, VkPhysicalDeviceCustomResolveFeaturesEXT>,
++  converters<VkStructureType::VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DATA_GRAPH_FEATURES_ARM, VkPhysicalDeviceDataGraphFeaturesARM>,
++  converters<VkStructureType::VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DATA_GRAPH_MODEL_FEATURES_QCOM, VkPhysicalDeviceDataGraphModelFeaturesQCOM>,
++  converters<VkStructureType::VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DATA_GRAPH_NEURAL_ACCELERATOR_STATISTICS_FEATURES_ARM, VkPhysicalDeviceDataGraphNeuralAcceleratorStatisticsFeaturesARM>,
++  converters<VkStructureType::VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DATA_GRAPH_OPTICAL_FLOW_FEATURES_ARM, VkPhysicalDeviceDataGraphOpticalFlowFeaturesARM>,
++  converters<VkStructureType::VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DEPTH_CLAMP_CONTROL_FEATURES_EXT, VkPhysicalDeviceDepthClampControlFeaturesEXT>,
++  converters<VkStructureType::VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DEPTH_CLAMP_ZERO_ONE_FEATURES_KHR, VkPhysicalDeviceDepthClampZeroOneFeaturesKHR>,
++  converters<VkStructureType::VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DESCRIPTOR_BUFFER_TENSOR_FEATURES_ARM, VkPhysicalDeviceDescriptorBufferTensorFeaturesARM>,
++  converters<VkStructureType::VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DESCRIPTOR_BUFFER_TENSOR_PROPERTIES_ARM, VkPhysicalDeviceDescriptorBufferTensorPropertiesARM>,
++  converters<VkStructureType::VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DESCRIPTOR_HEAP_FEATURES_EXT, VkPhysicalDeviceDescriptorHeapFeaturesEXT>,
++  converters<VkStructureType::VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DESCRIPTOR_HEAP_PROPERTIES_EXT, VkPhysicalDeviceDescriptorHeapPropertiesEXT>,
++  converters<VkStructureType::VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DESCRIPTOR_HEAP_TENSOR_PROPERTIES_ARM, VkPhysicalDeviceDescriptorHeapTensorPropertiesARM>,
++  converters<VkStructureType::VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DESCRIPTOR_POOL_OVERALLOCATION_FEATURES_NV, VkPhysicalDeviceDescriptorPoolOverallocationFeaturesNV>,
++  converters<VkStructureType::VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DEVICE_ADDRESS_COMMANDS_FEATURES_KHR, VkPhysicalDeviceDeviceAddressCommandsFeaturesKHR>,
++  converters<VkStructureType::VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DEVICE_GENERATED_COMMANDS_FEATURES_EXT, VkPhysicalDeviceDeviceGeneratedCommandsFeaturesEXT>,
++  converters<VkStructureType::VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DEVICE_GENERATED_COMMANDS_PROPERTIES_EXT, VkPhysicalDeviceDeviceGeneratedCommandsPropertiesEXT>,
++  converters<VkStructureType::VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DYNAMIC_RENDERING_LOCAL_READ_FEATURES, VkPhysicalDeviceDynamicRenderingLocalReadFeatures>,
++  converters<VkStructureType::VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ELAPSED_TIMER_QUERY_FEATURES_QCOM, VkPhysicalDeviceElapsedTimerQueryFeaturesQCOM>,
++  converters<VkStructureType::VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_EXTENDED_FLAGS_FEATURES_KHR, VkPhysicalDeviceExtendedFlagsFeaturesKHR>,
++  converters<VkStructureType::VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_EXTENDED_SPARSE_ADDRESS_SPACE_FEATURES_NV, VkPhysicalDeviceExtendedSparseAddressSpaceFeaturesNV>,
++  converters<VkStructureType::VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_EXTENDED_SPARSE_ADDRESS_SPACE_PROPERTIES_NV, VkPhysicalDeviceExtendedSparseAddressSpacePropertiesNV>,
++  converters<VkStructureType::VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_EXTERNAL_COMPUTE_QUEUE_PROPERTIES_NV, VkPhysicalDeviceExternalComputeQueuePropertiesNV>,
++  converters<VkStructureType::VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FAULT_FEATURES_KHR, VkPhysicalDeviceFaultFeaturesKHR>,
++  converters<VkStructureType::VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FAULT_PROPERTIES_KHR, VkPhysicalDeviceFaultPropertiesKHR>,
++  converters<VkStructureType::VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FORMAT_PACK_FEATURES_ARM, VkPhysicalDeviceFormatPackFeaturesARM>,
++  converters<VkStructureType::VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FRAGMENT_DENSITY_MAP_LAYERED_FEATURES_VALVE, VkPhysicalDeviceFragmentDensityMapLayeredFeaturesVALVE>,
++  converters<VkStructureType::VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FRAGMENT_DENSITY_MAP_LAYERED_PROPERTIES_VALVE, VkPhysicalDeviceFragmentDensityMapLayeredPropertiesVALVE>,
++  converters<VkStructureType::VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FRAGMENT_DENSITY_MAP_OFFSET_FEATURES_EXT, VkPhysicalDeviceFragmentDensityMapOffsetFeaturesEXT>,
++  converters<VkStructureType::VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FRAGMENT_DENSITY_MAP_OFFSET_PROPERTIES_EXT, VkPhysicalDeviceFragmentDensityMapOffsetPropertiesEXT>,
++  converters<VkStructureType::VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FRAME_BOUNDARY_FEATURES_EXT, VkPhysicalDeviceFrameBoundaryFeaturesEXT>,
++  converters<VkStructureType::VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_GLOBAL_PRIORITY_QUERY_FEATURES, VkPhysicalDeviceGlobalPriorityQueryFeatures>,
++  converters<VkStructureType::VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_GPA_FEATURES_AMD, VkPhysicalDeviceGpaFeaturesAMD>,
++  converters<VkStructureType::VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_GPA_PROPERTIES_2_AMD, VkPhysicalDeviceGpaProperties2AMD>,
++  converters<VkStructureType::VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_GPA_PROPERTIES_AMD, VkPhysicalDeviceGpaPropertiesAMD>,
++  converters<VkStructureType::VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_HDR_VIVID_FEATURES_HUAWEI, VkPhysicalDeviceHdrVividFeaturesHUAWEI>,
++  converters<VkStructureType::VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_HOST_IMAGE_COPY_FEATURES, VkPhysicalDeviceHostImageCopyFeatures>,
++  converters<VkStructureType::VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_HOST_IMAGE_COPY_PROPERTIES, VkPhysicalDeviceHostImageCopyProperties>,
++  converters<VkStructureType::VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_IMAGE_ALIGNMENT_CONTROL_FEATURES_MESA, VkPhysicalDeviceImageAlignmentControlFeaturesMESA>,
++  converters<VkStructureType::VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_IMAGE_ALIGNMENT_CONTROL_PROPERTIES_MESA, VkPhysicalDeviceImageAlignmentControlPropertiesMESA>,
++  converters<VkStructureType::VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_IMAGE_PROCESSING_2_FEATURES_QCOM, VkPhysicalDeviceImageProcessing2FeaturesQCOM>,
++  converters<VkStructureType::VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_IMAGE_PROCESSING_2_PROPERTIES_QCOM, VkPhysicalDeviceImageProcessing2PropertiesQCOM>,
++  converters<VkStructureType::VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_IMAGE_PROCESSING_3_FEATURES_QCOM, VkPhysicalDeviceImageProcessing3FeaturesQCOM>,
++  converters<VkStructureType::VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_IMAGE_TILING_CONTROL_FEATURES_EXT, VkPhysicalDeviceImageTilingControlFeaturesEXT>,
++  converters<VkStructureType::VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_INDEX_TYPE_UINT8_FEATURES, VkPhysicalDeviceIndexTypeUint8Features>,
++  converters<VkStructureType::VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_INTERNALLY_SYNCHRONIZED_QUEUES_FEATURES_KHR, VkPhysicalDeviceInternallySynchronizedQueuesFeaturesKHR>,
++  converters<VkStructureType::VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_LAYERED_API_VULKAN_PROPERTIES_KHR, VkPhysicalDeviceLayeredApiVulkanPropertiesKHR>,
++  converters<VkStructureType::VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_LAYERED_DRIVER_PROPERTIES_MSFT, VkPhysicalDeviceLayeredDriverPropertiesMSFT>,
++  converters<VkStructureType::VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_LEGACY_VERTEX_ATTRIBUTES_FEATURES_EXT, VkPhysicalDeviceLegacyVertexAttributesFeaturesEXT>,
++  converters<VkStructureType::VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_LEGACY_VERTEX_ATTRIBUTES_PROPERTIES_EXT, VkPhysicalDeviceLegacyVertexAttributesPropertiesEXT>,
++  converters<VkStructureType::VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_LINE_RASTERIZATION_FEATURES, VkPhysicalDeviceLineRasterizationFeatures>,
++  converters<VkStructureType::VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_LINE_RASTERIZATION_PROPERTIES, VkPhysicalDeviceLineRasterizationProperties>,
++  converters<VkStructureType::VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MAINTENANCE_10_FEATURES_KHR, VkPhysicalDeviceMaintenance10FeaturesKHR>,
++  converters<VkStructureType::VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MAINTENANCE_10_PROPERTIES_KHR, VkPhysicalDeviceMaintenance10PropertiesKHR>,
++  converters<VkStructureType::VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MAINTENANCE_11_FEATURES_KHR, VkPhysicalDeviceMaintenance11FeaturesKHR>,
++  converters<VkStructureType::VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MAINTENANCE_5_FEATURES, VkPhysicalDeviceMaintenance5Features>,
++  converters<VkStructureType::VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MAINTENANCE_5_PROPERTIES, VkPhysicalDeviceMaintenance5Properties>,
++  converters<VkStructureType::VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MAINTENANCE_6_FEATURES, VkPhysicalDeviceMaintenance6Features>,
++  converters<VkStructureType::VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MAINTENANCE_6_PROPERTIES, VkPhysicalDeviceMaintenance6Properties>,
++  converters<VkStructureType::VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MAINTENANCE_7_FEATURES_KHR, VkPhysicalDeviceMaintenance7FeaturesKHR>,
++  converters<VkStructureType::VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MAINTENANCE_7_PROPERTIES_KHR, VkPhysicalDeviceMaintenance7PropertiesKHR>,
++  converters<VkStructureType::VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MAINTENANCE_8_FEATURES_KHR, VkPhysicalDeviceMaintenance8FeaturesKHR>,
++  converters<VkStructureType::VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MAINTENANCE_9_FEATURES_KHR, VkPhysicalDeviceMaintenance9FeaturesKHR>,
++  converters<VkStructureType::VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MAINTENANCE_9_PROPERTIES_KHR, VkPhysicalDeviceMaintenance9PropertiesKHR>,
++  converters<VkStructureType::VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MAP_MEMORY_PLACED_FEATURES_EXT, VkPhysicalDeviceMapMemoryPlacedFeaturesEXT>,
++  converters<VkStructureType::VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MAP_MEMORY_PLACED_PROPERTIES_EXT, VkPhysicalDeviceMapMemoryPlacedPropertiesEXT>,
++  converters<VkStructureType::VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MEMORY_DECOMPRESSION_FEATURES_EXT, VkPhysicalDeviceMemoryDecompressionFeaturesEXT>,
++  converters<VkStructureType::VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MEMORY_DECOMPRESSION_PROPERTIES_EXT, VkPhysicalDeviceMemoryDecompressionPropertiesEXT>,
++  converters<VkStructureType::VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MULTISAMPLED_RENDER_TO_SWAPCHAIN_FEATURES_EXT, VkPhysicalDeviceMultisampledRenderToSwapchainFeaturesEXT>,
++  converters<VkStructureType::VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_NESTED_COMMAND_BUFFER_FEATURES_EXT, VkPhysicalDeviceNestedCommandBufferFeaturesEXT>,
++  converters<VkStructureType::VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_NESTED_COMMAND_BUFFER_PROPERTIES_EXT, VkPhysicalDeviceNestedCommandBufferPropertiesEXT>,
++  converters<VkStructureType::VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_OPACITY_MICROMAP_FEATURES_KHR, VkPhysicalDeviceOpacityMicromapFeaturesKHR>,
++  converters<VkStructureType::VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_OPACITY_MICROMAP_PROPERTIES_KHR, VkPhysicalDeviceOpacityMicromapPropertiesKHR>,
++  converters<VkStructureType::VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PARTITIONED_ACCELERATION_STRUCTURE_FEATURES_NV, VkPhysicalDevicePartitionedAccelerationStructureFeaturesNV>,
++  converters<VkStructureType::VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PARTITIONED_ACCELERATION_STRUCTURE_PROPERTIES_NV, VkPhysicalDevicePartitionedAccelerationStructurePropertiesNV>,
++  converters<VkStructureType::VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PER_STAGE_DESCRIPTOR_SET_FEATURES_NV, VkPhysicalDevicePerStageDescriptorSetFeaturesNV>,
++  converters<VkStructureType::VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PERFORMANCE_COUNTERS_BY_REGION_FEATURES_ARM, VkPhysicalDevicePerformanceCountersByRegionFeaturesARM>,
++  converters<VkStructureType::VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PERFORMANCE_COUNTERS_BY_REGION_PROPERTIES_ARM, VkPhysicalDevicePerformanceCountersByRegionPropertiesARM>,
++  converters<VkStructureType::VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PIPELINE_BINARY_FEATURES_KHR, VkPhysicalDevicePipelineBinaryFeaturesKHR>,
++  converters<VkStructureType::VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PIPELINE_BINARY_PROPERTIES_KHR, VkPhysicalDevicePipelineBinaryPropertiesKHR>,
++  converters<VkStructureType::VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PIPELINE_CACHE_INCREMENTAL_MODE_FEATURES_SEC, VkPhysicalDevicePipelineCacheIncrementalModeFeaturesSEC>,
++  converters<VkStructureType::VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PIPELINE_LIBRARY_GROUP_HANDLES_FEATURES_KHR, VkPhysicalDevicePipelineLibraryGroupHandlesFeaturesKHR>,
++  converters<VkStructureType::VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PIPELINE_OPACITY_MICROMAP_FEATURES_ARM, VkPhysicalDevicePipelineOpacityMicromapFeaturesARM>,
++  converters<VkStructureType::VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PIPELINE_PROTECTED_ACCESS_FEATURES, VkPhysicalDevicePipelineProtectedAccessFeatures>,
++  converters<VkStructureType::VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PIPELINE_ROBUSTNESS_FEATURES, VkPhysicalDevicePipelineRobustnessFeatures>,
++  converters<VkStructureType::VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PIPELINE_ROBUSTNESS_PROPERTIES, VkPhysicalDevicePipelineRobustnessProperties>,
++  converters<VkStructureType::VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PRESENT_ID_2_FEATURES_KHR, VkPhysicalDevicePresentId2FeaturesKHR>,
++  converters<VkStructureType::VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PRESENT_METERING_FEATURES_NV, VkPhysicalDevicePresentMeteringFeaturesNV>,
++  converters<VkStructureType::VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PRESENT_MODE_FIFO_LATEST_READY_FEATURES_KHR, VkPhysicalDevicePresentModeFifoLatestReadyFeaturesKHR>,
++  converters<VkStructureType::VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PRESENT_TIMING_FEATURES_EXT, VkPhysicalDevicePresentTimingFeaturesEXT>,
++  converters<VkStructureType::VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PRESENT_WAIT_2_FEATURES_KHR, VkPhysicalDevicePresentWait2FeaturesKHR>,
++  converters<VkStructureType::VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PRIMITIVE_RESTART_INDEX_FEATURES_EXT, VkPhysicalDevicePrimitiveRestartIndexFeaturesEXT>,
++  converters<VkStructureType::VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PRIVATE_DATA_BASE_HANDLE_FEATURES_NV, VkPhysicalDevicePrivateDataBaseHandleFeaturesNV>,
++  converters<VkStructureType::VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PUSH_CONSTANT_BANK_FEATURES_NV, VkPhysicalDevicePushConstantBankFeaturesNV>,
++  converters<VkStructureType::VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PUSH_CONSTANT_BANK_PROPERTIES_NV, VkPhysicalDevicePushConstantBankPropertiesNV>,
++  converters<VkStructureType::VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PUSH_DESCRIPTOR_PROPERTIES, VkPhysicalDevicePushDescriptorProperties>,
++  converters<VkStructureType::VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_QUEUE_PERF_HINT_FEATURES_QCOM, VkPhysicalDeviceQueuePerfHintFeaturesQCOM>,
++  converters<VkStructureType::VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_QUEUE_PERF_HINT_PROPERTIES_QCOM, VkPhysicalDeviceQueuePerfHintPropertiesQCOM>,
++  converters<VkStructureType::VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_RAW_ACCESS_CHAINS_FEATURES_NV, VkPhysicalDeviceRawAccessChainsFeaturesNV>,
++  converters<VkStructureType::VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_RAY_TRACING_INVOCATION_REORDER_FEATURES_EXT, VkPhysicalDeviceRayTracingInvocationReorderFeaturesEXT>,
++  converters<VkStructureType::VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_RAY_TRACING_INVOCATION_REORDER_PROPERTIES_EXT, VkPhysicalDeviceRayTracingInvocationReorderPropertiesEXT>,
++  converters<VkStructureType::VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_RAY_TRACING_LINEAR_SWEPT_SPHERES_FEATURES_NV, VkPhysicalDeviceRayTracingLinearSweptSpheresFeaturesNV>,
++  converters<VkStructureType::VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_RAY_TRACING_VALIDATION_FEATURES_NV, VkPhysicalDeviceRayTracingValidationFeaturesNV>,
++  converters<VkStructureType::VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_RELAXED_LINE_RASTERIZATION_FEATURES_IMG, VkPhysicalDeviceRelaxedLineRasterizationFeaturesIMG>,
++  converters<VkStructureType::VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_RENDER_PASS_STRIPED_FEATURES_ARM, VkPhysicalDeviceRenderPassStripedFeaturesARM>,
++  converters<VkStructureType::VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_RENDER_PASS_STRIPED_PROPERTIES_ARM, VkPhysicalDeviceRenderPassStripedPropertiesARM>,
++  converters<VkStructureType::VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ROBUSTNESS_2_FEATURES_KHR, VkPhysicalDeviceRobustness2FeaturesKHR>,
++  converters<VkStructureType::VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ROBUSTNESS_2_PROPERTIES_KHR, VkPhysicalDeviceRobustness2PropertiesKHR>,
++  converters<VkStructureType::VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SCHEDULING_CONTROLS_DISPATCH_PARAMETERS_PROPERTIES_ARM, VkPhysicalDeviceSchedulingControlsDispatchParametersPropertiesARM>,
++  converters<VkStructureType::VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SCHEDULING_CONTROLS_FEATURES_ARM, VkPhysicalDeviceSchedulingControlsFeaturesARM>,
++  converters<VkStructureType::VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SCHEDULING_CONTROLS_PROPERTIES_ARM, VkPhysicalDeviceSchedulingControlsPropertiesARM>,
++  converters<VkStructureType::VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_64_BIT_INDEXING_FEATURES_EXT, VkPhysicalDeviceShader64BitIndexingFeaturesEXT>,
++  converters<VkStructureType::VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_ABORT_FEATURES_KHR, VkPhysicalDeviceShaderAbortFeaturesKHR>,
++  converters<VkStructureType::VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_ABORT_PROPERTIES_KHR, VkPhysicalDeviceShaderAbortPropertiesKHR>,
++  converters<VkStructureType::VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_ATOMIC_FLOAT16_VECTOR_FEATURES_NV, VkPhysicalDeviceShaderAtomicFloat16VectorFeaturesNV>,
++  converters<VkStructureType::VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_BFLOAT16_FEATURES_KHR, VkPhysicalDeviceShaderBfloat16FeaturesKHR>,
++  converters<VkStructureType::VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_CONSTANT_DATA_FEATURES_KHR, VkPhysicalDeviceShaderConstantDataFeaturesKHR>,
++  converters<VkStructureType::VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_EXPECT_ASSUME_FEATURES, VkPhysicalDeviceShaderExpectAssumeFeatures>,
++  converters<VkStructureType::VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_FLOAT8_FEATURES_EXT, VkPhysicalDeviceShaderFloat8FeaturesEXT>,
++  converters<VkStructureType::VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_FLOAT_CONTROLS_2_FEATURES, VkPhysicalDeviceShaderFloatControls2Features>,
++  converters<VkStructureType::VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_FMA_FEATURES_KHR, VkPhysicalDeviceShaderFmaFeaturesKHR>,
++  converters<VkStructureType::VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_INSTRUMENTATION_FEATURES_ARM, VkPhysicalDeviceShaderInstrumentationFeaturesARM>,
++  converters<VkStructureType::VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_INSTRUMENTATION_PROPERTIES_ARM, VkPhysicalDeviceShaderInstrumentationPropertiesARM>,
++  converters<VkStructureType::VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_LONG_VECTOR_FEATURES_EXT, VkPhysicalDeviceShaderLongVectorFeaturesEXT>,
++  converters<VkStructureType::VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_LONG_VECTOR_PROPERTIES_EXT, VkPhysicalDeviceShaderLongVectorPropertiesEXT>,
++  converters<VkStructureType::VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_MAXIMAL_RECONVERGENCE_FEATURES_KHR, VkPhysicalDeviceShaderMaximalReconvergenceFeaturesKHR>,
++  converters<VkStructureType::VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_MIXED_FLOAT_DOT_PRODUCT_FEATURES_VALVE, VkPhysicalDeviceShaderMixedFloatDotProductFeaturesVALVE>,
++  converters<VkStructureType::VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_MULTIPLE_WAIT_QUEUES_FEATURES_QCOM, VkPhysicalDeviceShaderMultipleWaitQueuesFeaturesQCOM>,
++  converters<VkStructureType::VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_MULTIPLE_WAIT_QUEUES_PROPERTIES_QCOM, VkPhysicalDeviceShaderMultipleWaitQueuesPropertiesQCOM>,
++  converters<VkStructureType::VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_OCP_MICROSCALING_TYPES_FEATURES_EXT, VkPhysicalDeviceShaderOCPMicroscalingTypesFeaturesEXT>,
++  converters<VkStructureType::VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_QUAD_CONTROL_FEATURES_KHR, VkPhysicalDeviceShaderQuadControlFeaturesKHR>,
++  converters<VkStructureType::VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_RELAXED_EXTENDED_INSTRUCTION_FEATURES_KHR, VkPhysicalDeviceShaderRelaxedExtendedInstructionFeaturesKHR>,
++  converters<VkStructureType::VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_REPLICATED_COMPOSITES_FEATURES_EXT, VkPhysicalDeviceShaderReplicatedCompositesFeaturesEXT>,
++  converters<VkStructureType::VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_SPLIT_BARRIER_FEATURES_EXT, VkPhysicalDeviceShaderSplitBarrierFeaturesEXT>,
++  converters<VkStructureType::VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_SPLIT_BARRIER_PROPERTIES_EXT, VkPhysicalDeviceShaderSplitBarrierPropertiesEXT>,
++  converters<VkStructureType::VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_SUBGROUP_PARTITIONED_FEATURES_EXT, VkPhysicalDeviceShaderSubgroupPartitionedFeaturesEXT>,
++  converters<VkStructureType::VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_SUBGROUP_ROTATE_FEATURES, VkPhysicalDeviceShaderSubgroupRotateFeatures>,
++  converters<VkStructureType::VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_UNIFORM_BUFFER_UNSIZED_ARRAY_FEATURES_EXT, VkPhysicalDeviceShaderUniformBufferUnsizedArrayFeaturesEXT>,
++  converters<VkStructureType::VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_UNTYPED_POINTERS_FEATURES_KHR, VkPhysicalDeviceShaderUntypedPointersFeaturesKHR>,
++  converters<VkStructureType::VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SWAPCHAIN_MAINTENANCE_1_FEATURES_KHR, VkPhysicalDeviceSwapchainMaintenance1FeaturesKHR>,
++  converters<VkStructureType::VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_TENSOR_FEATURES_ARM, VkPhysicalDeviceTensorFeaturesARM>,
++  converters<VkStructureType::VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_TENSOR_PROPERTIES_ARM, VkPhysicalDeviceTensorPropertiesARM>,
++  converters<VkStructureType::VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_TEXTURE_COMPRESSION_ASTC_3D_FEATURES_EXT, VkPhysicalDeviceTextureCompressionASTC3DFeaturesEXT>,
++  converters<VkStructureType::VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_THROTTLE_HINT_FEATURES_SEC, VkPhysicalDeviceThrottleHintFeaturesSEC>,
++  converters<VkStructureType::VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_TILE_MEMORY_HEAP_FEATURES_QCOM, VkPhysicalDeviceTileMemoryHeapFeaturesQCOM>,
++  converters<VkStructureType::VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_TILE_MEMORY_HEAP_PROPERTIES_QCOM, VkPhysicalDeviceTileMemoryHeapPropertiesQCOM>,
++  converters<VkStructureType::VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_TILE_SHADING_FEATURES_QCOM, VkPhysicalDeviceTileShadingFeaturesQCOM>,
++  converters<VkStructureType::VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_TILE_SHADING_PROPERTIES_QCOM, VkPhysicalDeviceTileShadingPropertiesQCOM>,
++  converters<VkStructureType::VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_UNIFIED_IMAGE_LAYOUTS_FEATURES_KHR, VkPhysicalDeviceUnifiedImageLayoutsFeaturesKHR>,
++  converters<VkStructureType::VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VERTEX_ATTRIBUTE_DIVISOR_FEATURES, VkPhysicalDeviceVertexAttributeDivisorFeatures>,
++  converters<VkStructureType::VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VERTEX_ATTRIBUTE_DIVISOR_PROPERTIES, VkPhysicalDeviceVertexAttributeDivisorProperties>,
++  converters<VkStructureType::VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VERTEX_ATTRIBUTE_ROBUSTNESS_FEATURES_EXT, VkPhysicalDeviceVertexAttributeRobustnessFeaturesEXT>,
++  converters<VkStructureType::VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VIDEO_DECODE_VP9_FEATURES_KHR, VkPhysicalDeviceVideoDecodeVP9FeaturesKHR>,
++  converters<VkStructureType::VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VIDEO_ENCODE_AV1_FEATURES_KHR, VkPhysicalDeviceVideoEncodeAV1FeaturesKHR>,
++  converters<VkStructureType::VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VIDEO_ENCODE_FEEDBACK_2_FEATURES_KHR, VkPhysicalDeviceVideoEncodeFeedback2FeaturesKHR>,
++  converters<VkStructureType::VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VIDEO_ENCODE_INTRA_REFRESH_FEATURES_KHR, VkPhysicalDeviceVideoEncodeIntraRefreshFeaturesKHR>,
++  converters<VkStructureType::VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VIDEO_ENCODE_QUANTIZATION_MAP_FEATURES_KHR, VkPhysicalDeviceVideoEncodeQuantizationMapFeaturesKHR>,
++  converters<VkStructureType::VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VIDEO_ENCODE_RGB_CONVERSION_FEATURES_VALVE, VkPhysicalDeviceVideoEncodeRgbConversionFeaturesVALVE>,
++  converters<VkStructureType::VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VIDEO_MAINTENANCE_1_FEATURES_KHR, VkPhysicalDeviceVideoMaintenance1FeaturesKHR>,
++  converters<VkStructureType::VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VIDEO_MAINTENANCE_2_FEATURES_KHR, VkPhysicalDeviceVideoMaintenance2FeaturesKHR>,
++  converters<VkStructureType::VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_4_FEATURES, VkPhysicalDeviceVulkan14Features>,
++  converters<VkStructureType::VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_4_PROPERTIES, VkPhysicalDeviceVulkan14Properties>,
++  converters<VkStructureType::VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_YCBCR_DEGAMMA_FEATURES_QCOM, VkPhysicalDeviceYcbcrDegammaFeaturesQCOM>,
++  converters<VkStructureType::VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ZERO_INITIALIZE_DEVICE_MEMORY_FEATURES_EXT, VkPhysicalDeviceZeroInitializeDeviceMemoryFeaturesEXT>,
++  converters<VkStructureType::VK_STRUCTURE_TYPE_PIPELINE_BINARY_INFO_KHR, VkPipelineBinaryInfoKHR>,
++  converters<VkStructureType::VK_STRUCTURE_TYPE_PIPELINE_CREATE_FLAGS_2_CREATE_INFO, VkPipelineCreateFlags2CreateInfo>,
++  converters<VkStructureType::VK_STRUCTURE_TYPE_PIPELINE_FRAGMENT_DENSITY_MAP_LAYERED_CREATE_INFO_VALVE, VkPipelineFragmentDensityMapLayeredCreateInfoVALVE>,
++  converters<VkStructureType::VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO, VkPipelineLayoutCreateInfo>,
++  converters<VkStructureType::VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_LINE_STATE_CREATE_INFO, VkPipelineRasterizationLineStateCreateInfo>,
++  converters<VkStructureType::VK_STRUCTURE_TYPE_PIPELINE_ROBUSTNESS_CREATE_INFO, VkPipelineRobustnessCreateInfo>,
++  converters<VkStructureType::VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_DEPTH_CLAMP_CONTROL_CREATE_INFO_EXT, VkPipelineViewportDepthClampControlCreateInfoEXT>,
++  converters<VkStructureType::VK_STRUCTURE_TYPE_PRESENT_ID_2_KHR, VkPresentId2KHR>,
++  converters<VkStructureType::VK_STRUCTURE_TYPE_PRESENT_TIMING_SURFACE_CAPABILITIES_EXT, VkPresentTimingSurfaceCapabilitiesEXT>,
++  converters<VkStructureType::VK_STRUCTURE_TYPE_PUSH_CONSTANT_BANK_INFO_NV, VkPushConstantBankInfoNV>,
++  converters<VkStructureType::VK_STRUCTURE_TYPE_QUERY_POOL_VIDEO_ENCODE_FEEDBACK_CREATE_INFO_KHR, VkQueryPoolVideoEncodeFeedbackCreateInfoKHR>,
++  converters<VkStructureType::VK_STRUCTURE_TYPE_QUERY_POOL_VIDEO_ENCODE_PER_PARTITION_FEEDBACK_CREATE_INFO_KHR, VkQueryPoolVideoEncodePerPartitionFeedbackCreateInfoKHR>,
++  converters<VkStructureType::VK_STRUCTURE_TYPE_QUEUE_FAMILY_GLOBAL_PRIORITY_PROPERTIES, VkQueueFamilyGlobalPriorityProperties>,
++  converters<VkStructureType::VK_STRUCTURE_TYPE_QUEUE_FAMILY_OPTIMAL_IMAGE_TRANSFER_GRANULARITY_PROPERTIES_KHR, VkQueueFamilyOptimalImageTransferGranularityPropertiesKHR>,
++  converters<VkStructureType::VK_STRUCTURE_TYPE_QUEUE_FAMILY_OWNERSHIP_TRANSFER_PROPERTIES_KHR, VkQueueFamilyOwnershipTransferPropertiesKHR>,
++  converters<VkStructureType::VK_STRUCTURE_TYPE_RAY_TRACING_PIPELINE_CLUSTER_ACCELERATION_STRUCTURE_CREATE_INFO_NV, VkRayTracingPipelineClusterAccelerationStructureCreateInfoNV>,
++  converters<VkStructureType::VK_STRUCTURE_TYPE_RENDER_PASS_FRAGMENT_DENSITY_MAP_OFFSET_END_INFO_EXT, VkRenderPassFragmentDensityMapOffsetEndInfoEXT>,
++  converters<VkStructureType::VK_STRUCTURE_TYPE_RENDER_PASS_PERFORMANCE_COUNTERS_BY_REGION_BEGIN_INFO_ARM, VkRenderPassPerformanceCountersByRegionBeginInfoARM>,
++  converters<VkStructureType::VK_STRUCTURE_TYPE_RENDER_PASS_TILE_SHADING_CREATE_INFO_QCOM, VkRenderPassTileShadingCreateInfoQCOM>,
++  converters<VkStructureType::VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_FLAGS_INFO_KHR, VkRenderingAttachmentFlagsInfoKHR>,
++  converters<VkStructureType::VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_LOCATION_INFO, VkRenderingAttachmentLocationInfo>,
++  converters<VkStructureType::VK_STRUCTURE_TYPE_RENDERING_INPUT_ATTACHMENT_INDEX_INFO, VkRenderingInputAttachmentIndexInfo>,
++  converters<VkStructureType::VK_STRUCTURE_TYPE_RESOLVE_IMAGE_MODE_INFO_KHR, VkResolveImageModeInfoKHR>,
++  converters<VkStructureType::VK_STRUCTURE_TYPE_SAMPLER_BLOCK_MATCH_WINDOW_CREATE_INFO_QCOM, VkSamplerBlockMatchWindowCreateInfoQCOM>,
++  converters<VkStructureType::VK_STRUCTURE_TYPE_SAMPLER_CUBIC_WEIGHTS_CREATE_INFO_QCOM, VkSamplerCubicWeightsCreateInfoQCOM>,
++  converters<VkStructureType::VK_STRUCTURE_TYPE_SAMPLER_CUSTOM_BORDER_COLOR_INDEX_CREATE_INFO_EXT, VkSamplerCustomBorderColorIndexCreateInfoEXT>,
++  converters<VkStructureType::VK_STRUCTURE_TYPE_SAMPLER_YCBCR_CONVERSION_YCBCR_DEGAMMA_CREATE_INFO_QCOM, VkSamplerYcbcrConversionYcbcrDegammaCreateInfoQCOM>,
++  converters<VkStructureType::VK_STRUCTURE_TYPE_SET_PRESENT_CONFIG_NV, VkSetPresentConfigNV>,
++  converters<VkStructureType::VK_STRUCTURE_TYPE_SHARED_PRESENT_SURFACE_CAPABILITIES_2_KHR, VkSharedPresentSurfaceCapabilities2KHR>,
++  converters<VkStructureType::VK_STRUCTURE_TYPE_SUBRESOURCE_HOST_MEMCPY_SIZE, VkSubresourceHostMemcpySize>,
++  converters<VkStructureType::VK_STRUCTURE_TYPE_SUBSAMPLED_IMAGE_FORMAT_PROPERTIES_EXT, VkSubsampledImageFormatPropertiesEXT>,
++  converters<VkStructureType::VK_STRUCTURE_TYPE_SURFACE_CAPABILITIES_PRESENT_ID_2_KHR, VkSurfaceCapabilitiesPresentId2KHR>,
++  converters<VkStructureType::VK_STRUCTURE_TYPE_SURFACE_CAPABILITIES_PRESENT_WAIT_2_KHR, VkSurfaceCapabilitiesPresentWait2KHR>,
++  converters<VkStructureType::VK_STRUCTURE_TYPE_SURFACE_PRESENT_MODE_COMPATIBILITY_KHR, VkSurfacePresentModeCompatibilityKHR>,
++  converters<VkStructureType::VK_STRUCTURE_TYPE_SURFACE_PRESENT_MODE_KHR, VkSurfacePresentModeKHR>,
++  converters<VkStructureType::VK_STRUCTURE_TYPE_SURFACE_PRESENT_SCALING_CAPABILITIES_KHR, VkSurfacePresentScalingCapabilitiesKHR>,
++  converters<VkStructureType::VK_STRUCTURE_TYPE_SWAPCHAIN_CALIBRATED_TIMESTAMP_INFO_EXT, VkSwapchainCalibratedTimestampInfoEXT>,
++  converters<VkStructureType::VK_STRUCTURE_TYPE_SWAPCHAIN_FLAGS_SURFACE_CAPABILITIES_EXT, VkSwapchainFlagsSurfaceCapabilitiesEXT>,
++  converters<VkStructureType::VK_STRUCTURE_TYPE_SWAPCHAIN_LATENCY_CREATE_INFO_NV, VkSwapchainLatencyCreateInfoNV>,
++  converters<VkStructureType::VK_STRUCTURE_TYPE_SWAPCHAIN_PRESENT_FENCE_INFO_KHR, VkSwapchainPresentFenceInfoKHR>,
++  converters<VkStructureType::VK_STRUCTURE_TYPE_SWAPCHAIN_PRESENT_MODE_INFO_KHR, VkSwapchainPresentModeInfoKHR>,
++  converters<VkStructureType::VK_STRUCTURE_TYPE_SWAPCHAIN_PRESENT_MODES_CREATE_INFO_KHR, VkSwapchainPresentModesCreateInfoKHR>,
++  converters<VkStructureType::VK_STRUCTURE_TYPE_SWAPCHAIN_PRESENT_SCALING_CREATE_INFO_KHR, VkSwapchainPresentScalingCreateInfoKHR>,
++  converters<VkStructureType::VK_STRUCTURE_TYPE_TENSOR_EXPLICIT_TILING_FORMAT_PROPERTIES_ARM, VkTensorExplicitTilingFormatPropertiesARM>,
++  converters<VkStructureType::VK_STRUCTURE_TYPE_TENSOR_FORMAT_PROPERTIES_ARM, VkTensorFormatPropertiesARM>,
++  converters<VkStructureType::VK_STRUCTURE_TYPE_TENSOR_MEMORY_BARRIER_ARM, VkTensorMemoryBarrierARM>,
++  converters<VkStructureType::VK_STRUCTURE_TYPE_TENSOR_ROLLING_BACKING_CREATE_INFO_ARM, VkTensorRollingBackingCreateInfoARM>,
++  converters<VkStructureType::VK_STRUCTURE_TYPE_THROTTLE_HINT_SUBMIT_INFO_SEC, VkThrottleHintSubmitInfoSEC>,
++  converters<VkStructureType::VK_STRUCTURE_TYPE_TILE_MEMORY_BIND_INFO_QCOM, VkTileMemoryBindInfoQCOM>,
++  converters<VkStructureType::VK_STRUCTURE_TYPE_TILE_MEMORY_REQUIREMENTS_QCOM, VkTileMemoryRequirementsQCOM>,
++  converters<VkStructureType::VK_STRUCTURE_TYPE_TILE_MEMORY_SIZE_INFO_QCOM, VkTileMemorySizeInfoQCOM>,
++  converters<VkStructureType::VK_STRUCTURE_TYPE_VIDEO_DECODE_AV1_CAPABILITIES_KHR, VkVideoDecodeAV1CapabilitiesKHR>,
++  converters<VkStructureType::VK_STRUCTURE_TYPE_VIDEO_DECODE_AV1_PROFILE_INFO_KHR, VkVideoDecodeAV1ProfileInfoKHR>,
++  converters<VkStructureType::VK_STRUCTURE_TYPE_VIDEO_DECODE_VP9_CAPABILITIES_KHR, VkVideoDecodeVP9CapabilitiesKHR>,
++  converters<VkStructureType::VK_STRUCTURE_TYPE_VIDEO_DECODE_VP9_PROFILE_INFO_KHR, VkVideoDecodeVP9ProfileInfoKHR>,
++  converters<VkStructureType::VK_STRUCTURE_TYPE_VIDEO_ENCODE_AV1_CAPABILITIES_KHR, VkVideoEncodeAV1CapabilitiesKHR>,
++  converters<VkStructureType::VK_STRUCTURE_TYPE_VIDEO_ENCODE_AV1_GOP_REMAINING_FRAME_INFO_KHR, VkVideoEncodeAV1GopRemainingFrameInfoKHR>,
++  converters<VkStructureType::VK_STRUCTURE_TYPE_VIDEO_ENCODE_AV1_PROFILE_INFO_KHR, VkVideoEncodeAV1ProfileInfoKHR>,
++  converters<VkStructureType::VK_STRUCTURE_TYPE_VIDEO_ENCODE_AV1_QUALITY_LEVEL_PROPERTIES_KHR, VkVideoEncodeAV1QualityLevelPropertiesKHR>,
++  converters<VkStructureType::VK_STRUCTURE_TYPE_VIDEO_ENCODE_AV1_QUANTIZATION_MAP_CAPABILITIES_KHR, VkVideoEncodeAV1QuantizationMapCapabilitiesKHR>,
++  converters<VkStructureType::VK_STRUCTURE_TYPE_VIDEO_ENCODE_AV1_RATE_CONTROL_INFO_KHR, VkVideoEncodeAV1RateControlInfoKHR>,
++  converters<VkStructureType::VK_STRUCTURE_TYPE_VIDEO_ENCODE_AV1_RATE_CONTROL_LAYER_INFO_KHR, VkVideoEncodeAV1RateControlLayerInfoKHR>,
++  converters<VkStructureType::VK_STRUCTURE_TYPE_VIDEO_ENCODE_AV1_SESSION_CREATE_INFO_KHR, VkVideoEncodeAV1SessionCreateInfoKHR>,
++  converters<VkStructureType::VK_STRUCTURE_TYPE_VIDEO_ENCODE_CAPABILITIES_KHR, VkVideoEncodeCapabilitiesKHR>,
++  converters<VkStructureType::VK_STRUCTURE_TYPE_VIDEO_ENCODE_FEEDBACK_2_CAPABILITIES_KHR, VkVideoEncodeFeedback2CapabilitiesKHR>,
++  converters<VkStructureType::VK_STRUCTURE_TYPE_VIDEO_ENCODE_H264_CAPABILITIES_KHR, VkVideoEncodeH264CapabilitiesKHR>,
++  converters<VkStructureType::VK_STRUCTURE_TYPE_VIDEO_ENCODE_H264_DPB_SLOT_INFO_KHR, VkVideoEncodeH264DpbSlotInfoKHR>,
++  converters<VkStructureType::VK_STRUCTURE_TYPE_VIDEO_ENCODE_H264_GOP_REMAINING_FRAME_INFO_KHR, VkVideoEncodeH264GopRemainingFrameInfoKHR>,
++  converters<VkStructureType::VK_STRUCTURE_TYPE_VIDEO_ENCODE_H264_PROFILE_INFO_KHR, VkVideoEncodeH264ProfileInfoKHR>,
++  converters<VkStructureType::VK_STRUCTURE_TYPE_VIDEO_ENCODE_H264_QUALITY_LEVEL_PROPERTIES_KHR, VkVideoEncodeH264QualityLevelPropertiesKHR>,
++  converters<VkStructureType::VK_STRUCTURE_TYPE_VIDEO_ENCODE_H264_QUANTIZATION_MAP_CAPABILITIES_KHR, VkVideoEncodeH264QuantizationMapCapabilitiesKHR>,
++  converters<VkStructureType::VK_STRUCTURE_TYPE_VIDEO_ENCODE_H264_RATE_CONTROL_INFO_KHR, VkVideoEncodeH264RateControlInfoKHR>,
++  converters<VkStructureType::VK_STRUCTURE_TYPE_VIDEO_ENCODE_H264_RATE_CONTROL_LAYER_INFO_KHR, VkVideoEncodeH264RateControlLayerInfoKHR>,
++  converters<VkStructureType::VK_STRUCTURE_TYPE_VIDEO_ENCODE_H264_SESSION_CREATE_INFO_KHR, VkVideoEncodeH264SessionCreateInfoKHR>,
++  converters<VkStructureType::VK_STRUCTURE_TYPE_VIDEO_ENCODE_H264_SESSION_PARAMETERS_FEEDBACK_INFO_KHR, VkVideoEncodeH264SessionParametersFeedbackInfoKHR>,
++  converters<VkStructureType::VK_STRUCTURE_TYPE_VIDEO_ENCODE_H264_SESSION_PARAMETERS_GET_INFO_KHR, VkVideoEncodeH264SessionParametersGetInfoKHR>,
++  converters<VkStructureType::VK_STRUCTURE_TYPE_VIDEO_ENCODE_H265_CAPABILITIES_KHR, VkVideoEncodeH265CapabilitiesKHR>,
++  converters<VkStructureType::VK_STRUCTURE_TYPE_VIDEO_ENCODE_H265_DPB_SLOT_INFO_KHR, VkVideoEncodeH265DpbSlotInfoKHR>,
++  converters<VkStructureType::VK_STRUCTURE_TYPE_VIDEO_ENCODE_H265_GOP_REMAINING_FRAME_INFO_KHR, VkVideoEncodeH265GopRemainingFrameInfoKHR>,
++  converters<VkStructureType::VK_STRUCTURE_TYPE_VIDEO_ENCODE_H265_PROFILE_INFO_KHR, VkVideoEncodeH265ProfileInfoKHR>,
++  converters<VkStructureType::VK_STRUCTURE_TYPE_VIDEO_ENCODE_H265_QUALITY_LEVEL_PROPERTIES_KHR, VkVideoEncodeH265QualityLevelPropertiesKHR>,
++  converters<VkStructureType::VK_STRUCTURE_TYPE_VIDEO_ENCODE_H265_QUANTIZATION_MAP_CAPABILITIES_KHR, VkVideoEncodeH265QuantizationMapCapabilitiesKHR>,
++  converters<VkStructureType::VK_STRUCTURE_TYPE_VIDEO_ENCODE_H265_RATE_CONTROL_INFO_KHR, VkVideoEncodeH265RateControlInfoKHR>,
++  converters<VkStructureType::VK_STRUCTURE_TYPE_VIDEO_ENCODE_H265_RATE_CONTROL_LAYER_INFO_KHR, VkVideoEncodeH265RateControlLayerInfoKHR>,
++  converters<VkStructureType::VK_STRUCTURE_TYPE_VIDEO_ENCODE_H265_SESSION_CREATE_INFO_KHR, VkVideoEncodeH265SessionCreateInfoKHR>,
++  converters<VkStructureType::VK_STRUCTURE_TYPE_VIDEO_ENCODE_H265_SESSION_PARAMETERS_FEEDBACK_INFO_KHR, VkVideoEncodeH265SessionParametersFeedbackInfoKHR>,
++  converters<VkStructureType::VK_STRUCTURE_TYPE_VIDEO_ENCODE_H265_SESSION_PARAMETERS_GET_INFO_KHR, VkVideoEncodeH265SessionParametersGetInfoKHR>,
++  converters<VkStructureType::VK_STRUCTURE_TYPE_VIDEO_ENCODE_INTRA_REFRESH_CAPABILITIES_KHR, VkVideoEncodeIntraRefreshCapabilitiesKHR>,
++  converters<VkStructureType::VK_STRUCTURE_TYPE_VIDEO_ENCODE_INTRA_REFRESH_INFO_KHR, VkVideoEncodeIntraRefreshInfoKHR>,
++  converters<VkStructureType::VK_STRUCTURE_TYPE_VIDEO_ENCODE_PROFILE_RGB_CONVERSION_INFO_VALVE, VkVideoEncodeProfileRgbConversionInfoVALVE>,
++  converters<VkStructureType::VK_STRUCTURE_TYPE_VIDEO_ENCODE_QUALITY_LEVEL_INFO_KHR, VkVideoEncodeQualityLevelInfoKHR>,
++  converters<VkStructureType::VK_STRUCTURE_TYPE_VIDEO_ENCODE_QUANTIZATION_MAP_CAPABILITIES_KHR, VkVideoEncodeQuantizationMapCapabilitiesKHR>,
++  converters<VkStructureType::VK_STRUCTURE_TYPE_VIDEO_ENCODE_QUANTIZATION_MAP_INFO_KHR, VkVideoEncodeQuantizationMapInfoKHR>,
++  converters<VkStructureType::VK_STRUCTURE_TYPE_VIDEO_ENCODE_QUANTIZATION_MAP_SESSION_PARAMETERS_CREATE_INFO_KHR, VkVideoEncodeQuantizationMapSessionParametersCreateInfoKHR>,
++  converters<VkStructureType::VK_STRUCTURE_TYPE_VIDEO_ENCODE_RGB_CONVERSION_CAPABILITIES_VALVE, VkVideoEncodeRgbConversionCapabilitiesVALVE>,
++  converters<VkStructureType::VK_STRUCTURE_TYPE_VIDEO_ENCODE_SESSION_INTRA_REFRESH_CREATE_INFO_KHR, VkVideoEncodeSessionIntraRefreshCreateInfoKHR>,
++  converters<VkStructureType::VK_STRUCTURE_TYPE_VIDEO_ENCODE_SESSION_RGB_CONVERSION_CREATE_INFO_VALVE, VkVideoEncodeSessionRgbConversionCreateInfoVALVE>,
++  converters<VkStructureType::VK_STRUCTURE_TYPE_VIDEO_ENCODE_USAGE_INFO_KHR, VkVideoEncodeUsageInfoKHR>,
++  converters<VkStructureType::VK_STRUCTURE_TYPE_VIDEO_FORMAT_AV1_QUANTIZATION_MAP_PROPERTIES_KHR, VkVideoFormatAV1QuantizationMapPropertiesKHR>,
++  converters<VkStructureType::VK_STRUCTURE_TYPE_VIDEO_FORMAT_H265_QUANTIZATION_MAP_PROPERTIES_KHR, VkVideoFormatH265QuantizationMapPropertiesKHR>,
++  converters<VkStructureType::VK_STRUCTURE_TYPE_VIDEO_FORMAT_QUANTIZATION_MAP_PROPERTIES_KHR, VkVideoFormatQuantizationMapPropertiesKHR>,
++  converters<VkStructureType::VK_STRUCTURE_TYPE_VIDEO_INLINE_QUERY_INFO_KHR, VkVideoInlineQueryInfoKHR>,
++  converters<VkStructureType::VK_STRUCTURE_TYPE_VIDEO_REFERENCE_INTRA_REFRESH_INFO_KHR, VkVideoReferenceIntraRefreshInfoKHR>,
++  converters<VkStructureType::VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET_PARTITIONED_ACCELERATION_STRUCTURE_NV, VkWriteDescriptorSetPartitionedAccelerationStructureNV>,
++  converters<VkStructureType::VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET_TENSOR_ARM, VkWriteDescriptorSetTensorARM>,
+ };
+ 
+ static void default_fex_custom_repack_entry(VkBaseOutStructure& into, const guest_layout<VkBaseOutStructure>* from) {
+@@ -887,8 +1837,13 @@ static void default_fex_custom_repack_entry(VkBaseOutStructure& into, const gues
+ 
+   auto next_handler = next_handlers.find(static_cast<VkStructureType>(typed_source->data.sType.data));
+   if (next_handler == next_handlers.end()) {
+-    fprintf(stderr, "ERROR: Unrecognized VkStructureType %u referenced by pNext\n", typed_source->data.sType.data);
+-    std::abort();
++    // SteamARM: a structure this thunk cannot repack is left out of the
++    // chain (the driver then sees the rest of it), instead of aborting the
++    // application. For a query that means "not supported".
++    fprintf(stderr, "WARNING: Unrecognized VkStructureType %u referenced by pNext, left out\n", typed_source->data.sType.data);
++    into.pNext = nullptr;
++    default_fex_custom_repack_entry(into, typed_source);
++    return;
+   }
+ 
+   into.pNext = next_handler->second.first(typed_source);
+@@ -907,8 +1862,10 @@ static void default_fex_custom_repack_reverse(guest_layout<VkBaseOutStructure>&
+ 
+   auto next_handler = next_handlers.find(static_cast<VkStructureType>(into.data.pNext.get_pointer()->data.sType.data));
+   if (next_handler == next_handlers.end()) {
+-    fprintf(stderr, "ERROR: Unrecognized VkStructureType %u referenced by pNext when converting to guest\n", from->sType);
+-    std::abort();
++    // SteamARM: left out of the host chain on entry (see above); the host
++    // chain continues with the guest structure after it.
++    default_fex_custom_repack_reverse(*into.data.pNext.get_pointer(), from);
++    return;
+   }
+   next_handler->second.second((void*)into.data.pNext.get_pointer(), from->pNext);
+ 
+@@ -988,7 +1945,7 @@ VULKAN_DEFAULT_CUSTOM_REPACK(VkBindTransformFeedbackBuffer2InfoEXT)
+ VULKAN_DEFAULT_CUSTOM_REPACK(VkBindVertexBuffer3InfoKHR)
+ VULKAN_DEFAULT_CUSTOM_REPACK(VkBindVideoSessionMemoryInfoKHR)
+ VULKAN_DEFAULT_CUSTOM_REPACK(VkBlitImageCubicWeightsInfoQCOM)
+-// VULKAN_DEFAULT_CUSTOM_REPACK(VkBlitImageInfo2)
++VULKAN_NONDEFAULT_CUSTOM_REPACK(VkBlitImageInfo2)
+ VULKAN_DEFAULT_CUSTOM_REPACK(VkBufferCaptureDescriptorDataInfoEXT)
+ VULKAN_DEFAULT_CUSTOM_REPACK(VkBufferCopy2)
+ VULKAN_DEFAULT_CUSTOM_REPACK(VkBufferCreateInfo)
+@@ -1020,7 +1977,7 @@ VULKAN_DEFAULT_CUSTOM_REPACK(VkCommandBufferInheritanceViewportScissorInfoNV)
+ VULKAN_DEFAULT_CUSTOM_REPACK(VkCommandBufferSubmitInfo)
+ VULKAN_DEFAULT_CUSTOM_REPACK(VkCommandPoolCreateInfo)
+ VULKAN_DEFAULT_CUSTOM_REPACK(VkComputeOccupancyPriorityParametersNV)
+-VULKAN_DEFAULT_CUSTOM_REPACK(VkComputePipelineCreateInfo)
++VULKAN_NONDEFAULT_CUSTOM_REPACK(VkComputePipelineCreateInfo)
+ VULKAN_DEFAULT_CUSTOM_REPACK(VkComputePipelineIndirectBufferInfoNV)
+ VULKAN_DEFAULT_CUSTOM_REPACK(VkConditionalRenderingBeginInfo2EXT)
+ VULKAN_DEFAULT_CUSTOM_REPACK(VkConditionalRenderingBeginInfoEXT)
+@@ -1031,14 +1988,14 @@ VULKAN_DEFAULT_CUSTOM_REPACK(VkCooperativeMatrixPropertiesNV)
+ VULKAN_DEFAULT_CUSTOM_REPACK(VkCooperativeVectorPropertiesNV)
+ VULKAN_DEFAULT_CUSTOM_REPACK(VkCopyAccelerationStructureInfoKHR)
+ // VULKAN_DEFAULT_CUSTOM_REPACK(VkCopyAccelerationStructureToMemoryInfoKHR)
+-// VULKAN_DEFAULT_CUSTOM_REPACK(VkCopyBufferInfo2)
+-// VULKAN_DEFAULT_CUSTOM_REPACK(VkCopyBufferToImageInfo2)
++VULKAN_NONDEFAULT_CUSTOM_REPACK(VkCopyBufferInfo2)
++VULKAN_NONDEFAULT_CUSTOM_REPACK(VkCopyBufferToImageInfo2)
+ VULKAN_DEFAULT_CUSTOM_REPACK(VkCopyCommandTransformInfoQCOM)
+ VULKAN_DEFAULT_CUSTOM_REPACK(VkCopyDescriptorSet)
+ // VULKAN_DEFAULT_CUSTOM_REPACK(VkCopyDeviceMemoryImageInfoKHR)
+ // VULKAN_DEFAULT_CUSTOM_REPACK(VkCopyDeviceMemoryInfoKHR)
+-// VULKAN_DEFAULT_CUSTOM_REPACK(VkCopyImageInfo2)
+-// VULKAN_DEFAULT_CUSTOM_REPACK(VkCopyImageToBufferInfo2)
++VULKAN_NONDEFAULT_CUSTOM_REPACK(VkCopyImageInfo2)
++VULKAN_NONDEFAULT_CUSTOM_REPACK(VkCopyImageToBufferInfo2)
+ // VULKAN_DEFAULT_CUSTOM_REPACK(VkCopyImageToImageInfoEXT)
+ // VULKAN_DEFAULT_CUSTOM_REPACK(VkCopyImageToMemoryInfoEXT)
+ VULKAN_DEFAULT_CUSTOM_REPACK(VkCopyMemoryIndirectInfoKHR)
+@@ -1113,7 +2070,7 @@ VULKAN_DEFAULT_CUSTOM_REPACK(VkDescriptorSetVariableDescriptorCountAllocateInfo)
+ VULKAN_DEFAULT_CUSTOM_REPACK(VkDescriptorSetVariableDescriptorCountLayoutSupport)
+ VULKAN_NONDEFAULT_CUSTOM_REPACK(VkDescriptorUpdateTemplateCreateInfo)
+ VULKAN_DEFAULT_CUSTOM_REPACK(VkDeviceAddressBindingCallbackDataEXT)
+-// VULKAN_DEFAULT_CUSTOM_REPACK(VkDeviceBufferMemoryRequirements)
++VULKAN_NONDEFAULT_CUSTOM_REPACK(VkDeviceBufferMemoryRequirements)
+ VULKAN_NONDEFAULT_CUSTOM_REPACK(VkDeviceCreateInfo)
+ // VULKAN_DEFAULT_CUSTOM_REPACK(VkDeviceDeviceMemoryReportCreateInfoEXT)
+ VULKAN_DEFAULT_CUSTOM_REPACK(VkDeviceDiagnosticsConfigCreateInfoNV)
+@@ -1131,7 +2088,7 @@ VULKAN_DEFAULT_CUSTOM_REPACK(VkDeviceGroupPresentInfoKHR)
+ VULKAN_DEFAULT_CUSTOM_REPACK(VkDeviceGroupRenderPassBeginInfo)
+ VULKAN_DEFAULT_CUSTOM_REPACK(VkDeviceGroupSubmitInfo)
+ VULKAN_DEFAULT_CUSTOM_REPACK(VkDeviceGroupSwapchainCreateInfoKHR)
+-// VULKAN_DEFAULT_CUSTOM_REPACK(VkDeviceImageMemoryRequirements)
++VULKAN_NONDEFAULT_CUSTOM_REPACK(VkDeviceImageMemoryRequirements)
+ VULKAN_DEFAULT_CUSTOM_REPACK(VkDeviceMemoryCopyKHR)
+ VULKAN_DEFAULT_CUSTOM_REPACK(VkDeviceMemoryImageCopyKHR)
+ // VULKAN_DEFAULT_CUSTOM_REPACK(VkDeviceImageSubresourceInfoKHR)
+@@ -1875,7 +2832,7 @@ VULKAN_DEFAULT_CUSTOM_REPACK(VkRenderPassStripeInfoARM)
+ VULKAN_DEFAULT_CUSTOM_REPACK(VkRenderPassSubpassFeedbackCreateInfoEXT)
+ VULKAN_DEFAULT_CUSTOM_REPACK(VkRenderPassTileShadingCreateInfoQCOM)
+ VULKAN_DEFAULT_CUSTOM_REPACK(VkRenderPassTransformBeginInfoQCOM)
+-// VULKAN_DEFAULT_CUSTOM_REPACK(VkResolveImageInfo2)
++VULKAN_NONDEFAULT_CUSTOM_REPACK(VkResolveImageInfo2)
+ VULKAN_DEFAULT_CUSTOM_REPACK(VkResolveImageModeInfoKHR)
+ // VULKAN_DEFAULT_CUSTOM_REPACK(VkResourceDescriptorInfoEXT)
+ VULKAN_DEFAULT_CUSTOM_REPACK(VkSampleLocationsInfoEXT)
+@@ -1912,7 +2869,7 @@ VULKAN_DEFAULT_CUSTOM_REPACK(VkSharedPresentSurfaceCapabilitiesKHR)
+ VULKAN_DEFAULT_CUSTOM_REPACK(VkSparseImageFormatProperties2)
+ VULKAN_DEFAULT_CUSTOM_REPACK(VkSparseImageMemoryRequirements2)
+ VULKAN_NONDEFAULT_CUSTOM_REPACK(VkSubmitInfo)
+-// VULKAN_DEFAULT_CUSTOM_REPACK(VkSubmitInfo2)
++VULKAN_NONDEFAULT_CUSTOM_REPACK(VkSubmitInfo2)
+ VULKAN_DEFAULT_CUSTOM_REPACK(VkSubpassBeginInfo)
+ VULKAN_DEFAULT_CUSTOM_REPACK(VkSubpassDependency2)
+ VULKAN_NONDEFAULT_CUSTOM_REPACK(VkSubpassDescription2)
+@@ -2078,10 +3035,14 @@ VULKAN_NONDEFAULT_CUSTOM_REPACK(VkXlibSurfaceCreateInfoKHR)
+ void fex_custom_repack_entry(host_layout<VkInstanceCreateInfo>& into, const guest_layout<VkInstanceCreateInfo>& from) {
+   default_fex_custom_repack_entry(into, from);
+ 
+-  auto HostApplicationInfo = new host_layout<VkApplicationInfo> {*from.data.pApplicationInfo.get_pointer()};
+-  fex_apply_custom_repacking_entry(*HostApplicationInfo, *from.data.pApplicationInfo.get_pointer());
+-
+-  into.data.pApplicationInfo = &HostApplicationInfo->data;
++  // pApplicationInfo may be NULL (valid Vulkan; SteamARM's probes do it).
++  if (from.data.pApplicationInfo.get_pointer()) {
++    auto HostApplicationInfo = new host_layout<VkApplicationInfo> {*from.data.pApplicationInfo.get_pointer()};
++    fex_apply_custom_repacking_entry(*HostApplicationInfo, *from.data.pApplicationInfo.get_pointer());
++    into.data.pApplicationInfo = &HostApplicationInfo->data;
++  } else {
++    into.data.pApplicationInfo = nullptr;
++  }
+ 
+   auto extension_count = from.data.enabledExtensionCount.data;
+   into.data.ppEnabledExtensionNames = RepackStructArray<false>(extension_count, from.data.ppEnabledExtensionNames).data();
+@@ -2301,6 +3262,54 @@ bool fex_custom_repack_exit(guest_layout<VkCopyMemoryToImageInfoEXT>& into, cons
+   return false;
+ }
+ 
++// SteamARM: the Vulkan 1.3 "*2" commands (copies, blits, resolves, submit,
++// device memory requirements), which upstream leaves out of the 32-bit
++// thunks. Their region arrays and nested create infos are repacked like
++// VkDependencyInfo's barriers.
++#define REGIONS_REPACK(Info)                                                                                      \
++  void fex_custom_repack_entry(host_layout<Info>& into, const guest_layout<Info>& from) {                        \
++    default_fex_custom_repack_entry(into, from);                                                                 \
++    into.data.pRegions = RepackStructArray(from.data.regionCount.data, from.data.pRegions).data();              \
++  }                                                                                                              \
++  bool fex_custom_repack_exit(guest_layout<Info>& into, const host_layout<Info>& from) {                        \
++    DeleteRepackedStructArray(from.data.regionCount, from.data.pRegions, into.data.pRegions);                   \
++    return false;                                                                                                \
++  }
++REGIONS_REPACK(VkCopyBufferInfo2)
++REGIONS_REPACK(VkCopyBufferToImageInfo2)
++REGIONS_REPACK(VkCopyImageInfo2)
++REGIONS_REPACK(VkCopyImageToBufferInfo2)
++REGIONS_REPACK(VkBlitImageInfo2)
++REGIONS_REPACK(VkResolveImageInfo2)
++#undef REGIONS_REPACK
++
++void fex_custom_repack_entry(host_layout<VkSubmitInfo2>& into, const guest_layout<VkSubmitInfo2>& from) {
++  default_fex_custom_repack_entry(into, from);
++  into.data.pWaitSemaphoreInfos = RepackStructArray(from.data.waitSemaphoreInfoCount.data, from.data.pWaitSemaphoreInfos).data();
++  into.data.pCommandBufferInfos = RepackStructArray(from.data.commandBufferInfoCount.data, from.data.pCommandBufferInfos).data();
++  into.data.pSignalSemaphoreInfos = RepackStructArray(from.data.signalSemaphoreInfoCount.data, from.data.pSignalSemaphoreInfos).data();
++}
++
++bool fex_custom_repack_exit(guest_layout<VkSubmitInfo2>& into, const host_layout<VkSubmitInfo2>& from) {
++  DeleteRepackedStructArray(from.data.waitSemaphoreInfoCount, from.data.pWaitSemaphoreInfos, into.data.pWaitSemaphoreInfos);
++  DeleteRepackedStructArray(from.data.commandBufferInfoCount, from.data.pCommandBufferInfos, into.data.pCommandBufferInfos);
++  DeleteRepackedStructArray(from.data.signalSemaphoreInfoCount, from.data.pSignalSemaphoreInfos, into.data.pSignalSemaphoreInfos);
++  return false;
++}
++
++#define CREATE_INFO_REPACK(Info)                                                                                 \
++  void fex_custom_repack_entry(host_layout<Info>& into, const guest_layout<Info>& from) {                        \
++    default_fex_custom_repack_entry(into, from);                                                                 \
++    into.data.pCreateInfo = RepackStructArray(1, from.data.pCreateInfo).data();                                 \
++  }                                                                                                              \
++  bool fex_custom_repack_exit(guest_layout<Info>& into, const host_layout<Info>& from) {                        \
++    DeleteRepackedStructArray(1, from.data.pCreateInfo, into.data.pCreateInfo);                                 \
++    return false;                                                                                                \
++  }
++CREATE_INFO_REPACK(VkDeviceBufferMemoryRequirements)
++CREATE_INFO_REPACK(VkDeviceImageMemoryRequirements)
++#undef CREATE_INFO_REPACK
++
+ void fex_custom_repack_entry(host_layout<VkDependencyInfo>& into, const guest_layout<VkDependencyInfo>& from) {
+   default_fex_custom_repack_entry(into, from);
+   into.data.pMemoryBarriers = RepackStructArray(from.data.memoryBarrierCount.data, from.data.pMemoryBarriers).data();
+@@ -2329,13 +3338,44 @@ bool fex_custom_repack_exit(guest_layout<VkDescriptorUpdateTemplateCreateInfo>&
+ void fex_custom_repack_entry(host_layout<VkPipelineShaderStageCreateInfo>& into, const guest_layout<VkPipelineShaderStageCreateInfo>& from) {
+   default_fex_custom_repack_entry(into, from);
+   if (from.data.pSpecializationInfo.get_pointer()) {
+-    fprintf(stderr, "ERROR: Cannot repack non-null VkPipelineShaderStageCreateInfo::pSpecializationInfo yet");
+-    std::abort();
++    // SteamARM: DXVK specializes nearly every shader. The i386 layout is
++    // four 32-bit words (mapEntryCount, pMapEntries, dataSize, pData), each
++    // map entry three (constantID, offset, size).
++    auto g = reinterpret_cast<const uint32_t*>(from.data.pSpecializationInfo.get_pointer());
++    auto spec = new VkSpecializationInfo {};
++    spec->mapEntryCount = g[0];
++    auto entries = new VkSpecializationMapEntry[g[0] ? g[0] : 1];
++    auto ge = reinterpret_cast<const uint32_t*>(fex_lxrt_g2h(g[1]));
++    for (uint32_t i = 0; i < g[0]; ++i) {
++      entries[i] = {ge[3 * i], ge[3 * i + 1], ge[3 * i + 2]};
++    }
++    spec->pMapEntries = entries;
++    spec->dataSize = g[2];
++    spec->pData = reinterpret_cast<const void*>(fex_lxrt_g2h(g[3]));
++    into.data.pSpecializationInfo = spec;
+   }
+ }
+ 
+ bool fex_custom_repack_exit(guest_layout<VkPipelineShaderStageCreateInfo>& into, const host_layout<VkPipelineShaderStageCreateInfo>& from) {
+-  // TODO
++  if (from.data.pSpecializationInfo) {
++    delete[] from.data.pSpecializationInfo->pMapEntries;
++    delete from.data.pSpecializationInfo;
++  }
++  return false;
++}
++
++// SteamARM: the shader stage embedded in a compute pipeline needs the same
++// repacking as a graphics pipeline's stages (its pNext chain carries DXVK's
++// inline VkShaderModuleCreateInfo; MEASURED: MoltenVK got a null module).
++void fex_custom_repack_entry(host_layout<VkComputePipelineCreateInfo>& into, const guest_layout<VkComputePipelineCreateInfo>& from) {
++  default_fex_custom_repack_entry(into, from);
++  host_layout<VkPipelineShaderStageCreateInfo> stage {from.data.stage};
++  fex_custom_repack_entry(stage, from.data.stage);
++  into.data.stage = stage.data;
++}
++
++bool fex_custom_repack_exit(guest_layout<VkComputePipelineCreateInfo>& into, const host_layout<VkComputePipelineCreateInfo>& from) {
++  fex_custom_repack_exit(into.data.stage, to_host_layout(from.data.stage));
+   return false;
+ }
+ 
+diff --git a/ThunkLibs/libvulkan/libvulkan_interface.cpp b/ThunkLibs/libvulkan/libvulkan_interface.cpp
+index 5aa617c6a..95fd8d462 100644
+--- a/ThunkLibs/libvulkan/libvulkan_interface.cpp
++++ b/ThunkLibs/libvulkan/libvulkan_interface.cpp
+@@ -97,6 +97,11 @@ template<>
+ struct fex_gen_type<VkDescriptorUpdateTemplateEntry> {};
+ template<>
+ struct fex_gen_type<VkSubpassDescription> {};
++// SteamARM: element types of the 32-bit array repacking (Host.cpp)
++template<>
++struct fex_gen_type<VkBufferCopy> {};
++template<>
++struct fex_gen_type<VkBufferImageCopy> {};
+ 
+ // Structures that contain function pointers
+ // TODO: Use custom repacking for these instead
+@@ -217,8 +222,8 @@ template<>
+ struct fex_gen_config<&VkBindVideoSessionMemoryInfoKHR::pNext> : fexgen::custom_repack {};
+ template<>
+ struct fex_gen_config<&VkBlitImageCubicWeightsInfoQCOM::pNext> : fexgen::custom_repack {};
+-// template<>
+-// struct fex_gen_config<&VkBlitImageInfo2::pNext> : fexgen::custom_repack {};
++template<>
++struct fex_gen_config<&VkBlitImageInfo2::pNext> : fexgen::custom_repack {};
+ template<>
+ struct fex_gen_config<&VkBufferCaptureDescriptorDataInfoEXT::pNext> : fexgen::custom_repack {};
+ template<>
+@@ -309,10 +314,10 @@ template<>
+ struct fex_gen_config<&VkCopyAccelerationStructureInfoKHR::pNext> : fexgen::custom_repack {};
+ // template<>
+ // struct fex_gen_config<&VkCopyAccelerationStructureToMemoryInfoKHR::pNext> : fexgen::custom_repack {};
+-// template<>
+-// struct fex_gen_config<&VkCopyBufferInfo2::pNext> : fexgen::custom_repack {};
+-// template<>
+-// struct fex_gen_config<&VkCopyBufferToImageInfo2::pNext> : fexgen::custom_repack {};
++template<>
++struct fex_gen_config<&VkCopyBufferInfo2::pNext> : fexgen::custom_repack {};
++template<>
++struct fex_gen_config<&VkCopyBufferToImageInfo2::pNext> : fexgen::custom_repack {};
+ template<>
+ struct fex_gen_config<&VkCopyCommandTransformInfoQCOM::pNext> : fexgen::custom_repack {};
+ template<>
+@@ -321,10 +326,10 @@ struct fex_gen_config<&VkCopyDescriptorSet::pNext> : fexgen::custom_repack {};
+ // struct fex_gen_config<&VkCopyDeviceMemoryImageInfoKHR::pNext> : fexgen::custom_repack {};
+ // template<>
+ // struct fex_gen_config<&VkCopyDeviceMemoryInfoKHR::pNext> : fexgen::custom_repack {};
+-// template<>
+-// struct fex_gen_config<&VkCopyImageInfo2::pNext> : fexgen::custom_repack {};
+-// template<>
+-// struct fex_gen_config<&VkCopyImageToBufferInfo2::pNext> : fexgen::custom_repack {};
++template<>
++struct fex_gen_config<&VkCopyImageInfo2::pNext> : fexgen::custom_repack {};
++template<>
++struct fex_gen_config<&VkCopyImageToBufferInfo2::pNext> : fexgen::custom_repack {};
+ // template<>
+ // struct fex_gen_config<&VkCopyImageToImageInfo::pNext> : fexgen::custom_repack {};
+ // template<>
+@@ -475,8 +480,8 @@ template<>
+ struct fex_gen_config<&VkDescriptorUpdateTemplateCreateInfo::pNext> : fexgen::custom_repack {};
+ template<>
+ struct fex_gen_config<&VkDeviceAddressBindingCallbackDataEXT::pNext> : fexgen::custom_repack {};
+-// template<>
+-// struct fex_gen_config<&VkDeviceBufferMemoryRequirements::pNext> : fexgen::custom_repack {};
++template<>
++struct fex_gen_config<&VkDeviceBufferMemoryRequirements::pNext> : fexgen::custom_repack {};
+ template<>
+ struct fex_gen_config<&VkDeviceCreateInfo::pNext> : fexgen::custom_repack {};
+ // template<>
+@@ -511,8 +516,8 @@ template<>
+ struct fex_gen_config<&VkDeviceGroupSubmitInfo::pNext> : fexgen::custom_repack {};
+ template<>
+ struct fex_gen_config<&VkDeviceGroupSwapchainCreateInfoKHR::pNext> : fexgen::custom_repack {};
+-// template<>
+-// struct fex_gen_config<&VkDeviceImageMemoryRequirements::pNext> : fexgen::custom_repack {};
++template<>
++struct fex_gen_config<&VkDeviceImageMemoryRequirements::pNext> : fexgen::custom_repack {};
+ template<>
+ struct fex_gen_config<&VkDeviceMemoryCopyKHR::pNext> : fexgen::custom_repack {};
+ template<>
+@@ -2007,8 +2012,8 @@ template<>
+ struct fex_gen_config<&VkRenderPassTileShadingCreateInfoQCOM::pNext> : fexgen::custom_repack {};
+ template<>
+ struct fex_gen_config<&VkRenderPassTransformBeginInfoQCOM::pNext> : fexgen::custom_repack {};
+-// template<>
+-// struct fex_gen_config<&VkResolveImageInfo2::pNext> : fexgen::custom_repack {};
++template<>
++struct fex_gen_config<&VkResolveImageInfo2::pNext> : fexgen::custom_repack {};
+ template<>
+ struct fex_gen_config<&VkResolveImageModeInfoKHR::pNext> : fexgen::custom_repack {};
+ // template<>
+@@ -2081,8 +2086,8 @@ template<>
+ struct fex_gen_config<&VkSparseImageMemoryRequirements2::pNext> : fexgen::custom_repack {};
+ template<>
+ struct fex_gen_config<&VkSubmitInfo::pNext> : fexgen::custom_repack {};
+-// template<>
+-// struct fex_gen_config<&VkSubmitInfo2::pNext> : fexgen::custom_repack {};
++template<>
++struct fex_gen_config<&VkSubmitInfo2::pNext> : fexgen::custom_repack {};
+ template<>
+ struct fex_gen_config<&VkSubpassBeginInfo::pNext> : fexgen::custom_repack {};
+ template<>
+@@ -2508,6 +2513,30 @@ struct fex_gen_config<&VkPipelineCacheCreateInfo::pInitialData> : fexgen::custom
+ // Command buffers are dispatchable handles, so on 32-bit they need to be repacked
+ template<>
+ struct fex_gen_config<&VkSubmitInfo::pCommandBuffers> : fexgen::custom_repack {};
++// SteamARM: arrays (and nested create infos) of the Vulkan 1.3 "*2" commands
++// DXVK and VKD3D-Proton use, repacked element by element (Host.cpp).
++template<>
++struct fex_gen_config<&VkCopyBufferInfo2::pRegions> : fexgen::custom_repack {};
++template<>
++struct fex_gen_config<&VkCopyBufferToImageInfo2::pRegions> : fexgen::custom_repack {};
++template<>
++struct fex_gen_config<&VkCopyImageInfo2::pRegions> : fexgen::custom_repack {};
++template<>
++struct fex_gen_config<&VkCopyImageToBufferInfo2::pRegions> : fexgen::custom_repack {};
++template<>
++struct fex_gen_config<&VkBlitImageInfo2::pRegions> : fexgen::custom_repack {};
++template<>
++struct fex_gen_config<&VkResolveImageInfo2::pRegions> : fexgen::custom_repack {};
++template<>
++struct fex_gen_config<&VkSubmitInfo2::pWaitSemaphoreInfos> : fexgen::custom_repack {};
++template<>
++struct fex_gen_config<&VkSubmitInfo2::pCommandBufferInfos> : fexgen::custom_repack {};
++template<>
++struct fex_gen_config<&VkSubmitInfo2::pSignalSemaphoreInfos> : fexgen::custom_repack {};
++template<>
++struct fex_gen_config<&VkDeviceBufferMemoryRequirements::pCreateInfo> : fexgen::custom_repack {};
++template<>
++struct fex_gen_config<&VkDeviceImageMemoryRequirements::pCreateInfo> : fexgen::custom_repack {};
+ 
+ template<>
+ struct fex_gen_config<&VkRenderingInfo::pColorAttachments> : fexgen::custom_repack {};
+@@ -2649,12 +2678,24 @@ struct fex_gen_config<vkUnmapMemory> {};
+ #ifndef IS_32BIT_THUNK
+ template<>
+ struct fex_gen_config<vkFlushMappedMemoryRanges> {};
++#else
++template<>
++struct fex_gen_config<vkFlushMappedMemoryRanges> : fexgen::custom_host_impl {};
++template<>
++struct fex_gen_param<vkFlushMappedMemoryRanges, 2, const VkMappedMemoryRange*> : fexgen::ptr_passthrough {};
++#endif
++#ifndef IS_32BIT_THUNK
+ template<>
+ struct fex_gen_config<vkInvalidateMappedMemoryRanges> {};
++#else
+ template<>
+-struct fex_gen_config<vkGetDeviceMemoryCommitment> {};
++struct fex_gen_config<vkInvalidateMappedMemoryRanges> : fexgen::custom_host_impl {};
++template<>
++struct fex_gen_param<vkInvalidateMappedMemoryRanges, 2, const VkMappedMemoryRange*> : fexgen::ptr_passthrough {};
+ #endif
+ template<>
++struct fex_gen_config<vkGetDeviceMemoryCommitment> {};
++template<>
+ struct fex_gen_config<vkBindBufferMemory> {};
+ template<>
+ struct fex_gen_config<vkBindImageMemory> {};
+@@ -2665,12 +2706,22 @@ struct fex_gen_config<vkGetImageMemoryRequirements> {};
+ #ifndef IS_32BIT_THUNK
+ template<>
+ struct fex_gen_config<vkGetImageSparseMemoryRequirements> {};
++#else
++template<>
++struct fex_gen_config<vkGetImageSparseMemoryRequirements> : fexgen::custom_host_impl {};
++template<>
++struct fex_gen_param<vkGetImageSparseMemoryRequirements, 3, VkSparseImageMemoryRequirements*> : fexgen::ptr_passthrough {};
+ #endif
+ template<>
+ struct fex_gen_config<vkGetPhysicalDeviceSparseImageFormatProperties> {};
+ #ifndef IS_32BIT_THUNK
+ template<>
+ struct fex_gen_config<vkQueueBindSparse> {};
++#else
++template<>
++struct fex_gen_config<vkQueueBindSparse> : fexgen::custom_host_impl {};
++template<>
++struct fex_gen_param<vkQueueBindSparse, 2, const VkBindSparseInfo*> : fexgen::ptr_passthrough {};
+ #endif
+ template<>
+ struct fex_gen_config<vkCreateFence> {};
+@@ -2678,17 +2729,14 @@ template<>
+ struct fex_gen_config<vkDestroyFence> {};
+ template<>
+ struct fex_gen_config<vkResetFences> {};
+-#ifndef IS_32BIT_THUNK
+ template<>
+ struct fex_gen_config<vkGetFenceStatus> {};
+-#endif
+ template<>
+ struct fex_gen_config<vkWaitForFences> {};
+ template<>
+ struct fex_gen_config<vkCreateSemaphore> {};
+ template<>
+ struct fex_gen_config<vkDestroySemaphore> {};
+-#ifndef IS_32BIT_THUNK
+ template<>
+ struct fex_gen_config<vkCreateQueryPool> {};
+ template<>
+@@ -2697,7 +2745,6 @@ template<>
+ struct fex_gen_config<vkGetQueryPoolResults> {};
+ template<>
+ struct fex_gen_param<vkGetQueryPoolResults, 5, void*> : fexgen::assume_compatible_data_layout {};
+-#endif
+ template<>
+ struct fex_gen_config<vkCreateBuffer> {};
+ template<>
+@@ -2745,24 +2792,51 @@ struct fex_gen_config<vkResetCommandBuffer> {};
+ #ifndef IS_32BIT_THUNK
+ template<>
+ struct fex_gen_config<vkCmdCopyBuffer> {};
++#else
+ template<>
+-struct fex_gen_config<vkCmdCopyImage> {};
++struct fex_gen_config<vkCmdCopyBuffer> : fexgen::custom_host_impl {};
++template<>
++struct fex_gen_param<vkCmdCopyBuffer, 4, const VkBufferCopy*> : fexgen::ptr_passthrough {};
+ #endif
+ template<>
++struct fex_gen_config<vkCmdCopyImage> {};
++#ifndef IS_32BIT_THUNK
++template<>
+ struct fex_gen_config<vkCmdCopyBufferToImage> {};
++#else
++template<>
++struct fex_gen_config<vkCmdCopyBufferToImage> : fexgen::custom_host_impl {};
++template<>
++struct fex_gen_param<vkCmdCopyBufferToImage, 5, const VkBufferImageCopy*> : fexgen::ptr_passthrough {};
++#endif
+ #ifndef IS_32BIT_THUNK
+ template<>
+ struct fex_gen_config<vkCmdCopyImageToBuffer> {};
++#else
++template<>
++struct fex_gen_config<vkCmdCopyImageToBuffer> : fexgen::custom_host_impl {};
++template<>
++struct fex_gen_param<vkCmdCopyImageToBuffer, 5, const VkBufferImageCopy*> : fexgen::ptr_passthrough {};
++#endif
+ template<>
+ struct fex_gen_config<vkCmdUpdateBuffer> {};
+ template<>
+ struct fex_gen_param<vkCmdUpdateBuffer, 4, const void*> : fexgen::assume_compatible_data_layout {};
+ template<>
+ struct fex_gen_config<vkCmdFillBuffer> {};
+-#endif
++#ifndef IS_32BIT_THUNK
+ template<>
+ struct fex_gen_config<vkCmdPipelineBarrier> {};
+-#ifndef IS_32BIT_THUNK
++#else
++template<>
++struct fex_gen_config<vkCmdPipelineBarrier> : fexgen::custom_host_impl {};
++template<>
++struct fex_gen_param<vkCmdPipelineBarrier, 5, const VkMemoryBarrier*> : fexgen::ptr_passthrough {};
++template<>
++struct fex_gen_param<vkCmdPipelineBarrier, 7, const VkBufferMemoryBarrier*> : fexgen::ptr_passthrough {};
++template<>
++struct fex_gen_param<vkCmdPipelineBarrier, 9, const VkImageMemoryBarrier*> : fexgen::ptr_passthrough {};
++#endif
+ template<>
+ struct fex_gen_config<vkCmdBeginQuery> {};
+ template<>
+@@ -2773,8 +2847,15 @@ template<>
+ struct fex_gen_config<vkCmdWriteTimestamp> {};
+ template<>
+ struct fex_gen_config<vkCmdCopyQueryPoolResults> {};
++#ifndef IS_32BIT_THUNK
+ template<>
+ struct fex_gen_config<vkCmdExecuteCommands> {};
++#else
++template<>
++struct fex_gen_config<vkCmdExecuteCommands> : fexgen::custom_host_impl {};
++template<>
++struct fex_gen_param<vkCmdExecuteCommands, 2, const VkCommandBuffer*> : fexgen::ptr_passthrough {};
++#endif
+ template<>
+ struct fex_gen_config<vkCreateEvent> {};
+ template<>
+@@ -2785,7 +2866,6 @@ template<>
+ struct fex_gen_config<vkSetEvent> {};
+ template<>
+ struct fex_gen_config<vkResetEvent> {};
+-#endif
+ template<>
+ struct fex_gen_config<vkCreateBufferView> {};
+ template<>
+@@ -2809,11 +2889,16 @@ struct fex_gen_param<vkGetPipelineCacheData, 2, size_t*> : fexgen::ptr_passthrou
+ #endif
+ template<>
+ struct fex_gen_param<vkGetPipelineCacheData, 3, void*> : fexgen::assume_compatible_data_layout {};
+-#ifndef IS_32BIT_THUNK
+ template<>
+ struct fex_gen_config<vkMergePipelineCaches> {};
++#ifndef IS_32BIT_THUNK
+ template<>
+ struct fex_gen_config<vkCreateComputePipelines> {};
++#else
++template<>
++struct fex_gen_config<vkCreateComputePipelines> : fexgen::custom_host_impl {};
++template<>
++struct fex_gen_param<vkCreateComputePipelines, 3, const VkComputePipelineCreateInfo*> : fexgen::ptr_passthrough {};
+ #endif
+ template<>
+ struct fex_gen_config<vkDestroyPipeline> {};
+@@ -2854,7 +2939,6 @@ template<>
+ struct fex_gen_config<vkCmdBindPipeline> {};
+ template<>
+ struct fex_gen_config<vkCmdBindDescriptorSets> {};
+-#ifndef IS_32BIT_THUNK
+ template<>
+ struct fex_gen_config<vkCmdClearColorImage> {};
+ template<>
+@@ -2865,17 +2949,34 @@ template<>
+ struct fex_gen_config<vkCmdSetEvent> {};
+ template<>
+ struct fex_gen_config<vkCmdResetEvent> {};
++#ifndef IS_32BIT_THUNK
+ template<>
+ struct fex_gen_config<vkCmdWaitEvents> {};
++#else
++template<>
++struct fex_gen_config<vkCmdWaitEvents> : fexgen::custom_host_impl {};
++template<>
++struct fex_gen_param<vkCmdWaitEvents, 6, const VkMemoryBarrier*> : fexgen::ptr_passthrough {};
++template<>
++struct fex_gen_param<vkCmdWaitEvents, 8, const VkBufferMemoryBarrier*> : fexgen::ptr_passthrough {};
++template<>
++struct fex_gen_param<vkCmdWaitEvents, 10, const VkImageMemoryBarrier*> : fexgen::ptr_passthrough {};
++#endif
+ template<>
+ struct fex_gen_config<vkCmdPushConstants> {};
+ template<>
+ struct fex_gen_param<vkCmdPushConstants, 5, const void*> : fexgen::assume_compatible_data_layout {};
+-#endif
+ 
+ // TODO: Should be custom_host_impl since there may be more than one VkGraphicsPipelineCreateInfo and more than one output pipeline
++#ifndef IS_32BIT_THUNK
+ template<>
+ struct fex_gen_config<vkCreateGraphicsPipelines> {};
++#else
++template<>
++struct fex_gen_config<vkCreateGraphicsPipelines> : fexgen::custom_host_impl {};
++template<>
++struct fex_gen_param<vkCreateGraphicsPipelines, 3, const VkGraphicsPipelineCreateInfo*> : fexgen::ptr_passthrough {};
++#endif
+ template<>
+ struct fex_gen_config<vkCreateFramebuffer> {};
+ template<>
+@@ -2910,7 +3011,6 @@ template<>
+ struct fex_gen_config<vkCmdBindVertexBuffers> {};
+ template<>
+ struct fex_gen_config<vkCmdDraw> {};
+-#ifndef IS_32BIT_THUNK
+ template<>
+ struct fex_gen_config<vkCmdDrawIndexed> {};
+ template<>
+@@ -2921,19 +3021,14 @@ template<>
+ struct fex_gen_config<vkCmdBlitImage> {};
+ template<>
+ struct fex_gen_config<vkCmdClearDepthStencilImage> {};
+-#endif
+ template<>
+ struct fex_gen_config<vkCmdClearAttachments> {};
+-#ifndef IS_32BIT_THUNK
+ template<>
+ struct fex_gen_config<vkCmdResolveImage> {};
+-#endif
+ template<>
+ struct fex_gen_config<vkCmdBeginRenderPass> {};
+-#ifndef IS_32BIT_THUNK
+ template<>
+ struct fex_gen_config<vkCmdNextSubpass> {};
+-#endif
+ template<>
+ struct fex_gen_config<vkCmdEndRenderPass> {};
+ template<>
+@@ -2941,22 +3036,41 @@ struct fex_gen_config<vkEnumerateInstanceVersion> {};
+ #ifndef IS_32BIT_THUNK
+ template<>
+ struct fex_gen_config<vkBindBufferMemory2> {};
++#else
++template<>
++struct fex_gen_config<vkBindBufferMemory2> : fexgen::custom_host_impl {};
++template<>
++struct fex_gen_param<vkBindBufferMemory2, 2, const VkBindBufferMemoryInfo*> : fexgen::ptr_passthrough {};
++#endif
++#ifndef IS_32BIT_THUNK
+ template<>
+ struct fex_gen_config<vkBindImageMemory2> {};
++#else
++template<>
++struct fex_gen_config<vkBindImageMemory2> : fexgen::custom_host_impl {};
++template<>
++struct fex_gen_param<vkBindImageMemory2, 2, const VkBindImageMemoryInfo*> : fexgen::ptr_passthrough {};
++#endif
+ template<>
+ struct fex_gen_config<vkGetDeviceGroupPeerMemoryFeatures> {};
+ template<>
+ struct fex_gen_config<vkCmdSetDeviceMask> {};
++#ifndef IS_32BIT_THUNK
+ template<>
+ struct fex_gen_config<vkEnumeratePhysicalDeviceGroups> {};
+ #endif
+ template<>
+ struct fex_gen_config<vkGetImageMemoryRequirements2> {};
+-#ifndef IS_32BIT_THUNK
+ template<>
+ struct fex_gen_config<vkGetBufferMemoryRequirements2> {};
++#ifndef IS_32BIT_THUNK
+ template<>
+ struct fex_gen_config<vkGetImageSparseMemoryRequirements2> {};
++#else
++template<>
++struct fex_gen_config<vkGetImageSparseMemoryRequirements2> : fexgen::custom_host_impl {};
++template<>
++struct fex_gen_param<vkGetImageSparseMemoryRequirements2, 3, VkSparseImageMemoryRequirements2*> : fexgen::ptr_passthrough {};
+ #endif
+ template<>
+ struct fex_gen_config<vkGetPhysicalDeviceFeatures2> {};
+@@ -2969,14 +3083,34 @@ struct fex_gen_config<vkGetPhysicalDeviceImageFormatProperties2> {};
+ #ifndef IS_32BIT_THUNK
+ template<>
+ struct fex_gen_config<vkGetPhysicalDeviceQueueFamilyProperties2> {};
++#else
++template<>
++struct fex_gen_config<vkGetPhysicalDeviceQueueFamilyProperties2> : fexgen::custom_host_impl {};
++template<>
++struct fex_gen_param<vkGetPhysicalDeviceQueueFamilyProperties2, 2, VkQueueFamilyProperties2*> : fexgen::ptr_passthrough {};
++#endif
+ template<>
+ struct fex_gen_config<vkGetPhysicalDeviceMemoryProperties2> {};
++#ifndef IS_32BIT_THUNK
+ template<>
+ struct fex_gen_config<vkGetPhysicalDeviceSparseImageFormatProperties2> {};
++#else
++template<>
++struct fex_gen_config<vkGetPhysicalDeviceSparseImageFormatProperties2> : fexgen::custom_host_impl {};
++template<>
++struct fex_gen_param<vkGetPhysicalDeviceSparseImageFormatProperties2, 3, VkSparseImageFormatProperties2*> : fexgen::ptr_passthrough {};
++#endif
+ template<>
+ struct fex_gen_config<vkTrimCommandPool> {};
++#ifndef IS_32BIT_THUNK
+ template<>
+ struct fex_gen_config<vkGetDeviceQueue2> {};
++#else
++template<>
++struct fex_gen_config<vkGetDeviceQueue2> : fexgen::custom_host_impl {};
++template<>
++struct fex_gen_param<vkGetDeviceQueue2, 2, VkQueue*> : fexgen::ptr_passthrough {};
++#endif
+ template<>
+ struct fex_gen_config<vkGetPhysicalDeviceExternalBufferProperties> {};
+ template<>
+@@ -2985,7 +3119,6 @@ template<>
+ struct fex_gen_config<vkGetPhysicalDeviceExternalSemaphoreProperties> {};
+ template<>
+ struct fex_gen_config<vkCmdDispatchBase> {};
+-#endif
+ template<>
+ struct fex_gen_config<vkCreateDescriptorUpdateTemplate> {};
+ template<>
+@@ -2996,7 +3129,6 @@ template<>
+ struct fex_gen_param<vkUpdateDescriptorSetWithTemplate, 3, const void*> : fexgen::assume_compatible_data_layout {};
+ template<>
+ struct fex_gen_config<vkGetDescriptorSetLayoutSupport> {};
+-#ifndef IS_32BIT_THUNK
+ template<>
+ struct fex_gen_config<vkCreateSamplerYcbcrConversion> {};
+ template<>
+@@ -3005,16 +3137,12 @@ template<>
+ struct fex_gen_config<vkResetQueryPool> {};
+ template<>
+ struct fex_gen_config<vkGetSemaphoreCounterValue> {};
+-#endif
+ template<>
+ struct fex_gen_config<vkWaitSemaphores> {};
+-#ifndef IS_32BIT_THUNK
+ template<>
+ struct fex_gen_config<vkSignalSemaphore> {};
+-#endif
+ template<>
+ struct fex_gen_config<vkGetBufferDeviceAddress> {};
+-#ifndef IS_32BIT_THUNK
+ template<>
+ struct fex_gen_config<vkGetBufferOpaqueCaptureAddress> {};
+ template<>
+@@ -3023,18 +3151,23 @@ template<>
+ struct fex_gen_config<vkCmdDrawIndirectCount> {};
+ template<>
+ struct fex_gen_config<vkCmdDrawIndexedIndirectCount> {};
+-#endif
+ template<>
+ struct fex_gen_config<vkCreateRenderPass2> {};
+-#ifndef IS_32BIT_THUNK
+ template<>
+ struct fex_gen_config<vkCmdBeginRenderPass2> {};
+ template<>
+ struct fex_gen_config<vkCmdNextSubpass2> {};
+ template<>
+ struct fex_gen_config<vkCmdEndRenderPass2> {};
++#ifndef IS_32BIT_THUNK
+ template<>
+ struct fex_gen_config<vkGetPhysicalDeviceToolProperties> {};
++#else
++template<>
++struct fex_gen_config<vkGetPhysicalDeviceToolProperties> : fexgen::custom_host_impl {};
++template<>
++struct fex_gen_param<vkGetPhysicalDeviceToolProperties, 2, VkPhysicalDeviceToolProperties*> : fexgen::ptr_passthrough {};
++#endif
+ template<>
+ struct fex_gen_config<vkCreatePrivateDataSlot> {};
+ template<>
+@@ -3043,14 +3176,19 @@ template<>
+ struct fex_gen_config<vkSetPrivateData> {};
+ template<>
+ struct fex_gen_config<vkGetPrivateData> {};
+-#endif
+ template<>
+ struct fex_gen_config<vkCmdPipelineBarrier2> {};
+-#ifndef IS_32BIT_THUNK
+ template<>
+ struct fex_gen_config<vkCmdWriteTimestamp2> {};
++#ifndef IS_32BIT_THUNK
+ template<>
+ struct fex_gen_config<vkQueueSubmit2> {};
++#else
++template<>
++struct fex_gen_config<vkQueueSubmit2> : fexgen::custom_host_impl {};
++template<>
++struct fex_gen_param<vkQueueSubmit2, 2, const VkSubmitInfo2*> : fexgen::ptr_passthrough {};
++#endif
+ template<>
+ struct fex_gen_config<vkCmdCopyBuffer2> {};
+ template<>
+@@ -3063,19 +3201,32 @@ template<>
+ struct fex_gen_config<vkGetDeviceBufferMemoryRequirements> {};
+ template<>
+ struct fex_gen_config<vkGetDeviceImageMemoryRequirements> {};
++#ifndef IS_32BIT_THUNK
+ template<>
+ struct fex_gen_config<vkGetDeviceImageSparseMemoryRequirements> {};
++#else
++template<>
++struct fex_gen_config<vkGetDeviceImageSparseMemoryRequirements> : fexgen::custom_host_impl {};
++template<>
++struct fex_gen_param<vkGetDeviceImageSparseMemoryRequirements, 3, VkSparseImageMemoryRequirements2*> : fexgen::ptr_passthrough {};
++#endif
+ template<>
+ struct fex_gen_config<vkCmdSetEvent2> {};
+ template<>
+ struct fex_gen_config<vkCmdResetEvent2> {};
++#ifndef IS_32BIT_THUNK
+ template<>
+ struct fex_gen_config<vkCmdWaitEvents2> {};
++#else
++template<>
++struct fex_gen_config<vkCmdWaitEvents2> : fexgen::custom_host_impl {};
++template<>
++struct fex_gen_param<vkCmdWaitEvents2, 3, const VkDependencyInfo*> : fexgen::ptr_passthrough {};
++#endif
+ template<>
+ struct fex_gen_config<vkCmdBlitImage2> {};
+ template<>
+ struct fex_gen_config<vkCmdResolveImage2> {};
+-#endif
+ template<>
+ struct fex_gen_config<vkCmdBeginRendering> {};
+ template<>
+@@ -3127,6 +3278,8 @@ struct fex_gen_config<vkCopyMemoryToImage> {};
+ #ifndef IS_32BIT_THUNK
+ template<>
+ struct fex_gen_config<vkCopyImageToMemory> {};
++#endif
++#ifndef IS_32BIT_THUNK
+ template<>
+ struct fex_gen_config<vkCopyImageToImage> {};
+ #endif
+@@ -3135,20 +3288,44 @@ struct fex_gen_config<vkTransitionImageLayout> {};
+ #ifndef IS_32BIT_THUNK
+ template<>
+ struct fex_gen_config<vkCmdPushDescriptorSet> {};
++#else
++template<>
++struct fex_gen_config<vkCmdPushDescriptorSet> : fexgen::custom_host_impl {};
++template<>
++struct fex_gen_param<vkCmdPushDescriptorSet, 5, const VkWriteDescriptorSet*> : fexgen::ptr_passthrough {};
+ #endif
+ template<>
+ struct fex_gen_config<vkCmdPushDescriptorSetWithTemplate> {};
+ template<>
+ struct fex_gen_param<vkCmdPushDescriptorSetWithTemplate, 4, const void*> : fexgen::assume_compatible_data_layout {};
+-#ifndef IS_32BIT_THUNK
+ template<>
+ struct fex_gen_config<vkCmdBindDescriptorSets2> {};
++#ifndef IS_32BIT_THUNK
+ template<>
+ struct fex_gen_config<vkCmdPushConstants2> {};
++#else
++template<>
++struct fex_gen_config<vkCmdPushConstants2> : fexgen::custom_host_impl {};
++template<>
++struct fex_gen_param<vkCmdPushConstants2, 1, const VkPushConstantsInfo*> : fexgen::ptr_passthrough {};
++#endif
++#ifndef IS_32BIT_THUNK
+ template<>
+ struct fex_gen_config<vkCmdPushDescriptorSet2> {};
++#else
++template<>
++struct fex_gen_config<vkCmdPushDescriptorSet2> : fexgen::custom_host_impl {};
++template<>
++struct fex_gen_param<vkCmdPushDescriptorSet2, 1, const VkPushDescriptorSetInfo*> : fexgen::ptr_passthrough {};
++#endif
++#ifndef IS_32BIT_THUNK
+ template<>
+ struct fex_gen_config<vkCmdPushDescriptorSetWithTemplate2> {};
++#else
++template<>
++struct fex_gen_config<vkCmdPushDescriptorSetWithTemplate2> : fexgen::custom_host_impl {};
++template<>
++struct fex_gen_param<vkCmdPushDescriptorSetWithTemplate2, 1, const VkPushDescriptorSetWithTemplateInfo*> : fexgen::ptr_passthrough {};
+ #endif
+ template<>
+ struct fex_gen_config<vkCmdSetLineStipple> {};
+@@ -3156,12 +3333,10 @@ template<>
+ struct fex_gen_config<vkCmdBindIndexBuffer2> {};
+ template<>
+ struct fex_gen_config<vkGetRenderingAreaGranularity> {};
+-#ifndef IS_32BIT_THUNK
+ template<>
+ struct fex_gen_config<vkCmdSetRenderingAttachmentLocations> {};
+ template<>
+ struct fex_gen_config<vkCmdSetRenderingInputAttachmentIndices> {};
+-#endif
+ template<>
+ struct fex_gen_config<vkDestroySurfaceKHR> {};
+ template<>
+@@ -3182,7 +3357,6 @@ template<>
+ struct fex_gen_config<vkAcquireNextImageKHR> {};
+ template<>
+ struct fex_gen_config<vkQueuePresentKHR> {};
+-#ifndef IS_32BIT_THUNK
+ template<>
+ struct fex_gen_config<vkGetDeviceGroupPresentCapabilitiesKHR> {};
+ template<>
+@@ -3191,48 +3365,88 @@ template<>
+ struct fex_gen_config<vkGetPhysicalDevicePresentRectanglesKHR> {};
+ template<>
+ struct fex_gen_config<vkAcquireNextImage2KHR> {};
++#ifndef IS_32BIT_THUNK
+ template<>
+ struct fex_gen_config<vkGetPhysicalDeviceDisplayPropertiesKHR> {};
++#endif
++#ifndef IS_32BIT_THUNK
+ template<>
+ struct fex_gen_config<vkGetPhysicalDeviceDisplayPlanePropertiesKHR> {};
++#endif
++#ifndef IS_32BIT_THUNK
+ template<>
+ struct fex_gen_config<vkGetDisplayPlaneSupportedDisplaysKHR> {};
++#endif
++#ifndef IS_32BIT_THUNK
+ template<>
+ struct fex_gen_config<vkGetDisplayModePropertiesKHR> {};
++#endif
++#ifndef IS_32BIT_THUNK
+ template<>
+ struct fex_gen_config<vkCreateDisplayModeKHR> {};
++#endif
++#ifndef IS_32BIT_THUNK
+ template<>
+ struct fex_gen_config<vkGetDisplayPlaneCapabilitiesKHR> {};
++#endif
++#ifndef IS_32BIT_THUNK
+ template<>
+ struct fex_gen_config<vkCreateDisplayPlaneSurfaceKHR> {};
++#endif
+ template<>
+ struct fex_gen_config<vkCreateSharedSwapchainsKHR> {};
++#ifndef IS_32BIT_THUNK
+ template<>
+ struct fex_gen_config<vkGetPhysicalDeviceVideoCapabilitiesKHR> {};
++#endif
++#ifndef IS_32BIT_THUNK
+ template<>
+ struct fex_gen_config<vkGetPhysicalDeviceVideoFormatPropertiesKHR> {};
++#endif
++#ifndef IS_32BIT_THUNK
+ template<>
+ struct fex_gen_config<vkCreateVideoSessionKHR> {};
++#endif
++#ifndef IS_32BIT_THUNK
+ template<>
+ struct fex_gen_config<vkDestroyVideoSessionKHR> {};
++#endif
++#ifndef IS_32BIT_THUNK
+ template<>
+ struct fex_gen_config<vkGetVideoSessionMemoryRequirementsKHR> {};
++#endif
++#ifndef IS_32BIT_THUNK
+ template<>
+ struct fex_gen_config<vkBindVideoSessionMemoryKHR> {};
++#endif
++#ifndef IS_32BIT_THUNK
+ template<>
+ struct fex_gen_config<vkCreateVideoSessionParametersKHR> {};
++#endif
++#ifndef IS_32BIT_THUNK
+ template<>
+ struct fex_gen_config<vkUpdateVideoSessionParametersKHR> {};
++#endif
++#ifndef IS_32BIT_THUNK
+ template<>
+ struct fex_gen_config<vkDestroyVideoSessionParametersKHR> {};
++#endif
++#ifndef IS_32BIT_THUNK
+ template<>
+ struct fex_gen_config<vkCmdBeginVideoCodingKHR> {};
++#endif
++#ifndef IS_32BIT_THUNK
+ template<>
+ struct fex_gen_config<vkCmdEndVideoCodingKHR> {};
++#endif
++#ifndef IS_32BIT_THUNK
+ template<>
+ struct fex_gen_config<vkCmdControlVideoCodingKHR> {};
++#endif
++#ifndef IS_32BIT_THUNK
+ template<>
+ struct fex_gen_config<vkCmdDecodeVideoKHR> {};
++#endif
+ template<>
+ struct fex_gen_config<vkCmdBeginRenderingKHR> {};
+ template<>
+@@ -3245,12 +3459,26 @@ template<>
+ struct fex_gen_config<vkGetPhysicalDeviceFormatProperties2KHR> {};
+ template<>
+ struct fex_gen_config<vkGetPhysicalDeviceImageFormatProperties2KHR> {};
++#ifndef IS_32BIT_THUNK
+ template<>
+ struct fex_gen_config<vkGetPhysicalDeviceQueueFamilyProperties2KHR> {};
++#else
++template<>
++struct fex_gen_config<vkGetPhysicalDeviceQueueFamilyProperties2KHR> : fexgen::custom_host_impl {};
++template<>
++struct fex_gen_param<vkGetPhysicalDeviceQueueFamilyProperties2KHR, 2, VkQueueFamilyProperties2*> : fexgen::ptr_passthrough {};
++#endif
+ template<>
+ struct fex_gen_config<vkGetPhysicalDeviceMemoryProperties2KHR> {};
++#ifndef IS_32BIT_THUNK
+ template<>
+ struct fex_gen_config<vkGetPhysicalDeviceSparseImageFormatProperties2KHR> {};
++#else
++template<>
++struct fex_gen_config<vkGetPhysicalDeviceSparseImageFormatProperties2KHR> : fexgen::custom_host_impl {};
++template<>
++struct fex_gen_param<vkGetPhysicalDeviceSparseImageFormatProperties2KHR, 3, VkSparseImageFormatProperties2*> : fexgen::ptr_passthrough {};
++#endif
+ template<>
+ struct fex_gen_config<vkGetDeviceGroupPeerMemoryFeaturesKHR> {};
+ template<>
+@@ -3259,8 +3487,10 @@ template<>
+ struct fex_gen_config<vkCmdDispatchBaseKHR> {};
+ template<>
+ struct fex_gen_config<vkTrimCommandPoolKHR> {};
++#ifndef IS_32BIT_THUNK
+ template<>
+ struct fex_gen_config<vkEnumeratePhysicalDeviceGroupsKHR> {};
++#endif
+ template<>
+ struct fex_gen_config<vkGetPhysicalDeviceExternalBufferPropertiesKHR> {};
+ template<>
+@@ -3273,8 +3503,14 @@ template<>
+ struct fex_gen_config<vkImportSemaphoreFdKHR> {};
+ template<>
+ struct fex_gen_config<vkGetSemaphoreFdKHR> {};
++#ifndef IS_32BIT_THUNK
+ template<>
+ struct fex_gen_config<vkCmdPushDescriptorSetKHR> {};
++#else
++template<>
++struct fex_gen_config<vkCmdPushDescriptorSetKHR> : fexgen::custom_host_impl {};
++template<>
++struct fex_gen_param<vkCmdPushDescriptorSetKHR, 5, const VkWriteDescriptorSet*> : fexgen::ptr_passthrough {};
+ #endif
+ template<>
+ struct fex_gen_config<vkCmdPushDescriptorSetWithTemplateKHR> {};
+@@ -3290,7 +3526,6 @@ template<>
+ struct fex_gen_param<vkUpdateDescriptorSetWithTemplateKHR, 3, const void*> : fexgen::assume_compatible_data_layout {};
+ template<>
+ struct fex_gen_config<vkCreateRenderPass2KHR> {};
+-#ifndef IS_32BIT_THUNK
+ template<>
+ struct fex_gen_config<vkCmdBeginRenderPass2KHR> {};
+ template<>
+@@ -3305,40 +3540,80 @@ template<>
+ struct fex_gen_config<vkImportFenceFdKHR> {};
+ template<>
+ struct fex_gen_config<vkGetFenceFdKHR> {};
++#ifndef IS_32BIT_THUNK
+ template<>
+ struct fex_gen_config<vkEnumeratePhysicalDeviceQueueFamilyPerformanceQueryCountersKHR> {};
++#endif
++#ifndef IS_32BIT_THUNK
+ template<>
+ struct fex_gen_config<vkGetPhysicalDeviceQueueFamilyPerformanceQueryPassesKHR> {};
++#endif
+ template<>
+ struct fex_gen_config<vkAcquireProfilingLockKHR> {};
+ template<>
+ struct fex_gen_config<vkReleaseProfilingLockKHR> {};
+ template<>
+ struct fex_gen_config<vkGetPhysicalDeviceSurfaceCapabilities2KHR> {};
++#ifndef IS_32BIT_THUNK
+ template<>
+ struct fex_gen_config<vkGetPhysicalDeviceSurfaceFormats2KHR> {};
++#else
+ template<>
+-struct fex_gen_config<vkGetPhysicalDeviceDisplayProperties2KHR> {};
++struct fex_gen_config<vkGetPhysicalDeviceSurfaceFormats2KHR> : fexgen::custom_host_impl {};
+ template<>
+-struct fex_gen_config<vkGetPhysicalDeviceDisplayPlaneProperties2KHR> {};
++struct fex_gen_param<vkGetPhysicalDeviceSurfaceFormats2KHR, 3, VkSurfaceFormat2KHR*> : fexgen::ptr_passthrough {};
++#endif
++#ifndef IS_32BIT_THUNK
+ template<>
+-struct fex_gen_config<vkGetDisplayModeProperties2KHR> {};
++struct fex_gen_config<vkGetPhysicalDeviceDisplayProperties2KHR> {};
++#endif
++#ifndef IS_32BIT_THUNK
++template<>
++struct fex_gen_config<vkGetPhysicalDeviceDisplayPlaneProperties2KHR> {};
++#endif
++#ifndef IS_32BIT_THUNK
++template<>
++struct fex_gen_config<vkGetDisplayModeProperties2KHR> {};
++#endif
++#ifndef IS_32BIT_THUNK
+ template<>
+ struct fex_gen_config<vkGetDisplayPlaneCapabilities2KHR> {};
++#endif
+ template<>
+ struct fex_gen_config<vkGetImageMemoryRequirements2KHR> {};
+ template<>
+ struct fex_gen_config<vkGetBufferMemoryRequirements2KHR> {};
++#ifndef IS_32BIT_THUNK
+ template<>
+ struct fex_gen_config<vkGetImageSparseMemoryRequirements2KHR> {};
++#else
++template<>
++struct fex_gen_config<vkGetImageSparseMemoryRequirements2KHR> : fexgen::custom_host_impl {};
++template<>
++struct fex_gen_param<vkGetImageSparseMemoryRequirements2KHR, 3, VkSparseImageMemoryRequirements2*> : fexgen::ptr_passthrough {};
++#endif
+ template<>
+ struct fex_gen_config<vkCreateSamplerYcbcrConversionKHR> {};
+ template<>
+ struct fex_gen_config<vkDestroySamplerYcbcrConversionKHR> {};
++#ifndef IS_32BIT_THUNK
+ template<>
+ struct fex_gen_config<vkBindBufferMemory2KHR> {};
++#else
++template<>
++struct fex_gen_config<vkBindBufferMemory2KHR> : fexgen::custom_host_impl {};
++template<>
++struct fex_gen_param<vkBindBufferMemory2KHR, 2, const VkBindBufferMemoryInfo*> : fexgen::ptr_passthrough {};
++#endif
++#ifndef IS_32BIT_THUNK
+ template<>
+ struct fex_gen_config<vkBindImageMemory2KHR> {};
++#else
++template<>
++struct fex_gen_config<vkBindImageMemory2KHR> : fexgen::custom_host_impl {};
++template<>
++struct fex_gen_param<vkBindImageMemory2KHR, 2, const VkBindImageMemoryInfo*> : fexgen::ptr_passthrough {};
++#endif
+ template<>
+ struct fex_gen_config<vkGetDescriptorSetLayoutSupportKHR> {};
+ template<>
+@@ -3351,8 +3626,15 @@ template<>
+ struct fex_gen_config<vkWaitSemaphoresKHR> {};
+ template<>
+ struct fex_gen_config<vkSignalSemaphoreKHR> {};
++#ifndef IS_32BIT_THUNK
+ template<>
+ struct fex_gen_config<vkGetPhysicalDeviceFragmentShadingRatesKHR> {};
++#else
++template<>
++struct fex_gen_config<vkGetPhysicalDeviceFragmentShadingRatesKHR> : fexgen::custom_host_impl {};
++template<>
++struct fex_gen_param<vkGetPhysicalDeviceFragmentShadingRatesKHR, 2, VkPhysicalDeviceFragmentShadingRateKHR*> : fexgen::ptr_passthrough {};
++#endif
+ template<>
+ struct fex_gen_config<vkCmdSetFragmentShadingRateKHR> {};
+ template<>
+@@ -3377,52 +3659,90 @@ template<>
+ struct fex_gen_config<vkGetDeferredOperationResultKHR> {};
+ template<>
+ struct fex_gen_config<vkDeferredOperationJoinKHR> {};
++#ifndef IS_32BIT_THUNK
+ template<>
+ struct fex_gen_config<vkGetPipelineExecutablePropertiesKHR> {};
++#endif
++#ifndef IS_32BIT_THUNK
+ template<>
+ struct fex_gen_config<vkGetPipelineExecutableStatisticsKHR> {};
++#endif
++#ifndef IS_32BIT_THUNK
+ template<>
+ struct fex_gen_config<vkGetPipelineExecutableInternalRepresentationsKHR> {};
++#endif
++#ifndef IS_32BIT_THUNK
+ template<>
+ struct fex_gen_config<vkMapMemory2KHR> {};
++#endif
+ template<>
+ struct fex_gen_config<vkUnmapMemory2KHR> {};
++#ifndef IS_32BIT_THUNK
+ template<>
+ struct fex_gen_config<vkGetPhysicalDeviceVideoEncodeQualityLevelPropertiesKHR> {};
++#endif
++#ifndef IS_32BIT_THUNK
+ template<>
+ struct fex_gen_config<vkGetEncodedVideoSessionParametersKHR> {};
++#endif
++#ifndef IS_32BIT_THUNK
+ template<>
+ struct fex_gen_config<vkCmdEncodeVideoKHR> {};
++#endif
+ template<>
+ struct fex_gen_config<vkCmdSetEvent2KHR> {};
+ template<>
+ struct fex_gen_config<vkCmdResetEvent2KHR> {};
++#ifndef IS_32BIT_THUNK
+ template<>
+ struct fex_gen_config<vkCmdWaitEvents2KHR> {};
++#else
++template<>
++struct fex_gen_config<vkCmdWaitEvents2KHR> : fexgen::custom_host_impl {};
++template<>
++struct fex_gen_param<vkCmdWaitEvents2KHR, 3, const VkDependencyInfo*> : fexgen::ptr_passthrough {};
++#endif
+ template<>
+ struct fex_gen_config<vkCmdPipelineBarrier2KHR> {};
+ template<>
+ struct fex_gen_config<vkCmdWriteTimestamp2KHR> {};
++#ifndef IS_32BIT_THUNK
+ template<>
+ struct fex_gen_config<vkQueueSubmit2KHR> {};
++#else
++template<>
++struct fex_gen_config<vkQueueSubmit2KHR> : fexgen::custom_host_impl {};
++template<>
++struct fex_gen_param<vkQueueSubmit2KHR, 2, const VkSubmitInfo2*> : fexgen::ptr_passthrough {};
++#endif
+ template<>
+ struct fex_gen_config<vkCmdBindIndexBuffer3KHR> {};
++#ifndef IS_32BIT_THUNK
+ template<>
+ struct fex_gen_config<vkCmdBindVertexBuffers3KHR> {};
++#endif
+ template<>
+ struct fex_gen_config<vkCmdDrawIndirect2KHR> {};
+ template<>
+ struct fex_gen_config<vkCmdDrawIndexedIndirect2KHR> {};
+ template<>
+ struct fex_gen_config<vkCmdDispatchIndirect2KHR> {};
++#ifndef IS_32BIT_THUNK
+ template<>
+ struct fex_gen_config<vkCmdCopyMemoryKHR> {};
++#endif
++#ifndef IS_32BIT_THUNK
+ template<>
+ struct fex_gen_config<vkCmdCopyMemoryToImageKHR> {};
++#endif
++#ifndef IS_32BIT_THUNK
+ template<>
+ struct fex_gen_config<vkCmdCopyImageToMemoryKHR> {};
++#endif
++#ifndef IS_32BIT_THUNK
+ template<>
+ struct fex_gen_config<vkCmdUpdateMemoryKHR> {};
++#endif
+ template<>
+ struct fex_gen_config<vkCmdFillMemoryKHR> {};
+ template<>
+@@ -3435,20 +3755,28 @@ template<>
+ struct fex_gen_config<vkCmdBeginConditionalRendering2EXT> {};
+ template<>
+ struct fex_gen_config<vkCmdBindTransformFeedbackBuffers2EXT> {};
++#ifndef IS_32BIT_THUNK
+ template<>
+ struct fex_gen_config<vkCmdBeginTransformFeedback2EXT> {};
++#endif
++#ifndef IS_32BIT_THUNK
+ template<>
+ struct fex_gen_config<vkCmdEndTransformFeedback2EXT> {};
++#endif
+ template<>
+ struct fex_gen_config<vkCmdDrawIndirectByteCount2EXT> {};
+ template<>
+ struct fex_gen_config<vkCmdDrawMeshTasksIndirect2EXT> {};
+ template<>
+ struct fex_gen_config<vkCmdDrawMeshTasksIndirectCount2EXT> {};
++#ifndef IS_32BIT_THUNK
+ template<>
+ struct fex_gen_config<vkCmdWriteMarkerToMemoryAMD> {};
++#endif
++#ifndef IS_32BIT_THUNK
+ template<>
+ struct fex_gen_config<vkCreateAccelerationStructure2KHR> {};
++#endif
+ template<>
+ struct fex_gen_config<vkCmdCopyBuffer2KHR> {};
+ template<>
+@@ -3467,74 +3795,131 @@ template<>
+ struct fex_gen_config<vkGetDeviceBufferMemoryRequirementsKHR> {};
+ template<>
+ struct fex_gen_config<vkGetDeviceImageMemoryRequirementsKHR> {};
++#ifndef IS_32BIT_THUNK
+ template<>
+ struct fex_gen_config<vkGetDeviceImageSparseMemoryRequirementsKHR> {};
++#else
++template<>
++struct fex_gen_config<vkGetDeviceImageSparseMemoryRequirementsKHR> : fexgen::custom_host_impl {};
++template<>
++struct fex_gen_param<vkGetDeviceImageSparseMemoryRequirementsKHR, 3, VkSparseImageMemoryRequirements2*> : fexgen::ptr_passthrough {};
++#endif
+ template<>
+ struct fex_gen_config<vkCmdBindIndexBuffer2KHR> {};
+ template<>
+ struct fex_gen_config<vkGetRenderingAreaGranularityKHR> {};
++#ifndef IS_32BIT_THUNK
+ template<>
+ struct fex_gen_config<vkGetDeviceImageSubresourceLayoutKHR> {};
++#endif
++#ifndef IS_32BIT_THUNK
+ template<>
+ struct fex_gen_config<vkGetImageSubresourceLayout2KHR> {};
++#endif
+ template<>
+ struct fex_gen_config<vkWaitForPresent2KHR> {};
++#ifndef IS_32BIT_THUNK
+ template<>
+ struct fex_gen_config<vkCreatePipelineBinariesKHR> {};
++#endif
++#ifndef IS_32BIT_THUNK
+ template<>
+ struct fex_gen_config<vkDestroyPipelineBinaryKHR> {};
++#endif
+ template<>
+ struct fex_gen_config<vkGetPipelineKeyKHR> {};
++#ifndef IS_32BIT_THUNK
+ template<>
+ struct fex_gen_config<vkGetPipelineBinaryDataKHR> {};
++#endif
+ template<>
+ struct fex_gen_config<vkReleaseCapturedPipelineDataKHR> {};
+ template<>
+ struct fex_gen_config<vkReleaseSwapchainImagesKHR> {};
++#ifndef IS_32BIT_THUNK
+ template<>
+ struct fex_gen_config<vkGetPhysicalDeviceCooperativeMatrixPropertiesKHR> {};
++#endif
+ template<>
+ struct fex_gen_config<vkCmdSetLineStippleKHR> {};
+-#endif
+ template<>
+ struct fex_gen_config<vkGetPhysicalDeviceCalibrateableTimeDomainsKHR> {};
++#ifndef IS_32BIT_THUNK
+ template<>
+ struct fex_gen_config<vkGetCalibratedTimestampsKHR> {};
+-#ifndef IS_32BIT_THUNK
++#else
++template<>
++struct fex_gen_config<vkGetCalibratedTimestampsKHR> : fexgen::custom_host_impl {};
++template<>
++struct fex_gen_param<vkGetCalibratedTimestampsKHR, 2, const VkCalibratedTimestampInfoKHR*> : fexgen::ptr_passthrough {};
++#endif
+ template<>
+ struct fex_gen_config<vkCmdBindDescriptorSets2KHR> {};
++#ifndef IS_32BIT_THUNK
+ template<>
+ struct fex_gen_config<vkCmdPushConstants2KHR> {};
++#else
++template<>
++struct fex_gen_config<vkCmdPushConstants2KHR> : fexgen::custom_host_impl {};
++template<>
++struct fex_gen_param<vkCmdPushConstants2KHR, 1, const VkPushConstantsInfo*> : fexgen::ptr_passthrough {};
++#endif
++#ifndef IS_32BIT_THUNK
+ template<>
+ struct fex_gen_config<vkCmdPushDescriptorSet2KHR> {};
++#else
++template<>
++struct fex_gen_config<vkCmdPushDescriptorSet2KHR> : fexgen::custom_host_impl {};
++template<>
++struct fex_gen_param<vkCmdPushDescriptorSet2KHR, 1, const VkPushDescriptorSetInfo*> : fexgen::ptr_passthrough {};
++#endif
++#ifndef IS_32BIT_THUNK
+ template<>
+ struct fex_gen_config<vkCmdPushDescriptorSetWithTemplate2KHR> {};
++#else
++template<>
++struct fex_gen_config<vkCmdPushDescriptorSetWithTemplate2KHR> : fexgen::custom_host_impl {};
++template<>
++struct fex_gen_param<vkCmdPushDescriptorSetWithTemplate2KHR, 1, const VkPushDescriptorSetWithTemplateInfo*> : fexgen::ptr_passthrough {};
++#endif
++#ifndef IS_32BIT_THUNK
+ template<>
+ struct fex_gen_config<vkCmdSetDescriptorBufferOffsets2EXT> {};
++#endif
++#ifndef IS_32BIT_THUNK
+ template<>
+ struct fex_gen_config<vkCmdBindDescriptorBufferEmbeddedSamplers2EXT> {};
++#endif
++#ifndef IS_32BIT_THUNK
+ template<>
+ struct fex_gen_config<vkCmdCopyMemoryIndirectKHR> {};
++#endif
++#ifndef IS_32BIT_THUNK
+ template<>
+ struct fex_gen_config<vkCmdCopyMemoryToImageIndirectKHR> {};
++#endif
++#ifndef IS_32BIT_THUNK
+ template<>
+ struct fex_gen_config<vkGetDeviceFaultReportsKHR> {};
++#endif
++#ifndef IS_32BIT_THUNK
+ template<>
+ struct fex_gen_config<vkGetDeviceFaultDebugInfoKHR> {};
++#endif
+ template<>
+ struct fex_gen_config<vkCmdEndRendering2KHR> {};
+-#endif
+ template<>
+ struct fex_gen_config<vkCreateDebugReportCallbackEXT> : fexgen::custom_host_impl {};
+ template<>
+ struct fex_gen_param<vkCreateDebugReportCallbackEXT, 1, const VkDebugReportCallbackCreateInfoEXT*> : fexgen::ptr_passthrough {};
+ template<>
+ struct fex_gen_config<vkDestroyDebugReportCallbackEXT> : fexgen::custom_host_impl {};
+-#ifndef IS_32BIT_THUNK
+ template<>
+ struct fex_gen_config<vkDebugReportMessageEXT> {};
++#ifndef IS_32BIT_THUNK
+ template<>
+ struct fex_gen_config<vkDebugMarkerSetObjectTagEXT> {};
++#endif
+ template<>
+ struct fex_gen_config<vkDebugMarkerSetObjectNameEXT> {};
+ template<>
+@@ -3555,68 +3940,110 @@ template<>
+ struct fex_gen_config<vkCmdEndQueryIndexedEXT> {};
+ template<>
+ struct fex_gen_config<vkCmdDrawIndirectByteCountEXT> {};
++#ifndef IS_32BIT_THUNK
+ template<>
+ struct fex_gen_config<vkCreateCuModuleNVX> {};
++#endif
++#ifndef IS_32BIT_THUNK
+ template<>
+ struct fex_gen_config<vkCreateCuFunctionNVX> {};
++#endif
++#ifndef IS_32BIT_THUNK
+ template<>
+ struct fex_gen_config<vkDestroyCuModuleNVX> {};
++#endif
++#ifndef IS_32BIT_THUNK
+ template<>
+ struct fex_gen_config<vkDestroyCuFunctionNVX> {};
++#endif
++#ifndef IS_32BIT_THUNK
+ template<>
+ struct fex_gen_config<vkCmdCuLaunchKernelNVX> {};
++#endif
++#ifndef IS_32BIT_THUNK
+ template<>
+ struct fex_gen_config<vkGetImageViewHandleNVX> {};
++#endif
++#ifndef IS_32BIT_THUNK
+ template<>
+ struct fex_gen_config<vkGetImageViewHandle64NVX> {};
++#endif
++#ifndef IS_32BIT_THUNK
+ template<>
+ struct fex_gen_config<vkGetImageViewAddressNVX> {};
++#endif
++#ifndef IS_32BIT_THUNK
+ template<>
+ struct fex_gen_config<vkGetDeviceCombinedImageSamplerIndexNVX> {};
++#endif
++#ifndef IS_32BIT_THUNK
+ template<>
+ struct fex_gen_config<vkCmdDrawIndirectCountAMD> {};
++#endif
++#ifndef IS_32BIT_THUNK
+ template<>
+ struct fex_gen_config<vkCmdDrawIndexedIndirectCountAMD> {};
++#endif
++#ifndef IS_32BIT_THUNK
+ template<>
+ struct fex_gen_config<vkGetShaderInfoAMD> {};
++#endif
++#ifndef IS_32BIT_THUNK
+ template<>
+ struct fex_gen_param<vkGetShaderInfoAMD, 5, void*> : fexgen::assume_compatible_data_layout {};
++#endif
++#ifndef IS_32BIT_THUNK
+ template<>
+ struct fex_gen_config<vkGetPhysicalDeviceExternalImageFormatPropertiesNV> {};
++#endif
+ template<>
+ struct fex_gen_config<vkCmdBeginConditionalRenderingEXT> {};
+ template<>
+ struct fex_gen_config<vkCmdEndConditionalRenderingEXT> {};
++#ifndef IS_32BIT_THUNK
+ template<>
+ struct fex_gen_config<vkCmdSetViewportWScalingNV> {};
++#endif
++#ifndef IS_32BIT_THUNK
+ template<>
+ struct fex_gen_config<vkReleaseDisplayEXT> {};
++#endif
+ template<>
+ struct fex_gen_config<vkGetPhysicalDeviceSurfaceCapabilities2EXT> {};
++#ifndef IS_32BIT_THUNK
+ template<>
+ struct fex_gen_config<vkDisplayPowerControlEXT> {};
++#endif
+ template<>
+ struct fex_gen_config<vkRegisterDeviceEventEXT> {};
++#ifndef IS_32BIT_THUNK
+ template<>
+ struct fex_gen_config<vkRegisterDisplayEventEXT> {};
++#endif
+ template<>
+ struct fex_gen_config<vkGetSwapchainCounterEXT> {};
+ template<>
+ struct fex_gen_config<vkGetRefreshCycleDurationGOOGLE> {};
++#ifndef IS_32BIT_THUNK
+ template<>
+ struct fex_gen_config<vkGetPastPresentationTimingGOOGLE> {};
++#endif
+ template<>
+ struct fex_gen_config<vkCmdSetDiscardRectangleEXT> {};
+ template<>
+ struct fex_gen_config<vkCmdSetDiscardRectangleEnableEXT> {};
+ template<>
+ struct fex_gen_config<vkCmdSetDiscardRectangleModeEXT> {};
++#ifndef IS_32BIT_THUNK
+ template<>
+ struct fex_gen_config<vkSetHdrMetadataEXT> {};
++#endif
+ template<>
+ struct fex_gen_config<vkSetDebugUtilsObjectNameEXT> {};
++#ifndef IS_32BIT_THUNK
+ template<>
+ struct fex_gen_config<vkSetDebugUtilsObjectTagEXT> {};
++#endif
+ template<>
+ struct fex_gen_config<vkQueueBeginDebugUtilsLabelEXT> {};
+ template<>
+@@ -3629,7 +4056,6 @@ template<>
+ struct fex_gen_config<vkCmdEndDebugUtilsLabelEXT> {};
+ template<>
+ struct fex_gen_config<vkCmdInsertDebugUtilsLabelEXT> {};
+-#endif
+ template<>
+ struct fex_gen_config<vkCreateDebugUtilsMessengerEXT> : fexgen::custom_host_impl {};
+ template<>
+@@ -3639,108 +4065,196 @@ struct fex_gen_config<vkDestroyDebugUtilsMessengerEXT> {};
+ #ifndef IS_32BIT_THUNK
+ template<>
+ struct fex_gen_config<vkSubmitDebugUtilsMessageEXT> {};
++#endif
++#ifndef IS_32BIT_THUNK
+ template<>
+ struct fex_gen_config<vkCreateGpaSessionAMD> {};
++#endif
++#ifndef IS_32BIT_THUNK
+ template<>
+ struct fex_gen_config<vkDestroyGpaSessionAMD> {};
++#endif
++#ifndef IS_32BIT_THUNK
+ template<>
+ struct fex_gen_config<vkSetGpaDeviceClockModeAMD> {};
++#endif
++#ifndef IS_32BIT_THUNK
+ template<>
+ struct fex_gen_config<vkGetGpaDeviceClockInfoAMD> {};
++#endif
++#ifndef IS_32BIT_THUNK
+ template<>
+ struct fex_gen_config<vkCmdBeginGpaSessionAMD> {};
++#endif
++#ifndef IS_32BIT_THUNK
+ template<>
+ struct fex_gen_config<vkCmdEndGpaSessionAMD> {};
++#endif
++#ifndef IS_32BIT_THUNK
+ template<>
+ struct fex_gen_config<vkCmdBeginGpaSampleAMD> {};
++#endif
++#ifndef IS_32BIT_THUNK
+ template<>
+ struct fex_gen_config<vkCmdEndGpaSampleAMD> {};
++#endif
++#ifndef IS_32BIT_THUNK
+ template<>
+ struct fex_gen_config<vkGetGpaSessionStatusAMD> {};
++#endif
++#ifndef IS_32BIT_THUNK
+ template<>
+ struct fex_gen_config<vkGetGpaSessionResultsAMD> {};
++#endif
++#ifndef IS_32BIT_THUNK
+ template<>
+ struct fex_gen_config<vkResetGpaSessionAMD> {};
++#endif
++#ifndef IS_32BIT_THUNK
+ template<>
+ struct fex_gen_config<vkCmdCopyGpaSessionResultsAMD> {};
++#endif
++#ifndef IS_32BIT_THUNK
+ template<>
+ struct fex_gen_config<vkWriteSamplerDescriptorsEXT> {};
++#endif
++#ifndef IS_32BIT_THUNK
+ template<>
+ struct fex_gen_config<vkWriteResourceDescriptorsEXT> {};
++#endif
++#ifndef IS_32BIT_THUNK
+ template<>
+ struct fex_gen_config<vkCmdBindSamplerHeapEXT> {};
++#endif
++#ifndef IS_32BIT_THUNK
+ template<>
+ struct fex_gen_config<vkCmdBindResourceHeapEXT> {};
++#endif
++#ifndef IS_32BIT_THUNK
+ template<>
+ struct fex_gen_config<vkCmdPushDataEXT> {};
++#endif
++#ifndef IS_32BIT_THUNK
+ template<>
+ struct fex_gen_config<vkGetImageOpaqueCaptureDataEXT> {};
++#endif
+ template<>
+ struct fex_gen_config<vkGetPhysicalDeviceDescriptorSizeEXT> {};
+ template<>
+ struct fex_gen_config<vkRegisterCustomBorderColorEXT> {};
+ template<>
+ struct fex_gen_config<vkUnregisterCustomBorderColorEXT> {};
++#ifndef IS_32BIT_THUNK
+ template<>
+ struct fex_gen_config<vkGetTensorOpaqueCaptureDataARM> {};
++#endif
+ template<>
+ struct fex_gen_config<vkCmdSetSampleLocationsEXT> {};
+ template<>
+ struct fex_gen_config<vkGetPhysicalDeviceMultisamplePropertiesEXT> {};
+ template<>
+ struct fex_gen_config<vkGetImageDrmFormatModifierPropertiesEXT> {};
++#ifndef IS_32BIT_THUNK
+ template<>
+ struct fex_gen_config<vkCreateValidationCacheEXT> {};
++#endif
++#ifndef IS_32BIT_THUNK
+ template<>
+ struct fex_gen_config<vkDestroyValidationCacheEXT> {};
++#endif
++#ifndef IS_32BIT_THUNK
+ template<>
+ struct fex_gen_config<vkMergeValidationCachesEXT> {};
++#endif
++#ifndef IS_32BIT_THUNK
+ template<>
+ struct fex_gen_config<vkGetValidationCacheDataEXT> {};
++#endif
++#ifndef IS_32BIT_THUNK
+ template<>
+ struct fex_gen_param<vkGetValidationCacheDataEXT, 3, void*> : fexgen::assume_compatible_data_layout {};
++#endif
++#ifndef IS_32BIT_THUNK
+ template<>
+ struct fex_gen_config<vkCmdBindShadingRateImageNV> {};
++#endif
++#ifndef IS_32BIT_THUNK
+ template<>
+ struct fex_gen_config<vkCmdSetViewportShadingRatePaletteNV> {};
++#endif
++#ifndef IS_32BIT_THUNK
+ template<>
+ struct fex_gen_config<vkCmdSetCoarseSampleOrderNV> {};
++#endif
++#ifndef IS_32BIT_THUNK
+ template<>
+ struct fex_gen_config<vkCreateAccelerationStructureNV> {};
++#endif
++#ifndef IS_32BIT_THUNK
+ template<>
+ struct fex_gen_config<vkDestroyAccelerationStructureNV> {};
++#endif
++#ifndef IS_32BIT_THUNK
+ template<>
+ struct fex_gen_config<vkGetAccelerationStructureMemoryRequirementsNV> {};
++#endif
++#ifndef IS_32BIT_THUNK
+ template<>
+ struct fex_gen_config<vkBindAccelerationStructureMemoryNV> {};
++#endif
++#ifndef IS_32BIT_THUNK
+ template<>
+ struct fex_gen_config<vkCmdBuildAccelerationStructureNV> {};
++#endif
++#ifndef IS_32BIT_THUNK
+ template<>
+ struct fex_gen_config<vkCmdCopyAccelerationStructureNV> {};
++#endif
++#ifndef IS_32BIT_THUNK
+ template<>
+ struct fex_gen_config<vkCmdTraceRaysNV> {};
++#endif
++#ifndef IS_32BIT_THUNK
+ template<>
+ struct fex_gen_config<vkCreateRayTracingPipelinesNV> {};
++#endif
++#ifndef IS_32BIT_THUNK
+ template<>
+ struct fex_gen_config<vkGetRayTracingShaderGroupHandlesKHR> {};
++#endif
++#ifndef IS_32BIT_THUNK
+ template<>
+ struct fex_gen_param<vkGetRayTracingShaderGroupHandlesKHR, 5, void*> : fexgen::assume_compatible_data_layout {};
++#endif
++#ifndef IS_32BIT_THUNK
+ template<>
+ struct fex_gen_config<vkGetRayTracingShaderGroupHandlesNV> {};
++#endif
++#ifndef IS_32BIT_THUNK
+ template<>
+ struct fex_gen_param<vkGetRayTracingShaderGroupHandlesNV, 5, void*> : fexgen::assume_compatible_data_layout {};
++#endif
++#ifndef IS_32BIT_THUNK
+ template<>
+ struct fex_gen_config<vkGetAccelerationStructureHandleNV> {};
++#endif
++#ifndef IS_32BIT_THUNK
+ template<>
+ struct fex_gen_param<vkGetAccelerationStructureHandleNV, 3, void*> : fexgen::assume_compatible_data_layout {};
++#endif
++#ifndef IS_32BIT_THUNK
+ template<>
+ struct fex_gen_config<vkCmdWriteAccelerationStructuresPropertiesNV> {};
++#endif
++#ifndef IS_32BIT_THUNK
+ template<>
+ struct fex_gen_config<vkCompileDeferredNV> {};
++#endif
+ template<>
+ struct fex_gen_config<vkGetMemoryHostPointerPropertiesEXT> {};
+ template<>
+ struct fex_gen_param<vkGetMemoryHostPointerPropertiesEXT, 2, const void*> : fexgen::assume_compatible_data_layout {};
++#ifndef IS_32BIT_THUNK
+ template<>
+ struct fex_gen_config<vkCmdWriteBufferMarkerAMD> {};
+ #endif
+@@ -3751,66 +4265,123 @@ struct fex_gen_config<vkGetPhysicalDeviceCalibrateableTimeDomainsEXT> {};
+ #ifndef IS_32BIT_THUNK
+ template<>
+ struct fex_gen_config<vkGetCalibratedTimestampsEXT> {};
++#else
++template<>
++struct fex_gen_config<vkGetCalibratedTimestampsEXT> : fexgen::custom_host_impl {};
++template<>
++struct fex_gen_param<vkGetCalibratedTimestampsEXT, 2, const VkCalibratedTimestampInfoKHR*> : fexgen::ptr_passthrough {};
++#endif
++#ifndef IS_32BIT_THUNK
+ template<>
+ struct fex_gen_config<vkCmdDrawMeshTasksNV> {};
++#endif
++#ifndef IS_32BIT_THUNK
+ template<>
+ struct fex_gen_config<vkCmdDrawMeshTasksIndirectNV> {};
++#endif
++#ifndef IS_32BIT_THUNK
+ template<>
+ struct fex_gen_config<vkCmdDrawMeshTasksIndirectCountNV> {};
++#endif
++#ifndef IS_32BIT_THUNK
+ template<>
+ struct fex_gen_config<vkCmdSetExclusiveScissorEnableNV> {};
++#endif
++#ifndef IS_32BIT_THUNK
+ template<>
+ struct fex_gen_config<vkCmdSetExclusiveScissorNV> {};
++#endif
++#ifndef IS_32BIT_THUNK
+ template<>
+ struct fex_gen_config<vkCmdSetCheckpointNV> {};
++#endif
++#ifndef IS_32BIT_THUNK
+ template<>
+ struct fex_gen_param<vkCmdSetCheckpointNV, 1, const void*> : fexgen::assume_compatible_data_layout {};
++#endif
++#ifndef IS_32BIT_THUNK
+ template<>
+ struct fex_gen_config<vkGetQueueCheckpointDataNV> {};
++#endif
++#ifndef IS_32BIT_THUNK
+ template<>
+ struct fex_gen_config<vkGetQueueCheckpointData2NV> {};
++#endif
+ template<>
+ struct fex_gen_config<vkSetSwapchainPresentTimingQueueSizeEXT> {};
+ template<>
+ struct fex_gen_config<vkGetSwapchainTimingPropertiesEXT> {};
++#ifndef IS_32BIT_THUNK
+ template<>
+ struct fex_gen_config<vkGetSwapchainTimeDomainPropertiesEXT> {};
++#endif
++#ifndef IS_32BIT_THUNK
+ template<>
+ struct fex_gen_config<vkGetPastPresentationTimingEXT> {};
++#endif
++#ifndef IS_32BIT_THUNK
+ template<>
+ struct fex_gen_config<vkInitializePerformanceApiINTEL> {};
++#endif
++#ifndef IS_32BIT_THUNK
+ template<>
+ struct fex_gen_config<vkUninitializePerformanceApiINTEL> {};
++#endif
++#ifndef IS_32BIT_THUNK
+ template<>
+ struct fex_gen_config<vkCmdSetPerformanceMarkerINTEL> {};
++#endif
++#ifndef IS_32BIT_THUNK
+ template<>
+ struct fex_gen_config<vkCmdSetPerformanceStreamMarkerINTEL> {};
++#endif
++#ifndef IS_32BIT_THUNK
+ template<>
+ struct fex_gen_config<vkCmdSetPerformanceOverrideINTEL> {};
++#endif
++#ifndef IS_32BIT_THUNK
+ template<>
+ struct fex_gen_config<vkAcquirePerformanceConfigurationINTEL> {};
++#endif
++#ifndef IS_32BIT_THUNK
+ template<>
+ struct fex_gen_config<vkReleasePerformanceConfigurationINTEL> {};
++#endif
++#ifndef IS_32BIT_THUNK
+ template<>
+ struct fex_gen_config<vkQueueSetPerformanceConfigurationINTEL> {};
++#endif
++#ifndef IS_32BIT_THUNK
+ template<>
+ struct fex_gen_config<vkGetPerformanceParameterINTEL> {};
++#endif
++#ifndef IS_32BIT_THUNK
+ template<>
+ struct fex_gen_config<vkSetLocalDimmingAMD> {};
++#endif
+ template<>
+ struct fex_gen_config<vkGetBufferDeviceAddressEXT> {};
++#ifndef IS_32BIT_THUNK
+ template<>
+ struct fex_gen_config<vkGetPhysicalDeviceToolPropertiesEXT> {};
++#else
++template<>
++struct fex_gen_config<vkGetPhysicalDeviceToolPropertiesEXT> : fexgen::custom_host_impl {};
++template<>
++struct fex_gen_param<vkGetPhysicalDeviceToolPropertiesEXT, 2, VkPhysicalDeviceToolProperties*> : fexgen::ptr_passthrough {};
++#endif
++#ifndef IS_32BIT_THUNK
+ template<>
+ struct fex_gen_config<vkGetPhysicalDeviceCooperativeMatrixPropertiesNV> {};
++#endif
++#ifndef IS_32BIT_THUNK
+ template<>
+ struct fex_gen_config<vkGetPhysicalDeviceSupportedFramebufferMixedSamplesCombinationsNV> {};
++#endif
+ template<>
+ struct fex_gen_config<vkCreateHeadlessSurfaceEXT> {};
+-#endif
+ template<>
+ struct fex_gen_config<vkCmdSetLineStippleEXT> {};
+-#ifndef IS_32BIT_THUNK
+ template<>
+ struct fex_gen_config<vkResetQueryPoolEXT> {};
+ template<>
+@@ -3837,12 +4408,13 @@ template<>
+ struct fex_gen_config<vkCmdSetStencilTestEnableEXT> {};
+ template<>
+ struct fex_gen_config<vkCmdSetStencilOpEXT> {};
+-#endif
+ template<>
+ struct fex_gen_config<vkCopyMemoryToImageEXT> {};
+ #ifndef IS_32BIT_THUNK
+ template<>
+ struct fex_gen_config<vkCopyImageToMemoryEXT> {};
++#endif
++#ifndef IS_32BIT_THUNK
+ template<>
+ struct fex_gen_config<vkCopyImageToImageEXT> {};
+ #endif
+@@ -3851,26 +4423,43 @@ struct fex_gen_config<vkTransitionImageLayoutEXT> {};
+ #ifndef IS_32BIT_THUNK
+ template<>
+ struct fex_gen_config<vkGetImageSubresourceLayout2EXT> {};
++#endif
+ template<>
+ struct fex_gen_config<vkReleaseSwapchainImagesEXT> {};
++#ifndef IS_32BIT_THUNK
+ template<>
+ struct fex_gen_config<vkGetGeneratedCommandsMemoryRequirementsNV> {};
++#endif
++#ifndef IS_32BIT_THUNK
+ template<>
+ struct fex_gen_config<vkCmdPreprocessGeneratedCommandsNV> {};
++#endif
++#ifndef IS_32BIT_THUNK
+ template<>
+ struct fex_gen_config<vkCmdExecuteGeneratedCommandsNV> {};
++#endif
++#ifndef IS_32BIT_THUNK
+ template<>
+ struct fex_gen_config<vkCmdBindPipelineShaderGroupNV> {};
++#endif
++#ifndef IS_32BIT_THUNK
+ template<>
+ struct fex_gen_config<vkCreateIndirectCommandsLayoutNV> {};
++#endif
++#ifndef IS_32BIT_THUNK
+ template<>
+ struct fex_gen_config<vkDestroyIndirectCommandsLayoutNV> {};
++#endif
+ template<>
+ struct fex_gen_config<vkCmdSetDepthBias2EXT> {};
++#ifndef IS_32BIT_THUNK
+ template<>
+ struct fex_gen_config<vkAcquireDrmDisplayEXT> {};
++#endif
++#ifndef IS_32BIT_THUNK
+ template<>
+ struct fex_gen_config<vkGetDrmDisplayEXT> {};
++#endif
+ template<>
+ struct fex_gen_config<vkCreatePrivateDataSlotEXT> {};
+ template<>
+@@ -3879,26 +4468,47 @@ template<>
+ struct fex_gen_config<vkSetPrivateDataEXT> {};
+ template<>
+ struct fex_gen_config<vkGetPrivateDataEXT> {};
++#ifndef IS_32BIT_THUNK
+ template<>
+ struct fex_gen_config<vkQueueSetPerfHintQCOM> {};
++#endif
++#ifndef IS_32BIT_THUNK
+ template<>
+ struct fex_gen_config<vkCmdDispatchTileQCOM> {};
++#endif
++#ifndef IS_32BIT_THUNK
+ template<>
+ struct fex_gen_config<vkCmdBeginPerTileExecutionQCOM> {};
++#endif
++#ifndef IS_32BIT_THUNK
+ template<>
+ struct fex_gen_config<vkCmdEndPerTileExecutionQCOM> {};
++#endif
++#ifndef IS_32BIT_THUNK
+ template<>
+ struct fex_gen_config<vkSetLatencySleepModeLegacyNV> {};
++#endif
++#ifndef IS_32BIT_THUNK
+ template<>
+ struct fex_gen_config<vkLatencySleepLegacyNV> {};
++#endif
++#ifndef IS_32BIT_THUNK
+ template<>
+ struct fex_gen_config<vkSetLatencyMarkerLegacyNV> {};
++#endif
++#ifndef IS_32BIT_THUNK
+ template<>
+ struct fex_gen_config<vkGetLatencyTimingsLegacyNV> {};
++#endif
++#ifndef IS_32BIT_THUNK
+ template<>
+ struct fex_gen_config<vkQueueNotifyOutOfBandLegacyNV> {};
++#endif
++#ifndef IS_32BIT_THUNK
+ template<>
+ struct fex_gen_config<vkGetSleepStatusLegacyNV> {};
++#endif
++#ifndef IS_32BIT_THUNK
+ template<>
+ struct fex_gen_config<vkShutdownLatencyDeviceLegacyNV> {};
+ #endif
+@@ -3917,18 +4527,32 @@ struct fex_gen_config<vkCmdSetDescriptorBufferOffsetsEXT> {};
+ #ifndef IS_32BIT_THUNK
+ template<>
+ struct fex_gen_config<vkCmdBindDescriptorBufferEmbeddedSamplersEXT> {};
++#endif
++#ifndef IS_32BIT_THUNK
+ template<>
+ struct fex_gen_config<vkGetBufferOpaqueCaptureDescriptorDataEXT> {};
++#endif
++#ifndef IS_32BIT_THUNK
+ template<>
+ struct fex_gen_config<vkGetImageOpaqueCaptureDescriptorDataEXT> {};
++#endif
++#ifndef IS_32BIT_THUNK
+ template<>
+ struct fex_gen_config<vkGetImageViewOpaqueCaptureDescriptorDataEXT> {};
++#endif
++#ifndef IS_32BIT_THUNK
+ template<>
+ struct fex_gen_config<vkGetSamplerOpaqueCaptureDescriptorDataEXT> {};
++#endif
++#ifndef IS_32BIT_THUNK
+ template<>
+ struct fex_gen_config<vkGetAccelerationStructureOpaqueCaptureDescriptorDataEXT> {};
++#endif
++#ifndef IS_32BIT_THUNK
+ template<>
+ struct fex_gen_config<vkCmdSetFragmentShadingRateEnumNV> {};
++#endif
++#ifndef IS_32BIT_THUNK
+ template<>
+ struct fex_gen_config<vkGetDeviceFaultInfoEXT> {};
+ #endif
+@@ -3946,15 +4570,21 @@ struct fex_gen_param<vkCmdSetVertexInputEXT, 4, const VkVertexInputAttributeDesc
+ #ifndef IS_32BIT_THUNK
+ template<>
+ struct fex_gen_config<vkGetDeviceSubpassShadingMaxWorkgroupSizeHUAWEI> {};
++#endif
++#ifndef IS_32BIT_THUNK
+ template<>
+ struct fex_gen_config<vkCmdSubpassShadingHUAWEI> {};
++#endif
++#ifndef IS_32BIT_THUNK
+ template<>
+ struct fex_gen_config<vkCmdBindInvocationMaskHUAWEI> {};
+-#ifndef IS_32BIT_THUNK
++#endif
+ // VkRemoteAddressNV* expands to void**, so it needs custom repacking on on 32-bit
++#ifndef IS_32BIT_THUNK
+ template<>
+ struct fex_gen_config<vkGetMemoryRemoteAddressNV> {};
+ #endif
++#ifndef IS_32BIT_THUNK
+ template<>
+ struct fex_gen_config<vkGetPipelinePropertiesEXT> {};
+ #endif
+@@ -3977,58 +4607,110 @@ struct fex_gen_config<vkCmdDrawMultiIndexedEXT> {};
+ #ifndef IS_32BIT_THUNK
+ template<>
+ struct fex_gen_config<vkCreateMicromapEXT> {};
++#endif
++#ifndef IS_32BIT_THUNK
+ template<>
+ struct fex_gen_config<vkDestroyMicromapEXT> {};
++#endif
++#ifndef IS_32BIT_THUNK
+ template<>
+ struct fex_gen_config<vkCmdBuildMicromapsEXT> {};
++#endif
++#ifndef IS_32BIT_THUNK
+ template<>
+ struct fex_gen_config<vkBuildMicromapsEXT> {};
++#endif
++#ifndef IS_32BIT_THUNK
+ template<>
+ struct fex_gen_config<vkCopyMicromapEXT> {};
++#endif
++#ifndef IS_32BIT_THUNK
+ template<>
+ struct fex_gen_config<vkCopyMicromapToMemoryEXT> {};
++#endif
++#ifndef IS_32BIT_THUNK
+ template<>
+ struct fex_gen_config<vkCopyMemoryToMicromapEXT> {};
++#endif
++#ifndef IS_32BIT_THUNK
+ template<>
+ struct fex_gen_config<vkWriteMicromapsPropertiesEXT> {};
++#endif
++#ifndef IS_32BIT_THUNK
+ template<>
+ struct fex_gen_param<vkWriteMicromapsPropertiesEXT, 5, void*> : fexgen::assume_compatible_data_layout {};
++#endif
++#ifndef IS_32BIT_THUNK
+ template<>
+ struct fex_gen_config<vkCmdCopyMicromapEXT> {};
++#endif
++#ifndef IS_32BIT_THUNK
+ template<>
+ struct fex_gen_config<vkCmdCopyMicromapToMemoryEXT> {};
++#endif
++#ifndef IS_32BIT_THUNK
+ template<>
+ struct fex_gen_config<vkCmdCopyMemoryToMicromapEXT> {};
++#endif
++#ifndef IS_32BIT_THUNK
+ template<>
+ struct fex_gen_config<vkCmdWriteMicromapsPropertiesEXT> {};
++#endif
++#ifndef IS_32BIT_THUNK
+ template<>
+ struct fex_gen_config<vkGetDeviceMicromapCompatibilityEXT> {};
++#endif
++#ifndef IS_32BIT_THUNK
+ template<>
+ struct fex_gen_config<vkGetMicromapBuildSizesEXT> {};
++#endif
++#ifndef IS_32BIT_THUNK
+ template<>
+ struct fex_gen_config<vkCmdDrawClusterHUAWEI> {};
++#endif
++#ifndef IS_32BIT_THUNK
+ template<>
+ struct fex_gen_config<vkCmdDrawClusterIndirectHUAWEI> {};
++#endif
+ template<>
+ struct fex_gen_config<vkSetDeviceMemoryPriorityEXT> {};
++#ifndef IS_32BIT_THUNK
+ template<>
+ struct fex_gen_config<vkCmdSetDispatchParametersARM> {};
++#endif
++#ifndef IS_32BIT_THUNK
+ template<>
+ struct fex_gen_config<vkGetDescriptorSetLayoutHostMappingInfoVALVE> {};
++#endif
++#ifndef IS_32BIT_THUNK
+ template<>
+ struct fex_gen_config<vkGetDescriptorSetHostMappingVALVE> {};
++#endif
++#ifndef IS_32BIT_THUNK
+ template<>
+ struct fex_gen_config<vkCmdCopyMemoryIndirectNV> {};
++#endif
++#ifndef IS_32BIT_THUNK
+ template<>
+ struct fex_gen_config<vkCmdCopyMemoryToImageIndirectNV> {};
++#endif
++#ifndef IS_32BIT_THUNK
+ template<>
+ struct fex_gen_config<vkCmdDecompressMemoryNV> {};
++#endif
++#ifndef IS_32BIT_THUNK
+ template<>
+ struct fex_gen_config<vkCmdDecompressMemoryIndirectCountNV> {};
++#endif
++#ifndef IS_32BIT_THUNK
+ template<>
+ struct fex_gen_config<vkGetPipelineIndirectMemoryRequirementsNV> {};
++#endif
++#ifndef IS_32BIT_THUNK
+ template<>
+ struct fex_gen_config<vkCmdUpdatePipelineIndirectBufferNV> {};
++#endif
++#ifndef IS_32BIT_THUNK
+ template<>
+ struct fex_gen_config<vkGetPipelineIndirectDeviceAddressNV> {};
+ #endif
+@@ -4077,24 +4759,44 @@ struct fex_gen_config<vkCmdSetDepthClipNegativeOneToOneEXT> {};
+ #ifndef IS_32BIT_THUNK
+ template<>
+ struct fex_gen_config<vkCmdSetViewportWScalingEnableNV> {};
++#endif
++#ifndef IS_32BIT_THUNK
+ template<>
+ struct fex_gen_config<vkCmdSetViewportSwizzleNV> {};
++#endif
++#ifndef IS_32BIT_THUNK
+ template<>
+ struct fex_gen_config<vkCmdSetCoverageToColorEnableNV> {};
++#endif
++#ifndef IS_32BIT_THUNK
+ template<>
+ struct fex_gen_config<vkCmdSetCoverageToColorLocationNV> {};
++#endif
++#ifndef IS_32BIT_THUNK
+ template<>
+ struct fex_gen_config<vkCmdSetCoverageModulationModeNV> {};
++#endif
++#ifndef IS_32BIT_THUNK
+ template<>
+ struct fex_gen_config<vkCmdSetCoverageModulationTableEnableNV> {};
++#endif
++#ifndef IS_32BIT_THUNK
+ template<>
+ struct fex_gen_config<vkCmdSetCoverageModulationTableNV> {};
++#endif
++#ifndef IS_32BIT_THUNK
+ template<>
+ struct fex_gen_config<vkCmdSetShadingRateImageEnableNV> {};
++#endif
++#ifndef IS_32BIT_THUNK
+ template<>
+ struct fex_gen_config<vkCmdSetRepresentativeFragmentTestEnableNV> {};
++#endif
++#ifndef IS_32BIT_THUNK
+ template<>
+ struct fex_gen_config<vkCmdSetCoverageReductionModeNV> {};
++#endif
++#ifndef IS_32BIT_THUNK
+ template<>
+ struct fex_gen_config<vkCreateTensorARM> {};
+ #endif
+@@ -4109,72 +4811,134 @@ struct fex_gen_config<vkDestroyTensorViewARM> {};
+ #ifndef IS_32BIT_THUNK
+ template<>
+ struct fex_gen_config<vkGetTensorMemoryRequirementsARM> {};
++#endif
++#ifndef IS_32BIT_THUNK
+ template<>
+ struct fex_gen_config<vkBindTensorMemoryARM> {};
++#endif
++#ifndef IS_32BIT_THUNK
+ template<>
+ struct fex_gen_config<vkGetDeviceTensorMemoryRequirementsARM> {};
++#endif
++#ifndef IS_32BIT_THUNK
+ template<>
+ struct fex_gen_config<vkCmdCopyTensorARM> {};
++#endif
++#ifndef IS_32BIT_THUNK
+ template<>
+ struct fex_gen_config<vkGetPhysicalDeviceExternalTensorPropertiesARM> {};
++#endif
++#ifndef IS_32BIT_THUNK
+ template<>
+ struct fex_gen_config<vkGetTensorOpaqueCaptureDescriptorDataARM> {};
++#endif
++#ifndef IS_32BIT_THUNK
+ template<>
+ struct fex_gen_config<vkGetTensorViewOpaqueCaptureDescriptorDataARM> {};
++#endif
+ template<>
+ struct fex_gen_config<vkGetShaderModuleIdentifierEXT> {};
+ template<>
+ struct fex_gen_config<vkGetShaderModuleCreateInfoIdentifierEXT> {};
++#ifndef IS_32BIT_THUNK
+ template<>
+ struct fex_gen_config<vkGetPhysicalDeviceOpticalFlowImageFormatsNV> {};
++#endif
++#ifndef IS_32BIT_THUNK
+ template<>
+ struct fex_gen_config<vkCreateOpticalFlowSessionNV> {};
++#endif
++#ifndef IS_32BIT_THUNK
+ template<>
+ struct fex_gen_config<vkDestroyOpticalFlowSessionNV> {};
++#endif
++#ifndef IS_32BIT_THUNK
+ template<>
+ struct fex_gen_config<vkBindOpticalFlowSessionImageNV> {};
++#endif
++#ifndef IS_32BIT_THUNK
+ template<>
+ struct fex_gen_config<vkCmdOpticalFlowExecuteNV> {};
++#endif
++#ifndef IS_32BIT_THUNK
+ template<>
+ struct fex_gen_config<vkAntiLagUpdateAMD> {};
++#endif
++#ifndef IS_32BIT_THUNK
+ template<>
+ struct fex_gen_config<vkCreateShadersEXT> {};
++#endif
++#ifndef IS_32BIT_THUNK
+ template<>
+ struct fex_gen_config<vkDestroyShaderEXT> {};
++#endif
++#ifndef IS_32BIT_THUNK
+ template<>
+ struct fex_gen_config<vkGetShaderBinaryDataEXT> {};
++#endif
++#ifndef IS_32BIT_THUNK
+ template<>
+ struct fex_gen_config<vkCmdBindShadersEXT> {};
++#endif
+ template<>
+ struct fex_gen_config<vkCmdSetDepthClampRangeEXT> {};
++#ifndef IS_32BIT_THUNK
+ template<>
+ struct fex_gen_config<vkGetFramebufferTilePropertiesQCOM> {};
++#endif
++#ifndef IS_32BIT_THUNK
+ template<>
+ struct fex_gen_config<vkGetDynamicRenderingTilePropertiesQCOM> {};
++#endif
++#ifndef IS_32BIT_THUNK
+ template<>
+ struct fex_gen_config<vkGetPhysicalDeviceCooperativeVectorPropertiesNV> {};
++#endif
++#ifndef IS_32BIT_THUNK
+ template<>
+ struct fex_gen_config<vkConvertCooperativeVectorMatrixNV> {};
++#endif
++#ifndef IS_32BIT_THUNK
+ template<>
+ struct fex_gen_config<vkCmdConvertCooperativeVectorMatrixNV> {};
++#endif
++#ifndef IS_32BIT_THUNK
+ template<>
+ struct fex_gen_config<vkSetLatencySleepModeNV> {};
++#endif
++#ifndef IS_32BIT_THUNK
+ template<>
+ struct fex_gen_config<vkLatencySleepNV> {};
++#endif
++#ifndef IS_32BIT_THUNK
+ template<>
+ struct fex_gen_config<vkSetLatencyMarkerNV> {};
++#endif
++#ifndef IS_32BIT_THUNK
+ template<>
+ struct fex_gen_config<vkGetLatencyTimingsNV> {};
++#endif
++#ifndef IS_32BIT_THUNK
+ template<>
+ struct fex_gen_config<vkQueueNotifyOutOfBandNV> {};
++#endif
++#ifndef IS_32BIT_THUNK
+ template<>
+ struct fex_gen_config<vkCreateDataGraphPipelinesARM> {};
++#endif
++#ifndef IS_32BIT_THUNK
+ template<>
+ struct fex_gen_config<vkCreateDataGraphPipelineSessionARM> {};
++#endif
++#ifndef IS_32BIT_THUNK
+ template<>
+ struct fex_gen_config<vkGetDataGraphPipelineSessionBindPointRequirementsARM> {};
++#endif
++#ifndef IS_32BIT_THUNK
+ template<>
+ struct fex_gen_config<vkGetDataGraphPipelineSessionMemoryRequirementsARM> {};
++#endif
++#ifndef IS_32BIT_THUNK
+ template<>
+ struct fex_gen_config<vkBindDataGraphPipelineSessionMemoryARM> {};
+ #endif
+@@ -4183,14 +4947,24 @@ struct fex_gen_config<vkDestroyDataGraphPipelineSessionARM> {};
+ #ifndef IS_32BIT_THUNK
+ template<>
+ struct fex_gen_config<vkCmdDispatchDataGraphARM> {};
++#endif
++#ifndef IS_32BIT_THUNK
+ template<>
+ struct fex_gen_config<vkGetDataGraphPipelineAvailablePropertiesARM> {};
++#endif
++#ifndef IS_32BIT_THUNK
+ template<>
+ struct fex_gen_config<vkGetDataGraphPipelinePropertiesARM> {};
++#endif
++#ifndef IS_32BIT_THUNK
+ template<>
+ struct fex_gen_config<vkGetPhysicalDeviceQueueFamilyDataGraphPropertiesARM> {};
++#endif
++#ifndef IS_32BIT_THUNK
+ template<>
+ struct fex_gen_config<vkGetPhysicalDeviceQueueFamilyDataGraphProcessingEnginePropertiesARM> {};
++#endif
++#ifndef IS_32BIT_THUNK
+ template<>
+ struct fex_gen_config<vkGetPhysicalDeviceQueueFamilyDataGraphEngineOperationPropertiesARM> {};
+ #endif
+@@ -4199,6 +4973,8 @@ struct fex_gen_config<vkCmdSetAttachmentFeedbackLoopEnableEXT> {};
+ #ifndef IS_32BIT_THUNK
+ template<>
+ struct fex_gen_config<vkCmdBindTileMemoryQCOM> {};
++#endif
++#ifndef IS_32BIT_THUNK
+ template<>
+ struct fex_gen_config<vkCmdDecompressMemoryEXT> {};
+ #endif
+@@ -4213,117 +4989,205 @@ struct fex_gen_config<vkDestroyExternalComputeQueueNV> {};
+ #ifndef IS_32BIT_THUNK
+ template<>
+ struct fex_gen_config<vkGetExternalComputeQueueDataNV> {};
++#endif
++#ifndef IS_32BIT_THUNK
+ template<>
+ struct fex_gen_config<vkGetClusterAccelerationStructureBuildSizesNV> {};
++#endif
++#ifndef IS_32BIT_THUNK
+ template<>
+ struct fex_gen_config<vkCmdBuildClusterAccelerationStructureIndirectNV> {};
++#endif
++#ifndef IS_32BIT_THUNK
+ template<>
+ struct fex_gen_config<vkGetPartitionedAccelerationStructuresBuildSizesNV> {};
++#endif
++#ifndef IS_32BIT_THUNK
+ template<>
+ struct fex_gen_config<vkCmdBuildPartitionedAccelerationStructuresNV> {};
++#endif
+ template<>
+ struct fex_gen_config<vkGetGeneratedCommandsMemoryRequirementsEXT> {};
+ template<>
+ struct fex_gen_config<vkCmdPreprocessGeneratedCommandsEXT> {};
+ template<>
+ struct fex_gen_config<vkCmdExecuteGeneratedCommandsEXT> {};
++#ifndef IS_32BIT_THUNK
+ template<>
+ struct fex_gen_config<vkCreateIndirectCommandsLayoutEXT> {};
++#endif
++#ifndef IS_32BIT_THUNK
+ template<>
+ struct fex_gen_config<vkDestroyIndirectCommandsLayoutEXT> {};
++#endif
++#ifndef IS_32BIT_THUNK
+ template<>
+ struct fex_gen_config<vkCreateIndirectExecutionSetEXT> {};
++#endif
++#ifndef IS_32BIT_THUNK
+ template<>
+ struct fex_gen_config<vkDestroyIndirectExecutionSetEXT> {};
++#endif
++#ifndef IS_32BIT_THUNK
+ template<>
+ struct fex_gen_config<vkUpdateIndirectExecutionSetPipelineEXT> {};
++#endif
++#ifndef IS_32BIT_THUNK
+ template<>
+ struct fex_gen_config<vkUpdateIndirectExecutionSetShaderEXT> {};
++#endif
++#ifndef IS_32BIT_THUNK
+ template<>
+ struct fex_gen_config<vkGetPhysicalDeviceCooperativeMatrixFlexibleDimensionsPropertiesNV> {};
++#endif
++#ifndef IS_32BIT_THUNK
+ template<>
+ struct fex_gen_config<vkEnumeratePhysicalDeviceQueueFamilyPerformanceCountersByRegionARM> {};
++#endif
++#ifndef IS_32BIT_THUNK
+ template<>
+ struct fex_gen_config<vkEnumeratePhysicalDeviceShaderInstrumentationMetricsARM> {};
++#endif
++#ifndef IS_32BIT_THUNK
+ template<>
+ struct fex_gen_config<vkCreateShaderInstrumentationARM> {};
++#endif
++#ifndef IS_32BIT_THUNK
+ template<>
+ struct fex_gen_config<vkDestroyShaderInstrumentationARM> {};
++#endif
++#ifndef IS_32BIT_THUNK
+ template<>
+ struct fex_gen_config<vkCmdBeginShaderInstrumentationARM> {};
++#endif
++#ifndef IS_32BIT_THUNK
+ template<>
+ struct fex_gen_config<vkCmdEndShaderInstrumentationARM> {};
++#endif
++#ifndef IS_32BIT_THUNK
+ template<>
+ struct fex_gen_config<vkGetShaderInstrumentationValuesARM> {};
++#endif
++#ifndef IS_32BIT_THUNK
+ template<>
+ struct fex_gen_config<vkClearShaderInstrumentationMetricsARM> {};
++#endif
+ template<>
+ struct fex_gen_config<vkCmdEndRendering2EXT> {};
+ template<>
+ struct fex_gen_config<vkCmdBeginCustomResolveEXT> {};
++#ifndef IS_32BIT_THUNK
+ template<>
+ struct fex_gen_config<vkGetPhysicalDeviceQueueFamilyDataGraphOpticalFlowImageFormatsARM> {};
++#endif
++#ifndef IS_32BIT_THUNK
+ template<>
+ struct fex_gen_config<vkCmdSetComputeOccupancyPriorityNV> {};
++#endif
++#ifndef IS_32BIT_THUNK
+ template<>
+ struct fex_gen_config<vkGetPhysicalDeviceCooperativeMatrixProperties2EXT> {};
++#endif
+ template<>
+ struct fex_gen_config<vkCmdSetPrimitiveRestartIndexEXT> {};
++#ifndef IS_32BIT_THUNK
+ template<>
+ struct fex_gen_config<vkCreateAccelerationStructureKHR> {};
++#endif
++#ifndef IS_32BIT_THUNK
+ template<>
+ struct fex_gen_config<vkDestroyAccelerationStructureKHR> {};
++#endif
++#ifndef IS_32BIT_THUNK
+ template<>
+ struct fex_gen_config<vkCmdBuildAccelerationStructuresKHR> {};
++#endif
++#ifndef IS_32BIT_THUNK
+ template<>
+ struct fex_gen_config<vkCmdBuildAccelerationStructuresIndirectKHR> {};
++#endif
++#ifndef IS_32BIT_THUNK
+ template<>
+ struct fex_gen_config<vkBuildAccelerationStructuresKHR> {};
++#endif
++#ifndef IS_32BIT_THUNK
+ template<>
+ struct fex_gen_config<vkCopyAccelerationStructureKHR> {};
++#endif
++#ifndef IS_32BIT_THUNK
+ template<>
+ struct fex_gen_config<vkCopyAccelerationStructureToMemoryKHR> {};
++#endif
++#ifndef IS_32BIT_THUNK
+ template<>
+ struct fex_gen_config<vkCopyMemoryToAccelerationStructureKHR> {};
++#endif
++#ifndef IS_32BIT_THUNK
+ template<>
+ struct fex_gen_config<vkWriteAccelerationStructuresPropertiesKHR> {};
++#endif
++#ifndef IS_32BIT_THUNK
+ template<>
+ struct fex_gen_param<vkWriteAccelerationStructuresPropertiesKHR, 5, void*> : fexgen::assume_compatible_data_layout {};
++#endif
++#ifndef IS_32BIT_THUNK
+ template<>
+ struct fex_gen_config<vkCmdCopyAccelerationStructureKHR> {};
++#endif
++#ifndef IS_32BIT_THUNK
+ template<>
+ struct fex_gen_config<vkCmdCopyAccelerationStructureToMemoryKHR> {};
++#endif
++#ifndef IS_32BIT_THUNK
+ template<>
+ struct fex_gen_config<vkCmdCopyMemoryToAccelerationStructureKHR> {};
++#endif
++#ifndef IS_32BIT_THUNK
+ template<>
+ struct fex_gen_config<vkGetAccelerationStructureDeviceAddressKHR> {};
++#endif
++#ifndef IS_32BIT_THUNK
+ template<>
+ struct fex_gen_config<vkCmdWriteAccelerationStructuresPropertiesKHR> {};
++#endif
++#ifndef IS_32BIT_THUNK
+ template<>
+ struct fex_gen_config<vkGetDeviceAccelerationStructureCompatibilityKHR> {};
++#endif
++#ifndef IS_32BIT_THUNK
+ template<>
+ struct fex_gen_config<vkGetAccelerationStructureBuildSizesKHR> {};
++#endif
+ template<>
+ struct fex_gen_config<vkCmdTraceRaysKHR> {};
++#ifndef IS_32BIT_THUNK
+ template<>
+ struct fex_gen_config<vkCreateRayTracingPipelinesKHR> {};
++#endif
++#ifndef IS_32BIT_THUNK
+ template<>
+ struct fex_gen_config<vkGetRayTracingCaptureReplayShaderGroupHandlesKHR> {};
++#endif
++#ifndef IS_32BIT_THUNK
+ template<>
+ struct fex_gen_param<vkGetRayTracingCaptureReplayShaderGroupHandlesKHR, 5, void*> : fexgen::assume_compatible_data_layout {};
++#endif
+ template<>
+ struct fex_gen_config<vkCmdTraceRaysIndirectKHR> {};
++#ifndef IS_32BIT_THUNK
+ template<>
+ struct fex_gen_config<vkGetRayTracingShaderGroupStackSizeKHR> {};
++#endif
++#ifndef IS_32BIT_THUNK
+ template<>
+ struct fex_gen_config<vkCmdSetRayTracingPipelineStackSizeKHR> {};
++#endif
+ template<>
+ struct fex_gen_config<vkCmdDrawMeshTasksEXT> {};
+ template<>
+ struct fex_gen_config<vkCmdDrawMeshTasksIndirectEXT> {};
+ template<>
+ struct fex_gen_config<vkCmdDrawMeshTasksIndirectCountEXT> {};
+-#endif
+ 
+ // vulkan_xlib_xrandr.h
+ template<>

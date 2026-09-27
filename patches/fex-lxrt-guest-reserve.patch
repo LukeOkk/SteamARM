@@ -1,0 +1,113 @@
+FEX: host memory in 32-bit guests' reach; 32-bit layout of FEX's own thunks (SteamARM, Darwin host)
+
+Exports fex_lxrt_guest_bits/_reserve/_release to host libraries: a 32-bit
+guest lives at host = base + guest, so memory a host library maps
+(vkMapMemory) is out of its reach. The runtime's Vulkan shim reserves a
+range in the guest allocator, aliases the host pages into the window and
+returns the window address.
+
+Also: LoadLib/IsLibLoaded read the guest thunk library's structures in the
+guest's pointer size (4 bytes for i386) and through the guest base: FEX
+faulted reading 0xf754a0f2 on an i386 guest's first libvulkan load (MEASURED).
+
+--- a/Source/Tools/LinuxEmulation/Thunks.cpp	2026-09-27 08:09:52
++++ b/Source/Tools/LinuxEmulation/Thunks.cpp	2026-09-27 08:34:37
+@@ -8,6 +8,7 @@
+ 
+ #include "Thunks.h"
+ #include "LinuxSyscalls/Syscalls.h"
++#include "LinuxSyscalls/GuestBase.h"
+ #include "LinuxSyscalls/ThreadManager.h"
+ 
+ #include <FEXCore/Config/Config.h>
+@@ -355,24 +356,29 @@
+ }
+ 
+ namespace ThunkFunctions {
+-  void LoadLib(void* ArgsV) {
+-    struct LoadlibArgs {
+-      const char* Name;
+-    };
++  // SteamARM (Darwin host): the guest thunk library lays these structures
++  // out for ITS pointer size (4 bytes for an i386 guest), and a guest
++  // pointer is only a host pointer after the guest base (GuestBase.h).
++  static bool Guest32() {
++    return !FEX::HLE::_SyscallHandler->Is64BitMode();
++  }
++  static const char* GuestString(uint64_t Raw) {
++    if (Guest32()) {
++      Raw &= 0xFFFF'FFFFULL;
++    }
++    return reinterpret_cast<const char*>(FEX::HLE::G2H(Raw));
++  }
+ 
+-    auto Args = reinterpret_cast<LoadlibArgs*>(ArgsV);
++  void LoadLib(void* ArgsV) {
+     auto ThunkHandler = reinterpret_cast<ThunkHandler_impl*>(FEX::HLE::_SyscallHandler->GetThunkHandler());
+-
+-    ThunkHandler->LoadLib(Args->Name);
++    ThunkHandler->LoadLib(GuestString(*reinterpret_cast<uint64_t*>(ArgsV)));
+   }
+ 
+   void IsLibLoaded(void* ArgsRV) {
+-    struct ArgsRV_t {
+-      const char* Name;
+-      bool rv;
+-    };
+-
+-    auto& [Name, rv] = *reinterpret_cast<ArgsRV_t*>(ArgsRV);
++    // { const char* Name; bool rv; }: rv at 4 for an i386 guest, 8 for x86-64.
++    auto Bytes = reinterpret_cast<uint8_t*>(ArgsRV);
++    const char* Name = GuestString(*reinterpret_cast<uint64_t*>(Bytes));
++    bool& rv = *reinterpret_cast<bool*>(Bytes + (Guest32() ? 4 : 8));
+     auto ThunkHandler = reinterpret_cast<ThunkHandler_impl*>(FEX::HLE::_SyscallHandler->GetThunkHandler());
+ 
+     {
+@@ -468,3 +474,47 @@
+   return fextl::make_unique<ThunkHandler_impl>();
+ }
+ } // namespace FEX::HLE
++
++// SteamARM (Darwin host): guest address ranges for host memory a guest must
++// see. A 32-bit guest lives at host = base + guest (GuestBase.h), so a
++// pointer the host library hands back -- Vulkan's vkMapMemory above all --
++// is out of its reach. The runtime's Vulkan shim takes a range from the
++// guest allocator here, aliases the host pages into it, and returns the
++// window address; the thunk then gives the guest the window offset.
++#include <sys/mman.h>
++extern "C" {
++FEX_DEFAULT_VISIBILITY uint64_t fex_lxrt_guest_bits() {
++  return FEX::HLE::_SyscallHandler && FEX::HLE::_SyscallHandler->Is64BitMode() ? 64 : 32;
++}
++
++// Returns a 16 KiB aligned guest address with Size bytes reserved
++// (PROT_NONE), or 0.
++FEX_DEFAULT_VISIBILITY uint64_t fex_lxrt_guest_reserve(uint64_t Size) {
++  auto* A = FEX::HLE::_SyscallHandler ? FEX::HLE::_SyscallHandler->Get32BitAllocator() : nullptr;
++  if (!A || !Size) {
++    return 0;
++  }
++  constexpr uint64_t HostPage = 0x4000;
++  const uint64_t Len = (Size + HostPage - 1) & ~(HostPage - 1);
++  const auto R = reinterpret_cast<uint64_t>(A->Mmap(nullptr, Len + HostPage, PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE, -1, 0));
++  if (R > ~0xFFFULL) { // -errno
++    return 0;
++  }
++  const uint64_t Aligned = (R + HostPage - 1) & ~(HostPage - 1);
++  if (Aligned > R) {
++    A->Munmap(reinterpret_cast<void*>(R), Aligned - R);
++  }
++  const uint64_t End = R + Len + HostPage;
++  if (End > Aligned + Len) {
++    A->Munmap(reinterpret_cast<void*>(Aligned + Len), End - (Aligned + Len));
++  }
++  return Aligned;
++}
++
++FEX_DEFAULT_VISIBILITY void fex_lxrt_guest_release(uint64_t Addr, uint64_t Size) {
++  auto* A = FEX::HLE::_SyscallHandler ? FEX::HLE::_SyscallHandler->Get32BitAllocator() : nullptr;
++  if (A && Addr && Size) {
++    A->Munmap(reinterpret_cast<void*>(Addr), (Size + 0x3FFF) & ~0x3FFFULL);
++  }
++}
++}

@@ -1,0 +1,632 @@
+Stage 9 -- FEX built on the Mac with no VM (exit criterion #8). 2026-09-26.
+
+VERDICT: YES for FEX. FEX, FEXServer and FEXGetConfig (Release and
+RelWithDebInfo) plus the emulator-prefix FEX build on the macOS host, from
+Fedora 43 RPMs fetched over HTTPS and Homebrew clang/lld. The VM was not used
+for anything (no ssh, nothing copied out of it; VM-made files already in
+/tmp/lxrt-root were only read, for comparison). The host-built FEX passes the
+same five checks as the VM-built FEX-gb, and the host-built FEXServer serves
+them in an isolated instance. [MEASURED]
+NOT yet VM-free: the rest of the guest root (Xvnc, Mesa, bash, the lxrt-emu
+library copies, the dynamic-test samples) -- see OPEN ISSUES 1.
+UPDATE, same day: done -- see "STAGE 9b" at the end: the aarch64 root, the
+test samples and FEX's x86-64 rootfs are now built/fetched on the Mac too.
+
+Tags: MEASURED = run and observed here; VERIFIED IN SOURCE = read in FEX's
+or the runtime's source; HYPOTHESIS = inferred, not checked.
+
+REPRODUCE
+  scripts/build-fex-host.sh                    all steps (header explains why)
+  scripts/toolchain-aarch64-linux-fedora.cmake the cross toolchain file
+  Work dir $HOME/SteamARM-build (STEAMARM_BUILD): rpms/ sysroot-f43/ FEX/
+  build/{Release,RelWithDebInfo}/ out/ state/ logs/.
+  Steps: sysroot -> source -> build -> emu (each re-runnable on its own).
+
+
+1. SYSROOT (Fedora 43 aarch64, from RPMs)                          [MEASURED]
+
+  Downloaded from https://dl.fedoraproject.org/pub/fedora/linux/updates/43/
+  Everything/aarch64/Packages/<letter>/ and checked against sha256 pins taken
+  from that repo's repodata (primary.xml). Fallbacks in the script: releases/
+  repo, archive/, then Koji (kojipkgs .../packages/<src>/<ver>/<rel>/aarch64/,
+  HTTP 200 checked for glibc-2.42-16). 8 RPMs, 48,877,757 bytes:
+
+    glibc-2.42-16.fc43.aarch64                 1,910,697  0a665154...
+    glibc-devel-2.42-16.fc43.aarch64             579,154  d42b7f38...
+    kernel-headers-7.2.4-100.fc43.aarch64      1,798,306  1083cc19...
+    libgcc-15.3.1-1.fc43.aarch64                 129,898  150d2171...
+    libstdc++-15.3.1-1.fc43.aarch64              882,664  d0658a38...
+    libstdc++-devel-15.3.1-1.fc43.aarch64      5,439,665  d05e067c...
+    gcc-15.3.1-1.fc43.aarch64                 37,983,213  3ab396c6...
+      (only usr/lib/gcc/aarch64-redhat-linux/15: crt{begin,end}*.o,
+       libgcc.a, libgcc_eh.a, the libgcc_s.so linker script)
+    gdb-17.2-2.fc43.aarch64                      154,160  e5f15b06...
+      (only usr/include/gdb/jit-reader.h, see DIFFERENCES)
+  (full sha256 in the script's RPMS table)
+
+  Unpacked with macOS bsdtar 3.5.3 (libarchive 3.7.4), which hands the zstd
+  payload to Homebrew's zstd 1.5.7. usr/share, usr/lib/.build-id and gconv
+  skipped. libgcc still ships /lib64/libgcc_s.so.1: folded into usr/lib64,
+  then bin/sbin/lib/lib64 made merged-/usr symlinks as on Fedora. 0 absolute
+  symlinks found (all relative already). 65 MB. Linker scripts (libc.so,
+  libm.so, libgcc_s.so) use /lib64/... paths, which lld resolves inside
+  --sysroot.
+
+  The runtime libraries in the sysroot are BYTE-IDENTICAL to the ones the
+  VM put in /tmp/lxrt-root (sha256): usr/lib/ld-linux-aarch64.so.1,
+  usr/lib64/{libc.so.6,libm.so.6,libstdc++.so.6,libgcc_s.so.1}. So the VM
+  runs glibc 2.42-16.fc43 and gcc 15.3.1-1.fc43, and FEX links against
+  exactly what it runs with. The VM's FEX-gb .comment agrees: "GCC: (GNU)
+  15.3.1 20260722 (Red Hat 15.3.1-1)". [MEASURED]
+
+
+2. TOOLCHAIN
+
+  Host: macOS 27.0 (26A428), Apple M4, 10 cores, 16 GB.
+  Homebrew clang 23.1.1 (/opt/homebrew/opt/llvm/bin), Homebrew LLD 23.1.1
+  (/opt/homebrew/bin/ld.lld), llvm-ar/ranlib/nm/objcopy/strip 23.1.1,
+  cmake 4.4.2, ninja 1.13.2, git 2.54.0 (Apple), Python 3.14.6 (Homebrew;
+  CMake's pick for FEX's generator scripts). No GCC cross compiler.
+
+  scripts/toolchain-aarch64-linux-fedora.cmake:
+    CMAKE_SYSTEM_NAME Linux, CMAKE_SYSTEM_PROCESSOR aarch64
+    --target=aarch64-redhat-linux-gnu (Fedora's own triple)
+    --sysroot=$HOME/SteamARM-build/sysroot-f43
+    --gcc-install-dir=<sysroot>/usr/lib/gcc/aarch64-redhat-linux/15
+    -fuse-ld=lld --ld-path=<ld.lld> -Wl,--build-id=sha1
+    find_*: programs from the host, headers/libraries/packages only from the
+    sysroot (so Homebrew's Mach-O fmt/xxhash can never be picked up; FEX
+    builds its bundled fmt, xxhash, range-v3, unordered_dense).
+  What the clang driver does with it (clang -###, MEASURED): dynamic linker
+  /lib/ld-linux-aarch64.so.1, Scrt1.o crti.o crtbeginS.o ... crtendS.o
+  crtn.o, -lgcc --as-needed -lgcc_s, libstdc++ (not libc++/compiler-rt).
+
+
+3. CMAKE CONFIGURATION (both build types)
+
+  CFLAGS=-ffixed-x18 CXXFLAGS=-ffixed-x18 cmake -G Ninja
+    -DCMAKE_TOOLCHAIN_FILE=scripts/toolchain-aarch64-linux-fedora.cmake
+    -DCMAKE_BUILD_TYPE=Release | RelWithDebInfo
+    -DBUILD_TESTING=OFF -DBUILD_THUNKS=OFF -DBUILD_FEXCONFIG=OFF
+    -DENABLE_LTO=ON -DENABLE_FEX_ALLOCATOR=ON -DENABLE_JEMALLOC_GLIBC_ALLOC=OFF
+    -DENABLE_GDB_SYMBOLS=ON -DTUNE_CPU=apple-m1 -DTUNE_ARCH=generic
+    -DUSE_LEGACY_BINFMTMISC=OFF -DENABLE_CCACHE=OFF
+  with SOURCE_DATE_EPOCH = the commit time (1790089840, 2026-09-22).
+  Targets: FEX FEXServer FEXGetConfig.
+
+  Source: https://github.com/FEX-Emu/FEX.git at
+  08f451d3bce62a68aa6307dced5a8eaeb85c39bc (git describe:
+  FEX-2609-113-g08f451d3b), blobless clone; submodules (depth 1): External/
+  fmt range-v3 rpmalloc drm-headers xxhash unordered_dense and Source/Common/
+  cpp-optparse -- nothing else is compiled in this configuration (VERIFIED IN
+  SOURCE: CMakeLists.txt adds vixl only with BUILD_TESTING or the VIXL
+  options, Catch2 only with BUILD_TESTING, zydis/tracy/jemalloc_glibc only
+  with their own options). Patches, in order, with
+  git apply: patches/fex-lxrt-x18.patch, fex-lxrt-guest-base.patch (the
+  33-file version of 14:15, including the MAP_SHARED 16 KiB hunk; its prose
+  header is ignored by git apply), fex-lxrt-wx.patch; patches/LxrtJit.h
+  copied to FEXCore/include/FEXCore/Utils/LxrtJit.h (the wx patch includes
+  <FEXCore/Utils/LxrtJit.h>). 36 files changed/new. [MEASURED]
+
+  Resulting compile line (compile_commands.json, FEXInterpreter.cpp):
+    clang++ --target=aarch64-redhat-linux-gnu --sysroot=... -ffixed-x18
+    --gcc-install-dir=... -O3 -DNDEBUG -fomit-frame-pointer -std=gnu++20
+    -flto=thin -fPIE -fvisibility=hidden ... -march=armv8-a+crc -mcpu=apple-m1
+  LTO: kept ON; ThinLTO through lld works [MEASURED]. (The VM linked it
+  through a GNU linker + LLVMgold: its .comment names no lld -- HYPOTHESIS
+  as to which GNU linker.)
+  TUNE_CPU: the VM had TUNE_CPU=native, which FEX resolves by running
+  Scripts/aarch64_fit_native.py on /proc/cpuinfo (VERIFIED IN SOURCE) --
+  meaningless when cross compiling, so apple-m1 (a subset of the M4 the
+  runtime runs on). FEX_TUNE_CPU overrides it.
+
+
+4. BUILD TIME (M4, ninja -j8, a Steam session running under lxrun meanwhile)
+                                                                    [MEASURED]
+  From an empty work dir, whole script:   102 s (final script; earlier
+                                          versions 105 s). Downloads 8 RPMs,
+                                          blobless clone + 7 shallow
+                                          submodules, 2 configures, 2 builds,
+                                          FEX-emu relink.
+  Release build (267 ninja steps):        25-34 s across runs
+  RelWithDebInfo build (267 steps):       27-32 s
+  Re-run with nothing to do:              0.8 s
+  After a patch file changes (re-patch, 105 of 267 steps each): 52 s
+  The VM build time is not comparable (not measured; the VM was off limits).
+
+
+5. OUTPUT                                                         [MEASURED]
+
+  $HOME/SteamARM-build/out/            host build        VM build (/tmp/lxrt-root)
+    FEX                                3,918,688          3,940,800 (FEX-gb)
+    FEXServer                            355,280            397,896
+    FEXGetConfig                         290,664            331,528
+    FEX-dbg        (RelWithDebInfo)   36,865,648         39,001,368 (FEX-gb-dbg)
+    FEXServer-dbg                     13,137,672         12,194,440
+    FEXGetConfig-dbg                   4,639,328                  --
+    FEX-emu        (emulator prefix)   3,918,768          4,087,241 (lxrt-emu/FEX)
+  sha256: FEX a08e58fe60130e75..., FEXServer 6814ef69b60c57d3...,
+  FEXGetConfig 4eab51f2af336278..., FEX-emu ea339ca25620852e...
+
+  Installed (new names only): /tmp/lxrt-root/usr/bin/FEX-host (= out/FEX)
+  and /tmp/lxrt-root/usr/bin/FEXServer-host (= out/FEXServer). Nothing else
+  in either root was changed; lxrt-emu/* and /tmp/lxrt-steamroot untouched.
+
+  Reproducible: two builds in two different work dirs gave bit-identical
+  FEX, FEXServer, FEXGetConfig and FEX-emu. Without SOURCE_DATE_EPOCH, FEX
+  differed in 39,219 bytes: it embeds __DATE__/__TIME__ in its emulated
+  uname version string, and mergeable-string order then moves .text
+  offsets. The -dbg binaries still differ between work dirs (absolute
+  source paths in DWARF). [MEASURED]
+
+
+6. VERIFICATION                                                   [MEASURED]
+
+  6a. The five required runs, final binaries, from ~/Projects/SteamARM with
+  perl -e 'alarm 120; exec @ARGV' (stdout+stderr minus the [lxrt] lines).
+  run-fex.sh reuses the running FEXServer (the VM-built one serving Steam).
+
+  $ FEXBIN=FEX-host scripts/run-fex.sh /tmp/i386_probe          [rc=0, 0.13 s]
+      I GuestBase: 32-bit guest at host 0x7000038000
+      i386 probe: hello from int 0x80
+      g_data at 0x0040385c
+      mmap2 -> 0xf73b2000
+      brk 0xf77e3000
+        -> 0xf77f3000
+      mmap2 FIXED_NOREPLACE @0x30000000 -> 0x30000000
+      == i386 probe: 8 ok, 0 mal
+  $ FEXBIN=FEX-host scripts/run-fex.sh /tmp/i386_dyn            [rc=0, 0.13 s]
+      I GuestBase: 32-bit guest at host 0x7000038000
+      i386 dyn: libc heap ok, pid 38556
+      == i386 dyn: ok
+  $ FEXBIN=FEX-host scripts/run-fex.sh /tmp/i386_threads        [rc=0, 0.14 s]
+      I GuestBase: 32-bit guest at host 0x7000038000
+      == i386 threads: ok
+  $ FEXBIN=FEX-host scripts/run-fex.sh /tmp/i386_spawn          [rc=0, 0.54 s]
+      I GuestBase: 32-bit guest at host 0x7000038000
+      I CLONE_CLEAR_SIGHAND passed to clone3. Returning EINVAL.   (x4)
+      nested-ok
+      == i386 spawn: ok
+  $ FEXBIN=FEX-host scripts/run-fex.sh /usr/bin/python3 -c 'print("py-ok")'
+                                                                [rc=0, 0.23 s]
+      I GuestBase: 64-bit ET_EXEC guest, low window at host 0x8000000000
+      py-ok
+
+  Runtime load of FEX-host (i386_probe log):
+    [lxrt] /tmp/lxrt-root/usr/bin/FEX-host: PIE, 4128768 bytes at ...
+    [lxrt] rewrite: 459936 words scanned | svc 266 found, 266 rewritten,
+           0 poisoned | tls 717 reads + 0 writes, 717 rewritten, 0 poisoned
+           | ctr 1 | sysreg 12
+    [lxrt] rewrite: x18 0 found in 5 code windows, 0 rewritten
+  VM-built FEX-gb, same run:
+    [lxrt] rewrite: 638277 words scanned | svc 267 found, 267 rewritten,
+           0 poisoned | tls 603 reads ..., 603 rewritten, 0 poisoned | ...
+    [lxrt] rewrite: x18 0 found in 5 code windows
+
+  6b. Baseline: the same five runs with FEXBIN=FEX-gb give the same five
+  good lines (8 ok 0 mal / ok / ok / ok / py-ok).
+  The runtime was being worked on in parallel: build/lxrun was rebuilt at
+  14:45, after the runs above (14:39). Re-run at 14:46 against the new
+  lxrun, FEX-host and FEX-gb again both gave all five good lines.
+
+  6c. FEXServer-host, isolated from the Steam session's server: own HOME
+  (/tmp/fexhome-hosttest, so its own Server.lock) and own socket name
+  (FEX_SERVERSOCKETPATH=hosttest.FEXServer.Socket, VERIFIED IN SOURCE:
+  FEXServerClient.cpp GetServerSocketName); clients log through the server
+  (FEX_OUTPUTLOG=server), so their lines appearing in FEXServer-host's
+  output prove the connection. Script kept outside the repo (scratch).
+      FEXServer processes before: 4609
+      started FEXServer-host: lxrun pid 38653
+      socket up after ~100 ms: /tmp/lxrt-abstract-501/hosttest.FEXServer.Socket
+      client i386_probe rc=0 :: == i386 probe: 8 ok, 0 mal
+      client i386_dyn rc=0 :: == i386 dyn: ok
+      client i386_threads rc=0 :: == i386 threads: ok
+      client i386_spawn rc=0 :: == i386 spawn: ok
+      client python3 rc=0 :: py-ok
+      FEXServer processes after:  4609 38653     (no server auto-spawned)
+      client log lines received by FEXServer-host: 5
+    FEXServer-host's own output (client pid|tid, time, message):
+      I 38655|38655 0.000 GuestBase: 32-bit guest at host 0x7000038000
+      I 38657|38657 0.113 GuestBase: 32-bit guest at host 0x7000038000
+      I 38659|38659 0.230 GuestBase: 32-bit guest at host 0x7000038000
+      I 38661|38661 0.356 GuestBase: 32-bit guest at host 0x7000038000
+      I 38661|38661 0.427 CLONE_CLEAR_SIGHAND passed to clone3. Returning EINVAL.  (x4)
+      I 38668|38668 0.885 GuestBase: 64-bit ET_EXEC guest, low window at host 0x8000000000
+    Stopped with SIGTERM to its own pid; its socket files and HOME removed.
+
+  6d. FEX-emu, copied temporarily to /tmp/lxrt-root/usr/bin/FEX-emu-host
+  (not into lxrt-emu/), same five runs: all five good lines. The runtime
+  loads its interpreter from the prefix and ld.so takes the libraries from
+  the DT_RPATH (LD_DEBUG=libs):
+      [lxrt] PT_INTERP /usr/lib/lxrt-emu/ld-linux-aarch64.so.1 -> /tmp/lxrt-root/usr/lib/lxrt-emu/ld-linux-aarch64.so.1
+      search path=/usr/lib/lxrt-emu  (RPATH from file .../FEX-emu-host)
+      trying file=/usr/lib/lxrt-emu/libstdc++.so.6  (libm, libgcc_s, libc alike)
+  Copy removed afterwards.
+
+  6e. FEX-dbg (RelWithDebInfo), copied temporarily as FEX-host-dbg: all five
+  good lines. Removed afterwards.
+
+  6f. Merged Steam root (how Steam runs: LXRT_ROOT=/tmp/lxrt-steamroot,
+  FEX_ROOTFS=/), x86-64 bash starting x86-64 python3, read-only use of the
+  root:
+      FEX-gb   rc=0 :: steamroot bash ok: x86_64 5.2.21(1)-release | steamroot py 3.12.3
+      FEX-host rc=0 :: steamroot bash ok: x86_64 5.2.21(1)-release | steamroot py 3.12.3
+
+  6g. Speed, python3 summing 3M squares (inner = in-guest perf_counter,
+  wall = whole run incl. FEX start-up), alternating, 3 runs each:
+      FEX-gb   inner 0.221 / 0.222 / 0.223 s   wall 0.460 / 0.458 / 0.462 s
+      FEX-host inner 0.221 / 0.223 / 0.221 s   wall 0.455 / 0.459 / 0.452 s
+  No difference beyond noise.
+
+  6h. Static checks (llvm-readelf / llvm-objdump / file):
+    file: both "ELF 64-bit LSB pie executable, ARM aarch64, version 1
+      (SYSV), dynamically linked, interpreter /lib/ld-linux-aarch64.so.1,
+      for GNU/Linux 3.7.0, stripped" (FEXServer-host likewise).
+    NEEDED, both: libstdc++.so.6 libm.so.6 libgcc_s.so.1 libc.so.6;
+      FLAGS_1 PIE; no RPATH/RUNPATH (FEX-emu: RPATH /usr/lib/lxrt-emu,
+      interpreter /usr/lib/lxrt-emu/ld-linux-aarch64.so.1).
+    Symbol versions needed: host set == VM set minus GLIBCXX_3.4.26
+      (max GLIBC_2.38, GLIBCXX_3.4.31, CXXABI_1.3.9).
+    x18/w18 register operands: 0 in FEX, FEXServer, FEXGetConfig, FEX-emu
+      and all three -dbg builds (the same regex counts 27 in ld.so, matching
+      the runtime's own count). -ffixed-x18 survives ThinLTO.
+    GDB JIT hooks (__jit_debug_register_code): present in FEX-dbg, as in
+      FEX-gb-dbg.
+
+
+7. DIFFERENCES FROM THE VM BUILD
+
+  - Compiler: Homebrew clang 23.1.1 vs Fedora clang 21.1.8 (.comment of
+    each). [MEASURED]
+  - Linker: lld 23.1.1 vs GNU ld with LLVMgold for LTO. [MEASURED: the host
+    binary's .comment says "Linker: Homebrew LLD 23.1.1", the VM's has no
+    linker entry; which GNU linker (bfd/gold) the VM used is a HYPOTHESIS]
+  - Segment layout: 4 PT_LOADs (R / R E / RW relro / RW) vs 2 (R E holding
+    .rodata and .eh_frame too / RW); p_align 0x10000 everywhere, and lld
+    starts each segment in a new 64 KiB frame, so no 16 KiB host page holds
+    two permissions. Effect on the runtime: its load-time rewriter scans
+    459,936 words instead of 638,277 (only real code is executable now);
+    svc 266 vs 267 sites, TLS reads 717 vs 603 (codegen), all rewritten,
+    0 poisoned in both. [MEASURED]
+  - Section sizes within 1%: .text 1,834,400 vs 1,825,116 (+0.5%), .rodata
+    111,744 vs 110,656, .data.rel.ro 1,344,704 vs 1,344,392, .eh_frame
+    157,156 vs 157,400. The larger file-size gaps of FEXServer (-10.7%) and
+    FEXGetConfig (-12.3%) are layout/padding, not code: their sections
+    differ by at most 3.4 KB (.text +0.5% FEXServer, +1.6% FEXGetConfig).
+    [MEASURED]
+  - -mcpu: apple-m1 vs whatever aarch64_fit_native.py printed in the VM.
+    LSE/RCPC use is the same (casal 172 vs 172, ldapr 13 vs 13, swpal 1 vs 1,
+    ldaddal 97 vs 99) [MEASURED]; that the VM resolved to apple-a13
+    (implementer 0x61, part 0 under HVF) is a HYPOTHESIS.
+  - Version string: host FEX says "FEX-2609-113-g08f451d"; the VM's FEX-gb
+    has an empty one ("# SMP Sep 26 2026 12:44:21"), i.e. git describe
+    failed in the VM. The host build's uname date is the commit date
+    (SOURCE_DATE_EPOCH), not the build time. [MEASURED]
+  - Build-id: added with -Wl,--build-id=sha1 (GNU ld's Fedora default, not
+    lld's), so both have one. [MEASURED]
+  - GDB JIT support: ENABLE_GDB_SYMBOLS is ON in both. In the VM it came
+    from gdb being installed (FEX's CMake defaults it to "gdb/jit-reader.h
+    found"); here the gdb RPM supplies that one header and the script sets
+    the option explicitly. Only active with FEX's GDBSymbols option.
+    [MEASURED: __jit_debug_register_code in FEX-gb-dbg and FEX-dbg]
+  - kernel-headers 7.2.4-100.fc43; the VM's version was not checked (the
+    VM was off limits). FEX's syscall numbering and struct layouts are its
+    own; HYPOTHESIS that this changes nothing.
+  - BUILD_TESTING OFF (the VM had ON); it does not change the three targets
+    (VERIFIED IN SOURCE: every BUILD_TESTING block only adds test targets
+    or subdirectories; vixl is linked into FEXCore only with ENABLE_VIXL_*).
+  - FEX-emu is linked with --dynamic-linker/-rpath/--disable-new-dtags
+    instead of patchelf: no extra PT_LOADs, .interp stays in the first page
+    (the patchelf'd lxrt-emu/FEX has 4 PT_LOADs, 2 of them added). [MEASURED]
+  - RelWithDebInfo is what the VM's Build-dbg is (FEX_REUSE_ANALYSIS.md,
+    and FEX-gb-dbg has optimised code with .debug_loclists), not Debug.
+  - One build warning in both configurations: "<ciso646> is not a standard
+    header since C++20" (-W#warnings, from a bundled dependency). Harmless.
+
+
+8. OPEN ISSUES
+
+  1. The rest of the guest root is still VM-sourced: tests/elf/mkroot.sh
+     (glibc runtime + samples compiled in the VM) and scripts/
+     mkaarch64extras.sh (Xvnc, xkbcomp, bash, Mesa swrast/libgallium, the X
+     and font libraries, the lxrt-emu copies of ld.so/libc/libm/libstdc++/
+     libgcc_s, and patchelf for FEX-emu). All of those are prebuilt Fedora
+     binaries: the same fetch-verify-unpack as the sysroot step replaces
+     them without compiling anything, but it needs the dependency closure
+     resolved from repodata (not done). The lxrt-emu libraries are already
+     byte-identical to this sysroot's, and FEX-emu no longer needs patchelf,
+     so the FEX half of mkaarch64extras.sh can switch today.
+  2. FEX-host has not run the Steam client yet: the live session uses
+     FEX-gb, and switching it (FEXBIN=FEX-host, or FEX-emu in the steam
+     root's lxrt-emu/) needs a Steam restart, which was not mine to do.
+  3. Pins age: the updates repo keeps only the newest build of a package.
+     The script falls back to the archive tree and to Koji (which keeps
+     every build), so old pins still download; moving them is manual.
+  4. The compiler is unpinned Homebrew LLVM (23.1.1 today): brew upgrade
+     changes the output. Record or pin it if bit-for-bit rebuilds matter
+     across time (they already hold for the same toolchain, section 5).
+  5. -dbg binaries are not reproducible across work dirs (absolute DWARF
+     paths); -ffile-prefix-map would fix it if wanted.
+  6. Thunks (BUILD_THUNKS) are not covered: they need x86/x86-64 guest-side
+     builds and their own sysroots. FEX's unit tests (BUILD_TESTING, Catch2,
+     vixl) are not built here either.
+  7. kernel-headers: which version the VM has was not checked (VM off
+     limits); this build uses 7.2.4-100.fc43 (section 7).
+  8. The script needs Homebrew llvm, lld, cmake, ninja and zstd (bsdtar
+     uses the zstd program for Fedora's payloads); check_tools stops early
+     with the brew command if one is missing.
+
+
+FINAL CLEAN RUN (final script, empty STEAMARM_BUILD, M4, -j8)     [MEASURED]
+  EXIT 0 after 102 s. Printed downloads (all first-try from updates/):
+    fetch https://dl.fedoraproject.org/pub/fedora/linux/updates/43/Everything/aarch64/Packages/g/glibc-2.42-16.fc43.aarch64.rpm
+    ... glibc-devel, kernel-headers, libgcc, libstdc++, libstdc++-devel,
+    gcc, gdb (each followed by "ok, sha256 <pin>")
+  Release 25 s, RelWithDebInfo 27 s. Output sha256 equal to the verified,
+  installed binaries: FEX a08e58fe..., FEXServer 6814ef69...,
+  FEXGetConfig 4eab51f2..., FEX-emu ea339ca2... Immediate re-run: 0.8 s,
+  everything "cached" / "up to date".
+
+
+==========================================================================
+STAGE 9b -- the guest roots without the VM. 2026-09-26, afternoon.
+
+VERDICT: YES. The two remaining VM-built pieces are now made on the Mac from
+pinned, checksummed downloads: the aarch64 root (what tests/elf/mkroot.sh +
+scripts/mkaarch64extras.sh made in the VM) together with the dynamic-test
+samples, and FEX's x86-64 rootfs (what FEXRootFSFetcher fetched in the VM).
+The ELF suite passes 32/32 on the new root with the new samples, x86-64 and
+i386 programs run through FEX on the new roots, and a Steam root built from
+them by the unchanged scripts/mksteamroot.sh runs x86-64 bash + python3.
+The VM was not used (not started, no ssh, nothing copied out of it); the
+VM-made roots (/tmp/lxrt-root, /tmp/lxrt-steamroot, ~/SteamARM-roots/*)
+were only read, for comparison. [MEASURED]
+
+REPRODUCE
+  scripts/mkroot-rpm.sh <out-dir> [samples-dir]  aarch64 root (+ samples)
+  scripts/mkroot-rpm.sh --relock                 re-resolve the pins
+  scripts/mkroot-rpm.lock                        the pins (71 RPMs)
+  scripts/fetch-x86-rootfs.sh <out-dir>          x86-64 rootfs
+      [--erofs] EroFS image instead of SquashFS, [--pristine] no fix-ups,
+      --index prints FEX's current index (to move the pin)
+  scripts/mksteamroot.sh <x86> <aarch64> <out> $STEAMARM_BUILD/out/FEX-emu
+  Both scripts' headers say what each step does and why.
+  Work dir $HOME/SteamARM-build: rpms/ (shared with build-fex-host.sh),
+  repodata-f43/ (only for --relock), rootstage-f43/, rootfs-images/.
+  The roots measured below: $HOME/SteamARM-build/roots/{lxrt-root, samples,
+  x86-rootfs, steamroot}.
+  Homebrew packages installed for this: squashfs 4.7.5 (unsquashfs),
+  xxhash 0.8.4 (xxhsum), erofs-utils 1.9.4 (fsck.erofs, dump.erofs; only
+  for --erofs). Already present and used: zstd 1.5.7, llvm/lld 23.1.1.
+  Small edits elsewhere: tests/elf/run.sh reads LXRT_ROOT and LXRT_SAMPLES
+  (defaults unchanged: /tmp/lxrt-root, /tmp/lxrt-samples); scripts/run-fex.sh
+  reads FEXDIR, the host directory FEX/FEXServer are loaded from (default
+  unchanged: /tmp/lxrt-root/usr/bin); SUPERSEDED headers on
+  tests/elf/mkroot.sh and scripts/mkaarch64extras.sh; mksteamroot.sh's usage
+  comment points at the new scripts. runtime/ untouched.
+
+
+9. AARCH64 ROOT: scripts/mkroot-rpm.sh                           [MEASURED]
+
+  Sources: https://dl.fedoraproject.org/pub/fedora/linux/releases/43/
+  Everything/aarch64/os and .../updates/43/Everything/aarch64, fallbacks
+  .../pub/archive/fedora/... and https://kojipkgs.fedoraproject.org/packages
+  /<src>/<ver>/<rel>/<arch>/ (the Koji URL of all 71 locked RPMs answered
+  HTTP 200).
+
+  Resolution (--relock): repomd.xml -> primary.xml.zst of both repos (sha256
+  checked against repomd.xml; updates/ wins over releases/), parsed with
+  python3's xml.etree (macOS /usr/bin/python3 3.9.6) through zstd. Seeds:
+  glibc libgcc libstdc++ bash tigervnc-server-minimal xkbcomp
+  xkeyboard-config mesa-dri-drivers; then every package providing a
+  shared-library requirement ("libX11.so.6()(64bit)") of a selected package,
+  to a fixed point. Obsoletes are honoured as dnf does: F43's tigervnc 1.16
+  replaced tigervnc-server-minimal by tigervnc-x11-server (which obsoletes
+  and provides it); without that the first lock took the stale release-repo
+  tigervnc-server-minimal 1.15.0-7, and its Xvnc was not the VM's. No
+  requirement had more than one provider. Result: 66 root packages + 5
+  build-only (glibc-devel, glibc-static, kernel-headers, gcc, vulkan-headers)
+  = 71 RPMs, 116,601,235 bytes, from repomd revisions 1761190638 (releases)
+  and 1790382216 (updates). The lock records file (N-V-R.A), epoch, sha256,
+  size, source RPM and why each package is there. A second --relock later in
+  the afternoon rewrote the lock byte-identical (7 s).
+
+  Unpack: bsdtar + zstd, gcc only ./usr/lib/gcc, usr/lib/.build-id skipped,
+  merged /usr, 0 absolute symlinks: stage 352 MB. Case-insensitive clashes
+  among payload paths: 8, all kernel-headers netfilter pairs
+  (xt_CONNMARK.h/xt_connmark.h ...), build-only headers, not in the root.
+
+  Scriptlets (read from the 66 RPM headers): only glibc (ldconfig,
+  iconvconfig, ld.so.conf; a kernel check), bash (/etc/shells),
+  tigervnc-x11-server (systemd units), glib2 (gio/schema caches), freetype
+  (touches fonts.scale) and xkeyboard-config (moves an old xkb dir aside)
+  have any. None is replicated: the VM root had no ld.so.cache or gconv
+  cache either, ld.so then searches /lib64:/usr/lib64, and runtime/ never
+  mentions ld.so.cache (grep). bash's payload carries /usr/bin/sh -> bash.
+
+  Root assembly as the VM scripts did it: bash, sh, Xvnc, xkbcomp; FEX from
+  $STEAMARM_BUILD/out (FEX -> FEX-gb, FEX-dbg -> FEX-gb-dbg, FEXServer,
+  FEXServer-dbg, FEXGetConfig, FEX-emu -> usr/lib/lxrt-emu/FEX); swrast_dri.so,
+  libdril_dri.so, libgallium-25.3.6.so; the DT_NEEDED closure of all of
+  those (python ELF reader, glibc's /lib64:/usr/lib64 search) = 61 libraries
+  as real files named by soname; ld-linux-aarch64.so.1 in usr/lib and
+  usr/lib64; lxrt-emu ld.so/libc/libm/libstdc++/libgcc_s; build/libvulkan.so.1
+  (the host-built shim); xkb data resolved; etc/resolv.conf, etc/hosts,
+  var/lib/xkb, dev/shm, tmp; bin lib lib64 sbin -> usr. Check: 81 ELF files,
+  every DT_NEEDED resolves inside the root (lxrt-emu inside itself).
+  385 files + links, 271 MB (the VM root's usr/: 279 MB).
+
+  Time, M4: from an empty work dir 100 s (fetch 93 s -- 71 sequential
+  HTTPS downloads, releases/ ones after a 404 on updates/ --, stage 4 s,
+  root 1 s, samples 2 s); a re-run 3 s. Two runs in different work dirs gave
+  identical roots except the FEX binaries (another session rebuilt
+  $STEAMARM_BUILD/out between the two runs) and bit-identical samples.
+
+  Against the VM-made /tmp/lxrt-root (all but tmp/): 428 entries there, 423
+  here.
+    331 files byte-identical, among them Xvnc (TigerVNC 1.16.2, from
+      tigervnc-x11-server-1.16.2-4.fc43), bash, xkbcomp, swrast_dri.so,
+      libdril_dri.so, libgallium-25.3.6.so, libLLVM.so.21.1, the glibc and
+      libstdc++/libgcc_s copies (lxrt-emu included), libvulkan.so.1,
+      261 of 296 xkb files, etc/hosts, etc/resolv.conf.
+    48 differ, all package versions:
+      12 libraries where the VM had the F43 *release* build and the lock the
+      current update: audit-libs 4.1.1-2 -> 4.2.1-1, glib2 2.86.0-2 ->
+      2.86.5-1, gnutls 3.8.10-3 -> 3.8.13-1, harfbuzz 11.5.1-1 -> -2,
+      libbrotli 1.1.0-10 -> 1.2.0-1 (2 files), libcap-ng 0.8.5-8 -> 0.9.6-1,
+      libffi 3.5.1-2 -> 3.5.2-1, libpng 1.6.50-2 -> 1.6.58-1, libtasn1
+      4.20.0-2 -> 4.21.0-1, p11-kit 0.25.8-1 -> 0.26.5-1, pam-libs 1.7.1-3 ->
+      1.7.1-5; 35 xkb files (xkeyboard-config 2.45-1 -> 2.46-1); and
+      FEXServer-dbg (a newer $STEAMARM_BUILD/out build).
+      The 12 VM libraries and all 296 VM xkb files are byte-identical to the
+      files of those F43 release RPMs (downloaded and compared): the VM root
+      was plain Fedora RPM content, a mix of release and update builds.
+    Missing here (8): usr/lib/lxrt-emu/vm-build/ (the VM's FEX builds, kept
+      there by hand), etc/machine-id and var/lib/dbus/machine-id (added by
+      hand to both live roots at 15:02 today; no script creates them).
+    Extra here (3): sbin -> usr/sbin and usr/sbin/ (Fedora's layout), and
+      .lxrt-root-rpm (this script's marker; it refuses to overwrite a root
+      without it, so the VM-made roots cannot be clobbered).
+
+
+10. SAMPLES                                                      [MEASURED]
+
+  The 18 programs tests/elf/run.sh uses, from the same sources and flags as
+  tests/elf/mkroot.sh (its four inline C files are carried in
+  mkroot-rpm.sh): hello_glibc hello_dyn tls_test pth_test fam_test jit_wx
+  jit_fork jit_fork_mt x18_test mremap_test tfd_sfd_test inotify_test
+  bwrap_test sig_test vk_test vkshim_test vkpresent_test vktri_test.
+  Homebrew clang 23.1.1 + lld, --target=aarch64-redhat-linux-gnu, sysroot =
+  the stage (glibc-static for -static-pie, gcc's crt files and libgcc.a,
+  vulkan-headers 1.4.341.0), the three vk*shim/present/tri ones linked by
+  SONAME against build/libvulkan.so.1. 41 MB (the VM's gcc-built set, with
+  its lxrt-root.tgz, 43 MB).
+
+
+11. X86-64 ROOTFS: scripts/fetch-x86-rootfs.sh     [MEASURED, VERIFIED IN SOURCE]
+
+  Where FEX's images come from (VERIFIED IN SOURCE, FEX 08f451d3b):
+  Source/Tools/FEXRootFSFetcher/Main.cpp DownloadURL =
+  https://rootfs.fex-emu.gg/RootFS_links.json; per distro one SquashFS and
+  one EroFS image; "Hash" is XXH3-64 with seed 0 over the whole file
+  (XXFileHash.cpp), printed with %x. Extraction there: `unsquashfs -f -d`
+  or `fsck.erofs --extract=`.
+  Pinned (index of today; the image is dated 2026-08-11, as the VM-era
+  tree's files are):
+    Ubuntu_24_04.sqsh  525,615,104 bytes  XXH3 3517e0e5ea25a473
+                       sha256 2854b06d3ff1b8f6e526135bfb6dd5b7b30ab3ab73e79ae933a3d9fed959a178
+    Ubuntu_24_04.ero   884,666,368 bytes  XXH3 52d6c0dab39efaed
+                       sha256 005ec6a45f014244feea7e5250a965b654d70c7ad048117288ba7f5532c33c02
+  xxhsum -H3 of both downloads equals the index. SquashFS: zstd, 39523
+  inodes, no xattrs, no device nodes/fifos/sockets; EroFS: lz4.
+
+  macOS: the volume is case-insensitive APFS; 2 directory pairs of the
+  image differ only in case (perl's Sys/sys, Pod/pod) and are merged into
+  one directory each; unsquashfs -f exits 0; 0 of the image's 39527 paths
+  are missing afterwards (the script checks this against the image's own
+  listing). The two UTF-8 file names (NetLock ...Főtanúsítvány) extract.
+
+  Fix-ups: comparing the pristine extraction with ~/SteamARM-roots/
+  x86-rootfs found 39517 common entries all identical, and exactly two
+  VM-era changes on top of the image, which the script now replays:
+    - 8 Vulkan ICD manifests moved to usr/share/vulkan/icd.d.disabled
+      (asahi dzn freedreno gfxstream_vk intel_hasvk intel nouveau radeon):
+      guest/provision.sh did that in the VM; lvp and virtio stay.
+    - i386 GTK 2 + libXtst, 22 files and links (+5 directories) under
+      usr/lib/i386-linux-gnu (no record of who added them): byte-identical,
+      modes and links included, to the usr/lib/i386-linux-gnu of Ubuntu
+      noble's libgtk2.0-0t64_2.24.33-4ubuntu1.1_i386.deb (sha256 0b3da149...) and
+      libxtst6_1.2.3-1.1build1_i386.deb (sha256 c5183c2a...), fetched from
+      archive.ubuntu.com (Launchpad as fallback) and unpacked with bsdtar.
+
+  Result against both VM-era copies, ~/SteamARM-roots/x86-rootfs and
+  .../fexhome/.local/share/fex-emu/RootFS/Ubuntu_24_04 (full manifests:
+  type, sha256 of every file, permission bits, link targets): 39,553
+  entries each, 39,553 identical, 0 different, 0 missing, 0 extra. The
+  --erofs extraction is identical to the SquashFS one (39,553/39,553).
+  Time: download 10 s (sqsh) / 19 s (ero); unsquashfs 2-3 s, fsck.erofs
+  4 s; whole script from an empty cache 19 s, cached 4 s, --erofs 29 s
+  (23 s of it the dump.erofs walk that lists the image for the check).
+  1.8 GB unpacked.
+
+
+12. TESTS ON THE NEW ROOTS                                       [MEASURED]
+
+  12a. tests/elf/run.sh, runtime build/lxrun of 15:04 and of 15:33:
+    VM root + VM samples (baseline, defaults)   32 passed, 0 failed
+    new root + VM samples                       32 passed, 0 failed
+    new root + new samples (x2)                 32 passed, 0 failed
+  In all four: skip vulkaninfo (in neither root); "libc mapped by ld.so had
+  all 415 svc sites rewritten", "TLS rewriting found 273 reads". Only
+  difference beyond timing noise: the clang-built x18_test loses x18 in 1
+  check under LXRT_NO_X18=1, the gcc-built one in 2 (the test wants >= 1).
+  The baseline wrote two bwrap-data/src dirs into /tmp/lxrt-root/tmp; those
+  two were removed again. The other runs wrote only into the new root.
+
+  12b. LXRT_ROOT=<new root> build/lxrun ...
+    /usr/bin/bash -c 'echo hi'  -> hi, bash 5.3.0(1)-release
+    /usr/bin/Xvnc -version      -> Xvnc TigerVNC 1.16.2 - built Jun 18 2026
+    /usr/bin/xkbcomp -version   -> xkbcomp 1.5.0
+  A whole Xvnc from the new root on display :7 (port 5907, -localhost,
+  +extension GLX, the live :1 untouched): listening, keymap compiled by
+  xkbcomp through /bin/sh, scripts/vnc_snapshot.py got an 800x600 frame;
+  stopped with SIGTERM. xkbcomp warns about 27 unresolved XF86 keysyms here
+  vs 3 in the VM root's log (xkeyboard-config 2.46 names more keysyms than
+  libX11 1.8.13 knows; not fatal). LD_DEBUG=files: Xvnc dlopens
+  dri/swrast_dri.so, which dlopens libEGL.so.1 -- present in neither this
+  nor the VM root.
+
+  12c. FEX on the new roots only: FEX_ROOTFS=/tmp/x86-rootfs (a relative
+  link in the new root's tmp to the new x86 rootfs), FEXDIR=<new root>/usr/bin,
+  an own FEXServer (FEX_SERVERSOCKETPATH=mkroot-rpm.FEXServer.Socket,
+  HOME=/tmp/fexhome inside the new root) so the live session's server
+  (pid 47327) was never used; i386 probes built by tests/elf/build_i386.sh
+  against the new x86 rootfs. Via scripts/run-fex.sh:
+    python3 -c ...     rc=0  0.27 s  1 x86_64 3.12.3
+    bash -c ...        rc=0  0.22 s  bash 5.2.21(1)-release on x86_64, subshell ok
+    i386_probe         rc=0  0.13 s  8 ok, 0 mal
+    i386_dyn           rc=0  0.13 s  ok
+    i386_threads       rc=0  0.14 s  ok
+    i386_spawn         rc=0  0.55 s  nested-ok, ok
+  A client with FEX_OUTPUTLOG=server printed via-server-ok and its log line
+  appeared in the isolated server's output. FEXServer processes before:
+  47327; during: 47327 + the isolated one; after: 47327.
+
+  12d. Steam root: scripts/mksteamroot.sh <new x86 rootfs> <new aarch64
+  root> <out> $STEAMARM_BUILD/out/FEX-emu (4 s, APFS clones), then with an
+  own FEXServer and FEX_ROOTFS=/:
+    FEX-gb        rc=0  steamroot bash ok: x86_64 5.2.21(1)-release | steamroot py 3.12.3
+    lxrt-emu/FEX  rc=0  lxrt-emu FEX ok  (PT_INTERP from /usr/lib/lxrt-emu)
+  Against the live ~/SteamARM-roots/steamroot (all but tmp/): 39,622 of
+  39,638 common entries identical; different: the same 12 library versions,
+  FEX-gb (rebuilt in the meantime) and 3 fontconfig caches the Steam session
+  regenerated; only in the live one: dev/shm/u501-ValveIPCSharedObj-Steam,
+  3 i386 fontconfig caches, etc/machine-id + var/lib/dbus/machine-id and
+  usr/lib/lxrt-emu/vm-build/ -- runtime state and hand-made additions.
+
+
+13. STILL VM-DERIVED / OPEN
+
+  1. The live roots are still the VM-made ones: nothing was replaced (a
+     Steam session runs from them). Switching is: move ~/SteamARM-roots/
+     lxrt-root aside, scripts/mkroot-rpm.sh ~/SteamARM-roots/lxrt-root
+     ~/SteamARM-roots/samples, carry over its tmp/ (the script keeps tmp/
+     only when it rebuilds its own root), and likewise the x86 rootfs and
+     scripts/mksteamroot.sh.
+  2. Not reproduced by any script: etc/machine-id + var/lib/dbus/machine-id
+     (hand-made today, in both live roots) and usr/lib/lxrt-emu/vm-build/.
+  3. The Steam client files in the live steamroot's /tmp/fexhome were
+     copied from the VM (stage8); Steam's own bootstrap would fetch them
+     again, not tried here.
+  4. Package versions: the lock pins today's F43 updates, newer than the
+     VM's release builds of 12 libraries and xkeyboard-config. The suite,
+     Xvnc and FEX runs above pass with them; the Steam client itself has
+     not run on the new roots yet.
+  5. swrast_dri.so (Mesa 25.3 dril) dlopens libEGL.so.1, which neither root
+     has; whether Xvnc's GLX then works was not tested here (same in the
+     VM root).
+  6. Pins age: the updates repo keeps only the newest build; the script
+     falls back to archive/ and Koji. FEX's image URL is dated and the index
+     still lists it; if it goes, --index shows the replacement.
+  7. The samples are built with clang/lld, not gcc/GNU ld as in the VM:
+     same suite result; the x18 control differs as noted in 12a.

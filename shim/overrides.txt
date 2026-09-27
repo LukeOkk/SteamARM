@@ -1,0 +1,4 @@
+# Exported by hand outside shim/vk_rebase.c (not in vk.xml): gen.py emits
+# MoltenVK's version as the hidden lxrt_mvk_<name>. The generated wrappers'
+# names (shim/vk_rebase.names) are added to this list by the Makefile.
+vk_icdGetInstanceProcAddr

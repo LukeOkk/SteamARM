@@ -1,0 +1,62 @@
+FEX: keep x18 out of the JIT's dynamic register pool (Darwin host)
+====================================================================
+
+Why: Darwin's kernel zeroes x18 on every exception return -- a raw svc, a
+signal, a sleep, and preemption (benchmarks/stage5-x18.txt: 444 losses in
+1.5 s of preemption with no syscalls at all). FEX's 64-bit-mode register
+allocator hands x18 to guest values (x64::RA, PreserveAll_Dynamic in
+FEXCore/Source/Interface/Core/ArchHelpers/Arm64Emitter.cpp), so translated
+code silently lost values. The same file already excludes x18 on ARM64EC
+(Windows), where it is the TEB pointer.
+
+Which Linux dependency it removes: none. It is a host-platform constraint
+(x18 is the platform register on Darwin and Windows; a temporary on Linux).
+
+Upstreamable: yes, as a CMake option or a host-platform check
+("reserve x18 when the host is not Linux"); the ARM64EC branch is the
+precedent. Cost of one fewer dynamic register: not measured yet.
+
+External alternative: none for JIT output. FEX's own C++ and the guest's
+libraries are covered separately: FEX is built with -ffixed-x18 (both
+Build/ and Build-dbg/ on the guest: cmake -DCMAKE_C_FLAGS=-ffixed-x18
+-DCMAKE_CXX_FLAGS=-ffixed-x18), and unmodified Linux libraries (glibc 326
+sites, libstdc++ 251, ld.so 27, libgcc_s 40, libm 44) get x18 virtualised
+by the runtime's rewriter (runtime/x18.c) -- see MIGRATION_PLAN Stage 5.
+
+Maintenance: 12 changed lines in one file; rebase trivially.
+
+Applied on the guest tree at FEX-2609-113-g08f451d3b (commit 08f451d3b).
+
+diff --git a/FEXCore/Source/Interface/Core/ArchHelpers/Arm64Emitter.cpp b/FEXCore/Source/Interface/Core/ArchHelpers/Arm64Emitter.cpp
+index 3ebadb5..3875290 100644
+--- a/FEXCore/Source/Interface/Core/ArchHelpers/Arm64Emitter.cpp
++++ b/FEXCore/Source/Interface/Core/ArchHelpers/Arm64Emitter.cpp
+@@ -73,21 +73,23 @@ namespace x64 {
+     ARMEmitter::Reg::r8, ARMEmitter::Reg::r16, ARMEmitter::Reg::r17,
+   };
+ 
+-  constexpr std::array<ARMEmitter::Register, 7> RA = {
++  // r18 is NOT in this pool: on a Darwin host the kernel zeroes x18 on every
++  // exception return (syscall, signal, preemption -- measured by the lxrt
++  // runtime: 444 losses in 1.5 s of preemption), so nothing may live there.
++  constexpr std::array<ARMEmitter::Register, 6> RA = {
+     // All these callee saved
+     ARMEmitter::Reg::r20, ARMEmitter::Reg::r21, ARMEmitter::Reg::r22, ARMEmitter::Reg::r23,
+-    ARMEmitter::Reg::r24, ARMEmitter::Reg::r30, ARMEmitter::Reg::r18,
++    ARMEmitter::Reg::r24, ARMEmitter::Reg::r30,
+   };
+ 
+   constexpr unsigned RAPairs = 4;
+ 
+   // Dynamic GPRs
+-  constexpr std::array<ARMEmitter::Register, 2> PreserveAll_Dynamic = {
+-    ARMEmitter::Reg::r18,
++  constexpr std::array<ARMEmitter::Register, 1> PreserveAll_Dynamic = {
+     ARMEmitter::Reg::r30,
+   };
+ 
+-  constexpr std::array<ARMEmitter::Register, 2> NotPreserved_Dynamic = PreserveAll_Dynamic;
++  constexpr std::array<ARMEmitter::Register, 1> NotPreserved_Dynamic = PreserveAll_Dynamic;
+ 
+   // All are caller saved
+   constexpr std::array<ARMEmitter::VRegister, 16> SRAFPR = {

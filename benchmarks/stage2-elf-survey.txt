@@ -1,0 +1,33 @@
+PIE vs non-PIE, and what the __PAGEZERO limitation actually costs.
+Fedora 43 aarch64 guest + the Steam install this project runs. 2026-09-23.
+
+runtime/elf.c can only load ET_DYN (PIE) images; ET_EXEC images link inside
+Darwin's unreclaimable 4 GiB __PAGEZERO (benchmarks/stage2-pagezero.txt). This
+measures how much of the real world that excludes.
+
+  set                                total   DYN(PIE)   EXEC(no-PIE)
+  /usr/bin        (aarch64)           1019      985         34   (96.7% PIE)
+  /usr/lib64      (aarch64)            591      591          0  (100.0% PIE)
+  FEX             (aarch64)              7        7          0  (100.0% PIE)
+  Steam client    (x86)                 90       85          5   (94.4% PIE)
+  Steam runtime   (x86)                785      719         66   (91.6% PIE)
+
+The 34 non-PIE binaries in /usr/bin are the GCC toolchain and criu:
+  aarch64-redhat-linux-{gcc,g++,c++,gcc-15}, cc, c++, cpp, gcc, g++,
+  gcc-{ar,nm,ranlib}, gcov, gcov-dump, criu, ...
+
+None of them is on the path to running a game. Every shared library is PIE,
+FEX is PIE, and Steam's own binaries are PIE.
+
+CONCLUSION: the PIE-only restriction is real but nearly free for this project's
+purpose. It should still be stated in any capability claim rather than hidden,
+and it is a hard "cannot", not a "not yet".
+
+Separately, for Stage 5: Steam's x86 binaries use PT_LOAD p_align 0x1000, which
+would straddle Darwin's 16 KiB pages.
+
+CORRECTION (2026-09-24): the original text continued "That does not block them,
+because under FEX guest addresses are not host addresses", and that was wrong.
+FEX maps the guest's segments at their own addresses using the host's mmap, so
+Darwin's 16 KiB MAP_FIXED alignment requirement applies directly and rejected
+them. See benchmarks/stage5-subpage.txt for the measurement and the fix.

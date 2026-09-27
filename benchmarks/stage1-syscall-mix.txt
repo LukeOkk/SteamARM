@@ -1,0 +1,57 @@
+Guest syscall rate and mix -- Steam UI idle at the library view, no game running.
+Measured with ftrace raw_syscalls:sys_enter histograms, 10 s window, whole guest.
+Fedora 43 aarch64, kernel 6.17.1, 8 vCPU. 2026-09-23.
+
+Two consecutive 10 s windows: 42153 and 43189 hits.
+  => ~4300 syscalls/second, guest-wide, with Steam merely sitting at the library.
+
+Top by hitcount (aarch64 asm-generic numbers), second window:
+
+  id   name                 hits     share
+  113  clock_gettime      30482     70.6%
+  212  recvmsg             2721      6.3%
+   73  ppoll               2483      5.7%
+   98  futex               1908      4.4%
+  178  gettid               684      1.6%
+   63  read                 604      1.4%
+   22  epoll_pwait          437      1.0%
+  172  getpid               383      0.9%
+   66  writev               271
+   56  openat               267
+  139  rt_sigreturn         252
+   95  waitid               241
+   57  close                232
+  103  setitimer            216
+   80  fstat                193
+   64  write                181
+   62  lseek                107
+  437  openat2               98
+  115  clock_nanosleep       98
+   78  readlinkat            98
+   79  fstatat               88
+  129  kill                  87
+
+68 distinct syscalls in the window, 0 dropped events.
+
+READ THIS TOGETHER WITH stage1-syscall-cost.txt:
+
+* clock_gettime alone is 70% of all syscalls. On native Linux it would be
+  answered by the vDSO without entering the kernel at all; under FEX the x86
+  client cannot use the guest vDSO, so each one is a real syscall. A ZERO-VM
+  runtime answers it in userspace: measured 0.9 ns, against 68 ns for a
+  rewritten site that does reach the kernel.
+
+* At 4300 syscalls/s the mechanisms cost, per wall-clock second of one core:
+    trap via signal      4300 x 2794 ns = 12.0 ms   (1.2%)
+    trap via Mach exc.   4300 x 6317 ns = 27.2 ms   (2.7%)
+    rewritten svc        4300 x   68 ns =  0.29 ms  (0.03%)
+    rewritten, 70% of them served in userspace = 0.09 ms (0.01%)
+
+  This is the IDLE figure. It is a floor, not a budget: a running game adds its
+  own render-thread syscalls and is not represented here. Capture the same
+  histogram during a game run before quoting any number as the real load.
+
+* The syscalls to implement first are exactly the head of this list, which is
+  much shorter than "Linux": clock_gettime, recvmsg, ppoll, futex, gettid,
+  read/write/writev, epoll_pwait, openat, and the signal return path. Those
+  nine cover 92% of all calls made.

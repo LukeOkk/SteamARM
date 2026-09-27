@@ -1,0 +1,31 @@
+Is a linear scan for the `svc #0` bit pattern accurate on real binaries?
+2026-09-23.
+
+runtime/rewrite.c scans executable segments for the 32-bit encoding of
+`svc #0` (0xD4000001). The documented risk is that it cannot tell an
+instruction from a literal-pool entry holding the same bits, and Stage 1
+established that a MIS-rewrite or a MISS is silent, not loud.
+
+Validated against a full disassembly (llvm-objdump -d, counting `svc #0`):
+
+  binary                      linear scan    disassembler    agree
+  libc.so.6 (glibc, Fedora)          415            415       yes
+  ld-linux-aarch64.so.1               54             54       yes
+  libvulkan.so.1                       0              0       yes
+  /usr/bin/true                        0              0       yes
+
+Exact agreement on 430780 + 141622 + ... scanned words. No false positives, no
+misses, and no hvc/smc encodings turned up anywhere.
+
+Also observed, and worth keeping in mind: libvulkan.so.1 and /usr/bin/true
+contain ZERO syscall sites. Userspace does not issue syscalls directly; it
+calls libc, and libc holds 415 of them. The rewriting surface for an entire
+process is therefore small and concentrated.
+
+THIS IS EVIDENCE, NOT A PROOF. The scan remains structurally unable to
+distinguish code from data, and a binary whose literal pool happened to contain
+0xD4000001 would be corrupted silently. A disassembler-driven walk from the
+entry point and the symbol table is still the correct long-term implementation.
+What this measurement establishes is that the naive pass is good enough to
+proceed with, and that a regression in it would be detectable by re-running
+this comparison.

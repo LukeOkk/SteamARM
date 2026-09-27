@@ -1,0 +1,71 @@
+The virtual address space Darwin gives, and the one FEX expects.
+Apple M4, macOS 27. 2026-09-24.
+
+Probed with mach_vm_allocate(VM_FLAGS_FIXED), which fails rather than moving:
+
+  0x100000000        invalid address     <- and everything below: __PAGEZERO
+  0x1000000000       no space available
+  0x4000000000       no space available
+  0x7000000000       OK
+  0x8000000000       OK
+  0x10000000000      OK
+  0x100000000000     OK
+  0x7f0000000000     OK
+  0x800000000000     invalid address     <- the ceiling, 2^47
+  0x1000000000000    invalid address
+
+  largest contiguous reservation: 1024 GiB, at 0x7bea000000
+
+So a macOS arm64 process gets roughly [4 GiB, 2^47) -- the low 4 GiB taken by
+__PAGEZERO (benchmarks/stage2-pagezero.txt), the top bounded at 2^47. Linux
+x86-64 userspace gets [0, 2^47) and Linux aarch64 typically [0, 2^48).
+
+WHAT FEX ASKS FOR, traced:
+
+  MAP_FIXED_NOREPLACE 0x1fffffffffff000 + 0x1000
+  MAP_FIXED_NOREPLACE 0x800000000000    + 0x800000000000
+
+The second is a 128 TiB reservation starting exactly at Darwin's ceiling. FEX's
+64-bit allocator lays out the guest address space against Linux's map, and
+neither request can be satisfied here. It then asserts in
+FEXCore::Assert::ForcedAssert.
+
+CORRECTION, later the same day: THE CONCLUSION BELOW IS WRONG. FEX was not
+assuming Linux's layout -- it probes the host's VA width and adapts. It got the
+wrong answer because the runtime's MAP_FIXED_NOREPLACE returned EEXIST for
+every failure, including "address does not exist", and FEX's probe treats
+EEXIST as proof that a width exists. With EEXIST and ENOMEM distinguished, FEX
+detects 47 bits correctly and never attempts the reservation. No patch to FEX.
+See benchmarks/stage5-idregs.txt.
+
+The original text is kept below because the measurement of Darwin's address
+space is still correct and still useful.
+
+WHAT WAS WRONGLY CONCLUDED: The runtime cannot invent address space, so
+either:
+
+  (a) FEX is patched to take its VA layout from the host rather than assuming
+      Linux's -- a fork of FEX, which the project's rules say to reach for last
+      but which is what this is for; or
+  (b) some other x86 translator is used; or
+  (c) x86 support is abandoned, which also abandons Steam, whose client is
+      i386/x86-64.
+
+(a) is the only one that keeps the goal. It is worth noting that this is a
+bounded change -- an allocator's base addresses -- and not a rewrite.
+
+WHAT WAS FIXED ON THE WAY TO FINDING IT, all real and all kept:
+
+  * MAP_FIXED_NOREPLACE, which Darwin's mmap has no equivalent for. Implemented
+    with mach_vm_allocate(VM_FLAGS_FIXED), the same primitive that fixed the
+    runtime's own MAP_FIXED bug.
+  * brk(). It had pre-reserved a 256 MiB heap, which looks correct until
+    something probes past the break -- FEX asks for exactly the page after it.
+    Now grown and shrunk a page at a time against the real address space, as
+    the kernel does.
+  * Where the heap starts. Linux leaves a huge hole above the break; Darwin
+    packs mappings, so the 8 MiB guest stack landed immediately after the image
+    and FEX's probe hit it. The break is now placed inside a 4 GiB hole the
+    kernel confirms is free -- and deliberately NOT reserved, because anything
+    the runtime holds is exactly what such a probe fails against.
+  * msghdr and cmsghdr translation, the fifth silent number space.

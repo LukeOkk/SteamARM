@@ -1,0 +1,90 @@
+x18 on Darwin: measured, and what it did to FEX.
+2026-09-25, Apple Silicon, Darwin 27.0.0, x18probe.c (native, no runtime).
+
+THE MEASUREMENT (scratchpad/x18probe.c, cc -O1):
+  set only                                      : kept
+  across getpid()                               : kept   (cached in libSystem, no svc)
+  across raw `svc #0x80`                        : CLOBBERED (0x0)
+  across a signal (raise + handler return)      : CLOBBERED (0x0)
+  across usleep(50 ms)                          : CLOBBERED (0x0)
+  1.5 s busy loop, no syscalls, 16 spinners     : CLOBBERED, 444 losses, value 0x0
+So x18 is zeroed on every exception return, including preemption. It is
+not a register user code may keep anything in, ever. (MEASURED)
+
+WHAT LINUX CODE DOES WITH x18: on Linux it is an ordinary temporary. The
+guest images this runtime loads (llvm-objdump -d, counting instructions that
+name x18/w18 in any operand):
+  FEX (release, before the fix)   2271 of 449688 instructions
+  libc.so.6                        326 of 304419
+  libstdc++.so.6                   251 of 314104
+  libgcc_s.so.1                     40 of  24723
+  libm.so.6                         44 of  82222
+  ld-linux-aarch64.so.1             27 of  30806
+76 distinct mnemonics, 1165 distinct operand shapes (scratchpad
+x18_mnemonics.txt / x18_shapes.txt). Top forms: str/ldr with x18 as base or
+value, add/sub/cmp/mov, csel, ldp/stp, cbz/cbnz/tbz/tbnz, adrp, movk,
+casal/caspal, fmov/dup, one `mrs x18, TPIDR_EL0`.
+
+FEX's JIT (VERIFIED IN SOURCE, FEXCore/Source/Interface/Core/ArchHelpers/
+Arm64Emitter.cpp at 08f451d3b): in 64-bit guest mode x18 is in the dynamic
+register pool (`x64::RA = {r20..r24, r30, r18}`, `PreserveAll_Dynamic =
+{r18, r30}`); the 32-bit pool and the ARM64EC (Windows) pools exclude it.
+So translated x86-64 code also parked guest values in x18.
+
+WHAT IT LOOKED LIKE: every "small bogus pointer inside FEX's IR compiler"
+crash recorded in stage5-fex.txt and stage6 -- 0x85c, 0x2ee0, 0x118, 0x640,
+0x100000021 -- was this. With FEX-dbg symbols the faults land in
+FEXCore::IR::NodeWrapperBase::GetNode / OrderedNode::Op (IR.h:132/150/155/
+355): `ldr w16, [x16, x18]` with x18 = 0 where x18 held the IR list base.
+Every register dump the runtime ever printed showed x18 = 0x0. The failure
+rate rose with process count (more preemption): dash/bash fork loops under
+FEX lost 1-3 of 24 command substitutions per run and children died with
+SIGSEGV in the compiler.
+
+THE FIX, THREE PARTS:
+  1. FEX's JIT: patches/fex-lxrt-x18.patch removes x18 from the pool.
+  2. FEX's own C++ and its vendored libraries: built with -ffixed-x18.
+  3. Everything else Linux (glibc, libstdc++, ld.so, libgcc_s, libm, and any
+     library a guest dlopens): the runtime's rewriter virtualises x18 --
+     each instruction naming x18 becomes a branch to a trampoline that
+     loads the thread's virtual x18 from a TSD slot into a scratch register,
+     runs the instruction with the register substituted, stores the scratch
+     back, and returns. Preemption cannot touch the slot. runtime/x18.c
+     holds the decoder/planner; runtime/rewrite.c the integration.
+Why not only (3): FEX's JIT output cannot be scanned safely (its code buffer
+holds literal data that would decode as instructions), and rewriting 2271
+sites in FEX's hot compiler paths costs more than a compiler flag.
+Why not only (1)+(2): the distro libraries are prebuilt; rebuilding glibc,
+libstdc++ and every guest library with -ffixed-x18 is unbounded.
+
+RELATED DARWIN FACTS MEASURED THE SAME DAY (scratchpad probes):
+  - sigret_corrupt.c: a handler that zeroes its ucontext -> SIGTRAP; zeroes
+    the mcontext -> SIGSEGV; bad mcontext pointer / wrong uc_mcsize ->
+    SIGTRAP; uc_onstack forged -> fine. Never SIGKILL.
+  - altstack_gone.c: SA_ONSTACK delivery onto an unmapped or PROT_NONE alt
+    stack -> the process dies with SIGILL (XNU's sendsig failure path); a
+    handler without SA_ONSTACK is unaffected.
+  - redzone.c: there is NO red zone below sp for signal delivery: the kernel
+    frame overwrote [sp-16, sp) .. [sp-1024, sp) both on the thread stack
+    and on a nested delivery on the alt stack. A trampoline that needs
+    scratch space must move sp.
+  - fork(): the child's thread has NO alternate signal stack (sigaltstack
+    reports SS_DISABLE) although the mapping is inherited. The runtime
+    re-arms it in the child (lxrt_host_altstack_after_fork). Before that,
+    every host signal in a forked FEX process landed on the guest thread's
+    stack, FEX's handler wrote its context backup over the host frames, and
+    the child died with SIGILL/SIGSEGV -- visible as "Illegal instruction"
+    from the parent shell.
+  - The guest thread's host alt stack must be installed ON the guest thread:
+    sigaltstack is per thread, and main() had installed it on AppKit's.
+
+STILL OPEN (UNKNOWN): under LXRT_TRACE, the root FEX process of a fork loop
+is sometimes killed with SIGKILL right after `read` returns 0 on a command
+substitution pipe. proc_pidinfo(PROC_PIDEXITREASONBASICINFO) reports
+namespace 19 (OS_REASON_FOUNDATION), code 1, flags 0x2, no payload. A
+userspace terminate_with_reason always carries flag 0x4 (measured, self and
+cross-process), so the reason was created in the kernel; no kill/tgkill
+appears in any traced process, a DYLD_INSERT_LIBRARIES interposer on
+terminate_with_reason/abort_with_reason/kill logged nothing, and
+LXRT_NO_PUMP=1 (main thread out of AppKit/CoreFoundation) did not change
+it. Not reproduced without tracing in 8 runs.

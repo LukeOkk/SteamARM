@@ -1,0 +1,51 @@
+The ID registers, and the bug that made FEX ask for 128 TiB.
+Apple M4, macOS 27. 2026-09-24.
+
+FEX reads eleven system registers to decide which instructions it may emit.
+Measured from native Mach-O code, Darwin traps most of them:
+
+  CNTVCT_EL0   permitido      TPIDRRO_EL0  permitido
+  CNTFRQ_EL0   permitido      DCZID_EL0    permitido
+  CNTPCT_EL0   permitido      FPCR         permitido
+  CTR_EL0      *** SIGILL *** MIDR_EL1     *** SIGILL ***
+  ID_AA64PFR0/1, ID_AA64ISAR0/1/2, ID_AA64MMFR0/1/2/3, ID_AA64ZFR0
+                              *** SIGILL, all of them ***
+
+So they are rewritten, like svc and TPIDR_EL0: four instructions that
+materialise a 64-bit constant. 23 such sites in FEX, 2 in ld-linux.
+
+THE VALUES ARE REAL, not zeroes. macOS publishes the feature set through
+sysctl (hw.optional.arm.FEAT_*), and this core reports FEAT_LSE, AES, PMULL,
+SHA1/256/512/3, CRC32, RDM, DotProd, FHM, FlagM2, JSCVT, FCMA, LRCPC2, DPB2,
+FRINTTS, SB, BF16, I8MM and more. ID_AA64ISAR0/ISAR1/ISAR2/PFR0/PFR1/MMFR0/MMFR2
+are built from them.
+
+The bias is deliberate and one-directional. A feature reported ABSENT costs
+performance; a feature reported PRESENT but missing is an illegal instruction
+at runtime. Anything sysctl does not confirm is reported absent. Two are
+reported absent on purpose even though the hardware has them:
+
+  * Pointer authentication. Apple's implementation is enabled per-process by
+    the kernel; a guest that started signing pointers because an ID register
+    said it could would fault on the first authenticate.
+  * SME. It needs streaming state enabled through SMCR_EL1, which no guest here
+    can do.
+
+THE BUG THIS UNCOVERED, and it was in the runtime, not in FEX.
+
+FEX probes the host's VA width by trying to map one page at (1<<Bits)-PAGE_SIZE
+for Bits in 57, 52, 48, 47, ... and accepts a width if the mapping succeeds OR
+fails with EEXIST. The runtime's MAP_FIXED_NOREPLACE returned EEXIST for every
+failure, including "that address does not exist on this machine". FEX therefore
+concluded the host had 57-bit addresses, and then -- as it does whenever the
+host has 48 bits or more -- tried to reserve [2^47, 2^48) to fence off the
+range the guest must never see. Darwin tops out at 2^47, so that could never
+succeed, and FEX asserted.
+
+  EEXIST means "busy, try elsewhere".
+  ENOMEM means "that address does not exist here".
+
+mach_vm_allocate distinguishes them: KERN_NO_SPACE against KERN_INVALID_ADDRESS.
+The runtime now does too, and FEX correctly detects a 47-bit host and skips the
+reservation entirely. No patch to FEX was needed -- benchmarks/stage5-va.txt
+concluded one was, and that conclusion was wrong.

@@ -1,0 +1,70 @@
+Presentation end to end: swapchain on a CAMetalLayer, no VM.
+Apple M4, macOS 27, MoltenVK 1.4.2. 2026-09-24.
+
+WHAT RUNS: a dynamically linked Fedora binary, compiled with `-lvulkan` against
+the ELF shim and real Vulkan headers, that asks the runtime for a window,
+creates a surface on its CAMetalLayer, builds a swapchain, and runs an
+acquire / clear / present loop.
+
+  CAMetalLayer 0x77df3641e0, drawable 1280x720
+  VkSurfaceKHR creada sobre el CAMetalLayer
+  GPU: Apple M4
+  familia de colas 0 (grafica + present)
+  swapchain 1280x720, 3 imagenes
+  210 frames: mediana 8.620 ms (116.0 fps), media 7.930,
+              1% low 11.645 ms, max 13.201
+  presentacion completa, sin VM
+
+FIFO present mode, so the median sits on the display's refresh interval. This
+display is 1920x1080 @ 165 Hz, and a shorter run measured 6.030 ms / 165.8 fps
+-- exactly the refresh rate. The loop is vsync-bound, not GPU-bound, so the
+median says nothing about headroom. The number worth reading is the tail.
+
+COMPARE WITH THE VM (PERFORMANCE_BASELINE §2.1), Steam UI, 45 minutes:
+  median 16.54 ms (60.5 fps), 1% low 25.74, 0.1% low 42.70, stddev 2.90
+
+Not the same workload -- a clear loop is not a UI -- so this is not a like-for-
+like win. What it does show is that the 60 Hz ceiling is gone: that cap came
+from the guest's software compositor, which no longer exists.
+
+WHAT DISAPPEARED. In the VM a displayed frame took four steps:
+  1. cage composites in software (pixman) into guest RAM;
+  2. TRANSFER_TO_HOST_2D copies guest RAM -> host backing;
+  3. flush_resource copies host backing -> a display frame;
+  4. present_frame uploads that into an MTLTexture and draws it.
+Three full-frame copies, ~24 MB per frame at 1080p, measured at 0.70-1.24 ms.
+
+Here the swapchain images ARE the layer's drawables. There is no transport, no
+copy, and no compositor. The count is zero.
+
+HOW THE WINDOW IS OWNED. AppKit requires the main thread for window creation
+and a running run loop for the window to behave, so lxrun now runs the guest on
+a second thread and leaves the main thread in a pump. A private syscall
+(0x4C580010) returns the CAMetalLayer; the guest passes it to
+vkCreateMetalSurfaceEXT.
+
+THE BUG THAT CAME WITH THE SECOND THREAD, and it is a good one:
+
+  Adding the pump thread broke signal delivery. A process-directed signal goes
+  to any thread not blocking it -- and the main thread was sitting inside
+  AppKit. `tgkill` had been mapped onto a process-directed `kill()`, which was
+  harmless while the process contained only guest threads and wrong the moment
+  it did not. The signal was either lost (the blocking test went from OK to
+  "delivered never") or, worse, would have had AppKit's context rewritten into
+  guest code.
+
+  Fixed two ways: main() blocks every signal before spawning the guest thread,
+  which unblocks them itself and passes that mask to everything it clones; and
+  tgkill is now genuinely thread-directed via a tid -> pthread_t registry, with
+  process-directed kill() aimed at the first guest thread.
+
+NOT DONE:
+* The drawable came back 1280x720 for a 1280x720 window, which is correct here:
+  this display has a backing scale factor of 1.0. On a Retina panel the layer
+  is configured before the window is on a screen, so the scale factor may read
+  as 1.0 when it should be 2.0 and the swapchain would then be a quarter of the
+  pixels. Untested, and it must be checked before any FPS number is compared
+  against another system.
+* No resize handling: the swapchain is never recreated.
+* A clear is not a frame. Shaders, vertex buffers and a real render pass are
+  the next thing, and after that DXVK.

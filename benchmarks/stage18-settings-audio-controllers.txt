@@ -1,0 +1,96 @@
+Stage 18 -- settings, sound in Steam's container, controllers for games (2026-09-27)
+====================================================================================
+
+ZERO-VM status: NOT complete. Sound and controllers now reach Windows programs
+launched the way Steam launches games (Steam Linux Runtime container around
+Proton), measured with probes below. Real games are the user's tests; no game
+was run here.
+
+Settings (launcher/SETTINGS_SPEC.md)
+------------------------------------
+settings.json -> environment through one translation, scripts/settings-env.py,
+used by run-app.sh (launcher) and run-steam.sh; games inherit Steam's
+environment. Memory: usable M = T-2 (T <= 8 GB) else T-4 (16 -> 12, 64 -> 60);
+DRAM -> the memory guard's ceiling (limits.env), VRAM -> the Vulkan heap the
+shim reports (shim/memcap.c) and DXVK dxgi.maxDeviceMemory. "Registros de
+fallos del runtime" (guestFaults) now works: run-app.sh / run-steam.sh no
+longer force LXRT_GUEST_FAULTS=1.
+
+Sound inside the container
+--------------------------
+Symptom: probes outside the container played; inside it winepulse could not
+connect: PULSE_SERVER=unix:/run/pressure-vessel/pulse/native, and that path
+did not exist (MEASURED: connect ENOENT; /tmp/pulse/native fine).
+Cause: pressure-vessel checks every path it shares with openat(O_PATH)
+(_srt_sysroot_test, steam-runtime-tools pressure-vessel/bwrap.c) and drops the
+bind when that fails. Darwin cannot open(2) a Unix socket at all
+(EOPNOTSUPP), so the --ro-bind of the PulseAudio socket was silently dropped
+while PULSE_SERVER still pointed at it.
+Fix: runtime/pathfd.c -- O_PATH of a socket returns a stand-in descriptor that
+remembers the path; fstat, fstatat/statx(AT_EMPTY_PATH) and /proc/self/fd/N
+answer for the socket. O_PATH also adds O_NONBLOCK so a FIFO does not block.
+Test: tests/elf/opath_special.c (9 checks).
+Result (MEASURED): tests/win/run_steam_path.sh tone -- the waveOut stream of
+tone_clear.exe appears in PulseAudio (pactl list sink-inputs).
+
+Controllers for games
+---------------------
+Design (tools/inputd/PROTOCOL.md): steamarm-inputd on the Mac reads the real
+controllers (SDL2) and publishes each launcher player as a Unix socket
+/tmp/lxrt-input/eventN plus meta/eventN (name, USB ids, key/abs/ff
+capabilities of the Linux driver for the chosen type: xpad, hid-playstation,
+hid-sony, hid-nintendo, hid-steam). runtime/evdev.c shows it to guests as
+/dev/input/eventN: open connects, stat says character device 13:64+N (SDL
+tells devices apart by st_rdev), the EVIOC* ioctls answer from the
+description and the state seen in the stream, read() returns whole
+struct input_event records, EVIOCSFF + write(EV_FF) become rumble records.
+Test: tests/elf/evdev_test.c against tests/elf/fake_inputd.py (21 checks).
+
+End to end, Steam's launch path: tests/win/xinput.c polls XInputGetState and
+sets rumble under Proton in the SLR container, fed by fake_inputd.py.
+First run: "could not init SDL: Could not initialize UDEV". Proton's winebus
+uses SDL3 (through sdl2-compat) and SDL_Init(HAPTIC) requires a libudev
+device monitor, i.e. an AF_NETLINK / NETLINK_KOBJECT_UEVENT socket, which the
+runtime refused -- and with it SDL refused all controller support.
+Fix: runtime/socket.c emulates that socket (a silent datagram socket; bind,
+getsockname, filters accepted). Hotplug reaches SDL through inotify on
+/dev/input (runtime/inotify.c now translates watched guest paths).
+Result (MEASURED):
+  winebus: sdl_add_device ... {vid 045e, pid 028e, version 0114, is_gamepad 1}
+  probe:   connected 1, A down 1, A up 1, left stick 1, rumble 1
+  daemon:  rumble strong=40000 weak=20000 (XInputSetState(40000, 20000))
+
+The real daemon (tools/inputd/inputd.c, built by `make inputd`, started by
+scripts/input.sh with Steam and with launcher apps), driven by --fake TYPE
+--script (no hardware), same probe through Steam's launch path (MEASURED):
+  xbox360    connected 1, A down 1, A up 1, left stick 1, rumble 1
+  dualsense  same (winebus: vid 054c pid 0ce6, is_gamepad 1)
+  switchpro  connected 1, left stick 1, rumble 1, and the south button arrives
+             as XInput B, not A: SDL uses Nintendo labels for 057e:2009 (A is
+             the east button), as with a real Pro Controller on Linux. So a
+             non-Nintendo pad given the Switch identity swaps A/B -- expected.
+tools/inputd/test_fake.py: 7/7 (publication, snapshots, single instance,
+changed-only frames, late snapshot, rumble records, SIGTERM cleanup).
+
+Launcher controller page: vector drawings per model (launcher/
+ControllerDrawing.swift), rendered offscreen by launcher/tests/
+RenderControllers.swift (34 PNGs, all 10 types distinct) and checked by eye.
+
+Not done / open
+---------------
+- Measured with scripted input only; a physical controller through
+  steamarm-inputd (background events, real rumble, LED) is the user's test.
+- Wine's own evdev backend (container mode) wants /sys/class/input/eventN,
+  which is not emulated; the SDL backend covers gamepads.
+- Motion sensors and touchpads (separate evdev nodes on Linux) are not
+  published. DualShock/DualSense native HID features (hidraw) are not
+  available: games see the pad through SDL/XInput with its USB ids.
+- "Abort trap: 6" after the d3d11_32 probe reproduced once more (2 of ~25
+  runs), always after the probe passed and with no crash report. The runtime
+  now logs any SIGABRT sent to another process with the sender's argv
+  (signal.c note_foreign_abort) to find the sender next time.
+
+Regression (this stage)
+-----------------------
+tests/elf/run.sh 37/37 (new: opath_special, evdev); i386 18/18; tests/win/run.sh 11/11;
+tests/win/run_steam_path.sh 2/2 (tone, xinput).

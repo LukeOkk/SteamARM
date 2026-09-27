@@ -1,0 +1,234 @@
+Stage 10 (MIGRATION_PLAN M9) -- x86-64 Vulkan under FEX reaches MoltenVK
+through FEX's library thunks, no VM. Apple M4, macOS 27, MoltenVK 1.4.2.
+2026-09-26.
+
+VERDICT: YES. An unmodified x86-64 Ubuntu 24.04 `vulkaninfo` (vulkan-tools
+1.3.275), running under FEX under the runtime, enumerates
+
+    deviceName = Apple M4, driverID = DRIVER_ID_MOLTENVK, driverName = MoltenVK
+
+with the same 18 instance and 130 device extensions the aarch64 build sees.
+Without the thunk the same binary gets Ubuntu's x86 loader + lavapipe
+("llvmpipe (LLVM 20.1.8, 256 bits)"). A thunked vkGetPhysicalDeviceProperties
+costs 18.6-19.1 ns from x86-64 code vs 12.3 ns from native aarch64 through the
+shim. Presentation (xlib/xcb surfaces) does NOT work yet -- see REMAINING.
+[MEASURED]
+
+Tags: MEASURED = run and observed here; VERIFIED IN SOURCE = read in FEX's
+or the runtime's source; HYPOTHESIS = inferred, not checked.
+
+THE CHAIN
+    x86-64 program (JIT'd by FEX)
+      -> guest ld.so opens /usr/lib/x86_64-linux-gnu/libvulkan.so.1;
+         FEX's ThunksDB overlay hands it libvulkan-guest.so instead (x86-64 ELF)
+      -> guest packer, opcode 0F 3F ("libvulkan:vkXxx")
+      -> FEX: dlopen /opt/vkthunks/HostThunks/libvulkan-host.so (aarch64 ELF),
+         host unpacker
+      -> dlopen("libvulkan.so.1") in FEX's own aarch64 world = the runtime's
+         shim build/libvulkan.so.1 -> MoltenVK (Mach-O) -> Metal
+One process, no RPC, no VM. FEX itself is NOT rebuilt: OP_THUNK, fex:loadlib
+and the ThunksDB overlays are compiled into every FEX (BUILD_THUNKS only
+builds the libraries); the FEX-gb the running Steam uses already exports
+MakeHostTrampolineForGuestFunction & co. [VERIFIED IN SOURCE + MEASURED]
+
+REPRODUCE
+  scripts/build-fex-thunks.sh all install     ~30 s from an empty
+                                              ~/SteamARM-build/thunks-build
+                                              (debs cached in ~/SteamARM-build/debs)
+  Then, from the project root:
+    FEX_APP_CONFIG_LOCATION=/opt/vkthunks/config/ \
+    FEX_THUNKHOSTLIBS=/opt/vkthunks/HostThunks \
+    FEX_THUNKGUESTLIBS=/opt/vkthunks/GuestThunks \
+        scripts/run-fex.sh /opt/vkthunks/x86/vkshim_test_x86_64
+    (same three variables) scripts/run-fex.sh /usr/bin/env -u DISPLAY /usr/bin/vulkaninfo
+
+  What the script does (its header has the detail):
+  source    git worktree ~/SteamARM-build/FEX-thunks of the pinned FEX commit
+            (FEX-2609-113-g08f451d3b), the three lxrt patches + LxrtJit.h in
+            the same order as build-fex-host.sh, plus the NEW
+            patches/fex-thunkgen-macos.patch; submodules fmt, Vulkan-Headers
+            (1.4.362). ~/SteamARM-build/FEX is not modified or built in.
+  x86root   x86-64 DEV sysroot. The Ubuntu rootfs FEX runs has no headers
+            (usr/include holds only gnumake.h, renderdoc_app.h, X11/bitmaps),
+            so 12 noble/noble-updates .debs (libc6/libc6-dev 2.39-0ubuntu8.9,
+            linux-libc-dev 6.8.0-142, libstdc++6/libstdc++-14-dev/libgcc-14-dev/
+            libgcc-s1 14.2.0-4ubuntu2~24.04.1, libx11-dev, x11proto-dev,
+            libxcb1-dev, libxrandr-dev, libxrender-dev) are fetched over HTTPS,
+            sha256-pinned, unpacked into thunks-build/sysroot-x86_64 (82 MB).
+            The live rootfs is untouched. (The rootfs runs libc6 8.8; 8.8 is no
+            longer in the archive index, 8.9 is ABI-identical for this.)
+  thunkgen  FEX's generator built as a macOS arm64 program against Homebrew
+            LLVM 23.1.1 (libclang-cpp, libLLVM, -fno-rtti) + Homebrew OpenSSL.
+            One portability fix was needed, and it is an LLVM-23 fix, not a
+            macOS one: FileManager::clearStatCache() no longer exists
+            (patches/fex-thunkgen-macos.patch, 3 lines, #if LLVM < 23).
+  gen       guest .inl (13183 lines) with --target=x86_64-linux-gnu
+            --sysroot=<x86 sysroot>; host .inl (29811 lines) with
+            --target=aarch64-redhat-linux-gnu --sysroot=<Fedora 43 sysroot>.
+            Upstream runs the host pass natively on aarch64 Linux; on the Mac
+            libclang would otherwise parse the host side as arm64-apple-darwin.
+            No --gcc-install-dir on the host pass: thunkgen's guest data-layout
+            pass inherits those flags and must find x86 libstdc++, not Fedora's.
+  host      libvulkan-host.so, 1012672 bytes, aarch64, clang++ + lld against
+            the Fedora 43 sysroot, -ffixed-x18 (like FEX; this code calls
+            MoltenVK directly), --no-undefined. NEEDED libstdc++ libm libgcc_s
+            libc. sha256 aff94b9df3bd1a97bba981cb4b1089a8529091a8a5edbfec291a400b53750367
+            (rebuilt twice, identical).
+  guest     libvulkan-guest.so, 590368 bytes, x86-64, SONAME libvulkan.so.1.
+            sha256 16f1e78d03229b018f5ae1ad3a0e2926693128460d444162637ca543ea512fe4
+  probe     tests/elf/vk_shim_consumer.c (the Stage 4 shim consumer, same
+            source) compiled for x86-64, linked by SONAME to libvulkan.so.1.
+  install   only into $LXRT_ROOT/opt/vkthunks (default /tmp/lxrt-root; a path
+            resolving to the Steam root is refused): the two libraries, the
+            probe, FEX's Data/ThunksDB.json and Config.json =
+            {"Config":{"RootFS":".../Ubuntu_24_04"},"ThunksDB":{"Vulkan":1}}.
+
+  WHY FEX_APP_CONFIG_LOCATION and not $HOME/.fex-emu: /tmp/lxrt-root/tmp/fexhome
+  is a symlink into the STEAM root's fexhome, so $HOME/.fex-emu/Config.json is
+  the running Steam's config. FEX_APP_CONFIG_LOCATION replaces the user config
+  directory for this process only (FEX Source/Common/Config.cpp), so the
+  ThunksDB and the "Vulkan":1 switch live in /opt/vkthunks/config and nothing
+  shared changes. Nothing in the rootfs changes either: the thunk is an
+  overlay FEX applies when the guest opens @PREFIX_LIB@/libvulkan.so.1.
+  Undo: rm -rf /tmp/lxrt-root/opt/vkthunks. [VERIFIED IN SOURCE + MEASURED]
+
+STEP 0 -- the aarch64 baseline, reproduced first  [MEASURED]
+  /tmp/lxrt-samples/vkshim_test (aarch64):
+    vkEnumerateInstanceVersion -> 1.4.357 / extensiones de instancia: 18
+    vkCreateInstance -> 0 /   [0] Apple M4
+    vkGetPhysicalDeviceProperties por el shim: 12.3 ns/llamada
+  The current mkroot-rpm.sh root has no vulkaninfo and no libwayland-client,
+  so Fedora's vulkan-tools-1.4.341.0-1.fc43.aarch64.rpm (sha256 bfc3286a...0c50e)
+  and libwayland-client-1.26.0-1.fc43.aarch64.rpm (sha256 5054a688...14441)
+  were unpacked into /tmp/lxrt-root/opt/vkthunks/aarch64:
+    LXRT_ROOT=/tmp/lxrt-root LD_LIBRARY_PATH=/lib64:/opt/vkthunks/aarch64/lib64 \
+        ./build/lxrun /tmp/lxrt-root/opt/vkthunks/aarch64/bin/vulkaninfo
+    exit 0, 1199 lines, deviceName Apple M4, DRIVER_ID_MOLTENVK, driverInfo 1.4.2
+  (LD_LIBRARY_PATH entries are guest paths: a host path outside LXRT_ROOT is
+  not found, which is why the files went into the root.)
+
+RESULT 1 -- the x86-64 probe  [MEASURED]
+  $ FEX_APP_CONFIG_LOCATION=... FEX_THUNKHOSTLIBS=... FEX_THUNKGUESTLIBS=... \
+        scripts/run-fex.sh /opt/vkthunks/x86/vkshim_test_x86_64
+  rc=0
+  vkEnumerateInstanceVersion -> 1.4.357
+  extensiones de instancia: 18
+  vkCreateInstance -> 0
+    [0] Apple M4
+  vkGetPhysicalDeviceProperties por el shim: 18.8 ns/llamada
+  vkDestroyInstance ok
+  stderr: D LoadLib: libvulkan -> /opt/vkthunks/HostThunks/libvulkan-host.so
+          D Loaded 1567 syms
+  Five runs: 18.6, 19.1, 19.1, 19.1, 18.8 ns per call.
+
+  CONTROL, same binary, no thunk variables (Ubuntu's x86 loader + lavapipe,
+  all JIT'd):
+    vkEnumerateInstanceVersion -> 1.3.275 / extensiones de instancia: 25
+      [0] llvmpipe (LLVM 20.1.8, 256 bits)
+    vkGetPhysicalDeviceProperties: 25.3 ns/llamada
+  So the thunk path is cheaper per call than emulating the x86 loader's
+  dispatch, and the per-call boundary cost over native aarch64 is ~6.5 ns.
+  (Side note: the probe's hand-written VkApplicationInfo puts apiVersion at
+  offset 44 instead of 40, so it passes apiVersion 0; lavapipe's validation
+  says so, MoltenVK accepts it as 1.0. Harmless for this test; fix
+  tests/elf/vk_shim_consumer.c if it is reused.)
+
+RESULT 2 -- Ubuntu's x86-64 vulkaninfo, unmodified  [MEASURED]
+  $ (same variables) scripts/run-fex.sh /usr/bin/env -u DISPLAY /usr/bin/vulkaninfo
+  rc=0, 1182 lines (aarch64 1.4.341 build: 1199), wall 0.29-0.30 s
+  (without the thunk, lavapipe: 1.06-1.44 s)
+    Vulkan Instance Version: 1.4.357
+    Instance Extensions: count = 18
+    Instance Layers: count = 1 -- MoltenVK MoltenVK driver layer 1.4.357
+    GPU0:
+        apiVersion         = 1.4.357
+        vendorID           = 0x106b
+        deviceType         = PHYSICAL_DEVICE_TYPE_INTEGRATED_GPU
+        deviceName         = Apple M4
+        driverID           = DRIVER_ID_MOLTENVK
+        driverName         = MoltenVK
+        driverInfo         = 1.4.2
+        conformanceVersion = 1.4.4.0
+    Device Extensions: count = 130           (aarch64: 130)
+    geometryShader = false, logicOp = false, shaderCullDistance = false,
+    nullDescriptor = false                   (same gaps as Stage 4)
+  stderr: 377 "Linking address ... to host invoker" lines from the guest
+  thunk's vkGet*ProcAddr (FEX's Guest.cpp prints each one), then
+  "'DISPLAY' environment variable not set... skipping surface info" and the
+  usual XDG_RUNTIME_DIR line. No "Unknown Vulkan function" line.
+  With DISPLAY=:1 it also exits 0 but lists no presentable surfaces: MoltenVK
+  does not advertise VK_KHR_xlib_surface / VK_KHR_xcb_surface.
+
+WHAT FAILED / WAS NOT DONE
+  - Nothing in the build failed beyond the one LLVM-23 API removal above.
+    Four -Wformat warnings in thunkgen's debug printing (uint64_t vs %lu on
+    Darwin) are harmless and left alone.
+  - 32-bit guest thunk (libvulkan-guest.so for i386, HostThunks_32): not
+    built. Needs an i386 dev sysroot (libc6-dev-i386 / lib32 variants) and a
+    second gen/host pass with -for-32bit-guest; the host lib for 32-bit
+    guests is a separate aarch64 build (IS_32BIT_THUNK).
+  - Untested: host->guest callbacks (VK_EXT_debug_utils messenger,
+    pAllocator), multiple instances (Host.cpp: "TODO: Support use of multiple
+    instances"), anything beyond instance/physical-device queries (no
+    vkCreateDevice, no queue submit, no memory mapping across the boundary).
+
+REMAINING -- presentation (xlib/xcb surface -> CAMetalLayer)
+  What happens today: the guest's vkCreateXlibSurfaceKHR/XcbSurfaceKHR is
+  thunked; FEX's Host.cpp swaps the guest Display*/xcb_connection_t* for a
+  host-side one (X11Manager: XOpenDisplay/xcb_connect from the aarch64 libX11
+  / libxcb in the root, i.e. a second client of the same Xvnc), keeps the
+  window XID, and calls the host driver's entry point. MoltenVK has none
+  (only VK_EXT_metal_surface / VK_MVK_macos_surface), and the shim exports
+  none (shim/entrypoints.txt), so the function pointers are NULL and an
+  instance requesting VK_KHR_xlib_surface should fail with
+  VK_ERROR_EXTENSION_NOT_PRESENT. [VERIFIED IN SOURCE: ThunkLibs/libvulkan/
+  Host.cpp, X11Manager.h, shim/entrypoints.txt; the vkCreateInstance failure
+  is HYPOTHESIS, not run]
+  What it needs -- a WSI layer on the host side (in the shim, so both native
+  aarch64 and thunked x86 callers get it), not in FEX:
+   1. vkEnumerateInstanceExtensionProperties: add VK_KHR_xlib_surface and
+      VK_KHR_xcb_surface; vkCreateInstance: strip them, add
+      VK_EXT_metal_surface before calling MoltenVK.
+   2. vkCreateXlibSurfaceKHR / vkCreateXcbSurfaceKHR: take the XID, ask the
+      runtime for a CAMetalLayer (the private syscall 0x4C580010 in
+      runtime/window.m / dispatch.c; today it is ONE global NSWindow/layer, it
+      must become one layer per XID), size it from XGetGeometry /
+      xcb_get_geometry, call vkCreateMetalSurfaceEXT. The shim runs inside
+      FEX's process, so the aarch64 syscall is reachable from the host thunk
+      even though the x86 guest itself could never issue it.
+   3. vkGetPhysicalDeviceXlib/XcbPresentationSupportKHR -> VK_TRUE (FEX's
+      Host.cpp already routes them through custom host impls).
+   4. Decide where pixels go. Xvnc windows are not macOS windows: presenting
+      into the NSWindow bypasses the X server (fast, but the X window stays
+      black in VNC and input stays in X); presenting INTO Xvnc needs a
+      readback + XPutImage/MIT-SHM copy per frame (slow; this is exactly the
+      copy Stage 4 eliminated). The first is the target; window placement,
+      resize (VK_ERROR_OUT_OF_DATE_KHR on XID geometry change) and focus/input
+      routing between the X window and the NSWindow are the real work.
+REMAINING -- DXVK
+   1. Presentation above (Wine's winevulkan maps VK_KHR_win32_surface onto
+      the host's xlib surface, so DXVK would present through step 2 --
+      HYPOTHESIS, from Wine's design, not checked here).
+   2. 32-bit thunks for 32-bit games (see WHAT FAILED).
+   3. Inside Steam: the pressure-vessel container. FEX's ThunksDB already
+      overlays /usr/lib/pressure-vessel/overrides/lib/x86_64-linux-gnu and the
+      pinned_libs_64 copy, but the Steam run uses LXRT_ROOT=/tmp/lxrt-steamroot
+      and the shared $HOME/.fex-emu, so enabling it there is a deliberate
+      config change for the Steam root (per-app AppConfig "ThunksDB":
+      {"Vulkan":1} is the narrow way) -- not done here.
+   4. The feature gaps above (geometryShader, nullDescriptor/robustness2,
+      logicOp, cull distance) are unchanged, so the project's DXVK patch is
+      still required; the thunk passes MoltenVK's feature set through as-is.
+   5. vkCreateDevice/queues/memory through the thunk: device-level entry
+      points go through vkGetDeviceProcAddr set up in DoSetupWithInstance;
+      mapped memory is a host pointer the x86 guest can use directly (one
+      address space), which is the property that makes this path viable.
+      Unmeasured until a device is created.
+
+FILES
+  scripts/build-fex-thunks.sh            new: the build above (+ install)
+  patches/fex-thunkgen-macos.patch       new: clearStatCache guard for LLVM 23
+  benchmarks/stage10-vulkan-thunks.txt   this file
+  /tmp/lxrt-root/opt/vkthunks/           test-root install (rm -rf to undo)
+  ~/SteamARM-build/FEX-thunks            worktree; ~/SteamARM-build/thunks-build
+                                         outputs; ~/SteamARM-build/debs cache

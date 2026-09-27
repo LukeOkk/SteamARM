@@ -1,0 +1,140 @@
+JIT memory on Apple Silicon, and why FEX does not need patching for it.
+Apple M4, macOS 27. 2026-09-24.
+
+THE CONSTRAINT, measured three ways:
+
+  mmap PROT_READ|WRITE|EXEC                     Permission denied
+  mmap RW then mprotect RWX                     Permission denied
+  mmap RW then mprotect RX, run, mprotect RW    works, 200 cycles verified
+
+  MAP_JIT, with com.apple.security.cs.allow-jit:
+    mmap                                        OK
+    write with pthread_jit_write_protect_np(0)  OK
+    EXECUTE while still in write mode           *** SIGBUS ***
+
+So no process on this machine gets a page that is writable and executable at
+the same moment. MAP_JIT does not lift the rule, it makes it a per-thread
+switch: write OR execute, never both.
+
+WHAT FEX NEEDS: it emits instructions straight into its code buffer while that
+buffer is executable. Traced, the original fault is
+
+    str w9, [x8]        with w9 = 0xa9bf53f3
+
+and 0xa9bf53f3 decodes as `stp x19, x20, [sp, #-0x10]!` -- FEX writing the
+prologue of a translated block. Searching the FEX tree for MAP_JIT or
+pthread_jit_write_protect finds nothing: it has no W^X mode.
+
+CORRECTION, 2026-09-25: THE RESOLUTION BELOW DOES NOT WORK, and the measurement
+that disproves it is this:
+
+    pthread_jit_write_protect_np() called INSIDE a signal handler does not
+    survive the handler's return.
+
+Test: MAP_JIT region, write in write-mode, then execute without flipping. The
+SIGBUS handler calls pthread_jit_write_protect_np(1) and returns; the faulting
+instruction is retried and faults again, forever. Measured with the handler
+bailing out after 5 identical faults at the same address.
+
+    escrito en modo escritura; ahora ejecuto SIN conmutar antes
+      fallo en 0x102c70000, conmutando a modo ejecucion dentro del handler   x4
+      handler llamado 5 veces, abandono
+
+The same flip OUTSIDE a handler works perfectly -- three write/execute cycles
+with freshly generated code, all correct. So the mechanism is fine; it is
+unreachable from where a fault-driven design needs it.
+
+Observed in the real system exactly as predicted by that: FEX's first
+instruction fetch from its code buffer faulted, the runtime flipped to execute
+mode and returned, and the very same fetch faulted again -- at which point the
+handler correctly concluded it was a genuine fault and passed it to FEX, which
+gave up and aborted.
+
+CONSEQUENCE: FEX must be patched after all. It has to call the flip itself,
+from ordinary code around its emit path. That is the "small patch" rung of the
+project's minimise-forks rule, and it is where this lands.
+
+REFINEMENT, 2026-09-25, later: what exactly does and does not survive.
+The correction above is right but stated too broadly. Measured again with
+benchmarks/wx_in_handler.c (MAP_JIT region; SIGUSR1 handler flips to write
+mode, stores a new instruction, flips back to execute mode, returns; main then
+executes the region):
+
+    handler: store landed, nested=0        x3
+    before: fn() = 5
+    round 1: fn() = 42 (hits=1 nested=0)
+    round 2: fn() = 42 (hits=2 nested=0)
+    round 3: fn() = 42 (hits=3 nested=0)
+
+So a flip issued inside a handler IS honoured for the handler's own stores
+(the store landed, no nested fault), and flipping back before returning leaves
+the thread executable afterwards. What does not survive is a flip meant to
+persist PAST the return: the retried instruction runs in the mode the thread
+had before the signal. The fault-driven design needed exactly that, and only
+that, so it is still dead. But FEX's own in-handler writer -- the SIGBUS
+backpatcher for unaligned atomics, FEXCore/Source/Utils/ArchHelpers/Arm64.cpp
+~2100-2165, which rewrites the faulting instruction and resumes AT the
+rewritten instruction -- is the symmetric pattern that works, and can be
+scoped like any other write site.
+
+A WRONG TURN, recorded so it is not repeated: the first FEX patch attempt
+guarded everything with `#ifdef __APPLE__` and reported success because it
+compiled. FEX is built by the guest's Linux toolchain and runs under the
+runtime as a Linux ELF:
+
+    $ file /tmp/lxrt-root/usr/bin/FEX
+    ELF 64-bit LSB pie executable, ARM aarch64 ... for GNU/Linux 3.7.0
+
+`__APPLE__` is never defined in that build, so the patch was dead code, and
+the installed binary was still dated Sep 23 -- the build had not even been
+installed. The flip has to reach the runtime the way every other guest request
+does: a syscall. Private number 0x4C580020 in x8, (enable, addr, len); on a
+real Linux kernel that number returns -ENOSYS and the guest-side scope
+(patches/LxrtJit.h) latches to a no-op. One binary, both hosts.
+
+MECHANISM PROVEN WITHOUT FEX, 2026-09-25: tests/elf/jit_wx.c, check #17 of
+tests/elf/run.sh. The same static-pie binary, unchanged:
+
+  native Linux (guest VM):             under the runtime (lxrun, macOS):
+    probe: -38 (kernel Linux, -ENOSYS)   probe: 0 (runtime)
+    OK mmap RWX anonimo                  OK mmap RWX anonimo
+    OK ronda 1: emitido devuelve 42      OK ronda 1: emitido devuelve 42
+    OK ronda 2: reescrito devuelve 7     OK ronda 2: reescrito devuelve 7
+    OK ronda 3: svc del JIT = getpid()   OK ronda 3: svc del JIT = getpid()
+    OK ronda 4: enable=2 sigue escribible OK ronda 4: enable=2 sigue escribible
+    == 5 ok, 0 mal                       == 5 ok, 0 mal
+                                         [lxrt] JIT output: 1 svc sites rewritten x2
+
+Round 3 is the one that matters: "JIT" code containing a live `svc #0` with
+x8=getpid. Under the runtime that returns the guest's pid only because the
+execute flip rescanned the 12 bytes the guest declared and rewrote the site --
+the trace line above is the rewrite happening. Unrewritten, Stage 1 showed it
+would run whatever Darwin syscall x16 happened to hold.
+
+The runtime side is runtime/jit.c lxrt_jit_set_write() + dispatch.c
+LNR_lxrt_jit_wx; the guest side is patches/LxrtJit.h and the eight scoped
+write sites in patches/fex-lxrt-wx.patch (two code-buffer memcpys, four
+block-link stores, the dispatcher emit, the SIGBUS backpatcher).
+
+THE RESOLUTION AS ORIGINALLY WRITTEN, now known not to work:
+
+The transition is driven by the faults themselves. A JIT region is mapped
+MAP_JIT and starts in execute mode. A store into it faults; the handler flips
+the thread to write mode and retries the instruction. The next instruction
+fetch from it faults; the handler flips back and retries. A JIT emits a whole
+block between flips, so the cost is amortised over the block rather than paid
+per store.
+
+The flip back to execute mode is also the only moment at which generated code
+can be examined, so it is where `svc` sites in JIT output are rewritten. Stage 1
+established that a live `svc` runs an arbitrary Darwin syscall, and JIT output
+is exactly the code no load-time pass can ever see. Only the range that was
+actually written is rescanned.
+
+This is the project's minimise-forks rule working as intended: the problem
+looked like it required patching FEX, and the platform turned out to provide
+exactly enough to solve it on our side.
+
+COST, not yet measured: each flip is a signal round trip, which Stage 1 timed
+at 2.79 us. How many flips a real workload causes is unknown and is the number
+to get before claiming this is viable for a game.

@@ -1,0 +1,18 @@
+--- a/hw/xquartz/darwin.c
++++ b/hw/xquartz/darwin.c
+@@ -674,6 +674,15 @@
+     if (serverGeneration == 1) {
+         char *lf;
+         char *home = getenv("HOME");
++        const char *lf_env = getenv("XQUARTZ_LOG_FILE");
++
++        /* SteamARM: allow the launcher to choose the server log path. */
++        if (lf_env && lf_env[0]) {
++            LogInit(lf_env, ".old");
++            DarwinPrintBanner();
++            return;
++        }
++
+         assert(home);
+         assert(0 < asprintf(&lf, "%s/Library/Logs/X11", home));
+ 

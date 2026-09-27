@@ -1,0 +1,133 @@
+# Using SteamARM
+
+The launcher (**SteamARM.app**) starts Steam and other Linux programs and
+holds every setting. Its interface is in Spanish, and its settings window
+follows the layout of the [Ryujinx](https://ryujinx.app) emulator's.
+
+## The launcher
+
+- **Steam** starts the Linux Steam client. Its windows are ordinary macOS
+  windows (a rootless X server). The card shows **Detener** while it runs.
+- **+** adds other Linux programs: a `.tar.gz`/`.zip`/AppImage you pick, or
+  a known installer (Heroic, Prism Launcher). Right-click a card to edit or
+  delete it.
+- Only one program runs at a time. Stopping it stops all its Linux processes.
+- Starting a program also starts the memory guard, sound and the controller
+  service (below).
+
+Settings changes apply to programs started **after** you apply them. Games
+inherit Steam's environment, so restart Steam after changing a setting that
+affects games (the settings window reminds you).
+
+## Settings (Configuración)
+
+| Section | What it controls |
+|---|---|
+| **Interfaz** | Start Steam when the launcher opens; ask before stopping; native windows or a VNC desktop, and its resolution; the source folder the launcher runs scripts from |
+| **Entrada** | Controllers, one page per player (below) |
+| **Sistema** | Language and time zone of Linux programs; vsync (per game / on / off); **DRAM** and **VRAM** limits; esync/fsync |
+| **Procesador** | FEX options: on-disk translation cache (experimental), x86 memory-ordering emulation (TSO full/fast/off), multiblock, self-modifying code detection, reduced-precision x87 |
+| **Gráficos** | Shader cache, anisotropic filtering, frame-rate limit, DXVK HUD, Metal HUD |
+| **Sonido** | Sound on/off and volume |
+| **Atajos** | Keyboard shortcuts: screenshot (F8 by default, saved to `~/Pictures/SteamARM`), stop the running program, toggle the Metal HUD. Shortcuts while a game has focus need the Accessibility permission, and screenshots need Screen Recording |
+| **Registros** | Proton log, `WINEDEBUG`, DXVK and VKD3D-Proton log levels; opens the logs folder (`~/SteamARM-roots/logs`) |
+| **Depuración** | Runtime fault reports, runtime tracing, Vulkan debug, extra environment variables |
+
+Options with no working backend on this stack are greyed out, with the
+reason: OpenGL (WineD3D), FSR scaling, global anti-aliasing.
+
+### Memory: DRAM and VRAM
+
+Apple Silicon shares memory between the CPU and GPU, so both limits come
+out of the same RAM. The maximum you can pick leaves room for macOS:
+total − 2 GB up to 8 GB, total − 4 GB above that. So 8 GB → 6, 16 GB → 12,
+32 GB → 28, 64 GB → 60. **Automático** uses that maximum.
+
+- **DRAM** is the ceiling for everything SteamARM runs (Steam and the game
+  together). The memory guard stops the Linux programs before the Mac runs
+  out of memory, instead of letting macOS freeze.
+- **VRAM** is the video memory reported to games: the Vulkan heap size seen
+  by DXVK/VKD3D-Proton, and DXVK's `dxgi.maxDeviceMemory`.
+
+## Controllers (Entrada)
+
+Plug in or pair a controller with the Mac as usual (USB or Bluetooth). Then
+in **Configuración → Entrada**:
+
+1. **Jugador**: player 1–4.
+2. **Dispositivo**: the physical controller for this player (the refresh
+   button re-scans). With no controller chosen, the first unassigned one is
+   used.
+3. **Tipo de mando**: **what the game sees**. It is the identity (USB
+   vendor/product IDs, name and button layout) the controller service
+   presents to Linux and Proton, so games show the matching button prompts.
+   It does not have to match the physical controller: a DualSense can be
+   presented as an Xbox controller, and the other way round.
+
+| Type | Game sees |
+|---|---|
+| Xbox 360 | 045e:028e |
+| Xbox One | 045e:02ea |
+| Xbox Series X\|S (default) | 045e:0b12 |
+| Xbox Elite Series 2 | 045e:0b00, 4 paddles |
+| DualShock 3 (PS3) | 054c:0268 |
+| DualShock 4 (PS4) | 054c:09cc |
+| DualSense (PS5) | 054c:0ce6 |
+| DualSense Edge (PS5) | 054c:0df2 |
+| Steam Controller (2015) | 28de:1102, trackpads, 2 grips |
+| **Steam Controller (2026)** | 28de:1302, symmetric sticks, 2 trackpads, 4 rear grips (L4 R4 L5 R5), quick access button |
+| Nintendo Switch Pro | 057e:2009 |
+
+The drawing in the middle shows the chosen type. Pressed buttons light up
+live, and the two stick positions are shown below it. **Click a button on
+the drawing (or in the side lists) and press the control you want for it**
+to remap it. The side panels mirror Ryujinx's:
+
+- **Sticks**: invert X/Y, rotate 90°, dead zone and range.
+- **Triggers**: threshold (for types with digital triggers).
+- **Vibración**: on/off and strength, plus a test button.
+- **LED**: colour (DualShock 4 / DualSense).
+
+**Perfil** saves and loads named mappings. **Importar de Ryujinx** reads a
+Ryujinx input configuration.
+
+Good to know:
+
+- **Xbox Series X|S** is the most compatible choice. Every Windows game
+  supports XInput.
+- With the **Nintendo Switch Pro** type, games use Nintendo's labels: the
+  bottom face button is **B** and the right one is **A** (as with a real Pro
+  Controller on Linux). With a non-Nintendo controller that means A and B
+  appear swapped.
+- The **Steam Controller** types present Valve's layouts. The trackpads'
+  clicks and the rear grips are delivered; finger positions on the trackpads
+  are not (no source for them on the Mac side yet).
+- Motion sensors (gyro) are not delivered to games yet.
+
+How it works: `steamarm-inputd` (a small native program, started with Steam)
+reads the controllers through SDL and publishes each player as a Linux
+`/dev/input/eventN` device that the runtime shows to Linux programs.
+Proton's input layer (winebus/SDL) turns that into XInput/DirectInput/HID
+for the game. Details: [tools/inputd/PROTOCOL.md](../tools/inputd/PROTOCOL.md).
+
+## Sound
+
+Linux programs play through a PulseAudio server running on the Mac, which
+outputs to the current macOS output device (it follows the device you
+choose in Control Center). Set the volume or mute in **Sonido**.
+
+## Command line
+
+Everything the launcher does is a script in the source folder
+(`~/Library/Application Support/SteamARM/src` for the downloaded app, or
+your checkout):
+
+| Command | |
+|---|---|
+| `scripts/run-steam.sh` / `--stop` | start / stop Steam |
+| `scripts/run-app.sh` | what the launcher runs for any program |
+| `scripts/safeguard.sh status` | the memory guard |
+| `scripts/audio.sh status` | sound |
+| `scripts/input.sh status` | the controller service and its devices |
+| `scripts/setup.sh <step>` | re-run one setup step (`--list`) |
+| `tests/elf/run.sh`, `tests/win/run.sh`, `tests/win/run_steam_path.sh` | self-tests |

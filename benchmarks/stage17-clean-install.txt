@@ -1,0 +1,59 @@
+Stage 17 -- install from scratch, the way a clean Mac would (2026-09-27)
+========================================================================
+
+ZERO-VM status: NOT complete. A fresh checkout builds, installs and brings
+up Steam's sign-in window with no VM; signing in, Proton and a real game are
+the user's steps (credentials), and games are the user's tests.
+
+Method
+------
+The working tree copied without build/, graphify-out/ and .git (what a
+`git clone` gives), and every state directory new:
+  STEAMARM_BUILD=~/SteamARM-clean/build STEAMARM_STATE=~/SteamARM-clean/roots
+  scripts/setup.sh
+Not clean: Homebrew and its formulae were already installed ("already
+installed and up-to-date"), so their download time is not in the figure.
+Everything else was fetched and built anew: FEX cloned and compiled (306
+C++ units), its thunks (64- and 32-bit), XQuartz and quartz-wm, the Fedora
+RPMs of the aarch64 root, the Ubuntu 24.04 x86-64 rootfs, the Steam root,
+Steam's bootstrap from steam_latest.deb.
+
+Result (MEASURED)
+-----------------
+- scripts/setup.sh: 14:07:39 -> 14:14:05, 6.5 minutes on this M4 (formulae
+  preinstalled). Build tree 1.8 GB, roots 8.4 GB (with the Steam client).
+- Tests inside the fresh install: tests/elf/run.sh 35/35,
+  tests/elf/run_vk_device.sh 2/2 (x86-64 and i386 Vulkan through the thunks).
+- scripts/run-steam.sh: the bootstrap downloaded and installed the client
+  (2.1 GB), set up the Steam Runtime, and the "Sign in to Steam" window was
+  on screen 120 s after the second start.
+
+What a clean install found, and the fixes
+-----------------------------------------
+1. Paths that ignored STEAMARM_BUILD / STEAMARM_STATE: the XQuartz tree
+   (build-xquartz.sh, run-x11-native.sh), the X log directory, env-links.sh's
+   default root, the Fedora sysroot in the CMake toolchain file, the sysroot
+   in tests/elf/run.sh. All follow the variables now.
+2. setup.sh's test step failed the whole run: the Windows probes need Proton,
+   which Steam only downloads after the first sign-in. They are skipped with
+   that explanation until Proton is there (then `scripts/setup.sh test`).
+3. The first Steam start exited at once: run-steam.sh (and run-app.sh, the
+   launcher's path) always passed -noverifyfiles, which on a fresh install
+   also skips downloading the client -- the bootstrap found no steamui.so and
+   shut down. It is passed only when the client is installed.
+4. steam.sh then failed "Couldn't set up the Steam Runtime. Are you running
+   low on disk space?": GNU tar 1.35 extracts through
+   openat2(O_PATH|O_DIRECTORY|O_NOFOLLOW, RESOLVE_BENEATH), and the runtime's
+   openat2 refused O_PATH with EOPNOTSUPP (openat emulated it). openat2 now
+   emulates O_PATH the same way (runtime/fileops2.c); the whole runtime tarball
+   (5552 entries) extracts.
+
+After the fixes (main environment): tests/elf 35/35, i386 18/18, vk_device
+2/2, tests/win/run.sh 9/9. One run of tests/win/run.sh printed "Abort trap:
+6" for the d3d11_32 launcher after its probe had passed (600 frames, ok); three
+repeats did not reproduce it and no crash report was written. Open.
+
+Left to the user on a clean Mac: sign in, install Proton Experimental (or
+start a Windows game), then `scripts/setup.sh test` for the Windows probes.
+The trial install stays in ~/SteamARM-clean (10 GB); /tmp/lxrt-root and
+/tmp/lxrt-steamroot point back at ~/SteamARM-roots.

@@ -1,0 +1,171 @@
+Stage 16 -- 32-bit Windows games: Vulkan for i386 guests (2026-09-27)
+=====================================================================
+
+ZERO-VM status: NOT complete. 32-bit D3D9/D3D11/D3D12 probes now render
+through Steam's own launch path; real games are not verified (the user tests
+them), and the clean-Mac install has not been run end to end.
+
+What 32-bit games need
+----------------------
+Proton runs a 32-bit .exe in an i386 Wine: a 32-bit Linux process under FEX's
+32-bit mode (guest at host = base + guest). Its Vulkan loader is i386, so it
+needs FEX's 32-bit Vulkan thunks. The new-WoW64 alternative (32-bit PE code
+in a 64-bit Wine, WINEARCH=wow64 / PROTON_USE_WOW64=1) is not supported by
+FEX on x86 Linux: MEASURED "E [Unsupported] Trying to execute 32-bit syscall
+from a 64-bit process".
+
+MEASURED before this stage: D3D9 32-bit created its device (DXVK) and then
+hung; D3D11 32-bit picked llvmpipe (Mesa's software Vulkan) and failed to
+present.
+
+Result (MEASURED)
+-----------------
+tests/win/run.sh, Proton Experimental directly, 600 presented frames each:
+  d3d9      64-bit  DXVK            162.1 fps
+  d3d11     64-bit  DXVK            161.7 fps
+  d3d12     64-bit  VKD3D-Proton    162.7 fps
+  d3d9_32   32-bit  DXVK            162.4 fps
+  d3d11_32  32-bit  DXVK            162.6 fps
+  d3d12_32  32-bit  VKD3D-Proton    163.4 fps
+Steam's launch path (SteamLinuxRuntime_4/_v2-entry-point --verb=
+waitforexitandrun -- proton waitforexitandrun <exe>, i.e. pressure-vessel's
+container), verdict read from the probe's probe-result.txt:
+  d3d9_32 161.7 fps, d3d11_32 161.0 fps, d3d12_32 159.9 fps,
+  d3d11 161.3 fps, d3d12 161.7 fps; the container exits a few seconds after
+  the program.
+tests/elf/run_vk_device.sh (new, tests/elf/vk_device.c): instance, device,
+queue, host-visible memory mapped and written, two command buffers filling a
+buffer, submit + fence, read back through the mapping -- x86-64 ok, i386 ok.
+tests/elf/run.sh 34/34, tests/elf/run_i386.sh 18/18.
+
+What it took, in the order the failures appeared
+------------------------------------------------
+Build: scripts/build-fex-thunks.sh x86root32 gen32 host32 guest32 -- an i386
+dev sysroot (pinned noble debs), thunkgen -for-32bit-guest, HostThunks_32 /
+GuestThunks_32, installed by scripts/install-steamroot-gfx.sh.
+
+1. Guest base in FEX's thunk path (FEX assumed guest == host for 32-bit):
+   the Thunk op's argument pointer and its 32-byte hash
+   (patches/fex-lxrt-thunk-args.patch); FEX's LoadLib/IsLibLoaded reading
+   guest structures (patches/fex-lxrt-guest-reserve.patch); every pointer a
+   32-bit host thunk follows or hands back (patches/fex-thunks-guestbase32
+   .patch). vkMapMemory aliases MoltenVK's pages into the guest window and
+   host function pointers become trampolines there (shim/map32.c).
+2. vkCreateInstance: a NULL pApplicationInfo was dereferenced.
+3. vkEnumeratePhysicalDevices faulted at base + 0x38445b0: dispatchable
+   handles (VkInstance, VkDevice, VkQueue, VkCommandBuffer...) are MoltenVK
+   pointers far above 4 GiB, kept in 32 bits by the guest. Each host page
+   holding a handle is now aliased (shared) into one range of the guest
+   window (shim/map32.c, lxrt_handle_alias); the thunk converts the alias
+   back to the original pointer on the way in, so MoltenVK only sees its own.
+4. vkCmdFillBuffer was "Unknown Vulkan function": upstream leaves ~500
+   functions out of the 32-bit thunks (#ifndef IS_32BIT_THUNK), among them
+   what DXVK needs (vkCmdDrawIndexed, vkCmdCopyBuffer2, vkQueueSubmit2, push
+   descriptors...). They are enabled, except families MoltenVK does not
+   implement and thunkgen cannot repack (ray tracing, video, micromaps,
+   descriptor buffers/heaps, vendor extensions, device groups); thunkgen
+   leaves out (and names) what it still cannot repack instead of failing
+   (patches/fex-thunkgen-32bit.patch, THUNKGEN_SKIP_UNREPACKABLE). The i386
+   guest library went from 278 to 491 exported functions.
+5. thunkgen repacks a pointer parameter as ONE element: arrays of structures
+   (vkQueueSubmit2, vkCmdPipelineBarrier, vkCmdCopyBuffer, vkBindBufferMemory2,
+   vkGetPhysicalDeviceQueueFamilyProperties2 -- 25 functions) get generated
+   element-by-element implementations; the Vulkan 1.3 "*2" copy/blit/resolve
+   /submit structures, VkPipelineShaderStageCreateInfo::pSpecializationInfo
+   (upstream aborted on it; DXVK specializes nearly every shader) and the
+   shader stage embedded in compute pipelines (MEASURED: MoltenVK got a null
+   module -- DXVK passes the SPIR-V inline through the stage's pNext) are
+   repacked. Functions reached through vkGet*ProcAddr go through the same
+   custom implementations.
+6. "Unrecognized VkStructureType 1000528000": the pNext table predated the
+   pinned headers; 334 extension structures added (from vk.xml), and an
+   unknown one is left out of the chain instead of aborting.
+7. SIGBUS in JIT code: three thunk calls in a row wrote guest trampolines
+   (outside FEX's JIT write scopes) and returned to the same block; the
+   runtime's "same pc faulting 3x in 10 ms is not a mode problem" guard
+   delivered the fault. The guard now applies only when the thread is not
+   in write mode (runtime/jit.c).
+8. Host->guest callbacks built their arguments at the raw guest stack
+   address; the runtime's lazy low-pointer fix-up then added the base to a
+   register that ended up as the guest ESP. The arguments are built at the
+   host address and handed over as a guest address.
+9. The shim's pointer-rebasing layer is for the 64-bit low window; under
+   the 32-bit thunks every pointer is already a host one, and it rebased a
+   garbage pNext (from the single-element repacking) into a crash. It is off
+   for 32-bit guests.
+10. DXVK jumped to address 0: vkCmdPushDescriptorSetKHR, vkCmdPushConstants2
+   and relatives were NULL; implemented (the *2 infos decoded from their
+   i386 layout).
+11. VKD3D-Proton requires vkGetPhysicalDeviceSparseImageFormatProperties2 and
+   vkQueueBindSparse; implemented (sparse structures decoded from the i386
+   layout; MoltenVK reports no sparse support).
+
+Steam's launch path had regressed for every game (64-bit too), found here:
+- pressure-vessel's container read ~/.steam/sdk64 -> /tmp/lxrt-steamroot/...
+  (the spelling steam.sh made the link with) while its binds carry the
+  realpath (~/SteamARM-roots/steamroot/...): Proton's lsteamclient could not
+  load steamclient.so and steam.exe stopped on an assertion. readlinkat in a
+  sandbox now canonicalises the target before mapping it through the binds.
+- Wine's dosdevices/z: -> "/" joined with the rest gave "//tmp/...", which
+  no bind matches: the lookup fell into the sandbox's scratch root and
+  steam.exe "Failed to create process" for the game. Fixed in the runtime's
+  path resolution.
+
+The clocks of 64-bit Windows programs were frozen (found after the above)
+------------------------------------------------------------------------
+tests/win/tick.c (new, in tests/win/run.sh as tick / tick_32) measures the
+clocks across Sleep(1000). MEASURED before the fix, 64-bit: QPC 1002 ms,
+system time 1002 ms, GetTickCount 0 ms, GetTickCount64 constant; 32-bit
+fine. A window-only program that waited 1.5 s on GetTickCount never ended.
+KUSER_SHARED_DATA (0x7ffe0000, 4 KiB) is a read-only MAP_SHARED view of a
+section wineserver keeps updating; Wine 9+ maps its private "hypervisor
+shared data" page at 0x7ffe1000, in the same 16 KiB host page, and the
+runtime turned that host page into a private sub-page copy. runtime/
+shmirror.c now keeps a live view of the file page (mach_vm_remap, no copy)
+and copies it into the guest range every 2 ms. MEASURED after: 64-bit
+GetTickCount 998-1002 ms, 32-bit 986 ms (Wine's own granularity).
+
+The registry was lost after every session with a window
+-------------------------------------------------------
+MEASURED: wineserver aborted ("corrupted double-linked list", glibc) while
+saving the registry at the end of every session that created a window (the
+message at the end of every graphics probe since stage 15); the session's
+registry changes were lost and an empty reg*.tmp stayed in the prefix. Console
+sessions saved fine; with Wine's null display driver (winex11.drv=d) too.
+How it was found: the runtime now reports a process that sends itself
+SIGABRT (dispatch.c) -- it was wineserver; wineserver -d2 put it at the final
+registry save; a guard-page malloc preloaded into wineserver only (every
+block before a PROT_NONE page, freed blocks PROT_NONE) turned the corruption
+into a fault at the corrupting store, and FEX_MAXINST=1 plus a guest-stack dump
+(signal.c, 64-bit guests) gave the instruction: free_async_queue() writing
+async->queue after async_terminate() had freed the async (a named pipe's
+async, when its handle closed). async_terminate frees it only when
+thread_queue_apc() finds no thread to take the APC -- and wineserver chooses
+the thread by sending it SIGUSR1 with tgkill. The runtime's tgkill only knew
+the calling process's threads: every tgkill to another process was ESRCH.
+Fix (runtime/signal.c): a per-process mailbox (/tmp/lxrt-sig/<pid>, shared
+file) plus the realtime carrier signal, installed in every process: the
+sender queues (tid, signal) and wakes the target, whose carrier handler
+delivers it to that thread. The same path now carries realtime signals
+between processes (the bare carrier used to arrive without its number) and
+tgkill of a realtime signal within a process (it returned EINVAL; the carrier
+branch of the host handler was unreachable). tests/elf/xproc_signal.c;
+tests/win/regwin.c: a value written in a session with a window is in
+user.reg after wineserver exits. MEASURED after: no abort in any probe,
+registry saved, no reg*.tmp.
+
+Not done / known
+----------------
+- (fixed, see below) wineserver aborted while saving the registry at the
+  end of every session that created a window.
+- Left out of the 32-bit thunks (NULL from vkGet*ProcAddr): ray tracing,
+  video, micromaps, descriptor buffers/heaps, device groups, vendor (NV/AMD/
+  ...) extensions, display (KHR_display), host image copy, shader objects,
+  pipeline binaries, validation cache, HDR metadata, present timing,
+  debug-utils tags. MoltenVK implements few of these; a game that needs one
+  on 32-bit gets NULL.
+- "corrupted double-linked list" still printed by a process at exit
+  (stage 15).
+- A test harness that shares pressure-vessel's process group is killed with
+  it when the container ends (it signals its group); Steam starts games in
+  their own group.

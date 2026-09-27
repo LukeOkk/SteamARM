@@ -1,0 +1,71 @@
+Guest TLS on Darwin: TPIDR_EL0 is NOT usable, and the Stage 2 conclusion was wrong.
+Apple M4, macOS 27, 2026-09-23.
+
+CORRECTION FIRST. benchmarks/stage2-tls.txt concluded that "Darwin's thread
+pointer lives in TPIDRRO_EL0, and TPIDR_EL0 is free ... a Linux guest can own
+TPIDR_EL0 outright". The first half is true. The second half is false, and the
+test that produced it was too short to notice.
+
+WHAT THE STAGE 2 TEST MISSED: it wrote TPIDR_EL0 and read it back without the
+thread ever being descheduled. Repeated with real context switches:
+
+  valor inicial TPIDR_EL0 = 0x5
+  nada                              -> 0xfeedface   intacto
+  getpid() (syscall)                -> 0xfeedface   intacto
+  open+write+close                  -> 0xfeedface   intacto
+  sched_yield()                     -> 0xfeedface   intacto
+  usleep(1000)                      -> 0x5          *** PISADO ***
+  bucle 10 ms con clock_gettime     -> 0x5          *** PISADO ***
+  bucle puro ~200 ms sin syscalls   -> 0x1007       *** PISADO ***
+
+A syscall preserves TPIDR_EL0. Any actual context switch -- blocking or
+preemption -- restores a kernel-managed value (the observed values look like an
+encoded CPU/cluster id). Across four threads, every one lost its value and the
+main thread's was contaminated too.
+
+So a Linux guest that runs long enough to be descheduled silently loses its
+thread pointer. Like a missed `svc`, this is corruption rather than a crash.
+
+THE REPLACEMENT: Darwin's TSD slot array, which pthread_getspecific itself
+indexes off TPIDRRO_EL0.
+
+  pthread_key = 258, offset = 2064 bytes
+  written with pthread_setspecific, read with the raw 3-instruction sequence: ok
+  4 threads x 300 sleeps: all PRESERVADO
+  read cost: 2.34 ns/op
+
+Three instructions, one scratch-free register, within `ldr` immediate range:
+
+    mrs  xT, tpidrro_el0
+    and  xT, xT, #0xfffffffffffffff8   // low 3 bits carry the CPU number
+    ldr  xT, [xT, #slot*8]
+
+So every `mrs Xt, TPIDR_EL0` and `msr TPIDR_EL0, Xt` in guest code is rewritten
+into a branch to a trampoline built around that sequence -- the same mechanism
+already used for `svc`, for the same reason: the instruction cannot be trapped,
+and leaving it alone is silent.
+
+HOW MUCH CODE THIS TOUCHES (counted on the real binaries):
+
+  binary                      svc     mrs TPIDR   msr TPIDR
+  libc.so.6                   415        1440          0
+  ld-linux-aarch64.so.1        54          29          2
+  hello_glibc (static-pie)    120         272          1
+  hello_dyn                     0           0          0
+
+TLS reads outnumber syscall sites 3.5 to 1 in libc. The thread pointer is
+written once and read constantly, which is why the read path had to be free of
+scratch registers and the write path did not.
+
+PROOF, both directions, on a real Fedora glibc binary that sleeps 300 times:
+
+  $ ./build/lxrun tls_test
+  TLS escrito: 0xc0ffee
+  tras 300 usleep: 0xc0ffee -> PRESERVADO
+
+  $ LXRT_NO_TLS_REWRITE=1 ./build/lxrun tls_test
+  [lxrt] LXRT_NO_TLS_REWRITE set: leaving TPIDR_EL0 in place.
+  [lxrt] SIGSEGV at pc 0x10219f70c = image+0x3f70c, insn 0xb9400127
+
+The opt-out exists precisely so the failure can be demonstrated rather than
+asserted; tests/elf/run.sh runs both.

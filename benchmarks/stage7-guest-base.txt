@@ -1,0 +1,320 @@
+Milestone 4 -- a guest address base for 32-bit guests. Design study, 2026-09-25.
+
+WHY THERE IS NO OTHER WAY (MEASURED):
+  scratchpad/pagezero_probe.c, native, Darwin 27 arm64:
+    first VM region of the process      0x100cf8000 (nothing below 4 GiB is even mapped)
+    mmap(MAP_FIXED @0x10000)            ENOMEM
+    mach_vm_deallocate(0x10000, 64K)    KERN_SUCCESS   (there was nothing to remove)
+    mmap(MAP_FIXED @0x10000) after it   ENOMEM
+    mach_vm_allocate(FIXED @0x40000000) KERN_INVALID_ADDRESS
+    mach_vm_map(FIXED|OVERWRITE)        KERN_INVALID_ADDRESS
+    mach_vm_deallocate(0, 4 GiB)        KERN_SUCCESS
+    mmap(MAP_FIXED RWX @0x80000000)     ENOMEM
+  Link time was measured earlier (runtime/elf.c:14): every -pagezero_size
+  from 0x4000 to 0xC0000000 is killed at exec. The low 4 GiB is a kernel
+  rule for arm64 user tasks, not a mapping. So i386 guests (the Steam
+  client) and ET_EXEC x86-64 guests (python3.12, pressure-vessel-wrap,
+  srt-bwrap, steam-runtime-launcher-service, steam-launch-wrapper) can only
+  run if FEX maps them at host = BASE + guest.
+
+WHAT FEX ASSUMES TODAY (VERIFIED IN SOURCE, FEX-2609-113-g08f451d3b):
+  - host address == guest address, everywhere, in 32-bit mode:
+    MemAllocator32Bit (LinuxAllocator.cpp:23-227) hands ::mmap the guest
+    page number shifted; compat_ptr (x32/Types.h) is a uint32 cast to a
+    pointer; the JIT dereferences the 32-bit linear address directly
+    (Addressing.cpp: LoadEffectiveAddress truncates to AddrSize with _Bfe and
+    adds the segment only when a prefix or an override names one --
+    GetSegment returns nullptr for the plain case, OpcodeDispatcher.cpp:4063);
+    code is fetched through reinterpret_cast<const uint8_t*>(GuestRIP)
+    (Core.cpp:518,546); the i386 signal frame is written at ESP
+    (GuestFramesManagement.cpp); the ELF loader writes argv/auxv at the
+    guest stack.
+  - There is no GuestBase / VA-offset concept anywhere in the tree (grep).
+
+THE DESIGN (three parts, each with one choke point):
+
+  1. JIT. FEX's own AddressMode already has the shape we need:
+     LoadMem/StoreMem take Addr + Offset register + MemOffsetType (SXTX/UXTW/
+     SXTW) + scale (IR.json:532,543), i.e. the ARM form [Xbase, Wofs, uxtw].
+     In 32-bit mode every dereferenced address is produced by exactly two
+     helpers: SelectAddressMode/LoadEffectiveAddress(AddSegmentBase=true)
+     (Addressing.cpp) and AppendSegmentOffset (string ops and the few direct
+     users, OpcodeDispatcher.cpp:4112). Both get one extra step when a base
+     is configured: the final 32-bit linear address becomes
+        { Base = GUESTBASE, Index = linear, IndexType = UXTW, Scale = 1 }
+     for the AddressMode path (zero extra instructions: the load itself is
+     [xGB, wLin, uxtw]) and _Add(i64, GUESTBASE, zext32(linear)) for the
+     single-register callers (atomics, string ops: one add). LEA and every
+     other consumer that wants a GUEST address (AddSegmentBase=false) is
+     untouched, so values written back into guest memory stay guest values.
+     GUESTBASE itself is free: append r19 to the 32-bit static-register list
+     (x32::SRA, Arm64Emitter.cpp:246-262) and drop it from the dynamic pool.
+     The existing spill/fill machinery then keeps it in State.gregs[8] --
+     unused by 32-bit guests, whose registers stop at gregs[7] -- and reloads
+     it on every entry to translated code. The IR reads it with
+     _LoadRegister(8, GPRFixed), which the register allocator maps straight
+     onto x19 with no copy. gregs[8] is set to BASE when the first thread's
+     state is created; clone copies the parent's gregs, signal frames and
+     sigreturn touch gregs[0..7] only.
+     Code fetch: the two Core.cpp sites and the frontend get GuestRIP + BASE
+     as the byte pointer while keeping GuestRIP as the key of the lookup
+     cache and of the executable-range query.
+
+  2. FEX C++ (LinuxEmulation). compat_ptr<T> becomes reinterpret_cast<T*>
+     (BASE + value) -- the survey (scratchpad/gbase_survey.md, codex) lists
+     the raw casts outside it, the i386 frame builder, the ELF loader's
+     writes, the thread-setup writes, and the 32-bit allocator, which maps
+     at BASE + page and records guest page numbers. VMA tracking and the
+     SMC fault handler must agree on one address space (guest); si_addr
+     handed to the guest becomes host - BASE.
+
+  3. Runtime (runtime/gbase.c, DONE 2026-09-25). FEX announces BASE with
+     private syscall 0x4C580030 at start-up. Every pointer argument of a
+     passthrough syscall is a raw guest value; the dispatcher adds BASE to
+     any pointer-typed argument below 4 GiB -- unambiguous, since no host
+     memory exists there -- from a per-syscall table (aarch64 numbers) with
+     the four value-or-pointer cases decided by their command word (fcntl,
+     ioctl, futex, prctl, semctl). Memory-management addresses (mmap, munmap,
+     mprotect, madvise, mremap, brk, shmat, mlock, msync) are NOT translated:
+     FEX's allocator owns them and passes host addresses. Under LXRT_TRACE an
+     argument below 4 GiB for a syscall outside the table is reported, so a
+     forgotten entry shows up instead of corrupting silently. Regressions
+     unchanged with the base unset (fam 26/26, jit_wx 6/6, x18 26/26,
+     jit_fork 40/40).
+
+WHAT STAYS OUT OF SCOPE FOR THE FIRST CUT: 32-bit thunks (not built at this
+commit), MAP_32BIT for 64-bit guests, gdbserver, the WIP code cache.
+
+EXIT CRITERION (Milestone 4): a static i386 ELF runs under the runtime; a
+dynamic one from the rootfs runs; ubuntu12_32/steam starts.
+
+IMPLEMENTATION LOG, 2026-09-25/26:
+  - patches/fex-lxrt-guest-base.patch written and applied on the guest tree
+    (26 files); runtime/gbase.c wired (private syscall 0x4C580030 + pointer
+    table). Regressions with the base unset unchanged (fam 26/26, jit_wx 6/6,
+    x18 26/26, jit_fork 40/40).
+  - tests/elf/i386_probe.c: freestanding i386, raw int 0x80 (write, mmap2,
+    munmap, brk, MAP_FIXED_NOREPLACE, .data/.bss/stack checks). Built on the
+    host with Homebrew clang + lld (the guest has no i386 linker):
+    ET_EXEC at 0x400000 and a PIE variant, in /tmp/lxrt-root/tmp/.
+  - MEASURED, baseline without the base (unpatched FEX): the process dies
+    with SIGKILL from the kernel's memory-pressure killer -- exit reason
+    namespace 1 (JETSAM), code 13 -- after ~190k rounds of brk() returning
+    the same break and mmap(0, 1 MiB) succeeding: FEX's start-up for a
+    32-bit guest allocates without end once the low window is unavailable.
+    The first guest-base build (before the Push/Pop, MemCpy and bt fixes)
+    announced the base (0x7020038000) and then hit the same allocation loop
+    before mapping the guest; `sample` puts it inside glibc malloc called
+    from FEX+0x67828 (release binary, no symbols). Being resolved with the
+    debug build.
+
+RESULT WITH THE CORRECTED BUILD (2026-09-26), i386 probe, FEX_GUESTBASE=1:
+  Progress: the base is reserved and announced (host 0x7000038000), FEX no
+  longer runs the endless allocation loop, it maps the guest and reaches its
+  own 32-bit start-up. It then CRASHES, not hangs, ~700 traced lines in.
+  Two concrete sub-blockers, both measured:
+
+  (1) Fixed RWX mappings fail. FEX asks mmap(addr, 0x4000, PROT_READ|WRITE|
+      EXEC, MAP_FIXED|MAP_ANON) at high host addresses (0x7104044000,
+      0x78a80c0000, 0x7d0d480000). runtime/dispatch.c routes any RWX request
+      to MAP_JIT, and Darwin rejects MAP_JIT combined with MAP_FIXED
+      (EINVAL): "MAP_JIT 0x4000: Invalid argument". On Linux a fixed RWX
+      mapping just succeeds. These are the i386 VDSO/sigreturn code pages and
+      FEX's fixed code buffers. Fix needed in the runtime: for a fixed RWX
+      request, map MAP_JIT without FIXED to reserve, then move it, OR keep a
+      dedicated MAP_JIT arena and hand fixed sub-ranges out of it.
+
+  (2) FEX's SIGSEGV handler faults on a near-null pointer. After a legitimate
+      SEGV_ACCERR at 0x7d0d480000 (a PROT_NONE reservation region
+      0x7d0d464000+0xf9c000, max=rwx -- FEX's own overcommit/LookupCache
+      area, delivered correctly as SIGSEGV/SEGV_ACCERR), the guest handler
+      (FEX HandleSegfault, guest addr 0x10bb0e93c) itself dereferences
+      0xfffffffffffffff8 (= a null pointer - 8) at pc+0x30 and takes a second
+      SIGSEGV, then blocks. Root cause not yet isolated: likely the overcommit
+      region was never registered because one of the failed RWX maps above
+      left a null, so HandleSegfault's VMA/overcommit lookup returns null and
+      derefs it.
+
+  STATUS: the guest-base architecture is in place and builds (release+dbg),
+  the base is live, the guest loads; i386 does NOT run yet. The remaining
+  work is runtime-side fixed-RWX handling (1), which likely also resolves (2).
+  Milestone 4 exit criterion NOT met.
+
+PROGRESS, 2026-09-26 (later):
+  Sub-blocker (1) FIXED in the runtime (runtime/dispatch.c do_mmap): a fixed
+  RWX request (MAP_JIT + MAP_FIXED, which Darwin rejects with EINVAL) is now
+  served by dropping the reservation at that address and placing a fresh
+  MAP_JIT there without MAP_FIXED -- the kernel honours a free hint, measured
+  8/8 landing exactly, and the placed region executes and re-writes under the
+  W^X flip (scratchpad jitfixed3.c). mach_vm_remap of a MAP_JIT source does
+  NOT work (protection failure, cur/max come back 0 -- MAP_JIT protection is
+  not copyable); plain fixed RWX via mprotect is denied even with
+  allow-unsigned-executable-memory added to the ad-hoc signature. The
+  munmap-then-hint approach is the one that works with only allow-jit.
+  With it, i386 gets substantially further: FEX places its RWX code page at a
+  fixed address (region 0x7124044000+0x4000 prot=rwx), the JIT executes there
+  (a W^X fetch-fault is serviced), and start-up proceeds to the VDSO setup.
+
+  REMAINING BLOCKER, isolated (not yet fixed): FEX's i386 VDSO sigreturn-page
+  setup (VDSO_Emulation.cpp:711, `for (Location = 0xFFFFE000; Location != 0;
+  Location -= PageSize) GuestMmap(Is64Bit=false, Location, MAP_FIXED_NOREPLACE)`)
+  loops without end. The addresses that reach the runtime are garbage
+  (0xfffffffaba45a000, decreasing by 0x4000), so every mmap is rejected
+  ("outside the address space") and the down-scan never finds a spot. That
+  means the 32-bit allocator's guest-base translation (MemAllocator32Bit::Mmap,
+  G2H) is producing an un-based / overflowed address for these VDSO fixed
+  requests -- either FEX::HLE::GuestBase is not the value the allocator sees on
+  this path, or the fixed-NOREPLACE branch added by the patch mishandles the
+  Location. NEXT STEP (methodical, source-level with the dbg build, not trace
+  arithmetic): instrument MemAllocator32Bit::Mmap to log addr in, GuestBase,
+  and the ::mmap addr out for the VDSO Location range, and confirm whether the
+  base is applied once, twice, or not at all; the loop's page granularity
+  (FEX_PAGE_SIZE 4096 vs the runtime's 16 KiB rounding) is a second suspect.
+
+  STATUS: guest-base architecture in place, builds, runs; MAP_JIT-fixed solved;
+  i386 executes translated code at a base but does not complete start-up.
+  Milestone 4 exit criterion NOT met.
+
+PROGRESS, 2026-09-26 (evening) -- the real root cause and the iterative tail:
+  The VDSO "garbage address" loop was a symptom. Root cause found by capturing
+  the guest LR at the rejected mmap (runtime/dispatch.c now records it) and
+  symbolising against FEX-dbg: this commit's InitAllocator (FEXInterpreter.cpp)
+  uses MemAllocatorPassThrough for 32-bit guests, NOT MemAllocator32Bit --
+  the bitset allocator (the one the guest-base patch translates) was dead code.
+  The passthrough strategy ("let the OS hand out low addresses, exhaust
+  jemalloc's high reserves") cannot work on Darwin. FIXED: InitAllocator now
+  returns Create32BitAllocator() when GuestBase is set, and skips the
+  jemalloc-exhaustion loop (which would spin forever on Darwin, where malloc
+  never returns a sub-4 GiB pointer).
+  With the real allocator active, i386 gets further and the failures become a
+  bounded, iterative "base the next un-based guest deref" tail, each found by
+  symbolising the fault's pc/LR:
+    - GuestMprotect called ::mprotect with the raw guest addr -> FIXED (base
+      the host address, track the guest one). GuestMunmap already routed low
+      addresses through the based allocator.
+    - ELFCodeLoader vsyscall stub: memcpy/mprotect of a raw guest page
+      (VSyscallCode {int 0x80; ret}) -> FIXED (G2H). This was the `strb w8,
+      [x0,#2]` fault at 0xf77f5002 (the 3rd byte, 0xc3).
+  METHOD for the remaining tail: each rebuild, run the probe, symbolise the
+  faulting FEX pc, wrap that guest-memory access with G2H. The codex survey
+  (scratchpad/gbase_survey.md) enumerates the candidate sites; the ones the
+  i386 start-up actually hits are being cleared one per iteration.
+  STILL: i386 not yet completing. Milestone 4 exit criterion NOT met.
+
+INCIDENT, 2026-09-26 ~00:00: the Fedora guest VM (krunkit) died mid-build.
+  Symptoms on restart: ssh refused, no krunkit/gvproxy process, and the FEX
+  working tree had 24 tracked files truncated to zero bytes (delayed
+  allocation lost on the crash) plus 4 zero-length build objects. The probe
+  that ran meanwhile used the OLD binaries (scp had failed), so that result
+  was discarded. Recovery: run-vm.sh, `git checkout -- .` (which also reverts
+  the W^X patch -- all three patches must be re-applied: x18, guest-base,
+  wx), delete zero-length .o/.a, rebuild. Lesson recorded in the patch header.
+
+MILESTONE 4 ACHIEVED, 2026-09-26: a static i386 ELF runs end to end under the
+runtime with FEX_GUESTBASE=1, and exits cleanly.
+
+  ROOT CAUSE of the final SIGSEGV (found by adding a debug fprintf inside
+  ContextImpl::GuestCodeBase() and comparing the raw config value against the
+  ternary's result): `Config.Is64BitMode ? 0 : Config.GuestBase` silently
+  dropped everything above bit 15 of the base -- both operands are
+  FEXCore::Config::Getter<T> objects (Value<T> subclasses with a converting
+  constructor from the built-in type), and the ternary's common-type
+  deduction settled on the Value<uint64_t> CLASS type instead of the
+  built-in uint64_t; something on that path lost the high bits. Debug print
+  showed Config.GuestBase itself holding the correct 0x7000004000 while the
+  ternary's result was 0x4000. FIX: read each operand into a plain
+  uint64_t/bool local first, so the ternary only ever sees built-in types.
+  This single fix, on top of everything built earlier this session (32-bit
+  bitset allocator, MAP_JIT+MAP_FIXED workaround, GuestMprotect/vsyscall/
+  auxv/CheckRangeExecutable/VDSO-parser G2H wraps), took i386 from "faults
+  early in start-up" to a clean run.
+
+  RESULT (tests/elf/i386_probe.c, 8 checks): int 0x80 write, mmap2, .data
+  access at the announced guest base, brk + heap store, munmap, and a
+  MAP_FIXED_NOREPLACE mapping at a caller-chosen low address -- all correct.
+  Process exits via exit_group with status 0, no signal, confirmed via
+  proc_pidinfo exit-reason (code 1 "exited", status 0).
+
+  A related but SEPARATE finding, not a bug: the probe's first version used
+  i386 exit(1) (raw thread exit) instead of exit_group(252). FEX passes exit
+  straight through as a raw host `exit` syscall (thread-only termination),
+  which left FEX's own internal threads (JIT, etc.) alive and the process
+  never terminated -- indistinguishable from a hang without tracing. Real
+  glibc binaries always call exit_group at process end, so this does not
+  affect real guests (Steam, Proton, python3, ...); documented here because
+  it cost real debugging time. Fixed in the probe by using exit_group.
+
+  NEXT: a dynamic i386 ELF from the rootfs (ld-linux.so.2, i386-linux-gnu
+  libs are present), then ubuntu12_32/steam itself.
+
+DYNAMIC i386 RUNS, 2026-09-26 (later): tests/elf/i386_dyn.c, linked against
+the rootfs's real ld-linux.so.2 + libc.so.6 (hand-written _start, the rootfs
+ships no crt1.o), runs end to end: ld.so maps libc at the base, malloc/strcpy/
+printf/getpid/free and x87-or-SSE floating point all correct, exit status 0.
+Build: clang --target=i386-linux-gnu -m32 -nostdlib -nostartfiles -fuse-ld=lld
+  -Wl,-dynamic-linker,/lib/ld-linux.so.2 -L<rootfs>/lib/i386-linux-gnu -l:libc.so.6
+Three more fixes were needed, each found by an IR dump with FEX_DUMPIR=stderr
+FEX_MAXINST=1 FEX_MULTIBLOCK=0 (last block before the fault = the culprit):
+  - PopTwo (two pops fused after register allocation) had no guest-base path;
+    it now mirrors Pop.
+  - Non-rep MOVS wrote the segment-applied (now HOST) address back into
+    RSI/RDI, so the next MOVS based it again: base + uint32(guest + base).
+    ld.so copies strings this way. It now steps the raw registers.
+  - Every 32-bit syscall handler received guest pointers raw (FileManager::
+    Access read the path at 0xf7febf48). Single choke point added in
+    x32::RegisterSyscall: a thunk adds the base to every raw-pointer parameter
+    below 4 GiB before the handler body runs (compat_ptr<> and integer
+    parameters untouched; memory-management syscalls and semctl excluded;
+    plain SyscallPassthroughN functions untouched -- the runtime translates
+    their integer arguments). The one handler that already applied G2H to a
+    pointer parameter (set_tid_address) was reverted to avoid a double base.
+  Also based: full-SMC ValidateCode (host CRC read + address), the SMC
+  tracking mprotects (UnprotectRegionCallback, MarkGuestExecutableRange).
+  x86-64 regressions with the same FEX build: uname -a, ls /, a bash fork
+  loop -- all correct.
+
+NEXT BLOCKER FOR STEAM (MEASURED): every binary of the Steam runtime's
+container tooling is an x86-64 ET_EXEC (non-PIE, loads at 0x400000):
+pressure-vessel-wrap, pv-adverb, srt-bwrap, steam-runtime-supervisor,
+steam-runtime-launch-client, the runtime's own bash, the capsule/check-*
+helpers, and the rootfs python3. FEX's 64-bit mode maps them identity, which
+Darwin refuses ("Failed to map 64-bit elf file"). Required: a 64-bit
+"low window" -- guest addresses below 4 GiB go to base + addr, everything
+else stays identity -- enabled only for processes whose image is ET_EXEC.
+
+64-BIT LOW WINDOW, 2026-09-26: x86-64 ET_EXEC guests run.
+  Design (patches/fex-lxrt-guest-base.patch):
+  - Enabled per process only when the main program or its interpreter is an
+    x86-64 ET_EXEC with a PT_LOAD below 4 GiB (ELFCodeLoader::NeedsLowWindow);
+    PIE processes are untouched (GUESTBASE forced to 0 for them).
+  - A 4 GiB PROT_NONE window reserved at a power-of-two address (first free
+    of 2^39, 2^40, ...; measured 0x8000000000). Guest 0 < x < 4 GiB lives at
+    base + x; every other address is identity.
+  - The mapping is idempotent because Darwin never places host memory below
+    4 GiB: applying it to an address that is already a host one is a no-op.
+    That removes the whole "is this Ref guest or host?" class of bugs that the
+    32-bit mode has (its Bfe-truncating add is NOT idempotent).
+  - JIT: host = x + ((0 < x < 2^32) << k), computed as clz / ubfx #5,#1 /
+    add-shifted. Three instructions, no NZCV writes (NZCV holds the guest's
+    flags), no reserved register (in 64-bit mode gregs[8] is guest r8).
+    Applied in LoadEffectiveAddress (whose split [reg+imm]/[reg+reg] fast
+    paths are disabled in window mode, so the whole address is translated),
+    GuestToHost (string ops, atomics, x87), Push/PushTwo/Pop/PopTwo, rep
+    movs/stos (start addresses translated, registers returned to guest values).
+  - Code fetch: ContextImpl::GuestCodeHost / HostCodeToGuest replace the
+    32-bit-only GuestCodeBase arithmetic (decoder, SMC CRC validation).
+  - C++: G2H/H2G made conditional and idempotent (shared by both modes); the
+    syscall-argument thunk now also wraps x64::RegisterSyscall; GuestMmap
+    routes MAP_FIXED/NOREPLACE mappings below 4 GiB through the bitset
+    allocator (ET_EXEC image, brk), which GuestMunmap already used for every
+    low address; ExecveHandler translates argv/envp elements.
+  - Runtime: gbase.c translates iovec iov_base fields (readv/writev/preadv/
+    pwritev/…2) into a per-thread copy; procfs serves /proc/self/root.
+  Results (MEASURED, all exit 0):
+    /usr/bin/python3 (rootfs, ET_EXEC)  3.12.3, hashlib sha256 correct
+    pressure-vessel-wrap --version       0.20260728.0
+    srt-bwrap --version                  bubblewrap 0.12.0
+    steam-runtime-system-info --version  0.20260728.0
+    steam-runtime-launch-client --help, pv-verify --help
+  Regressions: static + dynamic i386 probes, x86-64 PIE (uname, ls, bash fork
+  loop), runtime suite 32/32.

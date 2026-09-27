@@ -1,0 +1,192 @@
+Native windows, stage W2 -- Vulkan presentation into an X window with no copy
+(2026-09-27)
+
+Design
+  A Linux game renders (DXVK/VKD3D -> Vulkan -> MoltenVK) in ITS process; its
+  window belongs to the X server, another macOS process. Core Animation can
+  host a layer tree across processes: a CAMetalLayer is put in a CAContext
+  whose 32-bit id the window server knows, and the X server shows it inside the
+  X window's NSView with a CALayerHost of that id (Chromium's GPU-process
+  mechanism). No frame is ever copied, and there is no second window.
+
+MEASURED: the mechanism (host-only prototype)
+  Process A: CAContext(contextWithCGSConnection) + CAMetalLayer, Metal clears
+  at 30 Hz, prints the context id. Process B: NSWindow, CALayerHost.contextId =
+  that id. Window B shows A's frames (screenshot 2026-09-27).
+
+Runtime (runtime/remote_layer.m, dispatch.c)
+  private syscalls 0x4C580012 create(w, h, &ctx_id) -> CAMetalLayer *,
+  0x4C580013 resize(layer, w, h), 0x4C580014 release(layer). No
+  NSApplication: only a window-server connection; explicit CATransaction
+  flushes (the calling thread has no run loop).
+
+Vulkan shim (shim/wsi.c, shim/overrides.txt, gen.py overrides)
+  Advertises VK_KHR_xlib_surface / VK_KHR_xcb_surface and swaps them for
+  VK_EXT_metal_surface at vkCreateInstance; vkCreate{Xlib,Xcb}SurfaceKHR get a
+  remote layer from the runtime, create the Metal surface on it and set the X
+  property _STEAMARM_LAYER (CARDINAL/32 = context id) on the window; the
+  surface-capabilities queries resize the layer to the X window's current
+  geometry first; presentation support is reported true. vkGetInstanceProcAddr
+  returns these for their names (DXVK resolves everything through it).
+  xcb / X11-xcb are dlopen'ed from the process (the x86 path gets a host
+  Display* from FEX's Vulkan thunk).
+
+MEASURED: tests/elf/vk_x11_present.c (aarch64, Xvnc :1 as the X server)
+  X window 0x2600000; VkSurfaceKHR on it; _STEAMARM_LAYER = 522005879;
+  GPU Apple M4; swapchain 800x600, 3 images; 90 frames median 8.075 ms
+  (123.8 fps), 1% low 9.39 ms. (Xvnc cannot show the layer -- it is a VNC
+  framebuffer; the native X server (W1) is what will host it.)
+  Run: TMPDIR=/tmp DISPLAY=:1 LXRT_ROOT=/tmp/lxrt-steamroot build/lxrun \
+       /opt/vkx11/vk_x11_present 120   (TMPDIR matters: abstract X sockets
+       live in a directory derived from it.)
+
+Remaining
+  - X server side: watch _STEAMARM_LAYER on windows, attach a CALayerHost to
+    the rootless NSWindow's view at the X window's geometry (child windows
+    offset inside their toplevel), follow ConfigureNotify.
+  - Retina: drawable is the X size (1x); the layer host scales it.
+  - (done, below) x86 path end to end.
+
+MEASURED: the x86-64 path (same test built for x86-64 against FEX's
+libvulkan-guest.so, run under FEX with the Vulkan thunk, /tmp/lxrt-root with
+the new shim as usr/lib64/libvulkan.so.1)
+  X window 0x2600000; _STEAMARM_LAYER = 3166656445; Apple M4; swapchain
+  800x600, 3 images; 90 frames median 8.139 ms (122.9 fps), 1% low 9.68 ms.
+  x86-64 xcb -> FEX thunk -> aarch64 shim wsi.c -> remote CAMetalLayer ->
+  MoltenVK -> Metal, one process, no VM.
+
+==========================================================================
+X SERVER SIDE (W2 server) -- our XQuartz (stage 11) shows the remote layer
+over the X window. 2026-09-26/27, Apple M4, macOS 27.0, 1920x1080 @1x.
+
+VERDICT: YES. The unmodified aarch64 guest test (vk_x11_present via lxrun,
+DISPLAY=:2) now appears on the Mac desktop: the 800x600 X window shows the
+Vulkan clear colour, follows XMoveWindow, is clipped/occluded by other X
+windows, hides on unmap, and the server does no per-frame work.
+[MEASURED]
+
+Patch: patches/xquartz-remote-layer.patch (applied by build-xquartz.sh after
+xquartz-log-file-env / before xquartz-signals-...; independent files).
+  hw/xquartz/xpr/xprRemoteLayer.[ch]  (new, dix thread)
+  hw/xquartz/remoteLayerCocoa.m       (new, AppKit main thread)
+  hw/xquartz/xpr/xprScreen.c          xprSetupScreen -> xprRemoteLayerScreenInit
+  hw/xquartz/xpr/xprFrame.c           xprRestackFrame -> xprRemoteLayerFrameRestacked
+  hw/xquartz/{,xpr/,mach-startup/}meson.build  sources + QuartzCore link
+Rebuild: scripts/build-xquartz.sh; restart: scripts/run-x11-native.sh restart :2
+Debug: XQUARTZ_RL_DEBUG=1 in the launcher's environment logs every overlay
+update ("rl apply ...") to ~/SteamARM-roots/logs/x11-native.log.
+
+Design (option a from stage11: overlay window per X window)
+  dix thread (xprRemoteLayer.c)
+    - AddCallback(&PropertyStateCallback): _STEAMARM_LAYER (format 32, >=1
+      item) set -> track(W, ctx); value 0 or PropertyDelete -> untrack.
+      "remote layer: window 0x.. -> CAContext N" goes to the server log.
+    - Tracked windows: fixed table (64). For each, a snapshot is computed:
+      W realized; toplevel T = ancestor whose parent is root; T's rootless
+      frame (WINREC(T)->wid, not is_offscreen) -> CGWindowID via
+      xp_get_native_window (cached per frame); layer rect = W's inside area
+      at absolute root coords + (pScreen->x + rootlessGlobalOffsetX/Y) --
+      exactly rootless' SCREEN_TO_GLOBAL transform for frames (global CG
+      space, top-left origin); clip rect = that rect intersected with every
+      ancestor's inside area up to T; window level = normal_window_levels[].
+      Only changed snapshots are sent: dispatch_async(main queue, value copy).
+    - Updates are triggered by screen-proc wrappers installed on top of
+      rootless (DestroyWindow -> untrack first; PositionWindow, Realize/
+      UnrealizeWindow -> update; RestackWindow -> update + reorder), by
+      xprRestackFrame (frame restacks that don't go through dix), and by a
+      33 ms TimerSet poll while anything is tracked (safety net).
+    - Before handing over a "reorder" snapshot the dix thread calls
+      xp_synchronize(): Xplugin applies map/restack asynchronously and would
+      otherwise re-raise its frame over the overlay after we ordered it
+      (MEASURED: without it, after XMoveWindow the X background showed
+      instead of the layer; CGWindowList still claimed the overlay was in
+      front, so window-list order is not a reliable check).
+  main thread (remoteLayerCocoa.m)
+    - one XQRemoteLayerWindow (NSWindow subclass, canBecomeKey/Main NO) per
+      X window: NSWindowStyleMaskBorderless, opaque NO, clearColor
+      background, ignoresMouseEvents YES (clicks/motion reach the Xplugin
+      frame below, so X input is unchanged), hasShadow NO,
+      animationBehavior None, collectionBehavior Managed | IgnoresCycle |
+      FullScreenAuxiliary, excluded from the Windows menu.
+    - content view is layer-hosting (view.layer = root CALayer, masksToBounds,
+      then wantsLayer); one CALayerHost (private QuartzCore class,
+      contextId = ctx) sublayer.
+    - window frame = clip rect converted CG -> Cocoa (y = H(primary screen) -
+      (y + h)); CALayerHost frame = full X window rect relative to it (the
+      root layer clips partially-hidden child windows); all inside a
+      CATransaction with disableActions.
+    - ordering: [overlay orderWindow:NSWindowAbove relativeTo:<T's
+      CGWindowID>] when shown / restacked / frame changed, plus two re-asserts
+      50 ms and 300 ms later (the toplevel's first map is deferred by rootless
+      redisplay and lands after the property is set), and on
+      NSApplicationDidBecomeActive / DidUnhide.
+    - not visible -> orderOut; untrack / window destroyed -> close.
+
+MEASURED end to end (guest = aarch64 vk_x11_present under lxrun; pixels
+read back with `screencapture -x -R` at global CG points)
+  - guest: X window 0x400000, _STEAMARM_LAYER set, swapchain 800x600, 3
+    images. Server log: "remote layer: window 0x400000 -> CAContext ...".
+    CGWindowList: overlay + Xplugin frame, both bounds 100,130 800x600
+    (menu-bar offset applied the same way), overlay directly in front.
+  - window centre shows the clear colour and changes over time:
+    srgba(14,33,232) -> (17,34,226) -> ... -> (112,44,104) (the test clears
+    to (t, 0.25, 1-t); green reads ~33-44 on screen, i.e. the
+    BGRA8Unorm layer is colour-matched to the display profile).
+  - XMoveWindow(400,250): overlay + frame at 400,280; new centre shows the
+    colour, the old-only area shows the desktop. 20 back-to-back moves (50 ms
+    apart): overlay still aligned and showing frames at the end.
+  - occlusion: a host X window (green, 200x150) mapped over it shows green;
+    the uncovered part keeps the Vulkan colour; after it goes away the
+    colour is back.
+  - XUnmapWindow: colour gone (desktop); XMapWindow: colour back.
+  - child windows (host test, CAContext from a Metal producer process set on
+    a 400x300 CHILD of a 600x400 toplevel): overlay at the child's absolute
+    position (200,230); child moved inside the parent -> overlay moved
+    (300,260); child moved partly outside -> overlay clipped to 200x150 at
+    550,430 and pixels outside the parent show the desktop; parent moved ->
+    overlay followed (700,480 200x150).
+  - frame pacing, 3000 frames with the overlay on screen and no interaction:
+    median 6.056 ms (165.1 fps), mean 6.061, 1% low 6.798 ms, max 7.196 ms.
+    X server CPU during presentation: 0.0 % (top/ps) -- frames go
+    MoltenVK -> CAMetalLayer -> WindowServer, never through the X server.
+    (Same test with the layer not hosted anywhere, before the patch: 60
+    frames median 8.087 ms; into Xvnc :1: 8.075 ms. Not investigated why
+    the hosted case is faster; presentation is not locked to 60 Hz here.)
+    With interaction (moves, unmap/map, window creation) the run still has
+    median 6.056 ms but 1% low ~21.5 ms and max ~424 ms (spikes around
+    unmap/map; not investigated).
+  - app hide/unhide (NSRunningApplication hide/unhide): overlay hidden with
+    the app's windows; after unhide it is re-ordered above the frame and
+    shows frames again. (hide() returned false and the Xplugin frame stayed
+    visible -- XQuartz's own Cmd-H path via xprHideWindows not exercised.)
+
+Limitations / not done
+  - Retina: not testable here (1x display). The remote CAMetalLayer's frame
+    and drawable are X-pixel sized; XQuartz maps 1 X pixel = 1 point, so on
+    a 2x screen the layer is shown upscaled 2x (blurry, correct size).
+    Fix later: shim sets drawableSize = size * backingScale (the server
+    could publish the scale as a root property).
+  - Two windows per X toplevel as far as the window server is concerned:
+    Mission Control / Stage Manager (enabled on this Mac) transform them
+    separately; during a Stage Manager transition the thumbnails were
+    ~15 px apart. Exposé / window-snapshot tools see the X frame and the
+    overlay as two windows.
+  - Stacking relies on re-ordering after Xplugin's own changes
+    (xp_synchronize + 50/300 ms re-asserts + activation/unhide). A frame
+    change that bypasses all of these hooks could leave the overlay below
+    its frame for up to 300 ms, or until the next restack.
+  - The overlay covers the X window; X drawing into the same window
+    (e.g. a game drawing a GL/X11 splash before creating its swapchain)
+    is hidden while the property is set. Shape (XShape) of W is ignored
+    (rectangle only); siblings/children of W that overlap it are covered by
+    the overlay (only ancestors clip). Client-side transparency is not
+    supported (CAMetalLayer is opaque).
+  - When the property is set on a window that is a descendant of another
+    tracked window, both overlays are independent (untested).
+  - The overlay's contents follow window moves at most one main-queue hop
+    later (PositionWindow -> dispatch_async); whether frame and overlay
+    visibly lag each other during a move was not measured, and a user drag
+    of an X window (needs a WM, none running) was not tested.
+  - Minimize (Dock) needs a window manager (quartz-wm); not tested.
+  - XQuartz activates itself when X windows are mapped (the menu bar
+    switched to SteamARM-X11 during the tests) -- stock XQuartz behaviour.

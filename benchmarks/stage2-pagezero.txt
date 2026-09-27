@@ -1,0 +1,43 @@
+Darwin __PAGEZERO on arm64: the low 4 GiB cannot be used, and cannot be reclaimed.
+Apple M4, macOS 27, 2026-09-23.
+
+WHY THIS MATTERS: a Linux ET_EXEC (non-PIE) image links at a fixed low address --
+0x200000 on aarch64, 0x400000 on x86-64. Both are inside Darwin's __PAGEZERO.
+An ET_EXEC image carries no relocations, so it cannot be moved. If __PAGEZERO
+cannot be shrunk, those images cannot be loaded in-process at all.
+
+TEST 1 -- shrink __PAGEZERO at link time.
+  clang -arch arm64 -Wl,-pagezero_size,<N> -o t t.c ; ./t
+
+  0x4000        -> killed, exit 137 (SIGKILL)
+  0x100000      -> killed, exit 137
+  0x1000000     -> killed, exit 137
+  0x10000000    -> killed, exit 137
+  0x80000000    -> killed, exit 137
+  0xC0000000    -> killed, exit 137
+  0x100000000   -> runs (this is the default)
+
+  Every size below the 4 GiB default is SIGKILLed by the kernel at exec, with
+  no crash report and nothing in the unified log. The flag still links; the
+  binary just never starts.
+
+TEST 2 -- reclaim the range at runtime, from a normally linked process.
+
+  mmap  0x200000     MAP_FIXED|MAP_ANON  -> FAILED, ENOMEM
+  mmap  0x400000     MAP_FIXED|MAP_ANON  -> FAILED, ENOMEM
+  mach_vm_allocate 0x200000 VM_FLAGS_FIXED -> kr=1, (os/kern) invalid address
+  mmap  0x200000000  MAP_FIXED|MAP_ANON  -> 0x200000000, writable  [control]
+
+CONCLUSION, stated as a limitation rather than worked around:
+
+  * PIE (ET_DYN) Linux images load fine -- they relocate to any address, and
+    the runtime places them above 4 GiB.
+  * non-PIE (ET_EXEC) Linux images CANNOT be loaded in-process. runtime/elf.c
+    refuses them with this reason rather than failing obscurely later.
+  * The x86 path is unaffected in principle: under FEX, guest addresses are not
+    host addresses, so an x86 ET_EXEC image can live wherever FEX puts it.
+
+OPEN QUESTION, and it decides how much this costs in practice: what fraction of
+the binaries this project must load are ET_EXEC? Modern distributions build
+everything PIE by default, and `file(1)` already reported Steam's own client
+binaries as "pie executable". Survey pending -- see stage2-elf-survey.txt.

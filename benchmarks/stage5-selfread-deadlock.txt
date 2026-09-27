@@ -1,0 +1,62 @@
+Reading a file into a mapping of that same file deadlocks the kernel.
+Apple M4, macOS 27. 2026-09-25.
+
+THE SYMPTOM, which pointed everywhere except at the cause:
+
+FEX would map its x86-64 guest ELF and then stop dead -- no output, no
+assertion, no signal, ~0% CPU, uninterruptible wait. `sample` put the guest
+thread inside `pread` on a plain 1800-byte regular file. A pread of a regular
+file cannot block.
+
+Worse, the file became permanently unreadable afterwards: `md5`, `dd` and a
+standalone `pread` on it all hung forever too, and each attempt left another
+process stuck in state U that `kill -9` could not clear. That sent the
+investigation after phantom filesystem corruption for a long time. It also
+produced a false conclusion -- "a fresh copy is also wedged" -- which was
+itself an artefact of one of those stuck processes still holding the path.
+
+THE CAUSE, in runtime/subpage.c:
+
+x86 Linux ELFs are linked with p_align 0x1000, so consecutive segments land
+4 KiB apart. On Darwin's 16 KiB pages that means one host page routinely holds
+BOTH a normal page-aligned mapping of the file (placed by the previous mmap)
+AND a sub-page mapping being built now. The sub-page path reads file content
+into place with pread:
+
+    pread(fd, (void *)addr, len, off);
+
+where `addr` lies inside a private mapping of the very file `fd` refers to.
+The kernel takes that file's VM object lock to service the read, then needs the
+same lock again to fault in the copy-out destination. It never gets it.
+
+Traced precisely:
+
+  -> 222(0x107ed0000, 0x1000, 0x1)     page-aligned, normal path, file mapped
+  -> 222(0x107ed1000, 0x1000, 0x5)     4 KiB later, sub-page path
+     subpage enter 0x107ed1000+0x1000 prot=5 anon=0 fd=4 off=0x0
+     subpage locking
+     subpage backing 0x107ed0000..0x107ed4000
+     subpage backed
+     subpage pread fd=4 len=0x1000 off=0x0        <-- never returns
+
+THE FIX: read through a bounce buffer and memcpy into place. That is not an
+optimisation, it is the difference between working and deadlocking -- it breaks
+the aliasing between the read's source and its destination.
+
+RESULT: FEX's trace goes from 267 lines to 587. It maps the guest ELF, writes
+its code cache, closes it, installs a SIGBUS handler and raises SIGBUS on
+itself -- its self-modifying-code detection probe. One signal was delivered to
+a guest handler successfully, so the signal machinery built in Stage 3 works
+under FEX.
+
+THE LESSON worth keeping: a hang with no output is not evidence about WHERE the
+program is. Three separate wrong conclusions were drawn before the runtime was
+instrumented at each step of the mapping path, and only the step-by-step trace
+named the call. Instrument the path, do not reason about it.
+
+CORRECTION, 2026-09-25 later: the 'wedged inode' was dismissed above as an
+artefact of my own kill -9. That was right for the files examined then, but
+it is real for /tmp/lxrt-root/tmp/hx86 now: a native pread(2) on it hangs
+forever (5 s probe, benchmarks/stage5-fex.txt), because an lxrun zombie in
+state U from that investigation still holds the file's VM object and cannot
+be killed. It clears at reboot. Every later FEX run uses a fresh copy (hx86c).

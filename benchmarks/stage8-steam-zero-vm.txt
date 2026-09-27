@@ -1,0 +1,407 @@
+Milestone 7 -- the Steam client without the VM. Bring-up log, 2026-09-26.
+
+SETUP (no VM involved at run time):
+  - The VM's Steam install (minus steamapps/caches) copied once into the
+    runtime root: /tmp/lxrt-root/tmp/fexhome/.local/share/Steam, including
+    ubuntu12_32/steam (the i386 PIE client) and steamrt64 (pressure-vessel).
+  - X server: Fedora's TigerVNC Xvnc (aarch64) runs NATIVELY under the
+    runtime (no FEX): `lxrun /usr/bin/Xvnc :1 -geometry 1600x900 -depth 24
+    -SecurityTypes None -rfbport 5901 -extension GLX -fp built-ins`. The X
+    socket is /tmp/.X11-unix/X1 inside the root, VNC on host port 5901
+    (macOS Screen Sharing: vnc://localhost:5901). scripts/vnc_snapshot.py
+    grabs a frame without a viewer.
+  - Launch: steam.sh under FEX with FEX_GUESTBASE=1, TMPDIR=/tmp, DISPLAY=:1.
+
+WHAT RUNS (MEASURED):
+  steam.sh (x86-64 bash) -> setup.sh -> steam-runtime-check-requirements
+  (x86-64 ET_EXEC, low window) "requirements are satisfied" -> the i386
+  client: "Startup - updater built Sep 3 2026", breakpad installed, cached
+  metrics loaded, update hosts listed (client-update.*.steamstatic.com),
+  and the -child-update-ui process started. Nothing drawn on the X screen
+  yet (update UI still starting). The brief's completion criterion is NOT
+  met.
+
+FIXES THIS STAGE REQUIRED (each found on the running client, each with a
+regression test where one was possible):
+  FEX guest-base patch:
+   - MOVD/MOVQ store, MOVNTDQ(A) (SSE, AVX128), prefetch: address came from
+     LoadSource(LoadData=false) and skipped the base.
+   - BT/BTS/BTR/BTC mem and XLAT: host base + 32-bit arithmetic truncated the
+     pointer; LoadEffectiveAddress now does 64-bit arithmetic for 64-bit
+     AddressModes, BT/XLAT build guest addresses (tests/elf/i386_bt_xlat.c).
+   - x32 SetThreadArea / clone pidfd: raw user_desc / pidfd pointers.
+   - Guest pages mapped without PROT_EXEC on the host (FEX never executes
+     them; PROT_EXEC made the runtime split W^X per 16 KiB page).
+  Runtime:
+   - pselect6 (glibc select); mknodat (FIFOs for srt-logger); setuid/setgid/
+     setre*/setfs*; clock ids (REALTIME_COARSE was uptime: time() in the
+     i386 client printed 1970); /proc/self/root; /dev/fd/N; absolute
+     symlinks created by the guest now resolve inside the root (readlink
+     shows the guest path); AF_UNIX socket paths go through the root.
+   - IP/IPv6/TCP socket option numbers translated (IPV6_V6ONLY is 26 vs 27,
+     IP_TOS 1 vs 3, TCP_KEEPIDLE 4 vs 0x10, ...), harmless Linux-only ones
+     accepted.
+   - Alignment faults delivered as SIGBUS/BUS_ADRALN (ESR DFSC 0x21) instead
+     of SIGSEGV: FEX emulates unaligned lock cmpxchg8b (CASP) from SIGBUS
+     (tests/elf/i386_cx8*.c).
+   - SP-alignment faults on the x18 trampolines' stp/ldp emulated (pixman's
+     NEON code keeps sp misaligned between accesses; Xvnc).
+   - Syscall pointer arguments translated on a COPY: FEX issues syscalls
+     inline with the guest's registers in x0-x5, and in-place translation
+     handed the i386 guest host pointers in EBX/ECX/...
+   - fork in multithreaded processes: runtime mutexes registered with
+     pthread_atfork; secondary thread ids moved to 200000+pid*10000+n (they
+     collided with the pids of later children); SHARED futexes on private
+     memory keyed task-locally (pthread_join after fork never returned:
+     copy-on-write moved the page to a new VM object). tests/elf/jit_fork_mt.c.
+   - AppKit started lazily (first window only): a fork while the main thread
+     sat in AppKit left the child spinning in xpc_atfork_child.
+   - exec resolves the program inside the guest root first (/bin/sh is the
+     guest's, not macOS's).
+
+SESSION 3 (2026-09-26) -- from "fork children crash" to pressure-vessel
+------------------------------------------------------------------------
+Each item was found by a measurement and fixed at its cause; the tests named
+are in tests/elf/ and pass (tests/elf/run.sh: 33/33, i386 probes all ok).
+
+  Fork children died in xpc_atfork_child (MEASURED, lldb on the child):
+    objc's class_rw_t for OS_xpc_pipe read back as zeros. Cause: FEX's
+    SetupHooks (32-bit mode) builds a 64-bit allocator that steals every free
+    range above 4 GiB and later madvise(MADV_DONTNEED)s it; libmalloc of the
+    same host process had grown into one of those ranges (region tagged
+    "objc-class_rw_t", SM=SHM in the parent) and the runtime's madvise
+    replaced its pages. Fixes: FEX skips SetupHooks under a guest base
+    (FEXInterpreter.cpp; the window already keeps FEX out of the low 4 GiB);
+    runtime madvise never zeroes host-tagged memory, and MAP_FIXED mmap /
+    munmap / mremap / shmat that touch a libmalloc region are refused and
+    reported ("REFUSED ... overlaps host malloc region").
+  posix_spawn children crashed (tests/elf/i386_spawn.c, MEASURED SIGSEGV x4):
+    (a) x86 clone(): the syscall thunk based `stack` (and x64 `tls`) like any
+        pointer, but they become the child's RSP / FS base -- H2G restores the
+        guest value; (b) CLONE_VM without CLONE_THREAD cannot share memory
+        between Darwin processes: FEX drops CLONE_VM on lxrt and uses its
+        fork-then-wait vfork path.
+  X11 MIT-SHM (shmat) spun forever: the 32-bit allocator picked 4 KiB-aligned
+    attach addresses (Darwin maps 16 KiB) and the target was the window's
+    PROT_NONE reservation. FEX aligns shm attaches to 16 KiB under a base;
+    the runtime lets shmat replace a bare reservation and re-reserves on
+    shmdt. The x32 ipc() multiplexer dereferenced guest pointers raw (SHMAT
+    result, msgsnd/msgrcv buffers, semtimedop timeout).
+  Threads retried one fault forever (runtime/memlog.c, a flight recorder of
+    address-space changes that prints the ops touching a page once a thread
+    faults 1000x on it): the sub-page protection table was a fixed 4096
+    entries and dropped records silently; now it grows and coalesces.
+  fork() hung in the parent: sysv_ipc's lock was registered with
+    pthread_atfork twice (a second prepare handler blocked on the first).
+  Requirements check / pressure-vessel:
+    /proc/self is a symlink to "<pid>" and /proc/<pid> the directory (glibc
+    realpath("/proc/self/exe") came out "/proc/exe"; steam-runtime-tools
+    could not locate itself). binfmt: lxrun runs an x86/i386 ELF under FEX
+    (LXRT_FEX, default /usr/bin/FEX-gb) as a FEX binfmt_misc registration
+    does on Linux. The bwrap interpreter: FEX-launched bwrap is interpreted,
+    bare commands are looked up in PATH (x86 rootfs overlay included),
+    /proc and /dev self-binds are no-ops, FEX's rootfs and config stay
+    visible, sandbox-root symlinks (/lib -> usr/lib) resolve in guest terms.
+    steam-runtime-check-requirements now PASSES by actually running its
+    bwrap probe (was "passing" only because it could not find srt-bwrap).
+    Linux O_PATH semantics (access mode ignored; O_PATH|O_NOFOLLOW names the
+    link via O_SYMLINK; readlinkat(fd, "")). SO_SNDBUF/SO_RCVBUF clamped like
+    Linux instead of EINVAL. lxrt root converted to merged /usr
+    (tests/elf/mkroot.sh).
+  Xvnc now runs with GLX (Mesa swrast from the Fedora guest): x86-64
+    glxinfo under FEX reports llvmpipe, OpenGL 4.6.
+
+STATE AT END OF SESSION 3 (MEASURED): the i386 client starts, updates, loads
+steamui.so, spawns its helpers (lspci, steamsysinfo, gpu-topology query) and
+launches steamwebhelper through pressure-vessel-wrap, which builds its
+runtime copy under FEX. The Steam UI has not drawn yet. The VM is still
+needed to build FEX (the runtime never runs it). Completion criterion NOT met.
+
+KNOWN OPEN (next):
+   - pressure-vessel under FEX is slow; the client's 15 s main-loop watchdog
+     ("fatal stalled cross-thread pipe") fired in traced runs.
+   - AVX2 gathers compute element addresses without the guest base.
+   - The Steam UI has not drawn on the X display yet.
+
+SESSION 4 (2026-09-26, later) -- signal frames, VM-free FEX, missing calls
+  FEX is now built on the Mac (scripts/build-fex-host.sh, stage9) and those
+    builds are the installed default in both roots; the VM builds are kept
+    aside in usr/lib/lxrt-emu/vm-build for comparison only.
+  Guest-base bugs in FEX's signal code, both found in the Steam client:
+    - i386 rt frame: pinfo/puc were FEX's host pointers truncated to 32 bits
+      (MEASURED: pinfo 0xb93efe6c for a frame at guest 0xb93b7e5c, i.e. off
+      by the base's low bits 0x38000); si_addr (i386 and x86-64) was the host
+      fault address. All through H2G now. Probe: tests/elf/i386_siginfo.c.
+    - Signal return: RestoreThreadState read FEX's saved host-stack pointer
+      through the raw guest SP. Every i386 handler that RETURNED faulted in
+      FEX's SIGILL handler at guest ESP-8 taken as a host address, forever
+      (MEASURED with the old build: "fault repeating 1000x at 0xffff7360");
+      in Steam that thread never came back and the client's 15 s watchdog
+      fired ("BMainLoop appears to have stalled", "fatal stalled cross-thread
+      pipe"). Through G2H now. Probe: tests/elf/i386_sigreturn.c (SA_SIGINFO
+      and plain handlers x100 each, SIGSEGV repair-and-return x10: ok).
+  Runtime:
+    - utimensat was missing entirely (-ENOSYS: pressure-vessel "Unable to
+      set mtime", touch, tar, cp -p). Implemented with Linux UTIME_NOW/OMIT,
+      NULL path / AT_EMPTY_PATH (futimens), AT_SYMLINK_NOFOLLOW; x86-64 touch
+      under FEX: explicit, -m, now and -h all MEASURED correct.
+    - LXRT_REPORT_ENOSYS=1 names each missing call once per process. A full
+      Steam start then showed: rseq (293, answered ENOSYS on purpose),
+      fadvise64 (223), setsid (157), close_range (436), sched_setaffinity
+      (122), clock_getres (114). All implemented; close_range closes through
+      the same per-kind hooks as close() or sets FD_CLOEXEC.
+    - /tmp/lxrt-proc-<pid> directories were never removed (4525 after a day
+      of runs). exit_group removes the process's own; a sweep (at most once a
+      minute) removes those of dead pids.
+    - The fault flight recorder (memlog) now ignores repeated SIGBUS: FEX's
+      split-lock atomics fault on purpose at the same pc.
+    - LXRT_GUEST_FAULTS=1: after FEX redirects a guest SIGSEGV to the guest
+      handler, print the guest fault context and the file+offset of the
+      faulting guest block (file-backed mappings are recorded for that).
+  Orphans: helpers of a crashed client (steamwebhelper, zygotes,
+    pv-adverb) survive it and were still attached to the IPC objects of the
+    next run. Test runs now kill every guest process except Xvnc/FEXServer
+    before starting.
+  Known limits kept, not fixed: a 4 KiB guest page inside a 16 KiB host page
+    gets the union of its neighbours' protections (runtime/subpage.c), so a
+    lone PROT_NONE guard page next to read/write ones is not enforced.
+    Linux SIGSTKFLT (16) and SIGPWR (30) have no Darwin number and are not
+    carried yet (native-Linux Boehm GC uses SIGPWR to stop threads).
+  Continued (same session), each found by the new guest-fault reporting:
+    - The client's deliberate crash ("movl $0,0x0; ud2" after Log(), in
+      steamclient.so, userinterface.cpp): it calls get_robust_list and
+      insists on len 12 and head->futex_offset == -20. FEX's x32
+      set_robust_list stored the syscall thunk's HOST pointer and handed it
+      back truncated. Stored as the guest address now (probe
+      tests/elf/i386_robust.c: head 0xf73b79ac, futex_offset -20).
+    - AVX2 gathers: FEX's per-lane ASIMD emulation computed each element's
+      address without the guest base; the client and gldriverquery spun on
+      "ld1 {v22.s}[0], [x1]" with x1 a raw guest address. Base (or 64-bit
+      window) added in Emulate128BitGather. Probe tests/elf/i386_gather.c
+      (the VM-built FEX loops on it; the fixed one: ok).
+    - JIT W^X across signals, MEASURED on macOS 27 (scratch program, six
+      cases): a handler's flip to WRITE survives sigreturn, a flip to EXEC
+      does not when the thread was interrupted in WRITE mode. So a thread
+      redirected into generated code while in write mode could not be fixed
+      from the fault handler (second fault at the same pc = "genuine" =
+      death; seen as steam.sh's "cd: : No such file" when dirname died).
+      The handler now parks the context and sends the thread through a stub
+      (trampoline.S) that flips on its own stack and brk's back; the brk
+      handler restores the full context (GPRs, NEON) in execute mode.
+      Probe tests/elf/jit_fetch_write.c: 3/3 rounds, argument registers
+      preserved.
+    - /etc/machine-id (and /var/lib/dbus/machine-id) were missing from the
+      roots: steam-runtime-launcher-service died on every start ("Cannot
+      spawn a message bus without a machine-id").
+    - name_to_handle_at answers EOPNOTSUPP (filesystems without handles).
+  Probe runner: tests/elf/run_i386.sh (all i386_* probes; 14/14 ok with the
+  host-built FEX).
+  steamwebhelper (Chromium/CEF) under pressure-vessel, same session:
+    - MADV_DONTNEED sometimes left memory intact: the runtime asked
+      proc_regionfilename() whether a region was file-backed, and that call
+      answers for the NEXT file-backed region when the asked one is
+      anonymous. FEX clears its lookup caches and call-return stacks with
+      MADV_DONTNEED, so threads kept jumping into code buffers FEX had freed
+      (MEASURED: "fault ... inside JIT region freed 0.001 s ago", the
+      munmap caller being ~CodeBuffer). Now decided by the region's own
+      external_pager (dispatch.c and subpage.c). tests/elf/madvise_zero.c.
+    - gettimeofday copied Darwin's struct timeval into Linux's: Darwin's
+      tv_usec is 32 bits plus padding, so the guest saw garbage in the upper
+      half (Chromium stamps like ".4295097544"). Fields written one by one.
+    - /proc/self/task/<tid> of exited threads was never removed: Chromium's
+      sandbox helper polls fstatat(proc_fd, "self/task/<tid>") until a stopped
+      thread disappears and FATALs otherwise. Removed at thread exit and on
+      regeneration.
+    - ~/.steam/sdk64 and friends: symlinkat stores host paths; a process
+      whose root is the same directory under another spelling
+      (/tmp/lxrt-steamroot vs its realpath) prefixed the root twice, and a
+      sandbox view did not map outer-root host paths back through its binds.
+      guest_resolve now canonicalises and untranslates such targets.
+    - pressure-vessel start-up (MEASURED 142 s -> 27 s to the webhelper):
+      every readlink("/proc/self/fd/N") rebuilt the whole fd directory (an
+      fcntl on every possible descriptor, an unlink and a symlink per open
+      one). A lookup of one descriptor now refreshes only that link. The
+      client waits 2400 x 50 ms for the webhelper (steamui.so, "Timed out
+      waiting for webhelper init") and had been giving up.
+    - V8 in every renderer: "Failed to reserve virtual memory for CodeRange".
+      Two causes, both fixed: (1) Darwin places mmap(NULL) bottom-up next to
+      its own images and the shared cache, so libcef.so sat at ~5 GB and V8
+      found no free 512 MiB within 2 GB of it -- guest mappings are now placed
+      top-down under 0x7f0000000000 like Linux, and an occupied hint falls
+      back to that instead of Darwin's upward search; (2) V8 then made the
+      range RWX, which Darwin refuses outside MAP_JIT (EACCES) -- RWX outside
+      MAP_JIT is granted as RW (the host never executes guest x86 code).
+    - JIT regions are forgotten on munmap and slots reused (64 were
+      exhausted over a long run).
+  Result at this point (MEASURED): pressure-vessel launches steamwebhelper,
+  the client creates the "SP Shared JS Context" browser, the page loads (its
+  title is set); the next blocker was an i386 client crash in poll().
+  x86 memory ordering was OFF for every multithreaded guest (the biggest
+  correctness bug of the session, MEASURED):
+    - FEX probes prctl(PR_GET_MEM_MODEL) / prctl(PR_SET_MEM_MODEL, TSO) and,
+      when they succeed, assumes hardware TSO and disables its atomic-based
+      TSO emulation. The runtime answered 0 to every unknown prctl. New
+      probe tests/elf/i386_tso.c (message passing, 1 writer + 3 readers):
+      FEX_TSOENABLED=0 -> 10261 violations; with the runtime now answering
+      EINVAL to both prctls -> 0. The Steam client's random crashes
+      (garbage 64-bit pc/addresses, returns to NULL, lock-free TSList
+      corruption) fit this exactly.
+    - Enabling TSO then exposed a hang: unaligned LDAPR/STLR take SIGBUS,
+      FEX's handler takes a spinlock stored in the MAP_JIT code buffer, and
+      in execute mode that store is itself a SIGBUS -- blocked inside the
+      SIGBUS handler, so Darwin re-executed the casal forever. Host handlers
+      of synchronous signals now always use SA_NODEFER (the runtime never
+      blocks sync signals on the host anyway).
+    - ppoll/pselect6 left the call's signal mask installed after return;
+      Linux restores the caller's mask. Fixed.
+  i386 probe suite: 16/16 (sleep, tso added).
+
+SESSION 5 (2026-09-26, evening) -- the i386 client crash after ~4 minutes
+  Symptom (MEASURED, twice): the i386 client segfaulted 3-4 min after start,
+  always on a return from a long blocking syscall -- glib's
+  g_main_context_poll returning from poll(), and ld-linux.so.2's
+  _dl_sysinfo_int80 (`int $0x80; ret`). Host pc was garbage
+  (0x7000038000 = G2H(0), or 0x7ef63063f020), reached from JIT code with
+  the popped call-ret entry "matching" the guest return address.
+  Ruled out by instrumentation: a temporary FEX check that every host code
+  pointer handed out by the L1/L2/L3 lookup caches and by the exit linker
+  lies in a live code buffer never fired before the crash.
+  Cause (VERIFIED IN SOURCE + MEASURED): FEX's per-thread call-ret stack has
+  4 KiB (FEX_PAGE_SIZE) guard pages. On 16 KiB host pages the guard shares
+  its host page with the stack itself, the page is read/write, and the
+  guard never faults. Unbalanced call/ret streams (every lazy PLT bind
+  returns through `ret` without a `call`; `call; pop` PIC idioms push
+  without popping) drift the stack pointer past either end into whatever
+  is mapped next -- typically another thread's call-ret stack -- instead of
+  faulting and being reset. New probe tests/elf/i386_callret.c (3 threads,
+  400k unmatched rets then 400k unmatched calls each): guard faults taken
+  with the old FEX 0 (2 SIGBUS total, both unrelated), with the fix 6
+  (2 + 6 = 8), one per thread per direction, as on Linux.
+  Fix (FEX patch, minimal): CALLRET_GUARD_SIZE = 16 KiB on each side
+  (InternalThreadState.h, ThreadManager.h/.cpp). The probe passes either
+  way (the corruption needs a matching neighbour entry); the guard-fault
+  count is the check.
+  Runtime: LXRT_SIGSTATS now also prints the tally at exit_group.
+  Suites: tests/elf/run.sh 32/32, run_i386.sh 17/17.
+  Later the same evening -- from a black screen to the logged-in Store
+  (MEASURED, screenshot via VNC: STORE/LIBRARY/COMMUNITY, Featured &
+  Recommended, Wishlist 13; zero VM). Each blocker in order:
+    1. Renderer livelock: ~440k SIGBUS/s (LXRT_SIGSTATS) on one unaligned
+       lock op in V8's code space. The runtime's sub-page W^X handler took
+       the ALIGNMENT fault for a protection fault on a page whose guest
+       pages union to RWX, mprotected and retried forever. Alignment faults
+       (ESR DFSC 0x21) now skip the JIT and sub-page handlers entirely.
+       After: renderer 0.2% CPU, 3-60 SIGBUS per 5 s. Probe
+       tests/elf/i386_rwx_atomic.c.
+    2. "Unexpected Transport Error 0x3008": the client checks every
+       websocket from its UI with `lsof -i TCP@127.0.0.1:<port>`
+       ("lsof is required to run steam") and rejects it when that fails.
+       lsof was not in the rootfs (added: lsof, libtirpc3t64,
+       libtirpc-common, scripts/fetch-x86-rootfs.sh), and /proc only
+       described the calling process. New runtime/procpid.c: other guest
+       processes in /proc (pid list, stat, status, comm, cmdline, exe,
+       environ, fd/ with socket:[inode] / pipe:[inode] links, all from
+       libproc -- no entitlement needed for same-user processes), and
+       /proc/net/{tcp,tcp6,udp,udp6} with inodes derived from the kernel
+       socket handle so tables and fd links agree; stat() through a
+       socket:[N] link answers S_IFSOCK with that inode (lsof matches on
+       it); prctl(PR_SET_MM, PR_SET_MM_MAP) now publishes the guest argv
+       FEX hands over as /proc/<pid>/cmdline. First lsof run took 16.8 s
+       (fd directory rebuilt per lookup) -- longer than the UI waits; only
+       the requested file is generated now: 0.42 s.
+    3. 0x3002 / "V8 process OOM (Exceeding maximum wasm committed code
+       space)": FEX's SMC write-protect of a 4 KiB guest page is a no-op
+       when its 16 KiB host page holds writable neighbours, so V8's
+       WebAssembly jump-table patches went unseen and it recompiled
+       forever. FEX patch: SMC tracking protects/invalidates whole host
+       pages under the runtime (the running-block check stays per 4 KiB --
+       widening it lost ESP in FEX's single-instruction replay, caught by
+       tests/elf/i386_siginfo.c). Probe tests/elf/i386_smc_subpage.c
+       (before: stale 10 10 10 10 10; after 10..50).
+    4. Zygotes dying (FATAL thread_helpers.cc fstatat(/proc,"self/task/")):
+       a FEXServer started from a Steam run (FEX_ROOTFS=/) told every
+       client the rootfs was "/", pressure-vessel then used no interpreter
+       root and FEX found the container's empty proc/ first.
+       scripts/run-fex.sh now starts FEXServer with a fixed environment.
+    5. Every request ERR_NAME_NOT_RESOLVED (even https://1.1.1.1): lookups
+       RELATIVE to a directory descriptor ignored the fake-bwrap binds;
+       FEX resolves every guest path relative to its rootfs descriptor, so
+       Chromium read the rootfs image's empty resolv.conf instead of the
+       bind over it and queried 127.0.0.1:53 (ECONNREFUSED). openat,
+       openat2, fstatat, statx, faccessat(2), readlinkat now go through
+       the bind table (at_through_mounts).
+  Also fixed on the way: getrusage and times were ENOSYS (bash `time`
+  printed garbage); wait4 ignored rusage and did not map signal numbers in
+  the status (a SIGBUS death read as SIGUSR1); exit(2) of the last thread
+  left the process hanging; /etc/passwd, /etc/group and machine-id are now
+  generated by scripts/mksteamroot.sh.
+  Known gaps: the steamwebhelper GPU process still exits (software
+  rendering); no dbus; FEX's single-instruction SMC replay loses ESP for a
+  32-bit guest at a base when the write hits the running block itself.
+  Suites: tests/elf/run.sh 32/32, run_i386.sh 19/19.
+
+SESSION 6 (2026-09-27) -- keeping the client alive, a way to see it
+  - The i386 client kept dying 4-6 min in, a different garbage pointer each
+    time (steamclient.so, ld.so with ebp=0, libc strcmp from libSDL3).
+    MEASURED causes and fixes, in order:
+    1. Host-page SMC tracking (session 5) made every data store next to code
+       an invalidation in the 32-bit client: ~1500 SIGBUS/s (LXRT_SIGSTATS);
+       with 4 KiB tracking ~40/s and the client survived 10+ min. FEX patch:
+       host-page SMC only for 64-bit guests (V8/wasm needs it there); the
+       32-bit shared-page SMC case is a known gap (i386_smc_subpage: xfail).
+    2. Self-deadlock: the realtime-signal queue lock was taken inside the host
+       signal handler too; a SIGCHLD landing while bash held it parked
+       steam.sh forever. Every holder now blocks host signals.
+    3. The root had no /dev/input: SDL's inotify watch failed and it
+       re-enumerated joysticks 4 times a second (240/min in console_log);
+       the last crash was inside that churn (libc strcmp called from
+       libSDL3). The root now has an (empty) /dev/input.
+    Stability after 1+2: 11.5 min; after 3 (+ the lock fix, + the vDSO): the
+    client stayed up 25+ min with the UI loaded (MEASURED, 2026-09-27).
+  - Display: Xvnc now listens on localhost only (it was open to the LAN
+    without a password) and asks for a VNC password so Apple's Screen
+    Sharing connects; scripts/run-steam.sh starts X + Steam and opens it.
+    scripts/vnc_snapshot.py / vnc_click.py speak VncAuth (vnc_auth.py).
+  - Downloads work: Proton Experimental (1.43 GB) downloaded and installed
+    through the Linux client (MEASURED, StateFlags 4).
+  - Deadlock fixed: the thread-table lock (realtime signal queue) is taken
+    by the host signal handler too; every holder now blocks host signals
+    (steam.sh's bash had parked forever: SIGCHLD inside the locked section).
+
+M6 (2026-09-27) -- the runtime's vDSO
+  runtime/vdso/vdso.c (+ vdso.lds) is a Linux aarch64 shared object with
+  __kernel_clock_gettime / __kernel_gettimeofday / __kernel_clock_getres
+  (version LINUX_2.6.39, no relocations, no x18), embedded in lxrun
+  (vdso_blob.S) and mapped per process by runtime/vdso_map.c below a 16 KiB
+  data page; AT_SYSINFO_EHDR points at it. MONOTONIC/RAW/COARSE are read in
+  user space exactly as Darwin's mach_absolute_time does it -- the commpage
+  (0xFFFFFC088 offset, 0xFFFFFC090 counter type: CNTVCT / CNTVCTSS /
+  ACNTVCT) -- scaled by ticks*mult>>32; REALTIME = that + an offset a host
+  thread refreshes every 250 ms (seqlock; restarted after fork). Other clocks
+  and a tz argument take the syscall. The runtime's own MONOTONIC
+  (lxrt_guest_clock_ns) is now the same integer formula, so futex/timerfd
+  deadlines agree with vDSO reads to the nanosecond.
+  Note (MEASURED): raw `mrs cntvct_el0` in user space does NOT equal
+  mach_absolute_time on macOS 27 (different base, reports 1 GHz, ~11.5 ns
+  per read -- apparently emulated); only the commpage-selected register is.
+  MEASURED (tests/elf/vdso_clock.c, glibc aarch64): vDSO present,
+  vDSO-vs-syscall deltas tens-hundreds of ns for MONOTONIC/REALTIME,
+  gettimeofday within 1 us, never backwards over 1M reads;
+  clock_gettime(MONOTONIC) 21.6 ns/call through the rewritten svc ->
+  15.6 ns with the vDSO (10.0 ns in the suite run). The rewritten-svc path
+  was already far cheaper than the 68 ns of Stage 1, so M6 is a modest win
+  (~30%), not the 70x the plan projected from the old numbers.
+  LXRT_NO_VDSO=1 turns it off. Suite: tests/elf/run.sh 33/33.
+
+INCIDENT 2026-09-27 00:12 -- the Mac hung and rebooted (watchdog panic)
+  panic-full-2026-09-27-001235: "watchdog timeout: no checkins from
+  watchdogd in 91 seconds"; compressor at 100% of its page limit. Largest
+  resident processes: krunkit 11.4 GB (the OLD libkrun VM from ~/SteamFEX,
+  started 2026-09-26 12:22 and never stopped -- not part of the zero-VM
+  path, and it also wrote a 360 MB debug log), fseventsd 5.9 GB, 130 lxrun
+  processes (leftover wine/Steam runs), a CrossOver steamwebhelper 1.8 GB.
+  Fixes: the synthetic /proc no longer rewrites unchanged files or re-creates
+  whole fd/task directories on every lookup (lxrt_file_same / lxrt_link_set,
+  incremental fd dirs, /proc listing no longer regenerates every process) --
+  every write was an fsevents record; long guest tests now run under a memory
+  guard. The VM and its remnants are to be deleted (owner's decision).

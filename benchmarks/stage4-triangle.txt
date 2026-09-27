@@ -1,0 +1,56 @@
+The full render path: SPIR-V, a render pass, a pipeline, a drawn triangle. No VM.
+Apple M4, macOS 27, MoltenVK 1.4.2. 2026-09-24.
+
+WHAT RUNS: a Fedora binary linked with -lvulkan against the ELF shim. It asks
+the runtime for a window, creates a surface on the CAMetalLayer, builds a
+swapchain, image views, a render pass and framebuffers, loads two SPIR-V
+modules, compiles a graphics pipeline, and draws a triangle every frame.
+
+  CAMetalLayer 0x7c9d355d70, drawable 1280x720
+  VkSurfaceKHR creada sobre el CAMetalLayer
+  GPU: Apple M4
+  swapchain 1280x720, 3 imagenes
+  modulos SPIR-V creados (1464 + 496 bytes)
+  pipeline grafico compilado en 352.5 ms (SPIR-V -> MSL -> Metal)
+  270 frames: mediana 6.839 ms (146.2 fps), media 7.069,
+              1% low 14.813 ms, max 15.611
+  triangulo dibujado 300 veces, sin VM
+
+This is the real path, not a clear: MoltenVK translated the SPIR-V to Metal
+Shading Language, Metal compiled it, and the GPU rasterised through a render
+pass into the layer's drawable.
+
+THE PIPELINE COMPILE, and the correction that came with repeating it:
+
+  first ever run   352.5 ms
+  later runs         2.1 ms, 1.6 ms, 1.7 ms
+
+The 352 ms was a COLD number. Metal keeps its own on-disk shader cache, so the
+second and later runs of the same shaders cost about 2 ms. Quoting the cold
+figure alone would have been wrong, and quoting the warm figure alone would be
+just as misleading: a player's first run of a game pays the cold price for
+every pipeline it compiles.
+
+PERFORMANCE_BASELINE §2.5 listed "shader compilation stalls" as unmeasured and
+as a classic stutter source unaffected by VM or no-VM. Both halves of that hold:
+it is large when cold, and removing the VM did nothing for it. What helps is a
+pipeline cache, and that is the next thing worth building rather than anything
+architectural.
+
+FRAME TIMES: FIFO on a 165 Hz display. The median of 6.84 ms is under the
+6.06 ms refresh interval measured by the clear-only loop, i.e. this loop misses
+a refresh now and then; the 1% low of 14.8 ms is roughly two intervals, which
+is exactly what a missed vsync looks like. Vsync-bound either way, so neither
+number says anything about GPU headroom.
+
+WHAT IS NOW PROVEN END TO END, with no Linux kernel and no hypervisor:
+  ELF loading -> syscall and TLS rewriting -> threads -> signals ->
+  dynamic linking -> an ELF Vulkan loader -> MoltenVK -> Metal ->
+  a window on screen.
+
+WHAT IS NOT:
+  * No vertex buffers, no descriptor sets, no textures, no depth buffer. A
+    triangle with hardcoded vertices exercises less than any real frame does.
+  * No swapchain recreation on resize.
+  * No pipeline cache, which the 352 ms above makes the obvious next thing.
+  * DXVK has not been run at all.

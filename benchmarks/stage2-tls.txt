@@ -1,0 +1,40 @@
+SUPERSEDED -- READ benchmarks/stage3-tls.txt INSTEAD.
+The conclusion below is WRONG. TPIDR_EL0 is not free: Darwin preserves it
+across a syscall but clobbers it on any context switch, so the short test
+used here never saw the failure. Kept for the record.
+======================================================================
+
+Do Linux and Darwin thread-local storage collide on arm64?
+Apple M4, macOS 27, 2026-09-23.
+
+ARCHITECTURE_TARGET §3.1 listed this as EXPERIMENTAL and as one of the hard
+problems: "Linux aarch64 uses TPIDR_EL0 via variant-I TLS; Darwin reserves
+TPIDRRO_EL0/TPIDR_EL0 for its own pthread implementation. Two thread pointers
+must coexist."
+
+Measured on a plain macOS arm64 process:
+
+  pthread_self()   = 0x200a33f80
+  TPIDR_EL0        = 0x0000000000000001     <- not a pointer; Darwin does not use it
+  TPIDRRO_EL0      = 0x0000000200a34060     <- adjacent to pthread_self: this is Darwin's
+
+  after `msr tpidr_el0, 0xDEADBEEF` (what a Linux guest does at start-up):
+  TPIDR_EL0        = 0x00000000deadbeef
+  printf / malloc / snprintf   -> still work
+  pthread_self()   = 0x200a33f80            -> unchanged and still valid
+  errno (a TLS variable)       -> still reads correctly
+
+CONCLUSION: **Darwin's thread pointer lives in TPIDRRO_EL0, and TPIDR_EL0 is
+free.** Linux aarch64 uses TPIDR_EL0. The two thread pointers do not merely
+"coexist" -- they never touch. A Linux guest can own TPIDR_EL0 outright and the
+host runtime keeps working in the same thread.
+
+CONFIRMED END TO END: a real Fedora glibc 2.42 static-PIE binary runs under
+runtime/ and reaches main, with working malloc, stdio, snprintf and
+clock_gettime. glibc sets up its TLS before any of that, and the host-side
+dispatcher -- ordinary C calling fprintf -- keeps running through every
+syscall afterwards.
+
+CAVEAT: this covers the single-threaded case. `clone(CLONE_SETTLS)` giving each
+new thread its own TPIDR_EL0 while Darwin manages the same thread's
+TPIDRRO_EL0 is Stage 3 and is not measured here.

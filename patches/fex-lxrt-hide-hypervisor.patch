@@ -1,0 +1,38 @@
+FEX: HideHypervisorBit also hides the hypervisor CPUID leaves (Darwin host)
+
+HideHypervisorBit only cleared CPUID.1:ECX[31]; leaves 4000_0000h
+("FEXIFEXIEMU") and 4000_0001h (host architecture = AArch64) stayed. The
+Steam client reads them: under SteamARM it concluded it ran on an arm64
+host and installed Proton (ARM64), Steam Linux Runtime 4.0 - Arm64 and
+Steam's own FEX tool (MEASURED), a path that cannot work on macOS -- native
+aarch64 Wine would need the low 4 GiB, which Darwin's __PAGEZERO takes. With
+the option set, both leaves read as zero and the machine looks like x86-64
+Linux: Steam uses x86 Proton, which runs under this FEX's low window.
+
+diff --git a/FEXCore/Source/Interface/Core/CPUID.cpp b/FEXCore/Source/Interface/Core/CPUID.cpp
+index ddce98d66..ef7ef05fb 100644
+--- a/FEXCore/Source/Interface/Core/CPUID.cpp
++++ b/FEXCore/Source/Interface/Core/CPUID.cpp
+@@ -967,6 +967,12 @@ FEXCore::CPUID::FunctionResults CPUIDEmu::Function_24h(uint32_t Leaf) const {
+ // Hypervisor CPUID information leaf
+ FEXCore::CPUID::FunctionResults CPUIDEmu::Function_4000_0000h(uint32_t Leaf) const {
+   FEXCore::CPUID::FunctionResults Res {};
++  // HideHypervisorBit hides FEX entirely: software that finds the
++  // "FEXIFEXIEMU" leaf reads the host architecture from 4000_0001h (the Steam
++  // client then treats the machine as arm64 and picks ARM64-only tools).
++  if (HideHypervisorBit()) {
++    return Res;
++  }
+   // Maximum supported hypervisor leafs
+   // We only expose the information leaf
+   //
+@@ -992,6 +998,9 @@ static_assert(GitString.size() < 32);
+ // Hypervisor CPUID information leaf
+ FEXCore::CPUID::FunctionResults CPUIDEmu::Function_4000_0001h(uint32_t Leaf) const {
+   FEXCore::CPUID::FunctionResults Res {};
++  if (HideHypervisorBit()) {
++    return Res;
++  }
+   constexpr uint32_t MaximumSubLeafNumber = 2;
+   if (Leaf == 0) {
+     // EAX[3:0] Is the host architecture that FEX is running under

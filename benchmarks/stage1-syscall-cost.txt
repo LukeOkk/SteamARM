@@ -1,0 +1,33 @@
+SteamARM Stage 1 -- cost of intercepting one Linux syscall on Darwin
+pid 51338, timebase 41.6667 ns/tick
+
+[1] Does Darwin distinguish `svc #0` from `svc #0x80`?
+    NO. `svc #0` with x16=20 returned our pid (51338).
+    Darwin ignores the SVC immediate and dispatches on x16.
+    CONSEQUENCE: a Linux binary's `svc #0` does not trap. It
+    executes whatever Darwin syscall x16 happens to hold, with
+    Linux arguments. Interception by trapping is NOT AVAILABLE;
+    the loader must rewrite every svc site, and self-modifying
+    or JIT-generated code (FEX) needs a different mechanism.
+
+[2] Does an invalid syscall number raise a catchable signal?
+    YES, as SIGTRAP. Handler ran and stepped the pc past the svc.
+
+[3] Mach exception interception (EXC_BREAKPOINT, handler thread)
+    Handler thread received the exception and advanced the pc.
+
+[4] Rewritten `svc` site: branch into the runtime dispatcher
+    Serviced Linux getpid(172) through the dispatch table.
+
+mechanism                                 ns/op   iterations  note
+-------------------------------- -------------- ------------  ----
+indirect function call                      0.8      2000000  cost floor
+Darwin syscall, svc #0x80                  71.5       500000  getpid via the native path
+Darwin syscall, svc #0                     66.5       500000  same path as svc #0x80 if the immediate is ignored
+in-process signal interception           2789.0       100000  svc -> SIGTRAP -> handler -> pc+=4 -> resume
+Mach exception interception              6111.4        50000  trap -> IPC to handler thread -> thread_set_state -> reply
+rewritten svc -> dispatcher                69.3      1000000  branch + table lookup + real Darwin syscall
+rewritten svc, serviced in userspace            0.9      1000000  branch + table lookup only, no kernel
+
+Compare against the VM exit these would replace: see
+benchmarks/vmexit_cost.md for how that number is obtained.

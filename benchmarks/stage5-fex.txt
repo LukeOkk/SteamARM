@@ -1,0 +1,302 @@
+FEX under the runtime: how far it gets, and what stops it.
+Apple M4, macOS 27. FEX built from ~/FEX, aarch64 PIE. 2026-09-24.
+
+WHY THIS MATTERS: Steam's client is i386/x86-64 (ARCHITECTURE_CURRENT §1), so
+FEX is on the critical path, not an extra. Stage 1 predicted FEX would need
+patching because its JIT emits `svc` at runtime where no load-time rewriting
+pass can see it. Before spending effort on that, the question is whether FEX
+runs at all.
+
+IT RUNS.
+
+  [lxrt] /tmp/lxrt-root/usr/bin/FEX: PIE, entry ...
+  [lxrt] rewrite: 625663 words scanned | svc 242 rewritten | tls 40 rewritten
+                                       | ctr 1 rewritten
+  [lxrt] PT_INTERP /lib/ld-linux-aarch64.so.1 -> ...
+  [lxrt] entering guest ...
+  E Couldn't connect to FEXServer socket 501.FEXServer.Socket 97
+  E Couldn't connect to FEXServer socket /var/.../501.FEXServer.Socket 2
+  E Couldn't connect to FEXServer socket after launching the process
+  E FEXServerClient: Failure to setup client
+
+FEX loads, links against libstdc++/libm/libgcc_s/libc through the guest's own
+ld.so, executes its own start-up, parses its configuration, and fails in
+FEXServerClient. That is FEX's code reaching FEX's own requirements -- not the
+runtime failing.
+
+WHAT IT NEEDED ON THE WAY, all now implemented:
+  * mkdirat -- FEX called it 40335 times in one run, walking a path it could
+    not create, because -ENOSYS came back instead of a real error;
+  * getcwd -- Linux returns the LENGTH including the terminator, not the
+    buffer. A guest reading the return value as a pointer reads a length;
+  * prctl (PR_SET_NAME / PR_GET_NAME);
+  * the whole socket family.
+
+UPDATE, later the same day: both blockers below were resolved -- the runtime
+grew a process model and abstract-socket translation (stage5-process.txt) --
+and FEX now starts FEXServer, connects to it, and gets as far as laying out the
+guest address space. It stops there against a harder wall: Darwin's user VA
+tops out at 2^47 and FEX asks to reserve 128 TiB starting at exactly that
+address. See benchmarks/stage5-va.txt; that one needs a patch to FEX.
+
+THE TWO ORIGINAL BLOCKERS, kept for the record:
+
+1. LINUX ABSTRACT AF_UNIX SOCKETS. FEX's first attempt is
+   `\0 501.FEXServer.Socket` -- a leading NUL means the abstract namespace,
+   which exists only on Linux. There is no filesystem-free socket namespace on
+   Darwin. runtime/socket.c returns EAFNOSUPPORT rather than quietly creating a
+   file with a strange name. The filesystem fallback FEX tries next is the
+   right path, and it fails only because nothing is listening.
+
+2. FEX SPAWNS FEXServer AS A SEPARATE PROCESS. The runtime has no fork/execve:
+   `clone` without CLONE_VM is refused outright. FEXServer exists to own the
+   rootfs squashfs mount and shared config across FEX instances. Either it
+   needs to run in-process, or the runtime needs a real process model.
+
+   This is the first thing in the whole project that the single-address-space
+   design does not simply absorb, and it deserves a decision rather than a
+   workaround: a second process means a second runtime, and everything the
+   graphics bridge gained from having one address space does not apply to it.
+
+STILL UNIMPLEMENTED after all this: rseq (293) alone, which glibc falls back
+from by design.
+
+NOT YET TESTED AT ALL: whether FEX's JIT works. It emits `svc` for guest
+syscalls at runtime (Stage 1 finding), it needs W^X rather than RWX
+(stage5-sysreg.txt), and none of that is reachable until FEXServer is resolved.
+
+==========================================================================
+IT RUNS X86-64 CODE. 2026-09-25, later.
+
+    $ LXRT_ROOT=/tmp/lxrt-root HOME=/tmp/fexhome ./build/lxrun /tmp/lxrt-root/usr/bin/FEX /tmp/hx86c
+    [lxrt] rewrite: 629914 words scanned | svc 267 found, 267 rewritten ... sysreg 12
+    [lxrt] mapped code at 0x108260000: 415 svc sites, 415 rewritten, 0 poisoned
+    [lxrt]    jit region 0x102870000+0x4000 registered       <- FEX's dispatcher
+    [lxrt]    jit region 0x1088fc000+0x1000000 registered    <- FEX's 16 MiB code buffer
+    hello from x86-64, translated by FEX, on macOS, with no VM
+    FEX EXIT 0
+
+An x86-64 Linux ELF (build/hello-x86, static, 1800 bytes), translated by
+FEX's JIT, executed on Apple Silicon under the runtime: no Linux kernel, no
+hypervisor, no VM. FEXServer runs as a second runtime process; FEX connects
+to it, maps the guest, emits code into MAP_JIT memory, and the syscalls the
+translated code makes come back through the same dispatcher.
+
+WHAT THE RUN COST (from --trace):
+  269 syscalls total; top: mmap x42, faccessat x29, openat x24, prctl x24,
+  write x19, mprotect x15, munmap x14.
+  7 W^X flips through private syscall 0x4C580020: 3 open-for-write,
+  4 close-for-execute (one of them the probe). 0 svc sites found in JIT
+  output -- FEX's translated code calls back into FEX for syscalls, so the
+  rescan found nothing to rewrite in this program.
+
+TIMING, same binary, three runs each (bash `time`, real/user/sys):
+  under the runtime on macOS:   0.040/0.01/0.01  0.020/0.01/0.01  0.010/0.00/0.00
+  native FEX inside the VM:     0.016/0.004/0.007 0.010/0.002/0.004 0.015/0.004/0.005
+  Parity for a 1800-byte program: this measures FEX start-up plus the
+  runtime's load-time rewriting (630k words), not translation throughput.
+  Throughput needs a real workload; that number is still owed.
+
+THE LAST TWO WALLS, for the record:
+
+1. W^X. FEX faulted on its first instruction fetch from the code buffer and
+   the fault-driven flip did not survive the handler's return (stage5-jit.txt
+   CORRECTION). Resolved by the guest asking for each flip itself:
+   patches/LxrtJit.h + patches/fex-lxrt-wx.patch (34 lines, 8 sites).
+
+2. A 4 KiB guard page inside a 16 KiB host page. With the W^X patch in,
+   FEX died with SIGSEGV at 0x103174004:
+
+     [lxrt] -> 222(0x0, 0x3000, 0x3)            mmap 12 KiB rw   -> 0x103174000
+     [lxrt] -> 226(0x103176000, 0x1000, 0x0)    mprotect 4 KiB at +0x2000 to NONE
+     [lxrt]    jit fault pc=0x1080b35b0 addr=0x103174004 region=-1
+               [region 0x103174000+0x4000 prot=--- max=rwx private]
+
+   FEX's temporary code buffer (PooledAllocatorVirtualWithGuard) is 12 KiB
+   plus a trailing 4 KiB guard. The sub-page layer took the mprotect, but
+   the 16 KiB-aligned mmap before it had never been tracked, so the union
+   over the host page was NONE and the whole page went dark; the next store
+   into the buffer faulted. runtime/subpage.c adopt_untracked() now records
+   the page's current protection for every untracked 4 KiB slot before
+   applying a sub-page change. The guard itself is lost (union(rw, none) is
+   rw); a program that never touches its guard cannot tell.
+
+A WEDGED FILE, not an artefact this time: /tmp/lxrt-root/tmp/hx86 hangs a
+native pread(2) forever (5 s probe), because an unkillable lxrun zombie in
+state U from the self-read-deadlock investigation still holds its VM object.
+The earlier record (stage5-selfread-deadlock.txt) dismissed "wedged inode"
+as a misdiagnosis; it was a misdiagnosis THEN and is real NOW, for that one
+file, until reboot. The run above used a fresh copy, hx86c.
+
+WHAT IS NOT PROVEN YET: dynamic x86-64 (glibc through FEX's x86 rootfs),
+threads under FEX, anything with real translation throughput, and Steam.
+
+==========================================================================
+DYNAMIC X86-64 RUNS. 2026-09-25, later still.
+
+    $ FEX_ROOTFS=/tmp/fexhome/.local/share/fex-emu/RootFS/Ubuntu_24_04 \
+      ./build/lxrun /tmp/lxrt-root/usr/bin/FEX /usr/bin/uname -m
+    x86_64
+    FEX EXIT 0
+
+Ubuntu 24.04's /usr/bin/uname -- a PIE that needs ld-linux-x86-64.so.2 and
+libc.so.6 -- loaded from FEX's extracted x86-64 rootfs (1.9 GB, copied out of
+the guest into the host root), through the x86-64 dynamic loader, through
+FEX's JIT, under the runtime. 4444 syscalls traced, including the 4-byte
+block-link W^X scopes (`0x4C580020(1, addr, 4)`), so FEX's block linking runs
+through the patch too.
+
+THREE MORE WALLS ON THE WAY, in order:
+
+1. FEX's rootfs overlay is openat2(RootFSFD, path, RESOLVE_IN_ROOT). The
+   runtime refused RESOLVE_IN_ROOT with EINVAL (16 calls -> -22), FEX punted
+   to the host path as its source says it will, and the x86-64 ld.so could
+   not find libc.so.6 inside the rootfs it had itself been loaded from.
+   fileops2.c now walks the path by hand inside the root -- every component,
+   every symlink re-rooted, ".." clamped -- and opens the symlink-free result
+   with O_NOFOLLOW|O_RESOLVE_BENEATH. (437 -> 4: libc found.)
+
+2. SIGBUS from the runtime's own memset, and then a hang. The x86-64 ld.so
+   maps libc's data segment from the file with an ordinary 16 KiB-aligned
+   mmap, then maps the bss anonymously 4 KiB later, inside the same host
+   page, whose tail lies past the file's end:
+
+     subpage enter 0x10c231000+0xcd90 prot=3 anon=1
+     subpage backing 0x10c230000..0x10c240000
+     host_handler: darwin 10 -> linux 7
+     jit fault pc=0x19af13a70 addr=0x10c234000 [region ... prot=rw- max=rwx]
+
+   back_range() saw the host page already mapped and kept it; the zero-fill
+   then stored past EOF on a file mapping, which Darwin answers with SIGBUS
+   even on an rw- page. The fault handler then took the sub-page lock the
+   faulting thread already held: deadlock, hence the 90 s timeout. Two fixes
+   in subpage.c: a file-backed host page is converted to an anonymous private
+   copy (bytes kept via mach_vm_read_overwrite, which fails rather than
+   faults past EOF) before anything is written into it; and a thread-local
+   flag makes the fault handler report, not wait, when the fault is the
+   module's own.
+
+3. (Earlier the same afternoon.) The CTR_EL0 line size, stage5-sysreg.txt.
+
+WHAT IS STILL NOT PROVEN: threads under FEX, fork/exec of x86-64 children,
+Steam itself.
+
+==========================================================================
+MORE OF THE ROOTFS RUNS, and the next wall. 2026-09-25, evening.
+
+    /bin/ls -la /usr                          -> full listing, exit 0
+    /bin/bash -c 'x=$(echo sub-shell-forked); echo "$x"; echo done'
+                                              -> sub-shell-forked / done, exit 0
+    /usr/bin/env                              -> the environment, exit 0
+    /usr/bin/python3 -c 'print(1)'            -> "E Failed to map 64-bit elf file"
+
+bash forking a subshell is fork+execve of x86-64 code under FEX under the
+runtime's process model (process.c): it works.
+
+Two walls fell for ls and bash, both syscall-result divergences that a
+translated program cannot tell from a kernel bug:
+  * ls printed everything and then died with SIGSEGV at 0x100000021: the
+    xattr family (5-16) was -ENOSYS. Linux answers ENOTSUP for a filesystem
+    without xattrs and coreutils handles that; ENOSYS it does not.
+  * bash died at start-up dereferencing 0x514: ioctl (29) was -ENOSYS, and
+    the first ioctl a glibc program makes is TCGETS2 (0x802c542a, tcgetattr).
+    runtime/ioctl_tty.c now translates the terminal family and FIONREAD/
+    FIONBIO/FIOCLEX, termios layouts and flag bits included; unknown requests
+    are ENOTTY, which is what Linux says for a request the driver lacks.
+
+THE NEXT WALL IS __PAGEZERO AGAIN, now for x86-64 guests:
+
+    [lxrt] -> 222(0x400000, 0x20000, 0x1)
+    [lxrt] syscall 222 -> -12
+    E MapFile: Some elf mapping failed, 12, fd: 5
+
+Ubuntu's /usr/bin/python3.12 is a non-PIE ET_EXEC linked at 0x400000. FEX
+maps a guest at the guest's own addresses (guest VA == host VA; that is why
+the 4 KiB/16 KiB wall applied), and the low 4 GiB of an arm64 macOS process
+cannot be mapped by anyone (stage2-pagezero.txt). The runtime's own loader
+refuses ET_EXEC with a message; FEX just fails.
+
+WHY THIS MATTERS MORE THAN PYTHON: Steam's client binary, ubuntu12_32/steam,
+is an i386 PIE (measured with file(1) on the guest) -- and PIE changes
+nothing for a 32-bit guest, whose whole address space lies below 4 GiB by
+construction. So do 32-bit Windows games under Wine (image base 0x400000).
+The same census found steamwebhelper to be an x86-64 PIE and 16 x86-64
+non-PIE executables among Steam's tools. 64-bit
+PIE binaries (steamwebhelper, most modern Linux builds) and 64-bit Windows
+images (base 0x140000000) are above the line. The fix is a guest address
+base inside FEX -- every guest memory access offset by a constant held in a
+register, every pointer crossing the syscall boundary adjusted -- which is
+the second FEX patch and a much larger one than W^X. Recorded as a Stage 6
+decision in MIGRATION_PLAN; not started here.
+
+THE WALL, MEASURED ON STEAM'S OWN LAUNCH CHAIN (2026-09-25, night):
+steamwebhelper.sh runs under FEX under the runtime as far as its entry
+point -- the /proc/sys knobs now say "no user namespaces" and it disables
+CEF's sandbox itself -- and then FEX re-execs (execveat "/proc/self/exe",
+now mapped to the loaded image) into pressure-vessel-wrap:
+
+    E MapFile: Some elf mapping failed, 12, fd: 9
+    E Failed to load elf file / E Failed to map 64-bit elf file.
+
+    pressure-vessel/bin/pressure-vessel-wrap                  EXEC, LOAD 0x400000
+    pressure-vessel/libexec/steam-runtime-tools-0/srt-bwrap    EXEC, LOAD 0x400000
+    pressure-vessel/bin/steam-runtime-launcher-service         EXEC, LOAD 0x400000
+    pressure-vessel/libexec/steam-runtime-tools-0/x86_64-linux-gnu-exec  EXEC, 0x400000
+
+Every binary on the launch path is a non-PIE x86-64 executable at 0x400000,
+inside Darwin's __PAGEZERO. The fake bwrap never even gets asked: pv-wrap
+cannot start. So the guest address base in FEX (MIGRATION_PLAN, Stage 6)
+gates the 64-bit path too, not only the i386 client.
+
+==========================================================================
+STEAMWEBHELPER STARTS. 2026-09-25, night. (CEF, libcef.so, three processes.)
+
+Launched directly -- the way Steam itself falls back to on the guest when
+bwrap fails -- with the steamrt3c platform libraries on LD_LIBRARY_PATH:
+
+    cd .../ubuntu12_64 && LD_LIBRARY_PATH=.:<steamrt3c>/files/lib/x86_64-linux-gnu \
+      ./steamwebhelper -nocrashdialog -lang=en_US -cachedir=... -steampid=1 ... --no-sandbox
+
+Result: the browser process and two subprocesses (each an execveat of
+/proc/self/exe, i.e. FEX re-executing itself) start, print CEF's crash-key
+warnings exactly as on the guest's own webhelper-linux.txt, and the browser
+process is still alive at the 120 s cap: 2 lxrun processes, ~200k traced
+syscalls. Not a window yet -- no X11/Wayland here -- but CEF initialising
+under FEX under the runtime.
+
+WHAT IT TOOK, in order, each a measured divergence the translated program
+turned into a crash:
+  1. execveat("/proc/self/exe") -- how FEX launches the next x86 program --
+     meant nothing to the child runtime. Mapped to the loaded image.
+  2. getpgid/setpgid (154/155), sysinfo (179): -ENOSYS. Added.
+  3. A 4 KiB PROT_READ (glibc RELRO) at the start of a 20 KiB rw mapping went
+     to a plain mprotect, which rounded it to the whole 16 KiB host page;
+     CEF's next store into the second 4 KiB took SIGSEGV. Partial LENGTHS
+     now go through the sub-page union like unaligned addresses do.
+  4. socketpair(AF_UNIX, SOCK_SEQPACKET) -> EPROTONOSUPPORT. Darwin has no
+     unix seqpacket; mapped to SOCK_DGRAM (boundaries and SCM_RIGHTS kept,
+     end-of-file on peer close lost -- documented).
+  5. setsockopt(SO_PASSCRED) -> ENOPROTOOPT, which Chromium's Mojo channel
+     CHECKs. Darwin cannot attach credentials per message, but it can always
+     say who the peer is (LOCAL_PEERPID + LOCAL_PEERCRED): the option is
+     remembered per fd and recvmsg() synthesises SCM_CREDENTIALS; SO_PEERCRED
+     answers from the same source.
+  6. "Failed to open /dev/null": no /dev under the Linux tree. /dev/null,
+     zero, full, random, urandom pass through to the host; /dev/shm is a
+     directory inside the root (Chromium's shared memory). Passing ALL of
+     /dev through was tried first and killed bash at start-up (its /dev/tty
+     open went ENOENT -> ENXIO and something jumped to RIP 0xd3a4); the
+     whitelist is what survived measurement.
+  7. Chromium's sandbox helpers PCHECK an openat(procfd, "self/task") --
+     relative to an open /proc, a path the synthesiser never sees. /proc now
+     materialises fd/ and task/<tid>/{status,comm} whenever /proc itself or
+     /proc/self is opened.
+  8. --trace did not follow execve; LXRT_TRACE=1 now travels in the child's
+     environment, which is how every item above was found.
+
+WHAT REMAINS: one process dies with SIGSEGV inside FEX's own C++ (not JIT
+output): image offset 0x816ac, a std::map lower_bound walk whose node
+pointer is 0x100000001 (fault at +0x20 = 0x100000021). The same value killed
+`ls` earlier today, before any of tonight's changes existed, so it predates
+them. The installed FEX is stripped; a RelWithDebInfo build (~/FEX/Build-dbg)
+is in progress on the guest to name the function.

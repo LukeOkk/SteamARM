@@ -1,0 +1,94 @@
+Stage 13 -- Wine runs a Windows program; host safety (2026-09-27)
+====================================================================
+
+ZERO-VM status: NOT complete. This stage gets Proton's wine to run
+cmd.exe; games, DXVK/VKD3D and the clean-Mac install are still open.
+
+1. Two Mac hangs during Wine tests -- cause and guard
+-----------------------------------------------------
+MEASURED. The first hang left a watchdog panic report: compressor full,
+the kernel "vm objects" zone at 2856 MB, 130 lxrun processes (the old VM
+was also still running then). The second left no report. Neither shows up
+in resident memory: the memory being used up belongs to the kernel.
+
+Cause 1: kernel VM objects. FEX's MemAllocator32Bit::Munmap re-reserved an
+unmapped range PAGE BY PAGE (one PROT_NONE mmap per 4 KiB) in wine's
+64-bit low window. Every such mapping is its own host VM object and map
+entry:
+  wine cmd.exe, 5 s in:  VM.map.entries 77k -> 206k, vm.objects 95k -> 224k
+  wine64-preloader:      107,485 untagged 16 KiB PROT_NONE regions
+Fix (patches/fex-lxrt-guest-base.patch): one mapping per munmap call.
+  same run after the fix: +~500 map entries.
+
+Cause 2: runaway process count. When FEXServer could not start, or when
+explorer.exe kept being restarted (section 2), guests multiplied: 99 and
+90 lxrun processes within ~25 s, 4 GB resident and rising.
+  FEXServer failed because it inherited macOS's TMPDIR (/var/folders/...),
+  which does not exist in the guest root: bind() of its socket got ENOENT.
+  scripts/run-fex.sh now starts it with TMPDIR=/tmp, logs it to
+  ~/SteamARM-roots/logs/fexserver.log, and refuses to start a guest when
+  the server is not up.
+
+Guard: scripts/safeguard.sh (started by run-fex.sh; detached with nohup,
+so it outlives the shell that started it). Once a second it kills every
+lxrun process when any of these holds:
+  free memory (kern.memorystatus_level)   < 35 %
+  fseventsd resident                      > 1.5 GB
+  guests' total resident                  > 8 GB
+  lxrun processes                         > 80
+  kernel vm.objects / VM.map.entries      > 1.5 M  (zprint, column inuse)
+It also kills krunkit/gvproxy on sight, and writes a status line to
+~/SteamARM-roots/logs/safeguard.log every 5 s, synced to disk.
+MEASURED: it stopped both runaways above (KILL at 99 and at 90 processes).
+Normal levels on this Mac: vm.objects ~95-135k, map entries ~78-80k.
+Guests are found by executable name (comm), not command line: matching
+"build/lxrun" in the command line had killed an unrelated shell.
+
+2. Wine: stale shared session objects -> explorer.exe storm
+------------------------------------------------------------
+MEASURED: "err:class:NtUserRegisterClassExWOW Failed to get shared session
+object for window class"; with warn+winstation: "Session object id doesn't
+match expected id"; 45 copies of "explorer.exe /desktop" after 12 s.
+
+wineserver keeps session objects in a memfd section that clients map read
+only. On Linux wine maps a read-only view MAP_PRIVATE (virtual.c,
+map_file_into_view, #ifdef __linux__), relying on Linux showing later file
+updates in pages the process has not written. Darwin copies a private file
+mapping when it is made (MEASURED on the host: a MAP_PRIVATE view saw none
+of three later updates). Each client thus saw the session as of the moment
+it mapped it.
+
+Fix: runtime/privmap.c. A MAP_PRIVATE mapping of a memfd (host-page
+aligned) is mapped MAP_SHARED without write permission; the first store
+into a host page turns that page into a private copy with the guest's
+protection (copy on write). mprotect keeps untouched pages unwritable;
+munmap/mmap/mremap end the bookkeeping. Both fault handlers call it
+(signal.c host_handler, main.c fault_report).
+Test: tests/elf/memfd_private.c (run.sh): read-only private sees 11 12,
+then 13 after pwrite; a store makes only its own page private.
+tests/elf/run.sh: 34 passed, 0 failed.
+
+3. Result
+---------
+MEASURED, fresh prefix, Proton Experimental's wine (wine-11.0), no VM:
+  wine cmd.exe /c echo HOLA_DESDE_WINDOWS
+  -> prints HOLA_DESDE_WINDOWS; wineboot creates the prefix
+     (system32: 816 files); at most 9 guest processes; no explorer storm.
+Remaining errors in that run (not blocking cmd.exe):
+  - "no driver could be loaded" / "explorer process failed to start":
+    no X server on :2 was running (restart it after a reboot).
+  - try_map_free_area ENOMEM at 0x100000000 and near 0x7fffffff0000: the
+    low window ends at 4 GiB and Darwin's __PAGEZERO/stack limits sit
+    there; wine falls back to other addresses.
+  - install_bpf: PR_SET_SECCOMP EINVAL (wine's syscall-dispatch filter;
+    harmless for Linux-built wine, which uses the ordinary syscalls).
+
+4. notepad.exe in a native window
+---------------------------------
+MEASURED: with the native X server on :2 (scripts/run-x11-native.sh start
+:2), `wine notepad.exe` opens Notepad as a real macOS window (menu bar,
+edit area, status bar "Ln 1, Col 1"), steady at 6 guest processes and
+407 MB resident for 60 s; the safeguard saw nothing unusual (free 75 %,
+vm.objects 118k). Still missing: a window manager (no title bar or
+decorations on X windows), and the GL driver warning ("Direct rendering is
+disabled") -- OpenGL in X goes through GLX 1.4 indirect rendering.

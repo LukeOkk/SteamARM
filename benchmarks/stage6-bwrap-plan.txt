@@ -1,0 +1,92 @@
+bwrap plan pressure-vessel-wrap generated for a real game launch on the guest.
+Source: ~/.local/share/Steam/logs/webhelper-linux.txt, 2026-09-23 11:57:34,
+pressure-vessel-wrap[9669], two 'D: run:' lines (the sandbox plan, then the
+final argv with --perms/--level-prefix). Home paths anonymised to ~.
+
+=== plan line 1: 35 tokens, 11 options
+namespace/capability options present: NONE
+option counts: --symlink x5, --ro-bind x2, --ro-bind-try x2, --bind x1, --dev-bind x1
+destination prefixes (top 16): /etc x1, /bin x1, /lib x1, /lib32 x1, /lib64 x1, /sbin x1, /usr x1, /gnu/store x1, /nix/store x1, /proc x1, /dev x1
+source prefixes (top 10): /etc x1, usr/bin x1, usr/lib x1, usr/lib32 x1, usr/lib64 x1, usr/sbin x1, /usr x1, /gnu/store x1, /nix/store x1, /proc x1
+argv tail (the command inside the sandbox): /usr --ro-bind-try /gnu/store /gnu/store --ro-bind-try /nix/store /nix/store --bind /proc /proc --dev-bind /dev /dev true
+
+=== plan line 2: 41 tokens, 15 options
+namespace/capability options present: NONE
+option counts: --symlink x5, --ro-bind x2, --ro-bind-try x2, --not-a-security-boundary x1, --level-prefix x1, --perms x1, --dir x1, --bind x1, --dev-bind x1
+destination prefixes (top 16): / x1, /etc x1, /bin x1, /lib x1, /lib32 x1, /lib64 x1, /sbin x1, /usr x1, /gnu/store x1, /nix/store x1, /proc x1, /dev x1
+source prefixes (top 10): /etc x1, usr/bin x1, usr/lib x1, usr/lib32 x1, usr/lib64 x1, usr/sbin x1, /usr x1, /gnu/store x1, /nix/store x1, /proc x1
+argv tail (the command inside the sandbox): /usr --ro-bind-try /gnu/store /gnu/store --ro-bind-try /nix/store /nix/store --bind /proc /proc --dev-bind /dev /dev true
+
+=== raw plan (line 2), one option per line:
+  /usr/bin/bwrap
+  --not-a-security-boundary
+  --level-prefix
+  --perms 0700
+  --dir /
+  --ro-bind /etc /etc
+  --symlink usr/bin /bin
+  --symlink usr/lib /lib
+  --symlink usr/lib32 /lib32
+  --symlink usr/lib64 /lib64
+  --symlink usr/sbin /sbin
+  --ro-bind /usr /usr
+  --ro-bind-try /gnu/store /gnu/store
+  --ro-bind-try /nix/store /nix/store
+  --bind /proc /proc
+  --dev-bind /dev /dev true
+
+=== THE REAL PLAN: the game-launch sandbox, one option per log line
+(same log, same pid 9669, lines 4630-5400): 47 options.
+namespace/capability/uid options present: NONE -- bwrap creates the mount namespace itself; no --unshare-* was asked for
+option counts: --ro-bind x19, --bind x18, --symlink x4, --ro-bind-data x3, --tmpfs x2, --dev-bind x1
+destination prefixes: /home/<user> x11, /run/user x8, /run/host x7, /run/pressure-vessel x6, /run/systemd x3, /tmp/.X11-unix x2, /home x1, /media x1, /mnt x1, /opt x1, /run/udev x1, /srv x1, /tmp x1, /var/tmp x1, /dev/snd x1, /run/dbus x1
+source prefixes: ~/.local x12, /run/user/1000 x8, ~/.cache x2, /run/systemd/journal x2, /home x1, ~ x1, ~/.config x1, /media x1, /mnt x1, /opt x1, /run/udev x1, /srv x1
+
+--- the plan itself (home anonymised):
+  --bind /home /home
+  --bind ~ ~
+  --bind ~/.cache ~/.cache
+  --bind ~/.config ~/.config
+  --bind ~/.local/share ~/.local/share
+  --bind ~/.local/share/Steam ~/.local/share/Steam
+  --bind ~/.local/share/Steam/linux32 ~/.local/share/Steam/linux32
+  --bind ~/.local/share/Steam/linux64 ~/.local/share/Steam/linux64
+  --bind ~/.local/share/Steam/ubuntu12_32 ~/.local/share/Steam/ubuntu12_32
+  --bind ~/.local/share/Steam/ubuntu12_64 ~/.local/share/Steam/ubuntu12_64
+  --tmpfs ~/.local/share/vulkan/implicit_layer.d
+  --bind ~/.local/state ~/.local/state
+  --bind /media /media
+  --bind /mnt /mnt
+  --bind /opt /opt
+  --ro-bind /run/udev /run/udev
+  --bind /srv /srv
+  --bind /tmp /tmp
+  --bind /var/tmp /var/tmp
+  --ro-bind ~/.local/share/fex-emu/RootFS/Ubuntu_24_04/etc/os-release /run/host/os-release
+  --ro-bind ~/.local/share/fex-emu/RootFS/Ubuntu_24_04/usr/share/fonts /run/host/fonts
+  --ro-bind ~/.local/share/fex-emu/RootFS/Ubuntu_24_04/var/cache/fontconfig /run/host/fonts-cache
+  --ro-bind ~/.cache/fontconfig /run/host/user-fonts-cache
+  --ro-bind-data 26 /run/host/font-dirs.xml
+  --ro-bind ~/.local/share/fex-emu/RootFS/Ubuntu_24_04/usr/share/icons /run/host/share/icons
+  --ro-bind ~/.local/share/icons /run/host/user-share/icons
+  --ro-bind /run/user/1000/wayland-0 /run/pressure-vessel/wayland-0
+  --tmpfs /tmp/.X11-unix
+  --ro-bind /tmp/.X11-unix/X0 /tmp/.X11-unix/X0
+  --ro-bind-data 28 /run/pressure-vessel/Xauthority
+  --ro-bind-data 27 /run/pressure-vessel/pulse/config
+  --ro-bind /run/user/1000/pulse/native /run/pressure-vessel/pulse/native
+  --dev-bind /dev/snd /dev/snd
+  --ro-bind /run/user/1000/bus /run/pressure-vessel/bus
+  --ro-bind /var/run/dbus/system_bus_socket /run/dbus/system_bus_socket
+  --bind /run/systemd/resolve/io.systemd.Resolve /run/systemd/resolve/io.systemd.Resolve
+  --ro-bind /run/systemd/journal/socket /run/systemd/journal/socket
+  --ro-bind /run/systemd/journal/stdout /run/systemd/journal/stdout
+  --ro-bind /run/user/1000/at-spi/bus /run/pressure-vessel/at-spi-bus
+  --ro-bind /run/user/1000/pipewire-0-manager.lock /run/user/1000/pipewire-0-manager.lock
+  --ro-bind /run/user/1000/pipewire-0.lock /run/user/1000/pipewire-0.lock
+  --ro-bind /run/user/1000/pipewire-0-manager /run/user/1000/pipewire-0-manager
+  --ro-bind /run/user/1000/pipewire-0 /run/user/1000/pipewire-0
+  --symlink ../../pressure-vessel/wayland-0 /run/user/1000/wayland-0
+  --symlink ../../pressure-vessel/pulse /run/user/1000/pulse
+  --symlink ../../pressure-vessel/bus /run/user/1000/bus
+  --symlink ../../pressure-vessel/at-spi-bus /run/user/1000/at-spi-bus

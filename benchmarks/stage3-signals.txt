@@ -1,0 +1,89 @@
+Guest signal delivery on Darwin.
+Apple M4, macOS 27, 2026-09-24.
+
+WHAT RUNS: a real Fedora glibc static-PIE binary that installs SA_SIGINFO
+handlers, raises them, blocks and unblocks, and takes an asynchronous SIGALRM.
+
+  1) raise(SIGUSR1): hits=1 sig=10 pc=0x19aecd060 marker+7  OK
+  2) contexto tras handler: a=111 b=222 c=333 hits=2        OK
+  3) bloqueo: hits durante=2 despues=3                      OK
+  4) SIGALRM asincrono: hits=4 sig=14                       OK
+
+Identical to the same binary on a real Linux kernel, except the pc in (1) --
+see DEVIATIONS.
+
+THREE THINGS DIFFER, all silent if got wrong:
+
+1. THE NUMBERS. Linux and Darwin agree up to SIGABRT and then diverge:
+   SIGBUS is 7 on Linux and 10 on Darwin; SIGUSR1 is 10 and 30; SIGUSR2 is 12
+   and 31; SIGCHLD is 17 and 20; SIGSYS is 31 and 12. Passing a number through
+   delivers a *different* signal, not a wrong one. Translated both directions.
+   Linux SIGSTKFLT (16) and SIGPWR (30) have no Darwin equivalent: the handler
+   is recorded so sigaction round-trips, and stderr says once that it can never
+   be delivered.
+
+2. THE FRAME. A Linux handler expects a Linux siginfo_t and a Linux ucontext_t,
+   with uc_mcontext at offset 176 and sigcontext holding regs[31], sp, pc,
+   pstate. Built by hand on the guest stack; the 4096-byte extension area is
+   zeroed, which is the end-of-records marker, so a guest walking it stops
+   instead of reading garbage.
+
+3. THE RETURN PATH. Linux enters a handler with lr pointing at a restorer that
+   issues rt_sigreturn. `svc` cannot be used (Stage 1), so lr points into the
+   runtime instead. The mechanism is otherwise the kernel's own: the host
+   handler does not call the guest handler, it rewrites the interrupted context
+   so that returning from it lands inside the guest handler.
+
+THE BUG THAT COST THE MOST, and it is a good example of the class:
+
+  Darwin builds its own signal frame -- the ucontext, the mcontext it points
+  at, and the siginfo -- BELOW the interrupted sp. Placing the Linux frame at
+  `sp - sizeof(frame)` therefore lands on top of it, and the memset that
+  initialises the Linux frame zeroed Darwin's mcontext before it had been read.
+  The resume pc came back as 0 and the first signal killed the process.
+
+  Fixed by snapshotting every field out of the Darwin context first, then
+  choosing a frame address below the lowest of sp, uap, siginfo and mcontext,
+  with a margin.
+
+DEVIATIONS, stated rather than hidden:
+
+* uc_mcontext.pc is a HOST address when the signal arrives while the guest is
+  inside a syscall, because in this design a syscall runs host code. Linux
+  would report the guest pc after the svc. Handlers that only read the pc are
+  unaffected; a handler that *modifies* it to resume elsewhere -- which JITs and
+  some GCs do -- would not behave as it does on Linux. This matters for Stage 5
+  (FEX) and is not yet solved.
+
+* x16 (IP0) is not restored by rt_sigreturn; it holds the resume address.
+  Branching needs a register and every other one has to be restored first.
+  AAPCS64 reserves x16 as intra-procedure scratch that no call preserves, so
+  the exposure is a signal arriving inside a PLT veneer. The kernel avoids this
+  by finishing with `eret`, which userspace cannot use.
+
+* ppoll's mask swap is not atomic. That race is the entire reason ppoll exists
+  as a syscall; closing it needs kernel support.
+
+* Realtime signals (32-64) have no Darwin carrier. glibc uses SIGRTMIN for
+  thread cancellation and setxid, so this will need a carrier-signal scheme
+  before anything that cancels threads works.
+
+SYNCHRONOUS DELIVERY AND THE HOST ALT STACK (2026-09-25):
+Delivery now calls the guest handler synchronously inside the host handler
+on a Linux rt_sigframe (siginfo + ucontext + sigcontext + fpsimd_context
+magic 0x46508001) and returns through the kernel's own sigreturn, copying
+whatever the guest wrote into the frame (FEX swaps whole contexts) back into
+Darwin's mcontext: x0-x28, fp, lr, sp, pc, NZCV, v0-v31, fpsr, fpcr. The
+first design returned by hand and could not restore x16, which Darwin
+reloads when it restarts an interrupted syscall: tests/elf/jit_fork.c died
+with SIGSYS in wait4 on its first SIGCHLD. Now 40/40.
+Host handlers run on a 512 KiB per-thread alt stack (SA_ONSTACK), installed
+on the thread that runs the guest, and re-armed after fork() because
+Darwin's child starts with SS_DISABLE (measured). Frame placement stays
+clear of everything Darwin put on the interrupted stack (uap, siginfo,
+mcontext, current sp) on every delivery, not only when no alt stack exists:
+a nested delivery lands on the current stack.
+Evidence of the failure modes, for the record: dash under FEX, host handler
+on the guest thread's stack -> FEX's handler backs the interrupted context
+up BELOW the interrupted sp, over the host frames -> host_handler's epilogue
+returned to pc 0 / into lxrun's data (SIGILL/SIGSEGV, rc 132/139).

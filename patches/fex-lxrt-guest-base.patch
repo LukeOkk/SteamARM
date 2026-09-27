@@ -1,0 +1,3034 @@
+FEX: a guest address base for 32-bit guests and a 64-bit low window (Darwin host)
+===================================================================================
+
+STATUS: applied on the guest tree, builds; static and dynamic i386 programs,
+x86-64 ET_EXEC tools and the i386 Steam client run under lxrun
+(benchmarks/stage7-guest-base.txt, stage8-steam-zero-vm.txt).
+
+Why: arm64 macOS gives a user task nothing below 4 GiB -- not at link time
+and not at run time (benchmarks/stage7-guest-base.txt) -- and FEX's 32-bit
+mode assumes host address == guest address everywhere (MemAllocator32Bit,
+compat_ptr, the JIT, the i386 signal frames, the ELF loader). With
+GUESTBASE=1 FEX reserves a 4 GiB PROT_NONE window at start-up and every
+32-bit guest address is host = window + guest.
+
+Which Linux dependency it removes: the identity mapping of the low 4 GiB
+(a Linux/x86 assumption, not a kernel feature). It is what makes the i386
+Steam client and the non-PIE x86-64 tools of pressure-vessel loadable here.
+
+Shape (one choke point per layer):
+  JIT   Addressing.cpp: LoadEffectiveAddress adds the base when it produces
+        an address to dereference; AddressModes with AddrSize == i64Bit carry
+        a host Base already (MakeSegmentAddress / GuestToHost results).
+        AppendSegmentOffset -> GuestToHost. Push/PushTwo/Pop keep the guest
+        SP a guest value and address memory through the base. MemSet/MemCpy
+        fold the base into their segment operand. The base itself is static
+        register StaticRegisters[8] (x19 in 32-bit mode, mirrored in
+        gregs[8], never used by a 32-bit guest), read with _LoadRegister at
+        no cost. Core.cpp fetches guest code at GuestCodeBase() + RIP.
+  C++   compat_ptr<T> (x32/Types.h) is the choke point for typed guest
+        pointers; the raw casts in x32/FD.cpp, Socket.cpp, IoctlEmulation.cpp,
+        the i386 frame builders/restorers, the ELF loader's stack and bss
+        writes, the VDSO stub writer and clone's tid writes go through
+        G2H(). MemAllocator32Bit maps at base + page with MAP_FIXED inside
+        the window (its bitset decides NOREPLACE), returns guest addresses,
+        and hands freed pages back to the reservation. HandleSegfault maps
+        a host fault address back into the guest.
+  Runtime (runtime/gbase.c): FEX announces the base with private syscall
+        0x4C580030; the dispatcher adds it to every pointer argument below
+        4 GiB of the ~120 syscalls it serves (table by aarch64 number, with
+        fcntl/ioctl/futex/prctl/semctl decided by their command), which is
+        what covers FEX's ~240 passthrough syscalls without touching them.
+
+Upstreamable: as a real "guest VA base" feature, plausibly -- Windows ARM64
+(WOW64) has the same low-memory constraint in a milder form. Maintenance:
+~380 lines over 26 files, most of them mechanical G2H() wraps; the design
+survives rebases because the choke points are stable.
+
+Applied on FEX-2609-113-g08f451d3b together with fex-lxrt-wx.patch and
+fex-lxrt-x18.patch. ORDER: x18, then guest-base, then wx. Note that
+`git checkout -- .` reverts all three; re-apply all of them.
+
+Also in this patch (found by symbolising each i386 fault, one per rebuild):
+  - InitAllocator: this commit used MemAllocatorPassThrough for 32-bit
+    guests (the bitset allocator was dead code); with a base it now returns
+    Create32BitAllocator() and skips the jemalloc-exhaustion loop, which
+    never terminates on Darwin.
+  - GuestMprotect: mprotect the host page, track the guest address.
+  - ELFCodeLoader: vsyscall stub memcpy/mprotect, AT_PLATFORM/AT_RANDOM/
+    AT_EXECFN writes, all through G2H.
+  - Frontend decoder: CheckRangeExecutable receives host code pointers but
+    queries the guest-keyed executable-range tracking; the guest address is
+    recovered by subtracting GuestCodeBase().
+  - GuestCodeBase() ternary truncation (ROOT CAUSE of the i386 SIGSEGV
+    after all prior fixes, MEASURED): `Config.Is64BitMode ? 0 : Config.GuestBase`
+    silently dropped everything above bit 15 of the base -- a debug print
+    showed Config.GuestBase itself holding the correct 0x7000004000 while
+    the ternary's result was 0x4000. Both operands are FEXCore::Config::
+    Getter<...> objects (Value<T> subclasses with an int-convertible
+    literal 0 on one side and a converting constructor on Value<uint64_t>);
+    the ternary's common-type deduction settles on the Value<uint64_t>
+    class type instead of the built-in uint64_t, and something on that path
+    loses the high bits. Fixed by reading each operand into a plain
+    uint64_t/bool local first, so the ternary only ever sees built-in types.
+  - VDSO symbol parser (LoadGuestVDSOSymbols): reads the guest VDSO image
+    through the host view, keeps the sigreturn/callback symbols as guest
+    addresses (needed once the VDSO thunk is installed, Milestone 9).
+
+  - InitAllocator: with a base, SetupHooks is skipped as in 64-bit mode.
+    Its 64-bit allocator steals every free range above 4 GiB and later
+    madvise(MADV_DONTNEED)s it; libmalloc of the same host process had grown
+    into one of those ranges and objc's class_rw_t for OS_xpc_pipe read back
+    as zeros, so every fork child died in xpc_atfork_child (MEASURED).
+  - CloneHandler: on lxrt (NoSharedVMProcesses) a new process with CLONE_VM
+    (posix_spawn's CLONE_VM|CLONE_VFORK) drops CLONE_VM and goes through
+    ForkGuest's fork-then-wait vfork path: the runtime cannot share an
+    address space between processes, and the host clone path ran the child
+    on a copy with the parent's fork locks never released (MEASURED: a
+    clobbered FEX global, SIGSEGV in pthread_rwlock_rdlock).
+
+  - x86 clone (x32 and x64): the syscall thunk bases pointer-typed
+    parameters, but clone's stack (and x64's tls) become the child's RSP /
+    FS base -- H2G hands back the guest value (Clone stack/tls, MEASURED:
+    every posix_spawn child SIGSEGV'd, tests/elf/i386_spawn.c).
+  - Shm attaches (MemAllocator32Bit::Shmat/Shmdt) are 16 KiB aligned and
+    sized under a base (Darwin maps shared memory in host pages); the x32
+    ipc() multiplexer's raw guest pointers go through G2H.
+
+  - MemAllocator32Bit::Mmap: under a base, MAP_SHARED mappings start on a
+    host page (16 KiB) so the runtime can map them shared instead of placing
+    a private copy (MEASURED: the Steam client's ValveIPCSharedObj was a
+    private copy, never shared with steamwebhelper, and the client crashed).
+
+ALSO (64-bit low window): x86-64 ET_EXEC images (the whole Steam runtime
+tooling) get guest 0 < x < 4 GiB at a power-of-two base, identity above;
+flag-free clz/ubfx/add translation in the JIT, idempotent on host
+addresses. See benchmarks/stage7-guest-base.txt, '64-BIT LOW WINDOW'.
+
+
+  - Guest signal frames: FEX writes the frame through a host pointer, and
+    the i386 rt frame's pinfo/puc were that host pointer truncated to 32
+    bits (MEASURED: +0x38000 off under base 0x7000038000, so the Steam
+    client's breakpad handler read garbage for siginfo and ucontext). They
+    and the fault address si_addr (i386 and x86-64) now go through H2G.
+  - Guest signal return: RestoreThreadState read the host-stack pointer FEX
+    keeps on the guest stack through the raw guest SP (MEASURED: every i386
+    handler that returned faulted inside FEX's SIGILL handler at guest
+    ESP-8 as a host address, forever; the Steam client's main loop then
+    stalled). Now through G2H.
+  - x32 set_robust_list stored the thunk's host pointer; get_robust_list
+    returned it truncated (MEASURED: head 0xf73ef9ac, futex_offset read 0
+    instead of -20; the Steam client checks this and deliberately crashes,
+    steamclient.so userinterface.cpp). Stored as the guest address now.
+    Probe: tests/elf/i386_robust.c.
+  - AVX2 gathers (VPGATHER*/VGATHER*, emulated per lane on ASIMD) computed
+    each element address from the guest's base register and index without
+    the guest base (MEASURED: the i386 Steam client and gldriverquery
+    faulted forever at 'ld1 {v22.s}[0], [x1]' with x1 a raw guest address).
+    Emulate128BitGather now adds the base (or the 64-bit window).
+  - MemAllocator32Bit::Mmap searched PagesLength + 3 pages for an aligned
+    MAP_SHARED mapping, which aligns the start but not the tail: a
+    neighbour could sit in the rest of the last host page and the runtime
+    had to fall back to a private copy (MEASURED: the client's
+    u501-Shm_* IPC objects). Searches AlignUp(PagesLength, 4) + 3 now.
+- Call-ret stack guards are 16 KiB (CALLRET_GUARD_SIZE): a 4 KiB guard shares its 16 KiB host page with the stack, so it was never enforced; an unbalanced call/ret stream (lazy PLT binds return with ret) walked into neighbouring memory and a matching {guest, host} pair sent a ret into garbage host code (i386 Steam client crash after ~4 min). tests/elf/i386_callret.c; measured: guard faults 0 before, 6 after.
+- SMC tracking protects and unprotects whole host pages (16 KiB under the runtime, LxrtJit::Available()) for 64-bit guests: a 4 KiB write-protect only changed the union of its host page, guest self-modifying code next to a writable neighbour went unseen and stale translations ran -- V8's WebAssembly jump-table patching recompiled forever ("V8 process OOM (Exceeding maximum wasm committed code space)" in the steamwebhelper renderer). 32-bit guests stay at 4 KiB: host-page mode made the i386 client crash within minutes (~1500 SIGBUS/s of invalidations). The running-block check stays per 4 KiB page. tests/elf/i386_smc_subpage.c now documents the 32-bit gap.
+- 64-bit low window also for wine* executables (and FEX_LOWWINDOW=1): Windows needs the low 4 GiB (KUSER_SHARED_DATA at 0x7ffe0000, PE images, WoW64), which Darwin never maps (MEASURED: wine 'failed to map the shared user data: c0000017').
+- Under the runtime, guest memory is mapped/protected without PROT_EXEC for 64-bit guests too: W|X became Darwin MAP_JIT whose per-thread W^X switch flipped on every guest data store (wineboot fault storm).
+- MemAllocator32Bit::Munmap with a guest base re-reserves the whole range with ONE PROT_NONE mapping instead of one per 4 KiB page: every per-page mapping became its own host VM object and map entry, and wine's multi-GiB reservations piled up 107k of them in 5 s (MEASURED: kernel VM.map.entries 77k -> 206k, vm.objects 95k -> 224k; left running, the "vm objects" zone reached 2.8 GB and the Mac hung in a watchdog panic). After: +~500 entries for the same run.
+- MemAllocator32Bit::Munmap accepts a length that is not a page multiple (rounds it up, as Linux does) instead of EINVAL: every mapping a guest unmapped with its file size leaked; pressure-vessel's 32-bit capsule-capture-libs mapped Mesa's 154 MB driver once per DRI module and ran out of the 4 GiB (MEASURED: 3.7 GB live, NULL from malloc, SIGSEGV).
+- MemAllocator32Bit::Mmap places every file mapping at a 16 KiB file offset on a host page (was: MAP_SHARED only), so the runtime maps the file instead of reading it into a private copy (MEASURED: 154 MB read per mapping of the driver).
+
+diff --git a/FEXCore/Source/Interface/Config/Config.json.in b/FEXCore/Source/Interface/Config/Config.json.in
+index db567f5bb..711deee65 100644
+--- a/FEXCore/Source/Interface/Config/Config.json.in
++++ b/FEXCore/Source/Interface/Config/Config.json.in
+@@ -743,6 +743,16 @@
+           "When running through a compatibility layer like wine, this will only be the exe name, instead of wine full path."
+         ]
+       },
++      "GUESTBASE": {
++        "Type": "uint64",
++        "Default": "0",
++        "AffectsCodeGen": "true",
++        "Desc": [
++          "32-bit guests only: host address = GuestBase + guest address.",
++          "0 = identity (Linux). 1 = reserve a 4 GiB window at start-up and use its address.",
++          "For hosts that cannot map the low 4 GiB (Darwin's __PAGEZERO)."
++        ]
++      },
+       "IS64BIT_MODE": {
+         "Type": "bool",
+         "Default": "false",
+diff --git a/FEXCore/Source/Interface/Context/Context.h b/FEXCore/Source/Interface/Context/Context.h
+index ebceec145..de3fa7e82 100644
+--- a/FEXCore/Source/Interface/Context/Context.h
++++ b/FEXCore/Source/Interface/Context/Context.h
+@@ -233,6 +233,12 @@ public:
+   void ConfigureAOTGen(FEXCore::Core::InternalThreadState* Thread, fextl::set<uint64_t>* ExternalBranches, uint64_t SectionMaxAddress) override;
+ 
+   bool IsAddressInCodeBuffer(FEXCore::Core::InternalThreadState* Thread, uintptr_t Address) const override;
++  uint64_t GuestCodeBase() const;
++  // 64-bit low window shift (0 = off) and guest<->host code address mapping
++  // that covers both guest-base modes (32-bit base, 64-bit low window).
++  uint8_t GuestWindowShift() const;
++  uint64_t GuestCodeHost(uint64_t RIP) const;
++  uint64_t HostCodeToGuest(uint64_t Host) const;
+ 
+   // returns false if a handler was already registered
+   std::optional<CustomIRResult>
+@@ -355,6 +361,7 @@ public:
+     FEX_CONFIG_OPT(SingleStepConfig, SINGLESTEP);
+     FEX_CONFIG_OPT(GdbServer, GDBSERVER);
+     FEX_CONFIG_OPT(Is64BitMode, IS64BIT_MODE);
++    FEX_CONFIG_OPT(GuestBase, GUESTBASE);
+     FEX_CONFIG_OPT(TSOEnabled, TSOENABLED);
+     FEX_CONFIG_OPT(VectorTSOEnabled, VECTORTSOENABLED);
+     FEX_CONFIG_OPT(MemcpySetTSOEnabled, MEMCPYSETTSOENABLED);
+diff --git a/FEXCore/Source/Interface/Core/Addressing.cpp b/FEXCore/Source/Interface/Core/Addressing.cpp
+index 8848dcba9..1be0f9e31 100644
+--- a/FEXCore/Source/Interface/Core/Addressing.cpp
++++ b/FEXCore/Source/Interface/Core/Addressing.cpp
+@@ -7,7 +7,12 @@
+ 
+ namespace FEXCore::IR {
+ 
+-Ref LoadEffectiveAddress(IREmitter* IREmit, const AddressMode& A, IR::OpSize GPRSize, bool AddSegmentBase, bool AllowUpperGarbage) {
++Ref LoadEffectiveAddress(IREmitter* IREmit, const AddressMode& A, IR::OpSize GPRSizeIn, bool AddSegmentBase, bool AllowUpperGarbage) {
++  // An AddressMode whose AddrSize is 64-bit in 32-bit mode carries a HOST
++  // base (guest base patch: MakeSegmentAddress / GuestToHost results). Its
++  // arithmetic must be 64-bit: a 32-bit Add truncated the host pointer
++  // (measured: BT mem,imm in the i386 Steam client loaded from low32(host)+3).
++  const IR::OpSize GPRSize = (A.AddrSize == OpSize::i64Bit) ? OpSize::i64Bit : GPRSizeIn;
+   Ref Tmp = A.Base;
+ 
+   if (A.Offset) {
+@@ -48,6 +53,26 @@ Ref LoadEffectiveAddress(IREmitter* IREmit, const AddressMode& A, IR::OpSize GPR
+     Tmp = Tmp ? IREmit->Add(GPRSize, Tmp, A.Segment) : A.Segment;
+   }
+ 
++  // Guest base (32-bit guests on hosts without the low 4 GiB): the linear
++  // address is complete at this point; the address the access uses is
++  // GuestBase + zext32(linear). Only for callers that will dereference
++  // (AddSegmentBase) -- LEA and friends must keep producing guest values.
++  // GuestBase is a static register (StaticRegisters[8], x19 in 32-bit mode,
++  // mirrored in gregs[8]), so the load is free and the add is one op.
++  // An AddressMode whose AddrSize is i64Bit in 32-bit mode carries a Base that
++  // is already a host address (MakeSegmentAddress / GuestToHost results);
++  // adding the base again would be wrong, so those are left alone.
++  if (AddSegmentBase && IREmit->GuestBase && A.AddrSize != OpSize::i64Bit) {
++    Ref Linear = Tmp ? IREmit->_Bfe(OpSize::i64Bit, 32, 0, Tmp) : IREmit->Constant(0);
++    Ref Base = IREmit->_LoadRegister(8, RegClass::GPRFixed, OpSize::i64Bit);
++    Tmp = IREmit->_Add(OpSize::i64Bit, Base, Linear);
++  }
++
++  // 64-bit low window (IREmitter.h): translate the complete linear address.
++  if (AddSegmentBase && IREmit->GuestWindowShift) {
++    Tmp = IREmit->GuestWindow(Tmp ?: IREmit->Constant(0));
++  }
++
+   return Tmp ?: IREmit->Constant(0);
+ }
+ 
+@@ -55,6 +80,15 @@ AddressMode SelectAddressMode(IREmitter* IREmit, const AddressMode& A, IR::OpSiz
+                               bool Vector, IR::OpSize AccessSize) {
+   const auto Is32Bit = GPRSize == OpSize::i32Bit;
+   const auto GPRSizeMatchesAddrSize = A.AddrSize == GPRSize;
++  if (IREmit->GuestWindowShift) {
++    // The window must see the whole address (base + index + offset), so none
++    // of the split [Reg + Reg/Imm] forms below apply. Only ET_EXEC processes
++    // (the Steam runtime's tooling) pay for this.
++    return {
++      .Base = LoadEffectiveAddress(IREmit, A, GPRSize, true),
++      .Index = IREmit->Invalid(),
++    };
++  }
+   const auto OffsetIndexToLargeFor32Bit = Is32Bit && (A.Offset <= -16384 || A.Offset >= 16384);
+   if (!GPRSizeMatchesAddrSize || OffsetIndexToLargeFor32Bit) {
+     // If address size doesn't match GPR size then no optimizations can occur.
+diff --git a/FEXCore/Source/Interface/Core/ArchHelpers/Arm64Emitter.cpp b/FEXCore/Source/Interface/Core/ArchHelpers/Arm64Emitter.cpp
+index 3875290a0..76a9785d3 100644
+--- a/FEXCore/Source/Interface/Core/ArchHelpers/Arm64Emitter.cpp
++++ b/FEXCore/Source/Interface/Core/ArchHelpers/Arm64Emitter.cpp
+@@ -233,7 +233,10 @@ namespace x64 {
+ 
+ namespace x32 {
+   // All but x19 and x29 are caller saved. eax/edx rearranged for cmpxchg.
+-  constexpr std::array<ARMEmitter::Register, 10> SRA = {
++  // r19 is the guest base register (StaticRegisters[8], kept in gregs[8],
++  // which a 32-bit guest never uses): host = r19 + guest when a GuestBase
++  // is configured, and simply zero otherwise.
++  constexpr std::array<ARMEmitter::Register, 11> SRA = {
+     ARMEmitter::Reg::r4,
+     ARMEmitter::Reg::r7,
+     ARMEmitter::Reg::r5,
+@@ -242,12 +245,13 @@ namespace x32 {
+     ARMEmitter::Reg::r9,
+     ARMEmitter::Reg::r10,
+     ARMEmitter::Reg::r11,
++    ARMEmitter::Reg::r19,
+     // PF/AF must be last.
+     REG_PF,
+     REG_AF,
+   };
+ 
+-  constexpr std::array<ARMEmitter::Register, 14> RA = {
++  constexpr std::array<ARMEmitter::Register, 13> RA = {
+     // All these callee saved
+     ARMEmitter::Reg::r20,
+     ARMEmitter::Reg::r21,
+@@ -266,7 +270,6 @@ namespace x32 {
+     ARMEmitter::Reg::r30,
+ 
+     ARMEmitter::Reg::r24,
+-    ARMEmitter::Reg::r19,
+   };
+ 
+   constexpr std::array<ARMEmitter::Register, 7> NotPreserved_Dynamic = {
+@@ -720,7 +723,9 @@ void Arm64Emitter::SpillStaticRegs(ARMEmitter::Register TmpReg, SpillStaticRegOp
+ 
+   for (size_t i = 0; i < StaticRegisters.size(); i += 2) {
+     auto Reg1 = StaticRegisters[i];
+-    auto Reg2 = StaticRegisters[i + 1];
++    // An odd count (the 32-bit list carries the guest base register before
++    // PF/AF) leaves the last slot unpaired; PF/AF are masked out above.
++    auto Reg2 = (i + 1 < StaticRegisters.size()) ? StaticRegisters[i + 1] : Reg1;
+     if (((1U << Reg1.Idx()) & Options.GPRSpillMask) && ((1U << Reg2.Idx()) & Options.GPRSpillMask)) {
+       stp<ARMEmitter::IndexType::OFFSET>(Reg1.X(), Reg2.X(), STATE.R(), ARRAY_OFFSETOF(FEXCore::Core::CpuStateFrame, State.gregs, i));
+     } else if (((1U << Reg1.Idx()) & Options.GPRSpillMask)) {
+@@ -873,7 +878,9 @@ void Arm64Emitter::FillStaticRegs(FillStaticRegOptions Options) {
+ 
+   for (size_t i = 0; i < StaticRegisters.size(); i += 2) {
+     auto Reg1 = StaticRegisters[i];
+-    auto Reg2 = StaticRegisters[i + 1];
++    // An odd count (the 32-bit list carries the guest base register before
++    // PF/AF) leaves the last slot unpaired; PF/AF are masked out above.
++    auto Reg2 = (i + 1 < StaticRegisters.size()) ? StaticRegisters[i + 1] : Reg1;
+     if (((1U << Reg1.Idx()) & Options.GPRFillMask) && ((1U << Reg2.Idx()) & Options.GPRFillMask)) {
+       ldp<ARMEmitter::IndexType::OFFSET>(Reg1.X(), Reg2.X(), STATE.R(), ARRAY_OFFSETOF(FEXCore::Core::CpuStateFrame, State.gregs, i));
+     } else if ((1U << Reg1.Idx()) & Options.GPRFillMask) {
+diff --git a/FEXCore/Source/Interface/Core/Core.cpp b/FEXCore/Source/Interface/Core/Core.cpp
+index 63280a42a..d2d5d07f7 100644
+--- a/FEXCore/Source/Interface/Core/Core.cpp
++++ b/FEXCore/Source/Interface/Core/Core.cpp
+@@ -8,6 +8,7 @@ desc: Glues Frontend, OpDispatcher and IR Opts & Compilation, LookupCache, Dispa
+ $end_info$
+ */
+ 
++#include <bit>
+ #include <cstdint>
+ #ifdef ZYDIS_DISASSEMBLER
+ #include <Zydis/Zydis.h>
+@@ -506,6 +507,55 @@ void ContextImpl::ClearCodeCache(FEXCore::Core::InternalThreadState* Thread, boo
+   Allocator::VirtualDontNeed(Thread->CallRetStackBase, FEXCore::Core::InternalThreadState::CALLRET_STACK_SIZE);
+ }
+ 
++// Where the guest's code bytes are on the host: identity, or GuestBase +
++// RIP for a 32-bit guest living at a base (Addressing.cpp has the story).
++uint64_t ContextImpl::GuestCodeBase() const {
++  // NOTE: `Config.Is64BitMode ? 0 : Config.GuestBase` silently truncated to
++  // 32 bits here (measured): both Getter<...> operands let the ternary's
++  // common-type deduction settle on the Value<uint64_t> CLASS type rather
++  // than plain uint64_t (0 converts to Value<uint64_t> via its converting
++  // constructor), and something in that path loses the high bits. Read each
++  // operand into a plain uint64_t first so the ternary only ever sees
++  // built-in types.
++  const uint64_t RawGuestBase = Config.GuestBase;
++  const bool Is64 = Config.Is64BitMode;
++  uint64_t Base = Is64 ? 0 : RawGuestBase;
++  return Base;
++}
++
++uint8_t ContextImpl::GuestWindowShift() const {
++  const bool Is64 = Config.Is64BitMode;
++  const uint64_t Base = Config.GuestBase;
++  if (!Is64 || Base < (1ULL << 32) || (Base & (Base - 1)) != 0) {
++    return 0;
++  }
++  return static_cast<uint8_t>(std::countr_zero(Base));
++}
++
++uint64_t ContextImpl::GuestCodeHost(uint64_t RIP) const {
++  const bool Is64 = Config.Is64BitMode;
++  const uint64_t Base = Config.GuestBase;
++  if (!Is64) {
++    return RIP + Base;
++  }
++  if (Base > 1 && RIP != 0 && RIP < (1ULL << 32)) {
++    return RIP + Base;
++  }
++  return RIP;
++}
++
++uint64_t ContextImpl::HostCodeToGuest(uint64_t Host) const {
++  const bool Is64 = Config.Is64BitMode;
++  const uint64_t Base = Config.GuestBase;
++  if (!Is64) {
++    return Host - Base;
++  }
++  if (Base > 1 && Host >= Base && Host < Base + (1ULL << 32)) {
++    return Host - Base;
++  }
++  return Host;
++}
++
+ static void IRDumper(FEXCore::Core::InternalThreadState* Thread, IR::IREmitter* IREmitter, uint64_t GuestRIP) {
+   FEXCore::File::File FD = FEXCore::File::File::GetStdERR();
+   fextl::ostringstream out;
+@@ -515,7 +565,7 @@ static void IRDumper(FEXCore::Core::InternalThreadState* Thread, IR::IREmitter*
+ }
+ 
+ bool ContextImpl::CheckIfBlockIsCacheable(FEXCore::Core::InternalThreadState& Thread, uint64_t GuestRIP, uint64_t MaxInst) {
+-  return Thread.FrontendDecoder->CheckIfCacheable(Thread, reinterpret_cast<const uint8_t*>(GuestRIP), GuestRIP, MaxInst);
++  return Thread.FrontendDecoder->CheckIfCacheable(Thread, reinterpret_cast<const uint8_t*>(GuestCodeHost(GuestRIP)), GuestRIP, MaxInst);
+ }
+ 
+ ContextImpl::GenerateIRResult
+@@ -543,7 +593,7 @@ ContextImpl::GenerateIR(FEXCore::Core::InternalThreadState* Thread, uint64_t Gue
+   }
+ 
+   if (!HasCustomIR) {
+-    const auto* GuestCode = reinterpret_cast<const uint8_t*>(GuestRIP);
++    const auto* GuestCode = reinterpret_cast<const uint8_t*>(GuestCodeHost(GuestRIP));
+ 
+     Thread->FrontendDecoder->DecodeLoop(GuestCode);
+ 
+@@ -642,8 +692,9 @@ ContextImpl::GenerateIR(FEXCore::Core::InternalThreadState* Thread, uint64_t Gue
+         }
+ 
+         if (Config.SMCChecks == FEXCore::Config::CONFIG_SMC_FULL || Block.ForceFullSMCDetection) {
+-          auto ExistingCodePtr = reinterpret_cast<uint8_t*>(Block.Entry + BlockInstructionsLength);
+-          auto InstAddressReg = Thread->OpDispatcher->_EntrypointOffset(GPRSize, InstAddress - GuestRIP);
++          auto ExistingCodePtr = reinterpret_cast<uint8_t*>(GuestCodeHost(Block.Entry + BlockInstructionsLength));
++          auto InstAddressReg = Thread->OpDispatcher->GuestToHostPublic(
++            Thread->OpDispatcher->_EntrypointOffset(GPRSize, InstAddress - GuestRIP));
+ 
+           auto Value = FEXCore::Utils::crc32(ExistingCodePtr, DecodedInfo->InstSize);
+           auto CRC = WantsDiskCachePatching ?
+diff --git a/FEXCore/Source/Interface/Core/Frontend.cpp b/FEXCore/Source/Interface/Core/Frontend.cpp
+index 78d5f1a2e..4649c7129 100644
+--- a/FEXCore/Source/Interface/Core/Frontend.cpp
++++ b/FEXCore/Source/Interface/Core/Frontend.cpp
+@@ -89,6 +89,9 @@ Decoder::Decoder(FEXCore::Core::InternalThreadState* Thread)
+ }
+ 
+ bool Decoder::CheckRangeExecutable(uint64_t Address, uint64_t Size) {
++  // The decoder walks HOST code pointers (GuestCodeBase + guest RIP, see
++  // Core.cpp); the executable-range query below is keyed by GUEST address.
++  Address = CTX->HostCodeToGuest(Address);
+   // Check for wraparound
+   if (Address + Size < Address) {
+     return false;
+diff --git a/FEXCore/Source/Interface/Core/JIT/JIT.cpp b/FEXCore/Source/Interface/Core/JIT/JIT.cpp
+index ef7e33299..231be5ee3 100644
+--- a/FEXCore/Source/Interface/Core/JIT/JIT.cpp
++++ b/FEXCore/Source/Interface/Core/JIT/JIT.cpp
+@@ -663,6 +663,9 @@ Arm64JITCore::Arm64JITCore(FEXCore::Context::ContextImpl* ctx, FEXCore::Core::In
+ 
+   RAPass->AddRegisters(IR::RegClass::GPR, GeneralRegisters.size());
+   RAPass->AddRegisters(IR::RegClass::GPRFixed, StaticRegisters.size());
++
++  GuestBaseActiveFlag = !CTX->Config.Is64BitMode && CTX->Config.GuestBase != 0;
++  GuestWindowShiftVal = CTX->GuestWindowShift();
+   RAPass->AddRegisters(IR::RegClass::FPR, GeneralFPRegisters.size());
+   RAPass->AddRegisters(IR::RegClass::FPRFixed, StaticFPRegisters.size());
+   RAPass->SetNumPairRegs(PairRegisters);
+diff --git a/FEXCore/Source/Interface/Core/JIT/JITClass.h b/FEXCore/Source/Interface/Core/JIT/JITClass.h
+index 7c60a2708..13e860693 100644
+--- a/FEXCore/Source/Interface/Core/JIT/JITClass.h
++++ b/FEXCore/Source/Interface/Core/JIT/JITClass.h
+@@ -88,6 +88,30 @@ private:
+   ARMEmitter::BiDirectionalLabel* PendingTargetLabel {};
+   ARMEmitter::BiDirectionalLabel* PendingCallReturnTargetLabel {};
+   FEXCore::Context::ContextImpl* CTX {};
++
++  // 32-bit guest living at host = base + guest: the base sits in the static
++  // register StaticRegisters[8] (x19), mirrored in gregs[8]. Push/Pop keep
++  // the guest SP as a guest value and address memory through the base.
++  // Set in the ctor (CTX->Config is incomplete in this header).
++  bool GuestBaseActiveFlag {};
++  bool GuestBaseActive() const {
++    return GuestBaseActiveFlag;
++  }
++  // 64-bit low window (IREmitter.h): 0 = off.
++  uint8_t GuestWindowShiftVal {};
++  bool GuestWindowActive() const {
++    return GuestWindowShiftVal != 0;
++  }
++  // Dst = Addr + ((0 < Addr < 4 GiB) << Shift). Flag-free: NZCV holds the
++  // guest's flags. Dst must differ from Addr.
++  void EmitGuestWindow(ARMEmitter::Register Dst, ARMEmitter::Register Addr) {
++    clz(ARMEmitter::Size::i64Bit, Dst, Addr);
++    ubfx(ARMEmitter::Size::i64Bit, Dst, Dst, 5, 1);
++    add(ARMEmitter::Size::i64Bit, Dst, Addr, Dst, ARMEmitter::ShiftType::LSL, GuestWindowShiftVal);
++  }
++  ARMEmitter::Register GuestBaseReg() const {
++    return StaticRegisters[8];
++  }
+   const FEXCore::IR::IRListView* IR {};
+   uint64_t Entry {};
+   CPUBackend::CompiledCode CodeData {};
+diff --git a/FEXCore/Source/Interface/Core/JIT/MemoryOps.cpp b/FEXCore/Source/Interface/Core/JIT/MemoryOps.cpp
+index 805a7312a..f1688bf8b 100644
+--- a/FEXCore/Source/Interface/Core/JIT/MemoryOps.cpp
++++ b/FEXCore/Source/Interface/Core/JIT/MemoryOps.cpp
+@@ -1148,13 +1148,26 @@ void Arm64JITCore::Emulate128BitGather(IR::OpSize Size, IR::OpSize ElementSize,
+       }
+     }
+ 
++    // Guest base: the element address is a guest address (the VSIB base
++    // register and the index are guest values). The SVE paths above only run
++    // for 64-bit addressing on SVE hosts, which a based guest never meets on
++    // Apple silicon.
++    ARMEmitter::Register LoadAddr = TempMemReg.R();
++    if (GuestBaseActive()) {
++      add(ARMEmitter::Size::i64Bit, TempMemReg.R(), GuestBaseReg(), TempMemReg.R(), ARMEmitter::ExtendedType::UXTW, 0);
++    } else if (GuestWindowActive()) {
++      // WorkingReg is free again: the mask and index were consumed above.
++      EmitGuestWindow(WorkingReg.R(), TempMemReg.R());
++      LoadAddr = WorkingReg.R();
++    }
++
+     // Now that the address is calculated. Do the load.
+     switch (ElementSize) {
+-    case IR::OpSize::i8Bit: ld1<ARMEmitter::SubRegSize::i8Bit>(ResultReg.Q(), i, TempMemReg); break;
+-    case IR::OpSize::i16Bit: ld1<ARMEmitter::SubRegSize::i16Bit>(ResultReg.Q(), i, TempMemReg); break;
+-    case IR::OpSize::i32Bit: ld1<ARMEmitter::SubRegSize::i32Bit>(ResultReg.Q(), i, TempMemReg); break;
+-    case IR::OpSize::i64Bit: ld1<ARMEmitter::SubRegSize::i64Bit>(ResultReg.Q(), i, TempMemReg); break;
+-    case IR::OpSize::i128Bit: ldr(ResultReg.Q(), TempMemReg, 0); break;
++    case IR::OpSize::i8Bit: ld1<ARMEmitter::SubRegSize::i8Bit>(ResultReg.Q(), i, LoadAddr); break;
++    case IR::OpSize::i16Bit: ld1<ARMEmitter::SubRegSize::i16Bit>(ResultReg.Q(), i, LoadAddr); break;
++    case IR::OpSize::i32Bit: ld1<ARMEmitter::SubRegSize::i32Bit>(ResultReg.Q(), i, LoadAddr); break;
++    case IR::OpSize::i64Bit: ld1<ARMEmitter::SubRegSize::i64Bit>(ResultReg.Q(), i, LoadAddr); break;
++    case IR::OpSize::i128Bit: ldr(ResultReg.Q(), LoadAddr, 0); break;
+     default: LOGMAN_MSG_A_FMT("Unhandled {} size: {}", __func__, ElementSize); FEX_UNREACHABLE;
+     }
+ 
+@@ -1472,6 +1485,36 @@ DEF_OP(Push) {
+   const auto AddrSrc = GetReg(Op->Addr);
+   const auto Dst = GetReg(Node);
+ 
++  if (GuestBaseActive()) {
++    // New guest SP in TMP1, host address in TMP2; the store never writes
++    // back the base into the guest register.
++    sub(ARMEmitter::Size::i32Bit, TMP1.R(), AddrSrc, ValueSize);
++    add(ARMEmitter::Size::i64Bit, TMP2.R(), GuestBaseReg(), TMP1.R(), ARMEmitter::ExtendedType::UXTW, 0);
++    switch (ValueSize) {
++    case 1: strb(Src.W(), TMP2.R(), 0); break;
++    case 2: strh(Src.W(), TMP2.R(), 0); break;
++    case 4: str(Src.W(), TMP2.R(), 0); break;
++    case 8: str(Src.X(), TMP2.R(), 0); break;
++    default: LOGMAN_MSG_A_FMT("Unhandled {} size: {}", __func__, ValueSize); break;
++    }
++    mov(ARMEmitter::Size::i32Bit, Dst, TMP1.R());
++    return;
++  }
++
++  if (GuestWindowActive()) {
++    sub(ARMEmitter::Size::i64Bit, TMP1.R(), AddrSrc, ValueSize);
++    EmitGuestWindow(TMP2.R(), TMP1.R());
++    switch (ValueSize) {
++    case 1: strb(Src.W(), TMP2.R(), 0); break;
++    case 2: strh(Src.W(), TMP2.R(), 0); break;
++    case 4: str(Src.W(), TMP2.R(), 0); break;
++    case 8: str(Src.X(), TMP2.R(), 0); break;
++    default: LOGMAN_MSG_A_FMT("Unhandled {} size: {}", __func__, ValueSize); break;
++    }
++    mov(ARMEmitter::Size::i64Bit, Dst, TMP1.R());
++    return;
++  }
++
+   bool NeedsMoveAfterwards = false;
+   if (Dst != AddrSrc) {
+     if (Dst == Src) {
+@@ -1557,6 +1600,30 @@ DEF_OP(PushTwo) {
+   auto Src2 = GetReg(Op->Value2);
+   const auto Dst = GetReg(Op->Addr);
+ 
++  if (GuestBaseActive()) {
++    sub(ARMEmitter::Size::i32Bit, TMP1.R(), Dst, 2 * ValueSize);
++    add(ARMEmitter::Size::i64Bit, TMP2.R(), GuestBaseReg(), TMP1.R(), ARMEmitter::ExtendedType::UXTW, 0);
++    switch (ValueSize) {
++    case 4: stp<ARMEmitter::IndexType::OFFSET>(Src1.W(), Src2.W(), TMP2.R(), 0); break;
++    case 8: stp<ARMEmitter::IndexType::OFFSET>(Src1.X(), Src2.X(), TMP2.R(), 0); break;
++    default: LOGMAN_MSG_A_FMT("Unhandled {} size: {}", __func__, ValueSize); break;
++    }
++    mov(ARMEmitter::Size::i32Bit, Dst, TMP1.R());
++    return;
++  }
++
++  if (GuestWindowActive()) {
++    sub(ARMEmitter::Size::i64Bit, TMP1.R(), Dst, 2 * ValueSize);
++    EmitGuestWindow(TMP2.R(), TMP1.R());
++    switch (ValueSize) {
++    case 4: stp<ARMEmitter::IndexType::OFFSET>(Src1.W(), Src2.W(), TMP2.R(), 0); break;
++    case 8: stp<ARMEmitter::IndexType::OFFSET>(Src1.X(), Src2.X(), TMP2.R(), 0); break;
++    default: LOGMAN_MSG_A_FMT("Unhandled {} size: {}", __func__, ValueSize); break;
++    }
++    mov(ARMEmitter::Size::i64Bit, Dst, TMP1.R());
++    return;
++  }
++
+   switch (ValueSize) {
+   case 4: {
+     stp<ARMEmitter::IndexType::PRE>(Src1.W(), Src2.W(), Dst, -2 * ValueSize);
+@@ -1581,6 +1648,32 @@ DEF_OP(Pop) {
+ 
+   LOGMAN_THROW_A_FMT(Dst != Addr, "Invalid");
+ 
++  if (GuestBaseActive()) {
++    add(ARMEmitter::Size::i64Bit, TMP2.R(), GuestBaseReg(), Addr, ARMEmitter::ExtendedType::UXTW, 0);
++    switch (Size) {
++    case 1: ldrb(Dst.W(), TMP2.R(), 0); break;
++    case 2: ldrh(Dst.W(), TMP2.R(), 0); break;
++    case 4: ldr(Dst.W(), TMP2.R(), 0); break;
++    case 8: ldr(Dst.X(), TMP2.R(), 0); break;
++    default: LOGMAN_MSG_A_FMT("Unhandled {} size: {}", __func__, Op->Size); break;
++    }
++    add(ARMEmitter::Size::i32Bit, Addr, Addr, Size);
++    return;
++  }
++
++  if (GuestWindowActive()) {
++    EmitGuestWindow(TMP2.R(), Addr);
++    switch (Size) {
++    case 1: ldrb(Dst.W(), TMP2.R(), 0); break;
++    case 2: ldrh(Dst.W(), TMP2.R(), 0); break;
++    case 4: ldr(Dst.W(), TMP2.R(), 0); break;
++    case 8: ldr(Dst.X(), TMP2.R(), 0); break;
++    default: LOGMAN_MSG_A_FMT("Unhandled {} size: {}", __func__, Op->Size); break;
++    }
++    add(ARMEmitter::Size::i64Bit, Addr, Addr, Size);
++    return;
++  }
++
+   switch (Size) {
+   case 1: {
+     ldrb<ARMEmitter::IndexType::POST>(Dst.W(), Addr, Size);
+@@ -1620,6 +1713,29 @@ DEF_OP(PopTwo) {
+   LOGMAN_THROW_A_FMT(Dst1 != Addr && Dst2 != Addr, "Invalid");
+   LOGMAN_THROW_A_FMT(Dst1 != Dst2, "Invalid");
+ 
++  if (GuestBaseActive()) {
++    // Same as Pop: the guest SP stays a guest value, memory goes through the base.
++    add(ARMEmitter::Size::i64Bit, TMP2.R(), GuestBaseReg(), Addr, ARMEmitter::ExtendedType::UXTW, 0);
++    switch (Size) {
++    case 4: ldp<ARMEmitter::IndexType::OFFSET>(Dst1.W(), Dst2.W(), TMP2.R(), 0); break;
++    case 8: ldp<ARMEmitter::IndexType::OFFSET>(Dst1.X(), Dst2.X(), TMP2.R(), 0); break;
++    default: LOGMAN_MSG_A_FMT("Unhandled {} size: {}", __func__, Op->Size); break;
++    }
++    add(ARMEmitter::Size::i32Bit, Addr, Addr, 2 * Size);
++    return;
++  }
++
++  if (GuestWindowActive()) {
++    EmitGuestWindow(TMP2.R(), Addr);
++    switch (Size) {
++    case 4: ldp<ARMEmitter::IndexType::OFFSET>(Dst1.W(), Dst2.W(), TMP2.R(), 0); break;
++    case 8: ldp<ARMEmitter::IndexType::OFFSET>(Dst1.X(), Dst2.X(), TMP2.R(), 0); break;
++    default: LOGMAN_MSG_A_FMT("Unhandled {} size: {}", __func__, Op->Size); break;
++    }
++    add(ARMEmitter::Size::i64Bit, Addr, Addr, 2 * Size);
++    return;
++  }
++
+   switch (Size) {
+   case 4: {
+     ldp<ARMEmitter::IndexType::POST>(Dst1.W(), Dst2.W(), Addr, 2 * Size);
+diff --git a/FEXCore/Source/Interface/Core/OpcodeDispatcher.cpp b/FEXCore/Source/Interface/Core/OpcodeDispatcher.cpp
+index 8dc605ca7..33734ac0f 100644
+--- a/FEXCore/Source/Interface/Core/OpcodeDispatcher.cpp
++++ b/FEXCore/Source/Interface/Core/OpcodeDispatcher.cpp
+@@ -2489,8 +2489,11 @@ void OpDispatchBuilder::BTOp(OpcodeArgs, uint32_t SrcIndex, BTAction Action) {
+     }
+     }
+   } else {
+-    // Load the address to the memory location
+-    Ref Dest = MakeSegmentAddress(Op, Op->Dest);
++    // Load the address to the memory location. A GUEST linear address here:
++    // LoadEffectiveAddress applies the guest base once, after the 32-bit wrap
++    // of Dest + byte offset (MakeSegmentAddress would already be host).
++    Ref Dest = GuestBase || GuestWindowShift ? AppendSegmentOffsetGuest(LoadSourceGPR(Op, Op->Dest, Op->Flags, {.LoadData = false}), Op->Flags)
++                                             : MakeSegmentAddress(Op, Op->Dest);
+     // Get the bit selection from the src
+     auto BitSelect = Src.Bfe(0, 3);
+ 
+@@ -2500,7 +2503,7 @@ void OpDispatchBuilder::BTOp(OpcodeArgs, uint32_t SrcIndex, BTAction Action) {
+ 
+     // Get the address offset by shifting out the size of the op (To shift out the bit selection)
+     // Then use that to index in to the memory location by size of op
+-    AddressMode Address = {.Base = Dest, .Index = Src.Ref(), .AddrSize = OpSize::i64Bit};
++    AddressMode Address = {.Base = Dest, .Index = Src.Ref(), .AddrSize = (GuestBase ? GetGPROpSize() : OpSize::i64Bit)};
+ 
+     switch (Action) {
+     case BTAction::BTNone: {
+@@ -2958,10 +2961,13 @@ void OpDispatchBuilder::AADOp(OpcodeArgs) {
+ }
+ 
+ void OpDispatchBuilder::XLATOp(OpcodeArgs) {
+-  Ref Src = MakeSegmentAddress(X86State::REG_RBX, Op->Flags, X86Tables::DecodeFlags::FLAG_DS_PREFIX);
++  // Under a guest base, build the GUEST address (EBX + AL, 32-bit wrap) and
++  // let LoadEffectiveAddress apply the base once.
++  Ref Src = GuestBase ? AppendSegmentOffsetGuest(LoadGPRRegister(X86State::REG_RBX), Op->Flags, X86Tables::DecodeFlags::FLAG_DS_PREFIX)
++                      : MakeSegmentAddress(X86State::REG_RBX, Op->Flags, X86Tables::DecodeFlags::FLAG_DS_PREFIX);
+   Ref Offset = LoadGPRRegister(X86State::REG_RAX, OpSize::i8Bit);
+ 
+-  AddressMode A = {.Base = Src, .Index = Offset, .AddrSize = OpSize::i64Bit};
++  AddressMode A = {.Base = Src, .Index = Offset, .AddrSize = GuestBase ? GetGPROpSize() : OpSize::i64Bit};
+   auto Res = _LoadMemGPRAutoTSO(OpSize::i8Bit, A, OpSize::i8Bit);
+ 
+   StoreGPRRegister(X86State::REG_RAX, Res, OpSize::i8Bit);
+@@ -3017,7 +3023,7 @@ void OpDispatchBuilder::EnterOp(OpcodeArgs) {
+   if (Level > 0) {
+     for (uint8_t i = 1; i < Level; ++i) {
+       auto MemLoc = Sub(GPRSize, OldBP, i * IR::OpSizeToSize(OperandSize));
+-      auto Mem = _LoadMemGPR(OperandSize, MemLoc, OperandSize);
++      auto Mem = _LoadMemGPR(OperandSize, GuestToHost(MemLoc), OperandSize);
+       NewSP = PushValue(OperandSize, Mem);
+     }
+     NewSP = PushValue(OperandSize, temp_RBP);
+@@ -3028,7 +3034,7 @@ void OpDispatchBuilder::EnterOp(OpcodeArgs) {
+ }
+ 
+ void OpDispatchBuilder::SGDTOp(OpcodeArgs) {
+-  auto DestAddress = LoadSourceGPR(Op, Op->Dest, Op->Flags, {.LoadData = false});
++  auto DestAddress = GuestToHost(LoadSourceGPR(Op, Op->Dest, Op->Flags, {.LoadData = false}));
+ 
+   // Store an emulated value in the format of:
+   // uint16_t Limit;
+@@ -3051,7 +3057,7 @@ void OpDispatchBuilder::SGDTOp(OpcodeArgs) {
+ }
+ 
+ void OpDispatchBuilder::SIDTOp(OpcodeArgs) {
+-  auto DestAddress = LoadSourceGPR(Op, Op->Dest, Op->Flags, {.LoadData = false});
++  auto DestAddress = GuestToHost(LoadSourceGPR(Op, Op->Dest, Op->Flags, {.LoadData = false}));
+ 
+   // See SGDTOp, matches Linux in reported values
+   uint64_t IDTAddress = 0xFFFFFE0000000000ULL;
+@@ -3252,6 +3258,16 @@ void OpDispatchBuilder::STOSOp(OpcodeArgs) {
+ 
+     Ref Counter = LoadGPRRegister(X86State::REG_RCX);
+ 
++    // With a guest base the segment operand carries it (the op adds the
++    // segment to every address it touches, and RDI stays a guest value).
++    if (GuestBase) {
++      Segment = Segment ? _Add(OpSize::i64Bit, GuestBaseRef(), Segment) : GuestBaseRef();
++    } else if (GuestWindowShift) {
++      // The op adds its segment operand to RDI; make that operand carry the
++      // window's delta for the start address (a rep never crosses 4 GiB).
++      Ref Linear = Segment ? _Add(OpSize::i64Bit, Dest, Segment) : Dest;
++      Segment = _Sub(OpSize::i64Bit, GuestWindow(Linear), Dest);
++    }
+     auto Result = _MemSet(CTX->IsAtomicTSOEnabled(), Size, Segment ?: InvalidNode, Dest, Src, Counter, LoadDir(1));
+     StoreGPRRegister(X86State::REG_RCX, Constant(0));
+     StoreGPRRegister(X86State::REG_RDI, Result);
+@@ -3276,6 +3292,12 @@ void OpDispatchBuilder::MOVSOp(OpcodeArgs) {
+     auto DstSegment = GetSegment(0, FEXCore::X86Tables::DecodeFlags::FLAG_ES_PREFIX, true);
+     auto SrcSegment = GetSegment(Op->Flags, FEXCore::X86Tables::DecodeFlags::FLAG_DS_PREFIX);
+ 
++    if (GuestBase) {
++      // Host addresses in, and the results are converted back below.
++      DstSegment = DstSegment ? _Add(OpSize::i64Bit, GuestBaseRef(), DstSegment) : GuestBaseRef();
++      SrcSegment = SrcSegment ? _Add(OpSize::i64Bit, GuestBaseRef(), SrcSegment) : GuestBaseRef();
++    }
++
+     if (DstSegment) {
+       DstAddr = Add(OpSize::i64Bit, DstAddr, DstSegment);
+     }
+@@ -3284,10 +3306,28 @@ void OpDispatchBuilder::MOVSOp(OpcodeArgs) {
+       SrcAddr = Add(OpSize::i64Bit, SrcAddr, SrcSegment);
+     }
+ 
++    // 64-bit low window: copy between host addresses, give the registers back
++    // their guest values afterwards.
++    Ref WindowDst {};
++    Ref WindowSrc {};
++    if (GuestWindowShift) {
++      Ref HostDst = GuestWindow(DstAddr);
++      Ref HostSrc = GuestWindow(SrcAddr);
++      WindowDst = _Sub(OpSize::i64Bit, HostDst, DstAddr);
++      WindowSrc = _Sub(OpSize::i64Bit, HostSrc, SrcAddr);
++      DstAddr = HostDst;
++      SrcAddr = HostSrc;
++    }
++
+     Ref Result_Src = _AllocateGPR(false);
+     Ref Result_Dst = _AllocateGPR(false);
+     _MemCpy(CTX->IsAtomicTSOEnabled(), Size, DstAddr, SrcAddr, Counter, LoadDir(1), Result_Dst, Result_Src);
+ 
++    if (WindowDst) {
++      Result_Dst = _Sub(OpSize::i64Bit, Result_Dst, WindowDst);
++      Result_Src = _Sub(OpSize::i64Bit, Result_Src, WindowSrc);
++    }
++
+     if (DstSegment) {
+       Result_Dst = Sub(OpSize::i64Bit, Result_Dst, DstSegment);
+     }
+@@ -3313,6 +3353,13 @@ void OpDispatchBuilder::MOVSOp(OpcodeArgs) {
+       _StoreMem(RegClass::GPR, Size, Src, RDI, Invalid(), OpSize::i8Bit, MemOffsetType::SXTX, 1);
+     }
+ 
++    if (GuestBase) {
++      // RSI/RDI above are HOST addresses (MakeSegmentAddress applies the
++      // guest base); the registers must stay guest values. Step the raw
++      // registers instead (32-bit DS/ES bases are zero on Linux).
++      RSI = LoadGPRRegister(X86State::REG_RSI);
++      RDI = LoadGPRRegister(X86State::REG_RDI);
++    }
+     RSI = OffsetByDir(RSI, IR::OpSizeToSize(Size));
+     RDI = OffsetByDir(RDI, IR::OpSizeToSize(Size));
+ 
+@@ -4109,13 +4156,24 @@ Ref OpDispatchBuilder::GetSegment(uint32_t Flags, uint32_t DefaultPrefix, bool O
+   return nullptr;
+ }
+ 
++Ref OpDispatchBuilder::AppendSegmentOffsetGuest(Ref Value, uint32_t Flags, uint32_t DefaultPrefix, bool Override) {
++  auto Segment = GetSegment(Flags, DefaultPrefix, Override);
++  if (Segment) {
++    Value = Add(std::max(OpSize::i32Bit, std::max(GetOpSize(Value), GetOpSize(Segment))), Value, Segment);
++  }
++  return Value;
++}
++
+ Ref OpDispatchBuilder::AppendSegmentOffset(Ref Value, uint32_t Flags, uint32_t DefaultPrefix, bool Override) {
+   auto Segment = GetSegment(Flags, DefaultPrefix, Override);
+   if (Segment) {
+     Value = Add(std::max(OpSize::i32Bit, std::max(GetOpSize(Value), GetOpSize(Segment))), Value, Segment);
+   }
+ 
+-  return Value;
++  // Every caller dereferences the result (string ops, cmpxchg16b, ...): with
++  // a guest base the linear address becomes the host address here, exactly
++  // as LoadEffectiveAddress does for the AddressMode paths.
++  return GuestToHost(Value);
+ }
+ 
+ 
+@@ -4653,6 +4711,11 @@ OpDispatchBuilder::OpDispatchBuilder(FEXCore::Context::ContextImpl* ctx, FEXCore
+   : IREmitter {ctx->OpDispatcherAllocator, ctx->HostFeatures.SupportsTSOImm9 != 0}
+   , CTX {ctx}
+   , Thread {Thread} {
++  if (!CTX->Config.Is64BitMode) {
++    GuestBase = CTX->Config.GuestBase;
++  } else {
++    GuestWindowShift = CTX->GuestWindowShift();
++  }
+   if (CTX->HostFeatures.SupportsAVX && CTX->HostFeatures.SupportsSVE256) {
+     SaveAVXStateFunc = &OpDispatchBuilder::SaveAVXState;
+     RestoreAVXStateFunc = &OpDispatchBuilder::RestoreAVXState;
+@@ -5061,7 +5124,7 @@ void OpDispatchBuilder::Prefetch(OpcodeArgs, bool ForStore, bool Stream, uint8_t
+     return;
+   }
+ 
+-  Ref DestMem = LoadSourceGPR(Op, Op->Src[0], Op->Flags, {.LoadData = false});
++  Ref DestMem = GuestToHost(LoadSourceGPR(Op, Op->Src[0], Op->Flags, {.LoadData = false}));
+   _Prefetch(ForStore, Stream, Level, DestMem, Invalid(), MemOffsetType::SXTX, 1);
+ }
+ 
+diff --git a/FEXCore/Source/Interface/Core/OpcodeDispatcher.h b/FEXCore/Source/Interface/Core/OpcodeDispatcher.h
+index 5e57fc081..977c34fb0 100644
+--- a/FEXCore/Source/Interface/Core/OpcodeDispatcher.h
++++ b/FEXCore/Source/Interface/Core/OpcodeDispatcher.h
+@@ -122,6 +122,11 @@ struct DispatchTableEntry {
+ 
+ class OpDispatchBuilder final : public IREmitter {
+ public:
++  // Guest linear address -> host address (identity unless a 32-bit guest
++  // lives at a guest base). Public so Core.cpp's SMC validation can use it.
++  Ref GuestToHostPublic(Ref Linear) {
++    return GuestToHost(Linear);
++  }
+   Ref GetNewJumpBlock(uint64_t RIP) {
+     auto it = JumpTargets.find(RIP);
+     LOGMAN_THROW_A_FMT(it != JumpTargets.end(), "Couldn't find block generated for 0x{:x}", RIP);
+@@ -1505,6 +1510,8 @@ private:
+ #undef OpcodeArgs
+ 
+   Ref AppendSegmentOffset(Ref Value, uint32_t Flags, uint32_t DefaultPrefix = 0, bool Override = false);
++  // Linear GUEST address with the segment applied, no guest base (upstream semantics).
++  Ref AppendSegmentOffsetGuest(Ref Value, uint32_t Flags, uint32_t DefaultPrefix = 0, bool Override = false);
+   Ref GetSegment(uint32_t Flags, uint32_t DefaultPrefix = FEXCore::X86Tables::DecodeFlags::FLAG_NO_PREFIX, bool Override = false);
+ 
+   void UpdatePrefixFromSegment(Ref Segment, uint32_t SegmentReg);
+@@ -1619,6 +1626,24 @@ private:
+ 
+   // In several instances, it's desirable to get a base address with the segment offset
+   // applied to it. This pulls all the common-case appending into a single set of functions.
++  // A guest linear address -> the address the JIT must dereference. Identity
++  // unless a 32-bit guest lives at a base (Addressing.cpp has the story).
++  [[nodiscard]]
++  Ref GuestToHost(Ref Linear) {
++    if (GuestWindowShift) {
++      return GuestWindow(Linear);
++    }
++    if (!GuestBase) {
++      return Linear;
++    }
++    return _Add(OpSize::i64Bit, _LoadRegister(8, RegClass::GPRFixed, OpSize::i64Bit), _Bfe(OpSize::i64Bit, 32, 0, Linear));
++  }
++  // The base as an SSA value, for IR ops that take a segment/base operand.
++  [[nodiscard]]
++  Ref GuestBaseRef() {
++    return _LoadRegister(8, RegClass::GPRFixed, OpSize::i64Bit);
++  }
++
+   [[nodiscard]]
+   Ref MakeSegmentAddress(const X86Tables::DecodedOp& Op, const X86Tables::DecodedOperand& Operand, IR::OpSize OpSize) {
+     Ref Mem = LoadSourceGPR_WithOpSize(Op, Operand, OpSize, Op->Flags, {.LoadData = false});
+diff --git a/FEXCore/Source/Interface/Core/OpcodeDispatcher/AVX_128.cpp b/FEXCore/Source/Interface/Core/OpcodeDispatcher/AVX_128.cpp
+index 59466b976..7ca7fce43 100644
+--- a/FEXCore/Source/Interface/Core/OpcodeDispatcher/AVX_128.cpp
++++ b/FEXCore/Source/Interface/Core/OpcodeDispatcher/AVX_128.cpp
+@@ -356,7 +356,7 @@ void OpDispatchBuilder::AVX128_MOVVectorNT(OpcodeArgs) {
+   if (Op->Dest.IsGPR()) {
+     ///< MOVNTDQA load non-temporal comes from SSE4.1 and is extended by AVX/AVX2.
+     RefPair Src {};
+-    Ref SrcAddr = LoadSourceGPR(Op, Op->Src[0], Op->Flags, {.LoadData = false});
++    Ref SrcAddr = GuestToHost(LoadSourceGPR(Op, Op->Src[0], Op->Flags, {.LoadData = false}));
+     Src.Low = _VLoadNonTemporal(OpSize::i128Bit, SrcAddr, 0);
+ 
+     if (Is128Bit) {
+@@ -367,7 +367,7 @@ void OpDispatchBuilder::AVX128_MOVVectorNT(OpcodeArgs) {
+     AVX128_StoreResult_WithOpSize(Op, Op->Dest, Src);
+   } else {
+     auto Src = AVX128_LoadSource_WithOpSize(Op, Op->Src[0], Op->Flags, !Is128Bit, MemoryAccessType::STREAM);
+-    Ref Dest = LoadSourceGPR(Op, Op->Dest, Op->Flags, {.LoadData = false});
++    Ref Dest = GuestToHost(LoadSourceGPR(Op, Op->Dest, Op->Flags, {.LoadData = false}));
+ 
+     if (Is128Bit) {
+       // Single store non-temporal for 128-bit operations.
+@@ -734,7 +734,7 @@ void OpDispatchBuilder::AVX128_MOVBetweenGPR_FPR(OpcodeArgs) {
+       StoreResultGPR(Op, Op->Dest, Src.Low);
+     } else {
+       // Storing first element to memory.
+-      Ref Dest = LoadSourceGPR(Op, Op->Dest, Op->Flags, {.LoadData = false});
++      Ref Dest = GuestToHost(LoadSourceGPR(Op, Op->Dest, Op->Flags, {.LoadData = false}));
+       _StoreMemFPR(OpSizeFromDst(Op), Dest, Src.Low, OpSize::i8Bit);
+     }
+   }
+diff --git a/FEXCore/Source/Interface/Core/OpcodeDispatcher/Vector.cpp b/FEXCore/Source/Interface/Core/OpcodeDispatcher/Vector.cpp
+index 6cf764f45..93ac29d6d 100644
+--- a/FEXCore/Source/Interface/Core/OpcodeDispatcher/Vector.cpp
++++ b/FEXCore/Source/Interface/Core/OpcodeDispatcher/Vector.cpp
+@@ -53,7 +53,7 @@ void OpDispatchBuilder::MOVVectorNTOp(OpcodeArgs, bool IsAVX) {
+ 
+   if (Op->Dest.IsGPR() && Size >= OpSize::i128Bit) {
+     ///< MOVNTDQA load non-temporal comes from SSE4.1 and is extended by AVX/AVX2.
+-    Ref SrcAddr = LoadSourceGPR(Op, Op->Src[0], Op->Flags, {.LoadData = false});
++    Ref SrcAddr = GuestToHost(LoadSourceGPR(Op, Op->Src[0], Op->Flags, {.LoadData = false}));
+     auto Src = _VLoadNonTemporal(Size, SrcAddr, 0);
+ 
+     if (IsAVX) {
+@@ -78,7 +78,7 @@ void OpDispatchBuilder::MOVVectorNTOp(OpcodeArgs, bool IsAVX) {
+       // MMX 64-bit comes from MOVNTQ
+       StoreResultFPR(Op, Src, OpSize::i8Bit, MemoryAccessType::STREAM);
+     } else {
+-      Ref Dest = LoadSourceGPR(Op, Op->Dest, Op->Flags, {.LoadData = false});
++      Ref Dest = GuestToHost(LoadSourceGPR(Op, Op->Dest, Op->Flags, {.LoadData = false}));
+ 
+       // Single store non-temporal for larger operations.
+       _VStoreNonTemporal(Size, Src, Dest, 0);
+@@ -2875,7 +2875,7 @@ void OpDispatchBuilder::MOVBetweenGPR_FPR(OpcodeArgs, VectorOpType VectorType) {
+       const auto DstSize = std::max(OpSize::i32Bit, OpSizeFromDst(Op));
+ 
+       // Storing first element to memory.
+-      Ref Dest = LoadSourceGPR(Op, Op->Dest, Op->Flags, {.LoadData = false});
++      Ref Dest = GuestToHost(LoadSourceGPR(Op, Op->Dest, Op->Flags, {.LoadData = false}));
+       _StoreMemFPR(DstSize, Dest, Src, OpSize::i8Bit);
+     }
+   }
+diff --git a/FEXCore/Source/Interface/IR/IREmitter.h b/FEXCore/Source/Interface/IR/IREmitter.h
+index 4c4c9bae8..696e3cad9 100644
+--- a/FEXCore/Source/Interface/IR/IREmitter.h
++++ b/FEXCore/Source/Interface/IR/IREmitter.h
+@@ -25,6 +25,28 @@ public:
+ 
+   virtual ~IREmitter() = default;
+ 
++  // 32-bit guests may live at host = GuestBase + guest (hosts without the
++  // low 4 GiB). Zero means identity. Read by Addressing.cpp, which is where
++  // a linear address turns into the address the load or store uses.
++  uint64_t GuestBase {};
++
++  // 64-bit guests whose image is ET_EXEC (loads below 4 GiB) live in a
++  // "low window": a guest address 0 < x < 4 GiB is at host GuestBase + x,
++  // every other address is identity. GuestBase is a power of two >= 4 GiB,
++  // stored as its shift; zero means off. Host addresses on Darwin are all
++  // >= 4 GiB, so the mapping is idempotent (applying it to an address that is
++  // already a host one changes nothing).
++  uint8_t GuestWindowShift {};
++
++  // host = x + ((0 < x < 4 GiB) << Shift), without touching NZCV (which holds
++  // the guest's flags): clz(x) is in [32, 63] exactly when 0 < x < 2^32, i.e.
++  // bit 5 of clz(x) is set; clz(0) = 64 keeps NULL at NULL.
++  Ref GuestWindow(Ref Addr) {
++    Ref Lz = _CountLeadingZeroes(OpSize::i64Bit, Addr);
++    Ref Low = _Bfe(OpSize::i64Bit, 1, 5, Lz);
++    return _AddShift(OpSize::i64Bit, Addr, Low, ShiftType::LSL, GuestWindowShift);
++  }
++
+   void ReownOrClaimBuffer() {
+     DualListData.ReownOrClaimBuffer();
+ 
+diff --git a/FEXCore/include/FEXCore/Debug/InternalThreadState.h b/FEXCore/include/FEXCore/Debug/InternalThreadState.h
+index 42feabb1c..9a1cf607a 100644
+--- a/FEXCore/include/FEXCore/Debug/InternalThreadState.h
++++ b/FEXCore/include/FEXCore/Debug/InternalThreadState.h
+@@ -110,6 +110,12 @@ struct alignas(FEXCore::Utils::FEX_PAGE_SIZE) InternalThreadState : public FEXCo
+   void* FrontendPtr;
+ 
+   static constexpr size_t CALLRET_STACK_SIZE {0x400000};
++  // Guard on each side of the call-ret stack. FEX_PAGE_SIZE (4 KiB) is not
++  // enough on a 16 KiB-page host: the guard then shares a host page with the
++  // stack, the page is read/write, and an unbalanced call/ret stream walks off
++  // the end into whatever is mapped next (another thread's call-ret stack),
++  // where a matching {guest, host} pair sends a ret into stale host code.
++  static constexpr size_t CALLRET_GUARD_SIZE {0x4000};
+ 
+   // The low address of the call-ret stack allocation (not including guard pages)
+   void* CallRetStackBase {};
+diff --git a/Source/Tools/FEXInterpreter/ELFCodeLoader.h b/Source/Tools/FEXInterpreter/ELFCodeLoader.h
+index 5850c83d5..9ed99532c 100644
+--- a/Source/Tools/FEXInterpreter/ELFCodeLoader.h
++++ b/Source/Tools/FEXInterpreter/ELFCodeLoader.h
+@@ -28,6 +28,7 @@
+ #include <fcntl.h>
+ #include <fmt/format.h>
+ #include <sys/auxv.h>
++#include "LinuxSyscalls/GuestBase.h"
+ #include <sys/mman.h>
+ #include <sys/personality.h>
+ #include <sys/prctl.h>
+@@ -169,7 +170,7 @@ class ELFCodeLoader final : public FEX::CodeLoader {
+ 
+         // Only clear padding bytes if the section is writable
+         if (Header.p_flags & PF_W) {
+-          memset((void*)BSSStart, 0, BSSPageStart - BSSStart);
++          memset(FEX::HLE::G2H((void*)BSSStart), 0, BSSPageStart - BSSStart);
+         }
+ 
+         if (BSSPageStart != BSSPageEnd) {
+@@ -663,8 +664,8 @@ public:
+           0xcd, 0x80, // int 0x80
+           0xc3,       // ret
+         };
+-        memcpy(VSyscallPage, VSyscallCode, sizeof(VSyscallCode));
+-        mprotect(VSyscallPage, FEXCore::Utils::FEX_PAGE_SIZE, PROT_READ);
++        memcpy(FEX::HLE::G2H(VSyscallPage), VSyscallCode, sizeof(VSyscallCode));
++        mprotect(FEX::HLE::G2H(VSyscallPage), FEXCore::Utils::FEX_PAGE_SIZE, PROT_READ);
+         VSyscallEntry = reinterpret_cast<uint64_t>(VSyscallPage);
+       }
+ 
+@@ -697,18 +698,18 @@ public:
+                             const fextl::vector<fextl::string>& Args, const fextl::vector<fextl::string>& EnvironmentVariables,
+                             const fextl::list<auxv_t>& AuxVariables, uint64_t* AuxTabBase, uint64_t* AuxTabSize) {
+     // Pointer list offsets
+-    PointerType* ArgumentPointers = reinterpret_cast<PointerType*>(StackPointer + PointerSize);
+-    PointerType* PadPointers = reinterpret_cast<PointerType*>(StackPointer + PointerSize + Args.size() * PointerSize);
+-    PointerType* EnvpPointers = reinterpret_cast<PointerType*>(StackPointer + PointerSize + Args.size() * PointerSize + PointerSize);
+-    AuxType* AuxVPointers = reinterpret_cast<AuxType*>(StackPointer + AuxVOffset);
++    PointerType* ArgumentPointers = reinterpret_cast<PointerType*>(FEX::HLE::G2H(StackPointer + PointerSize));
++    PointerType* PadPointers = reinterpret_cast<PointerType*>(FEX::HLE::G2H(StackPointer + PointerSize + Args.size() * PointerSize));
++    PointerType* EnvpPointers = reinterpret_cast<PointerType*>(FEX::HLE::G2H(StackPointer + PointerSize + Args.size() * PointerSize + PointerSize));
++    AuxType* AuxVPointers = reinterpret_cast<AuxType*>(FEX::HLE::G2H(StackPointer + AuxVOffset));
+ 
+     // Arguments memory lives after everything else
+-    uint8_t* ArgumentBackingBase = reinterpret_cast<uint8_t*>(StackPointer + ArgumentOffset);
+-    uint8_t* EnvpBackingBase = reinterpret_cast<uint8_t*>(StackPointer + EnvpOffset);
++    uint8_t* ArgumentBackingBase = reinterpret_cast<uint8_t*>(FEX::HLE::G2H(StackPointer + ArgumentOffset));
++    uint8_t* EnvpBackingBase = reinterpret_cast<uint8_t*>(FEX::HLE::G2H(StackPointer + EnvpOffset));
+     PointerType ArgumentBackingBaseGuest = StackPointer + ArgumentOffset;
+     PointerType EnvpBackingBaseGuest = StackPointer + EnvpOffset;
+ 
+-    *reinterpret_cast<PointerType*>(StackPointer + 0) = Args.size();
++    *reinterpret_cast<PointerType*>(FEX::HLE::G2H(StackPointer + 0)) = Args.size();
+     PadPointers[0] = 0;
+ 
+     // If we don't have any, just make sure the first is nullptr
+@@ -874,7 +875,7 @@ public:
+ 
+     // Setup our AUXP values that need memory now that the stack is setup
+     AuxPlatform->val = StackPointer + PlatformNameLocation;
+-    char* PlatformLoc = reinterpret_cast<char*>(AuxPlatform->val);
++    char* PlatformLoc = reinterpret_cast<char*>(FEX::HLE::G2H(AuxPlatform->val));
+     memset(PlatformLoc, 0, platform_string_max_size);
+     if (Is64BitMode()) {
+       strncpy(PlatformLoc, platform_name_x86_64.data(), platform_string_max_size);
+@@ -884,7 +885,7 @@ public:
+ 
+     // Random value is always 128bits
+     AuxRandom->val = StackPointer + RandomNumberLocation;
+-    uint64_t* RandomLoc = reinterpret_cast<uint64_t*>(AuxRandom->val);
++    uint64_t* RandomLoc = reinterpret_cast<uint64_t*>(FEX::HLE::G2H(AuxRandom->val));
+     uint64_t* HostRandom = reinterpret_cast<uint64_t*>(getauxval(AT_RANDOM));
+     if (HostRandom) {
+       // Pass through the host's random values
+@@ -902,7 +903,7 @@ public:
+ 
+     // Setup ExecFN aux
+     AuxExecFN->val = StackPointer + ExecFNLocation;
+-    const auto InvocationName = reinterpret_cast<char*>(AuxExecFN->val);
++    const auto InvocationName = reinterpret_cast<char*>(FEX::HLE::G2H(AuxExecFN->val));
+     strncpy(InvocationName, ApplicationArgs[0].c_str(), ApplicationArgs[0].size() + 1);
+ 
+     // Stack setup
+@@ -968,6 +969,23 @@ public:
+     return MainElf.type == ::ELFLoader::ELFContainer::TYPE_X86_64;
+   }
+ 
++  // A 64-bit ET_EXEC (main program or interpreter) with a PT_LOAD below
++  // 4 GiB: on a host without the low 4 GiB it has to live in a low window.
++  bool NeedsLowWindow() const {
++    auto Low = [](const ELFParser& Elf) {
++      if (Elf.ehdr.e_type != ET_EXEC) {
++        return false;
++      }
++      for (const auto& Header : Elf.phdrs) {
++        if (Header.p_type == PT_LOAD && Header.p_vaddr < (1ULL << 32)) {
++          return true;
++        }
++      }
++      return false;
++    };
++    return Is64BitMode() && (Low(MainElf) || (!MainElf.InterpreterElf.empty() && Low(InterpElf)));
++  }
++
+   ::ELFLoader::ELFContainer::BRKInfo GetBRKInfo() {
+     return ::ELFLoader::ELFContainer::BRKInfo {BrkStart, BRK_SIZE};
+   }
+diff --git a/Source/Tools/FEXInterpreter/FEXInterpreter.cpp b/Source/Tools/FEXInterpreter/FEXInterpreter.cpp
+index c2eb2fbea..b871626e5 100644
+--- a/Source/Tools/FEXInterpreter/FEXInterpreter.cpp
++++ b/Source/Tools/FEXInterpreter/FEXInterpreter.cpp
+@@ -7,6 +7,9 @@ $end_info$
+ */
+ 
+ #include "Common/ArgumentLoader.h"
++#include "LinuxSyscalls/GuestBase.h"
++#include <sys/mman.h>
++#include <sys/syscall.h>
+ #include "Common/FEXServerClient.h"
+ #include "Common/Config.h"
+ #include "Common/HostFeatures.h"
+@@ -166,10 +169,31 @@ fextl::unique_ptr<FEX::HLE::MemAllocator> InitAllocator(bool Is64Bit) {
+     return {};
+   }
+ 
++  if (FEX::HLE::GuestBase) {
++    // Darwin host: there is no low 4 GiB, so the passthrough strategy below
++    // (let the OS hand out low addresses, exhaust jemalloc's high reserves)
++    // cannot work. The real bitset allocator maps every 32-bit guest page at
++    // GuestBase + page inside the reserved window (LinuxAllocator.cpp), which
++    // is the whole point of the guest base. The jemalloc-exhaustion loop is
++    // also skipped: on Darwin malloc never returns a sub-4 GiB pointer, so it
++    // would spin forever.
++    //
++    // SetupHooks is skipped too, as in 64-bit mode. Its 64-bit allocator
++    // steals every free range above 4 GiB and later madvise(MADV_DONTNEED)s
++    // what it believes it owns; the host process shares that address space
++    // with libSystem's malloc, whose regions grew into those ranges and were
++    // zeroed (measured: objc class_rw_t of OS_xpc_pipe read back as zeros and
++    // every fork child crashed in xpc_atfork_child). Keeping FEX's own
++    // allocations out of the low 4 GiB is what the hooks are for, and the
++    // guest window already does that.
++    return FEX::HLE::Create32BitAllocator();
++  }
++
+   const auto PageSize = sysconf(_SC_PAGESIZE);
+ 
+   // Setup our userspace allocator
+   FEXCore::Allocator::SetupHooks(PageSize > 0 ? PageSize : FEXCore::Utils::FEX_PAGE_SIZE);
++
+   auto Allocator = FEX::HLE::CreatePassthroughAllocator();
+ 
+   // Now that the upper 32-bit address space is blocked for future allocations,
+@@ -492,6 +516,62 @@ int main(int argc, char** argv, char** const envp) {
+   ELFCodeLoader Loader {Program.ProgramPath, FEXFD, LDPath(), Args, ParsedArgs, envp, &Environment};
+   FEXCore::Config::Set(FEXCore::Config::CONFIG_IS64BIT_MODE, Loader.Is64BitMode() ? "1" : "0");
+ 
++  // Guest base for 32-bit guests (GUESTBASE=1: reserve a 4 GiB window now,
++  // before the allocator and the loader exist, and live there). Announced to
++  // the lxrt runtime with a private syscall; a Linux kernel answers -ENOSYS
++  // and nothing else changes.
++  FEX::HLE::NoSharedVMProcesses = FEXCore::Config::Get_GUESTBASE() != 0;
++  if (!Loader.Is64BitMode()) {
++    uint64_t Base = FEXCore::Config::Get_GUESTBASE();
++    if (Base == 1) {
++      void* Window = ::mmap(nullptr, 1ULL << 32, PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE, -1, 0);
++      if (Window == MAP_FAILED) {
++        LogMan::Msg::EFmt("GuestBase: could not reserve a 4 GiB window");
++        return -ENOMEM;
++      }
++      Base = reinterpret_cast<uint64_t>(Window);
++      FEXCore::Config::Set(FEXCore::Config::CONFIG_GUESTBASE, fextl::fmt::format("{}", Base));
++    }
++    if (Base > 1) {
++      FEX::HLE::GuestBase = Base;
++      ::syscall(0x4C580030, Base);
++      LogMan::Msg::IFmt("GuestBase: 32-bit guest at host 0x{:x}", Base);
++    }
++  } else {
++    // 64-bit: only an ET_EXEC image below 4 GiB needs a low window. The base
++    // must be a power of two (the JIT adds it with a shift, IREmitter.h).
++    uint64_t Base = 0;
++    // Wine too: KUSER_SHARED_DATA (0x7ffe0000), 32-bit PE images and every
++    // WoW64 allocation live below 4 GiB, where Darwin's __PAGEZERO forbids any
++    // mapping (MEASURED: "failed to map the shared user data: c0000017").
++    const auto BaseName = Program.ProgramPath.substr(Program.ProgramPath.find_last_of('/') + 1);
++    const char* ForceLow = getenv("FEX_LOWWINDOW");
++    const bool WineLike = BaseName.starts_with("wine") && !BaseName.starts_with("wineserver");
++    const bool WantLow = Loader.NeedsLowWindow() || WineLike || (ForceLow && ForceLow[0] == '1');
++    if (FEXCore::Config::Get_GUESTBASE() != 0 && WantLow) {
++      constexpr int FEX_MAP_FIXED_NOREPLACE = 0x100000;
++      for (int Shift : {39, 40, 41, 38, 42, 43}) {
++        void* Want = reinterpret_cast<void*>(1ULL << Shift);
++        void* Window = ::mmap(Want, 1ULL << 32, PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE | FEX_MAP_FIXED_NOREPLACE, -1, 0);
++        if (Window == Want) {
++          Base = 1ULL << Shift;
++          break;
++        }
++        if (Window != MAP_FAILED) {
++          ::munmap(Window, 1ULL << 32);
++        }
++      }
++      if (!Base) {
++        LogMan::Msg::EFmt("GuestBase: could not reserve a 4 GiB low window");
++        return -ENOMEM;
++      }
++      FEX::HLE::GuestBase = Base;
++      ::syscall(0x4C580030, Base);
++      LogMan::Msg::IFmt("GuestBase: 64-bit guest ({}), low window at host 0x{:x}", WineLike ? "wine" : "ET_EXEC", Base);
++    }
++    FEXCore::Config::Set(FEXCore::Config::CONFIG_GUESTBASE, fextl::fmt::format("{}", Base));
++  }
++
+   if (!Loader.ELFWasLoaded()) {
+     // Loader couldn't load this program for some reason
+     fextl::fmt::print(stderr, "Invalid or Unsupported elf file.\n");
+@@ -628,6 +708,11 @@ int main(int argc, char** argv, char** const envp) {
+   // Pull RIP and stack pointer from loader and set the thread data to it.
+   ParentThread->Thread->CurrentFrame->State.rip = Loader.DefaultRIP();
+   ParentThread->Thread->CurrentFrame->State.gregs[FEXCore::X86State::REG_RSP] = Loader.GetStackPointer();
++  if (!Loader.Is64BitMode()) {
++    // The JIT's guest base register (x19 <-> gregs[8], unused by a 32-bit
++    // guest); every thread inherits the parent's gregs.
++    ParentThread->Thread->CurrentFrame->State.gregs[8] = FEX::HLE::GuestBase;
++  }
+ 
+   // Close the loader FDs after everything has been parsed and mapped.
+   Loader.CloseFDs();
+diff --git a/Source/Tools/LinuxEmulation/LinuxSyscalls/GuestBase.h b/Source/Tools/LinuxEmulation/LinuxSyscalls/GuestBase.h
+new file mode 100644
+index 000000000..4d7892568
+--- /dev/null
++++ b/Source/Tools/LinuxEmulation/LinuxSyscalls/GuestBase.h
+@@ -0,0 +1,27 @@
++// SPDX-License-Identifier: MIT
++#pragma once
++#include <cstdint>
++
++// 32-bit guests on a host that cannot map the low 4 GiB (Darwin's __PAGEZERO)
++// live at host = GuestBase + guest. Zero on Linux: identity, no cost.
++// Set once at start-up (FEXInterpreter.cpp) before anything touches guest
++// memory; the JIT reads the same value through gregs[8] / x19.
++namespace FEX::HLE {
++extern uint64_t GuestBase;
++// True when FEX runs on the lxrt runtime (GUESTBASE requested), whatever the
++// guest's bitness. That host cannot give two processes one address space.
++extern bool NoSharedVMProcesses;
++// Only 0 < guest < 4 GiB is translated: that is every non-NULL address of a
++// 32-bit guest, and exactly the low window of a 64-bit ET_EXEC guest (whose
++// other addresses are identity). Host addresses on Darwin are all >= 4 GiB,
++// so both directions are idempotent.
++inline uint64_t G2H(uint64_t Guest) {
++  return (GuestBase && Guest != 0 && Guest < (1ULL << 32)) ? Guest + GuestBase : Guest;
++}
++inline uint64_t H2G(uint64_t Host) {
++  return (GuestBase && Host >= GuestBase && Host < GuestBase + (1ULL << 32)) ? Host - GuestBase : Host;
++}
++inline void* G2H(const void* Guest) {
++  return reinterpret_cast<void*>(G2H(reinterpret_cast<uint64_t>(Guest)));
++}
++} // namespace FEX::HLE
+diff --git a/Source/Tools/LinuxEmulation/LinuxSyscalls/GuestBaseThunk.h b/Source/Tools/LinuxEmulation/LinuxSyscalls/GuestBaseThunk.h
+new file mode 100644
+index 000000000..79eb0f0d4
+--- /dev/null
++++ b/Source/Tools/LinuxEmulation/LinuxSyscalls/GuestBaseThunk.h
+@@ -0,0 +1,60 @@
++// SPDX-License-Identifier: MIT
++#pragma once
++#include "LinuxSyscalls/GuestBase.h"
++
++#include <cstdint>
++#include <string_view>
++#include <type_traits>
++
++namespace FEXCore::Core {
++struct CpuStateFrame;
++}
++
++namespace FEX::HLE {
++// Guest address base (Darwin host, see LinuxSyscalls/GuestBase.h): a 32-bit
++// guest's (or a 64-bit ET_EXEC guest's low-window) pointer arguments are guest addresses, while every handler body
++// dereferences them on the host (FileManager, signal structs, iovecs, ...).
++// This wrapper is the single choke point: each raw-pointer parameter below
++// 4 GiB gets the base added before the handler runs. compat_ptr<> parameters
++// already translate on their own, integer parameters are untouched, and the
++// memory-management syscalls are excluded -- their address argument is owned
++// by the 32-bit allocator, which works in guest addresses.
++template<typename T>
++static inline T GuestBaseArg(T Value) {
++  if constexpr (std::is_pointer_v<T>) {
++    const auto Raw = reinterpret_cast<uintptr_t>(Value);
++    if (FEX::HLE::GuestBase && Raw && Raw < 0x1'0000'0000ULL) {
++      return reinterpret_cast<T>(Raw + FEX::HLE::GuestBase);
++    }
++  }
++  return Value;
++}
++
++template<class F, typename R, typename... Args>
++struct GuestBaseThunk {
++  static R Call(FEXCore::Core::CpuStateFrame* Frame, Args... args) {
++    return F {}(Frame, GuestBaseArg<Args>(args)...);
++  }
++};
++
++template<class F, typename R, typename... Args>
++static auto MakeGuestBaseThunk(R (*)(FEXCore::Core::CpuStateFrame*, Args...)) {
++  return &GuestBaseThunk<F, R, Args...>::Call;
++}
++
++static inline bool IsGuestBaseExcluded(std::string_view Name) {
++  constexpr std::string_view Excluded[] = {
++    "mmap", "mmap2", "munmap", "mprotect", "mremap", "madvise", "brk", "shmat", "shmdt", "mlock", "mlock2",
++    "munlock", "msync", "mincore", "remap_file_pages", "pkey_mprotect", "process_madvise", "mseal",
++    // semun is a pointer-typed parameter that carries an int for SETVAL.
++    "semctl",
++  };
++  for (auto E : Excluded) {
++    if (E == Name) {
++      return true;
++    }
++  }
++  return false;
++}
++
++} // namespace FEX::HLE
+diff --git a/Source/Tools/LinuxEmulation/LinuxSyscalls/LinuxAllocator.cpp b/Source/Tools/LinuxEmulation/LinuxSyscalls/LinuxAllocator.cpp
+index 60b0ef192..4f744e621 100644
+--- a/Source/Tools/LinuxEmulation/LinuxSyscalls/LinuxAllocator.cpp
++++ b/Source/Tools/LinuxEmulation/LinuxSyscalls/LinuxAllocator.cpp
+@@ -1,5 +1,6 @@
+ // SPDX-License-Identifier: MIT
+ #include "LinuxSyscalls/LinuxAllocator.h"
++#include "LinuxSyscalls/GuestBase.h"
+ #include "LinuxSyscalls/Syscalls.h"
+ 
+ #include <FEXCore/Utils/MathUtils.h>
+@@ -20,6 +21,15 @@
+ #endif
+ 
+ namespace FEX::HLE {
++// Under a guest base the host never executes guest memory (FEX translates
++// it); PROT_EXEC on those pages only makes the lxrt runtime split W^X at its
++// 16 KiB page granularity, which ping-pongs when guest code and data share a
++// host page (measured: the i386 Steam client spun in that fault loop). The
++// guest's own protection is kept by VMA tracking.
++static inline int HostProt(int prot) {
++  return FEX::HLE::GuestBase ? (prot & ~PROT_EXEC) : prot;
++}
++
+ class MemAllocator32Bit final : public FEX::HLE::MemAllocator {
+ private:
+   static constexpr uint64_t BASE_KEY = 16;
+@@ -173,26 +183,46 @@ void* MemAllocator32Bit::Mmap(void* addr, size_t length, int prot, int flags, in
+   // Remove the MAP_32BIT flag if it exists now
+   flags &= ~FEX::HLE::X86_64_MAP_32BIT;
+ 
++  // Under a guest base (Darwin host, 16 KiB pages) a MAP_SHARED mapping has
++  // to start on a host page, or the runtime can only place a private copy
++  // there -- and a copy is not shared: the Steam client and steamwebhelper
++  // then each saw their own ValveIPCSharedObj and the client crashed
++  // (measured). Search with slack and align inside the free range; the
++  // whole host pages are marked used.
++  // A file mapping at a 16 KiB file offset is placed on a host page as well:
++  // anywhere else the runtime has to read the file into a private copy
++  // (MEASURED: 154 MB read per mapping of Mesa's driver), where on a host
++  // page it maps the file itself and pages it in lazily.
++  const uint64_t HostPages = (GuestBase && fd != -1 && (offset & 0x3fff) == 0) ? 4 : 1;
++  // The whole last host page must be free too: a neighbour placed in its
++  // tail forces the runtime back to a private copy (measured: the Steam
++  // client's u501-Shm_* objects, 1 MiB + 16 bytes, next to a read-only
++  // mapping at the following 4 KiB page).
++  const uint64_t SearchLength = FEXCore::AlignUp(PagesLength, HostPages) + HostPages - 1;
+   auto AllocateNoHint = [&]() -> void* {
+     bool Wrapped = false;
+     uint64_t BottomPage = Map32Bit && (LastScanLocation >= LastKeyLocation32Bit) ? LastKeyLocation32Bit : LastScanLocation;
+ restart: {
+   // Linear range scan
+-  uint64_t LowerPage = (this->*FindPageRangePtr)(BottomPage, PagesLength);
+-  if (LowerPage == 0) {
++  uint64_t FoundPage = (this->*FindPageRangePtr)(BottomPage, SearchLength);
++  if (FoundPage == 0) {
+     // Try again but this time from the start
+     BottomPage = Map32Bit ? LastKeyLocation32Bit : LastKeyLocation;
+-    LowerPage = (this->*FindPageRangePtr)(BottomPage, PagesLength);
++    FoundPage = (this->*FindPageRangePtr)(BottomPage, SearchLength);
+   }
+ 
+-  uint64_t UpperPage = LowerPage + PagesLength;
+-  if (LowerPage == 0) {
++  uint64_t UpperPage = FoundPage + SearchLength;
++  if (FoundPage == 0) {
+     return reinterpret_cast<void*>(-ENOMEM);
+   }
++  const uint64_t LowerPage = FEXCore::AlignUp(FoundPage, HostPages);
+   {
+     // Try and map the range
+-    void* MappedPtr =
+-      ::mmap(reinterpret_cast<void*>(LowerPage << FEXCore::Utils::FEX_PAGE_SHIFT), length, prot, flags | FEX_MAP_FIXED_NOREPLACE, fd, offset);
++    // With a guest base the whole window is our own PROT_NONE reservation:
++    // the bitset is the truth, so map FIXED over it; NOREPLACE would only
++    // ever see the reservation and say EEXIST.
++    void* MappedPtr = ::mmap(reinterpret_cast<void*>(G2H(LowerPage << FEXCore::Utils::FEX_PAGE_SHIFT)), length, HostProt(prot),
++                             GuestBase ? ((flags & ~FEX_MAP_FIXED_NOREPLACE) | MAP_FIXED) : (flags | FEX_MAP_FIXED_NOREPLACE), fd, offset);
+ 
+     if (MappedPtr == MAP_FAILED && errno != EEXIST) {
+       return reinterpret_cast<void*>(-errno);
+@@ -201,7 +231,7 @@ restart: {
+         BottomPage = BASE_KEY;
+         Wrapped = true;
+         goto restart;
+-      } else if (Wrapped && LowerPage >= LastScanLocation) {
++      } else if (Wrapped && FoundPage >= LastScanLocation) {
+         // We linear scanned the entire memory range. Give up
+         return (void*)(uintptr_t)-errno;
+       } else {
+@@ -219,8 +249,8 @@ restart: {
+       } else {
+         LastScanLocation = UpperPage;
+       }
+-      SetUsedPages(LowerPage, PagesLength);
+-      return MappedPtr;
++      SetUsedPages(LowerPage, FEXCore::AlignUp(PagesLength, HostPages));
++      return reinterpret_cast<void*>(H2G(reinterpret_cast<uint64_t>(MappedPtr)));
+     }
+   }
+ }
+@@ -230,12 +260,21 @@ restart: {
+   if (Addr == 0) {
+     return AllocateNoHint();
+   } else {
+-    void* MappedPtr = ::mmap(reinterpret_cast<void*>(PageAddr << FEXCore::Utils::FEX_PAGE_SHIFT),
+-                             PagesLength << FEXCore::Utils::FEX_PAGE_SHIFT, prot, flags, fd, offset);
++    if (GuestBase && (flags & FEX_MAP_FIXED_NOREPLACE)) {
++      // NOREPLACE against our own reservation: the bitset decides.
++      for (size_t i = 0; i < PagesLength; ++i) {
++        if (MappedPages.test(PageAddr + i)) {
++          return reinterpret_cast<void*>(-EEXIST);
++        }
++      }
++      flags = (flags & ~FEX_MAP_FIXED_NOREPLACE) | MAP_FIXED;
++    }
++    void* MappedPtr = ::mmap(reinterpret_cast<void*>(G2H(PageAddr << FEXCore::Utils::FEX_PAGE_SHIFT)),
++                             PagesLength << FEXCore::Utils::FEX_PAGE_SHIFT, HostProt(prot), flags, fd, offset);
+ 
+     if (MappedPtr != MAP_FAILED) {
+       SetUsedPages(PageAddr, PagesLength);
+-      return MappedPtr;
++      return reinterpret_cast<void*>(H2G(reinterpret_cast<uint64_t>(MappedPtr)));
+     } else {
+       return reinterpret_cast<void*>(-errno);
+     }
+@@ -257,9 +296,13 @@ int MemAllocator32Bit::Munmap(void* addr, size_t length) {
+     return -EINVAL;
+   }
+ 
+-  if (length & ~FEXCore::Utils::FEX_PAGE_MASK) {
+-    return -EINVAL;
+-  }
++  // Linux: "addr must be a multiple of the page size (but length need not
++  // be)" -- the tail rounds up. Returning EINVAL here leaked every mapping a
++  // guest unmapped with its file size: pressure-vessel's 32-bit
++  // capsule-capture-libs mapped Mesa's 154 MB driver once per DRI module,
++  // unmapped none of them, ran out of the 4 GiB and crashed on a NULL from
++  // malloc (MEASURED: 3.7 GB live, 7 copies of the driver).
++  length = FEXCore::AlignUp(length, FEXCore::Utils::FEX_PAGE_SIZE);
+ 
+   if (Addr + length > std::numeric_limits<uint32_t>::max()) {
+     return -EOVERFLOW;
+@@ -271,10 +314,20 @@ int MemAllocator32Bit::Munmap(void* addr, size_t length) {
+     return 0;
+   }
+ 
++  // With a guest base, hand the range back to the reservation rather than
++  // to the host (nothing else may ever land inside the window), in ONE
++  // mapping: re-reserving page by page left one host VM object and map entry
++  // per page, and wine's multi-GiB reservations exhausted the kernel's zones
++  // until the Mac hung (MEASURED: 107k entries in 5 s).
++  if (GuestBase && PageAddr != PageEnd &&
++      ::mmap(reinterpret_cast<void*>(G2H(PageAddr << FEXCore::Utils::FEX_PAGE_SHIFT)), length, PROT_NONE,
++             MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED | MAP_NORESERVE, -1, 0) == MAP_FAILED) {
++    return -errno;
++  }
++
+   while (PageAddr != PageEnd) {
+     // Always pass to munmap, it may be something allocated we aren't tracking
+-    int Result = ::munmap(reinterpret_cast<void*>(PageAddr << FEXCore::Utils::FEX_PAGE_SHIFT), FEXCore::Utils::FEX_PAGE_SIZE);
+-    if (Result != 0) {
++    if (!GuestBase && ::munmap(reinterpret_cast<void*>(PageAddr << FEXCore::Utils::FEX_PAGE_SHIFT), FEXCore::Utils::FEX_PAGE_SIZE) != 0) {
+       return -errno;
+     }
+ 
+@@ -295,9 +348,10 @@ void* MemAllocator32Bit::Mremap(void* old_address, size_t old_size, size_t new_s
+   {
+     std::scoped_lock<std::mutex> lk {AllocMutex};
+     if (flags & MREMAP_FIXED) {
+-      void* MappedPtr = ::mremap(old_address, old_size, new_size, flags, new_address);
++      void* MappedPtr = ::mremap(G2H(old_address), old_size, new_size, flags, (flags & MREMAP_FIXED) ? G2H(new_address) : new_address);
+ 
+       if (MappedPtr != MAP_FAILED) {
++        MappedPtr = reinterpret_cast<void*>(H2G(reinterpret_cast<uint64_t>(MappedPtr)));
+         if (!(flags & MREMAP_DONTUNMAP)) {
+           // Unmap the old location
+           uintptr_t OldAddr = reinterpret_cast<uintptr_t>(old_address);
+@@ -315,9 +369,10 @@ void* MemAllocator32Bit::Mremap(void* old_address, size_t old_size, size_t new_s
+       uintptr_t OldPageAddr = OldAddr >> FEXCore::Utils::FEX_PAGE_SHIFT;
+ 
+       if (NewPagesLength < OldPagesLength) {
+-        void* MappedPtr = ::mremap(old_address, old_size, new_size, flags & ~MREMAP_MAYMOVE);
++        void* MappedPtr = ::mremap(G2H(old_address), old_size, new_size, flags & ~MREMAP_MAYMOVE);
+ 
+         if (MappedPtr != MAP_FAILED) {
++          MappedPtr = reinterpret_cast<void*>(H2G(reinterpret_cast<uint64_t>(MappedPtr)));
+           // Clear the pages that we just shrunk
+           size_t NewPagesLength = FEXCore::AlignUp(new_size, FEXCore::Utils::FEX_PAGE_SIZE) >> FEXCore::Utils::FEX_PAGE_SHIFT;
+           uintptr_t NewPageAddr = reinterpret_cast<uintptr_t>(MappedPtr) >> FEXCore::Utils::FEX_PAGE_SHIFT;
+@@ -338,9 +393,10 @@ void* MemAllocator32Bit::Mremap(void* old_address, size_t old_size, size_t new_s
+         }
+ 
+         if (CanExtend) {
+-          void* MappedPtr = ::mremap(old_address, old_size, new_size, flags & ~MREMAP_MAYMOVE);
++          void* MappedPtr = ::mremap(G2H(old_address), old_size, new_size, flags & ~MREMAP_MAYMOVE);
+ 
+           if (MappedPtr != MAP_FAILED) {
++            MappedPtr = reinterpret_cast<void*>(H2G(reinterpret_cast<uint64_t>(MappedPtr)));
+             // Map the new pages
+             size_t NewPagesLength = FEXCore::AlignUp(new_size, FEXCore::Utils::FEX_PAGE_SIZE) >> FEXCore::Utils::FEX_PAGE_SHIFT;
+             uintptr_t NewAddr = reinterpret_cast<uintptr_t>(MappedPtr);
+@@ -369,9 +425,10 @@ void* MemAllocator32Bit::Mremap(void* old_address, size_t old_size, size_t new_s
+ 
+   // Good news, we found a region
+   // This will overwrite the previous mmap if it succeeds
+-  MappedPtr = ::mremap(old_address, old_size, new_size, flags | MREMAP_FIXED | MREMAP_MAYMOVE, MappedPtr);
++  MappedPtr = ::mremap(G2H(old_address), old_size, new_size, flags | MREMAP_FIXED | MREMAP_MAYMOVE, G2H(MappedPtr));
+ 
+   if (MappedPtr != MAP_FAILED) {
++    MappedPtr = reinterpret_cast<void*>(H2G(reinterpret_cast<uint64_t>(MappedPtr)));
+     if (!(flags & MREMAP_DONTUNMAP) && MappedPtr != old_address) {
+       // If we have both MREMAP_DONTUNMAP not set and the new pointer is at a new location
+       // Make sure to clear the old mapping
+@@ -395,7 +452,10 @@ uint64_t MemAllocator32Bit::Shmat(int shmid, const void* shmaddr, int shmflg, ui
+ 
+   if (shmaddr != nullptr) {
+     // shmaddr must be valid
+-    uint64_t Result = reinterpret_cast<uint64_t>(::shmat(shmid, shmaddr, shmflg));
++    uint64_t Result = reinterpret_cast<uint64_t>(::shmat(shmid, shmaddr ? G2H(shmaddr) : shmaddr, shmflg));
++    if (Result != ~0ULL) {
++      Result = H2G(Result);
++    }
+     if (Result != -1) {
+       uint32_t SmallRet = Result >> 32;
+       if (!(SmallRet == 0 || SmallRet == ~0U)) {
+@@ -431,37 +491,47 @@ uint64_t MemAllocator32Bit::Shmat(int shmid, const void* shmaddr, int shmflg, ui
+     struct shmid_ds buf {};
+     uint64_t PagesLength {};
+ 
++    // Under a guest base the host maps shared memory in 16 KiB pages (Darwin
++    // arm64): the attach address must be 16 KiB aligned and the segment
++    // owns whole host pages, so search with slack and align inside it.
++    const uint64_t HostPages = FEX::HLE::GuestBase ? 4 : 1;
+     if (shmctl(shmid, IPC_STAT, &buf) == 0) {
+       PagesLength = FEXCore::AlignUp(buf.shm_segsz, FEXCore::Utils::FEX_PAGE_SIZE) >> FEXCore::Utils::FEX_PAGE_SHIFT;
++      PagesLength = FEXCore::AlignUp(PagesLength, HostPages);
+     } else {
+       return -EINVAL;
+     }
++    const uint64_t SearchLength = PagesLength + HostPages - 1;
+ 
+     bool Wrapped = false;
+     uint64_t BottomPage = LastScanLocation;
+ restart: {
+   // Linear range scan
+-  uint64_t LowerPage = (this->*FindPageRangePtr)(BottomPage, PagesLength);
+-  if (LowerPage == 0) {
++  uint64_t FoundPage = (this->*FindPageRangePtr)(BottomPage, SearchLength);
++  if (FoundPage == 0) {
+     // Try again but this time from the start
+     BottomPage = LastKeyLocation;
+-    LowerPage = (this->*FindPageRangePtr)(BottomPage, PagesLength);
++    FoundPage = (this->*FindPageRangePtr)(BottomPage, SearchLength);
+   }
+ 
+-  uint64_t UpperPage = LowerPage + PagesLength;
+-  if (LowerPage == 0) {
++  uint64_t UpperPage = FoundPage + SearchLength;
++  if (FoundPage == 0) {
+     return -ENOMEM;
+   }
++  const uint64_t LowerPage = FEXCore::AlignUp(FoundPage, HostPages);
+   {
+     // Try and map the range
+-    void* MappedPtr = ::shmat(shmid, reinterpret_cast<const void*>(LowerPage << FEXCore::Utils::FEX_PAGE_SHIFT), shmflg);
++    void* MappedPtr = ::shmat(shmid, reinterpret_cast<const void*>(G2H(LowerPage << FEXCore::Utils::FEX_PAGE_SHIFT)), shmflg);
++    if (MappedPtr != MAP_FAILED) {
++      MappedPtr = reinterpret_cast<void*>(H2G(reinterpret_cast<uint64_t>(MappedPtr)));
++    }
+ 
+     if (MappedPtr == MAP_FAILED) {
+       if (UpperPage == TOP_KEY) {
+         BottomPage = LastKeyLocation;
+         Wrapped = true;
+         goto restart;
+-      } else if (Wrapped && LowerPage >= LastScanLocation) {
++      } else if (Wrapped && FoundPage >= LastScanLocation) {
+         // We linear scanned the entire memory range. Give up
+         return -errno;
+       } else {
+@@ -473,7 +543,7 @@ restart: {
+       if (SearchDown) {
+         LastScanLocation = LowerPage;
+       } else {
+-        LastScanLocation = UpperPage;
++        LastScanLocation = LowerPage + PagesLength;
+       }
+       // Set the range as mapped
+       SetUsedPages(LowerPage, PagesLength);
+@@ -505,12 +575,14 @@ uint64_t MemAllocator32Bit::Shmdt(const void* shmaddr) {
+   struct shmid_ds buf {};
+   if (shmctl(shmid, IPC_STAT, &buf) == 0) {
+     size_t PagesLength = FEXCore::AlignUp(buf.shm_segsz, FEXCore::Utils::FEX_PAGE_SIZE) >> FEXCore::Utils::FEX_PAGE_SHIFT;
++    // Same whole-host-page rounding as the attach (Shmat).
++    PagesLength = FEXCore::AlignUp(PagesLength, FEX::HLE::GuestBase ? 4 : 1);
+     SetFreePages(AddrPage, PagesLength);
+   } else {
+     LOGMAN_MSG_A_FMT("Failed to get shm size during shmdt");
+   }
+ 
+-  uint64_t Result = ::shmdt(shmaddr);
++  uint64_t Result = ::shmdt(G2H(shmaddr));
+ 
+   if (Result == 0) {
+     PageToShm.erase(it);
+diff --git a/Source/Tools/LinuxEmulation/LinuxSyscalls/SignalDelegator.cpp b/Source/Tools/LinuxEmulation/LinuxSyscalls/SignalDelegator.cpp
+index 6d6c899f7..d660acb19 100644
+--- a/Source/Tools/LinuxEmulation/LinuxSyscalls/SignalDelegator.cpp
++++ b/Source/Tools/LinuxEmulation/LinuxSyscalls/SignalDelegator.cpp
+@@ -7,6 +7,7 @@ $end_info$
+ */
+ 
+ #include "LinuxSyscalls/SignalDelegator.h"
++#include "LinuxSyscalls/GuestBase.h"
+ #include "LinuxSyscalls/Syscalls.h"
+ 
+ #include <FEXCore/Core/Context.h>
+@@ -248,7 +249,8 @@ void SignalDelegator::RestoreThreadState(FEXCore::Core::InternalThreadState* Thr
+       }
+     }
+ 
+-    OldSP = *reinterpret_cast<uint64_t*>(GuestSP);
++    // Guest base: GuestSP is a guest address.
++    OldSP = *reinterpret_cast<uint64_t*>(FEX::HLE::G2H(GuestSP));
+   }
+ 
+   uintptr_t NewSP = OldSP;
+diff --git a/Source/Tools/LinuxEmulation/LinuxSyscalls/SignalDelegator/GuestFramesManagement.cpp b/Source/Tools/LinuxEmulation/LinuxSyscalls/SignalDelegator/GuestFramesManagement.cpp
+index 2401fe496..62a721c82 100644
+--- a/Source/Tools/LinuxEmulation/LinuxSyscalls/SignalDelegator/GuestFramesManagement.cpp
++++ b/Source/Tools/LinuxEmulation/LinuxSyscalls/SignalDelegator/GuestFramesManagement.cpp
+@@ -7,6 +7,7 @@ $end_info$
+ */
+ 
+ #include "LinuxSyscalls/SignalDelegator.h"
++#include "LinuxSyscalls/GuestBase.h"
+ 
+ #include <FEXCore/Core/Context.h>
+ #include <FEXCore/Core/SignalDelegator.h>
+@@ -124,8 +125,8 @@ static void SetXStateInfo(T* xstate, bool is_avx_enabled) {
+ 
+ void SignalDelegator::RestoreFrame_x64(FEXCore::Core::InternalThreadState* Thread, ArchHelpers::Context::ContextBackup* Context,
+                                        FEXCore::Core::CpuStateFrame* Frame, void* ucontext) {
+-  auto* guest_uctx = reinterpret_cast<FEXCore::x86_64::ucontext_t*>(Context->UContextLocation);
+-  [[maybe_unused]] auto* guest_siginfo = reinterpret_cast<siginfo_t*>(Context->SigInfoLocation);
++  auto* guest_uctx = reinterpret_cast<FEXCore::x86_64::ucontext_t*>(G2H(Context->UContextLocation));
++  [[maybe_unused]] auto* guest_siginfo = reinterpret_cast<siginfo_t*>(G2H(Context->SigInfoLocation));
+ 
+   // If the guest modified the RIP then we need to take special precautions here
+   if (Context->OriginalRIP != guest_uctx->uc_mcontext.gregs[FEXCore::x86_64::FEX_REG_RIP] || Context->FaultToTopAndGeneratedException) {
+@@ -171,7 +172,7 @@ void SignalDelegator::RestoreFrame_x64(FEXCore::Core::InternalThreadState* Threa
+     COPY_REG(RCX);
+     COPY_REG(RSP);
+ #undef COPY_REG
+-    auto* xstate = reinterpret_cast<FEXCore::x86_64::xstate*>(guest_uctx->uc_mcontext.fpregs);
++    auto* xstate = reinterpret_cast<FEXCore::x86_64::xstate*>(G2H(guest_uctx->uc_mcontext.fpregs));
+     auto* fpstate = &xstate->fpstate;
+ 
+     if (SupportsAVX) {
+@@ -207,7 +208,7 @@ void SignalDelegator::RestoreFrame_x64(FEXCore::Core::InternalThreadState* Threa
+ 
+ void SignalDelegator::RestoreFrame_ia32(FEXCore::Core::InternalThreadState* Thread, ArchHelpers::Context::ContextBackup* Context,
+                                         FEXCore::Core::CpuStateFrame* Frame, void* ucontext) {
+-  SigFrame_i32* guest_uctx = reinterpret_cast<SigFrame_i32*>(Context->UContextLocation);
++  SigFrame_i32* guest_uctx = reinterpret_cast<SigFrame_i32*>(G2H(Context->UContextLocation));
+   // If the guest modified the RIP then we need to take special precautions here
+   if (Context->OriginalRIP != guest_uctx->sc.ip || Context->FaultToTopAndGeneratedException) {
+     // Restore previous `InSyscallInfo` structure.
+@@ -248,7 +249,7 @@ void SignalDelegator::RestoreFrame_ia32(FEXCore::Core::InternalThreadState* Thre
+     COPY_REG(RCX, cx);
+     COPY_REG(RSP, sp);
+ #undef COPY_REG
+-    auto* xstate = reinterpret_cast<FEXCore::x86::xstate*>(guest_uctx->sc.fpstate);
++    auto* xstate = reinterpret_cast<FEXCore::x86::xstate*>(G2H(guest_uctx->sc.fpstate));
+     auto* fpstate = &xstate->fpstate;
+ 
+     // Extended XMM state
+@@ -285,7 +286,7 @@ void SignalDelegator::RestoreFrame_ia32(FEXCore::Core::InternalThreadState* Thre
+ 
+ void SignalDelegator::RestoreRTFrame_ia32(FEXCore::Core::InternalThreadState* Thread, ArchHelpers::Context::ContextBackup* Context,
+                                           FEXCore::Core::CpuStateFrame* Frame, void* ucontext) {
+-  RTSigFrame_i32* guest_uctx = reinterpret_cast<RTSigFrame_i32*>(Context->UContextLocation);
++  RTSigFrame_i32* guest_uctx = reinterpret_cast<RTSigFrame_i32*>(G2H(Context->UContextLocation));
+   // If the guest modified the RIP then we need to take special precautions here
+   if (Context->OriginalRIP != guest_uctx->uc.uc_mcontext.gregs[FEXCore::x86::FEX_REG_EIP] || Context->FaultToTopAndGeneratedException) {
+ 
+@@ -327,7 +328,7 @@ void SignalDelegator::RestoreRTFrame_ia32(FEXCore::Core::InternalThreadState* Th
+     COPY_REG(RCX);
+     COPY_REG(RSP);
+ #undef COPY_REG
+-    auto* xstate = reinterpret_cast<FEXCore::x86::xstate*>(guest_uctx->uc.uc_mcontext.fpregs);
++    auto* xstate = reinterpret_cast<FEXCore::x86::xstate*>(G2H(guest_uctx->uc.uc_mcontext.fpregs));
+     auto* fpstate = &xstate->fpstate;
+ 
+     // Extended XMM state
+@@ -406,17 +407,17 @@ uint64_t SignalDelegator::SetupFrame_x64(FEXCore::Core::InternalThreadState* Thr
+   ContextBackup->UContextLocation = UContextLocation;
+   ContextBackup->SigInfoLocation = SigInfoLocation;
+ 
+-  FEXCore::x86_64::ucontext_t* guest_uctx = reinterpret_cast<FEXCore::x86_64::ucontext_t*>(UContextLocation);
+-  siginfo_t* guest_siginfo = reinterpret_cast<siginfo_t*>(SigInfoLocation);
++  FEXCore::x86_64::ucontext_t* guest_uctx = reinterpret_cast<FEXCore::x86_64::ucontext_t*>(G2H(UContextLocation));
++  siginfo_t* guest_siginfo = reinterpret_cast<siginfo_t*>(G2H(SigInfoLocation));
+   // Store where the host context lives in the guest stack.
+-  *(uint64_t*)HostStackLocation = (uint64_t)ContextBackup;
++  *(uint64_t*)G2H(HostStackLocation) = (uint64_t)ContextBackup;
+ 
+   // We have extended float information
+   guest_uctx->uc_flags = FEXCore::x86_64::UC_FP_XSTATE | FEXCore::x86_64::UC_SIGCONTEXT_SS | FEXCore::x86_64::UC_STRICT_RESTORE_SS;
+ 
+   // Pointer to where the fpreg memory is
+   guest_uctx->uc_mcontext.fpregs = reinterpret_cast<FEXCore::x86_64::_libc_fpstate*>(FPStateLocation);
+-  auto* xstate = reinterpret_cast<FEXCore::x86_64::xstate*>(FPStateLocation);
++  auto* xstate = reinterpret_cast<FEXCore::x86_64::xstate*>(G2H(FPStateLocation));
+   SetXStateInfo(xstate, SupportsAVX);
+ 
+   guest_uctx->uc_mcontext.gregs[FEXCore::x86_64::FEX_REG_RIP] = ContextBackup->OriginalRIP;
+@@ -431,6 +432,10 @@ uint64_t SignalDelegator::SetupFrame_x64(FEXCore::Core::InternalThreadState* Thr
+   // SI_USER could also potentially have random data in it, needs to be bit perfect
+   // For guest faults we don't have a real way to reconstruct state to a real guest RIP
+   *guest_siginfo = *HostSigInfo;
++  if (Signal == SIGSEGV || Signal == SIGBUS) {
++    // Guest base: the host fault address is base + guest.
++    guest_siginfo->si_addr = reinterpret_cast<void*>(FEX::HLE::H2G(reinterpret_cast<uint64_t>(HostSigInfo->si_addr)));
++  }
+ 
+   if (ContextBackup->FaultToTopAndGeneratedException) {
+     guest_uctx->uc_mcontext.gregs[FEXCore::x86_64::FEX_REG_TRAPNO] = Frame->SynchronousFaultData.TrapNo;
+@@ -511,10 +516,10 @@ uint64_t SignalDelegator::SetupFrame_x64(FEXCore::Core::InternalThreadState* Thr
+   // TODO: Emulate SIGSEGV when the guest doesn't provide a restorer.
+   NewGuestSP -= 8;
+   if (GuestAction->restorer) {
+-    *(uint64_t*)NewGuestSP = (uint64_t)GuestAction->restorer;
++    *(uint64_t*)G2H(NewGuestSP) = (uint64_t)GuestAction->restorer;
+   } else {
+     // XXX: Emulate SIGSEGV here
+-    // *(uint64_t*)NewGuestSP = SignalReturn;
++    // *(uint64_t*)G2H(NewGuestSP) = SignalReturn;
+   }
+ 
+   return NewGuestSP;
+@@ -549,13 +554,13 @@ uint64_t SignalDelegator::SetupFrame_ia32(FEXCore::Core::InternalThreadState* Th
+   ContextBackup->UContextLocation = SigFrameLocation;
+   ContextBackup->SigInfoLocation = 0;
+ 
+-  SigFrame_i32* guest_uctx = reinterpret_cast<SigFrame_i32*>(SigFrameLocation);
++  SigFrame_i32* guest_uctx = reinterpret_cast<SigFrame_i32*>(G2H(SigFrameLocation));
+   // Store where the host context lives in the guest stack.
+-  *(uint64_t*)HostStackLocation = (uint64_t)ContextBackup;
++  *(uint64_t*)G2H(HostStackLocation) = (uint64_t)ContextBackup;
+ 
+   // Pointer to where the fpreg memory is
+   guest_uctx->sc.fpstate = static_cast<uint32_t>(FPStateLocation);
+-  auto* xstate = reinterpret_cast<FEXCore::x86::xstate*>(FPStateLocation);
++  auto* xstate = reinterpret_cast<FEXCore::x86::xstate*>(G2H(FPStateLocation));
+   SetXStateInfo(xstate, SupportsAVX);
+ 
+   guest_uctx->sc.cs = Frame->State.cs_idx;
+@@ -676,9 +681,9 @@ uint64_t SignalDelegator::SetupRTFrame_ia32(FEXCore::Core::InternalThreadState*
+   NewGuestSP = FEXCore::AlignDown(NewGuestSP, alignof(RTSigFrame_i32));
+ 
+   uint64_t SigFrameLocation = NewGuestSP;
+-  RTSigFrame_i32* guest_uctx = reinterpret_cast<RTSigFrame_i32*>(SigFrameLocation);
++  RTSigFrame_i32* guest_uctx = reinterpret_cast<RTSigFrame_i32*>(G2H(SigFrameLocation));
+   // Store where the host context lives in the guest stack.
+-  *(uint64_t*)HostStackLocation = (uint64_t)ContextBackup;
++  *(uint64_t*)G2H(HostStackLocation) = (uint64_t)ContextBackup;
+ 
+   ContextBackup->FPStateLocation = FPStateLocation;
+   ContextBackup->UContextLocation = SigFrameLocation;
+@@ -690,7 +695,7 @@ uint64_t SignalDelegator::SetupRTFrame_ia32(FEXCore::Core::InternalThreadState*
+ 
+   // Pointer to where the fpreg memory is
+   guest_uctx->uc.uc_mcontext.fpregs = static_cast<uint32_t>(FPStateLocation);
+-  auto* xstate = reinterpret_cast<FEXCore::x86::xstate*>(FPStateLocation);
++  auto* xstate = reinterpret_cast<FEXCore::x86::xstate*>(G2H(FPStateLocation));
+   SetXStateInfo(xstate, SupportsAVX);
+ 
+   guest_uctx->uc.uc_mcontext.gregs[FEXCore::x86::FEX_REG_CS] = Frame->State.cs_idx;
+@@ -790,7 +795,7 @@ uint64_t SignalDelegator::SetupRTFrame_ia32(FEXCore::Core::InternalThreadState*
+   case SigInfoLayout::LAYOUT_FAULT:
+     // Macro expansion to get the si_addr
+     // This is the address trying to be accessed, not the RIP
+-    guest_uctx->info._sifields._sigfault.addr = static_cast<uint32_t>(reinterpret_cast<uintptr_t>(HostSigInfo->si_addr));
++    guest_uctx->info._sifields._sigfault.addr = static_cast<uint32_t>(FEX::HLE::H2G(reinterpret_cast<uintptr_t>(HostSigInfo->si_addr)));
+     break;
+   case SigInfoLayout::LAYOUT_FAULT_RIP:
+     // Macro expansion to get the si_addr
+@@ -822,8 +827,8 @@ uint64_t SignalDelegator::SetupRTFrame_ia32(FEXCore::Core::InternalThreadState*
+ 
+   // Setup the guest stack context.
+   guest_uctx->Signal = Signal;
+-  guest_uctx->pinfo = (uint32_t)(uint64_t)&guest_uctx->info;
+-  guest_uctx->puc = (uint32_t)(uint64_t)&guest_uctx->uc;
++  guest_uctx->pinfo = (uint32_t)FEX::HLE::H2G(reinterpret_cast<uint64_t>(&guest_uctx->info));
++  guest_uctx->puc = (uint32_t)FEX::HLE::H2G(reinterpret_cast<uint64_t>(&guest_uctx->uc));
+ 
+   // Retcode needs to be bit-exact for debuggers
+   constexpr static uint8_t rt_retcode[] = {
+diff --git a/Source/Tools/LinuxEmulation/LinuxSyscalls/Syscalls.cpp b/Source/Tools/LinuxEmulation/LinuxSyscalls/Syscalls.cpp
+index 6f4f19fc9..9e0612480 100644
+--- a/Source/Tools/LinuxEmulation/LinuxSyscalls/Syscalls.cpp
++++ b/Source/Tools/LinuxEmulation/LinuxSyscalls/Syscalls.cpp
+@@ -15,6 +15,7 @@ $end_info$
+ 
+ #include "LinuxSyscalls/LinuxAllocator.h"
+ #include "LinuxSyscalls/SignalDelegator.h"
++#include "LinuxSyscalls/GuestBase.h"
+ #include "LinuxSyscalls/Syscalls.h"
+ #include "LinuxSyscalls/Syscalls/Thread.h"
+ #include "LinuxSyscalls/Utils/Threads.h"
+@@ -64,6 +65,9 @@ $end_info$
+ #include <unistd.h>
+ 
+ namespace FEX::HLE {
++uint64_t GuestBase {};
++bool NoSharedVMProcesses {};
++
+ class SignalDelegator;
+ SyscallHandler* _SyscallHandler {};
+ 
+@@ -197,6 +201,27 @@ static fextl::string GetShebangInterpFilename(const fextl::string& Filename) {
+ }
+ 
+ uint64_t ExecveHandler(FEXCore::Core::CpuStateFrame* Frame, const char* pathname, char* const* argv, char* const* envp, ExecveAtArgs Args) {
++  // Guest base: the arrays themselves arrive as host pointers (syscall thunk /
++  // compat layer), their elements are still guest pointers. G2H is
++  // idempotent and the identity without a base.
++  fextl::vector<char*> BasedArgv;
++  fextl::vector<char*> BasedEnvp;
++  if (FEX::HLE::GuestBase) {
++    if (argv) {
++      for (size_t i = 0; argv[i]; i++) {
++        BasedArgv.push_back(static_cast<char*>(FEX::HLE::G2H(argv[i])));
++      }
++      BasedArgv.push_back(nullptr);
++      argv = BasedArgv.data();
++    }
++    if (envp) {
++      for (size_t i = 0; envp[i]; i++) {
++        BasedEnvp.push_back(static_cast<char*>(FEX::HLE::G2H(envp[i])));
++      }
++      BasedEnvp.push_back(nullptr);
++      envp = BasedEnvp.data();
++    }
++  }
+   auto SyscallHandler = FEX::HLE::_SyscallHandler;
+   Frame->Thread->CTX->FlushAndCloseCodeMap();
+ 
+@@ -589,6 +614,16 @@ static uint64_t Clone3Handler(FEXCore::Core::CpuStateFrame* Frame, FEX::HLE::clo
+ };
+ 
+ uint64_t CloneHandler(FEXCore::Core::CpuStateFrame* Frame, FEX::HLE::clone3_args* args) {
++  if (FEX::HLE::NoSharedVMProcesses && (args->args.flags & (CLONE_VM | CLONE_THREAD)) == CLONE_VM) {
++    // A new process sharing the parent's memory (posix_spawn's
++    // CLONE_VM|CLONE_VFORK) cannot exist on the lxrt runtime: its clone is a
++    // real fork, so the host-side clone below would run the child on a copy
++    // of memory it expects to share, with the parent's fork locks never
++    // released in it (measured: steam's spawned children faulted in FEX with
++    // a clobbered global). Drop CLONE_VM so ForkGuest handles it the way FEX
++    // already handles vfork -- fork, then the parent waits for exec or exit.
++    args->args.flags &= ~uint64_t(CLONE_VM);
++  }
+   uint64_t flags = args->args.flags;
+ 
+   if (flags & CLONE_CLEAR_SIGHAND) {
+diff --git a/Source/Tools/LinuxEmulation/LinuxSyscalls/Syscalls/Thread.cpp b/Source/Tools/LinuxEmulation/LinuxSyscalls/Syscalls/Thread.cpp
+index 0a51b98a3..999b6cc7c 100644
+--- a/Source/Tools/LinuxEmulation/LinuxSyscalls/Syscalls/Thread.cpp
++++ b/Source/Tools/LinuxEmulation/LinuxSyscalls/Syscalls/Thread.cpp
+@@ -9,6 +9,7 @@ $end_info$
+ 
+ #include "LinuxSyscalls/SignalDelegator.h"
+ #include "LinuxSyscalls/Syscalls.h"
++#include "LinuxSyscalls/GuestBase.h"
+ #include "LinuxSyscalls/Syscalls/Thread.h"
+ #include "LinuxSyscalls/x64/Syscalls.h"
+ #include "LinuxSyscalls/x64/Thread.h"
+@@ -138,20 +139,20 @@ FEX::HLE::ThreadStateObject* CreateNewThread(FEXCore::Context::Context* CTX, FEX
+ 
+   // Sets the child TID to pointer in ParentTID
+   if (flags & CLONE_PARENT_SETTID) {
+-    *reinterpret_cast<pid_t*>(args->args.parent_tid) = Result;
++    *reinterpret_cast<pid_t*>(G2H(args->args.parent_tid)) = Result;
+   }
+ 
+   // Sets the child TID to the pointer in ChildTID
+   if (flags & CLONE_CHILD_SETTID) {
+-    NewThread->ThreadInfo.set_child_tid = reinterpret_cast<int32_t*>(args->args.child_tid);
+-    *reinterpret_cast<pid_t*>(args->args.child_tid) = Result;
++    NewThread->ThreadInfo.set_child_tid = reinterpret_cast<int32_t*>(G2H(args->args.child_tid));
++    *reinterpret_cast<pid_t*>(G2H(args->args.child_tid)) = Result;
+   }
+ 
+   // When the thread exits, clear the child thread ID at ChildTID
+   // Additionally wakeup a futex at that address
+   // Address /may/ be changed with SET_TID_ADDRESS syscall
+   if (flags & CLONE_CHILD_CLEARTID) {
+-    NewThread->ThreadInfo.clear_child_tid = reinterpret_cast<int32_t*>(args->args.child_tid);
++    NewThread->ThreadInfo.clear_child_tid = reinterpret_cast<int32_t*>(G2H(args->args.child_tid));
+   }
+ 
+   // clone3 flag
+@@ -161,7 +162,7 @@ FEX::HLE::ThreadStateObject* CreateNewThread(FEXCore::Context::Context* CTX, FEX
+     if (pidfd == -1) {
+       LogMan::Msg::EFmt("Couldn't get pidfd of TID {}. errno={}\n", Result, errno);
+     } else {
+-      *reinterpret_cast<int*>(args->args.pidfd) = pidfd;
++      *reinterpret_cast<int*>(G2H(args->args.pidfd)) = pidfd;
+     }
+   }
+ 
+@@ -262,8 +263,8 @@ uint64_t ForkGuest(FEXCore::Core::InternalThreadState* Thread, FEXCore::Core::Cp
+   const uint64_t flags = args->args.flags;
+   auto stack = reinterpret_cast<const void*>(args->args.stack);
+   const uint64_t stack_size = args->args.stack_size;
+-  auto parent_tid = reinterpret_cast<pid_t*>(args->args.parent_tid);
+-  auto child_tid = reinterpret_cast<pid_t*>(args->args.child_tid);
++  auto parent_tid = reinterpret_cast<pid_t*>(G2H(args->args.parent_tid));
++  auto child_tid = reinterpret_cast<pid_t*>(G2H(args->args.child_tid));
+   auto tls = reinterpret_cast<void*>(args->args.tls);
+   const uint64_t exit_signal = args->args.exit_signal;
+ 
+@@ -561,6 +562,7 @@ void RegisterThread(FEX::HLE::SyscallHandler* Handler) {
+ 
+   REGISTER_SYSCALL_IMPL(set_tid_address, [](FEXCore::Core::CpuStateFrame* Frame, int* tidptr) -> uint64_t {
+     auto ThreadObject = FEX::HLE::ThreadManager::GetStateObjectFromCPUState(Frame);
++    // tidptr is already a host pointer (x32::RegisterSyscall bases pointer arguments).
+     ThreadObject->ThreadInfo.clear_child_tid = tidptr;
+     return ThreadObject->ThreadInfo.TID;
+   });
+diff --git a/Source/Tools/LinuxEmulation/LinuxSyscalls/SyscallsSMCTracking.cpp b/Source/Tools/LinuxEmulation/LinuxSyscalls/SyscallsSMCTracking.cpp
+index 6739f891c..d8f9cd930 100644
+--- a/Source/Tools/LinuxEmulation/LinuxSyscalls/SyscallsSMCTracking.cpp
++++ b/Source/Tools/LinuxEmulation/LinuxSyscalls/SyscallsSMCTracking.cpp
+@@ -19,6 +19,8 @@ $end_info$
+ #include <sys/shm.h>
+ 
+ #include "LinuxSyscalls/Syscalls.h"
++#include "LinuxSyscalls/GuestBase.h"
++#include <FEXCore/Utils/LxrtJit.h>
+ #include "LinuxSyscalls/SignalDelegator.h"
+ 
+ #include <FEXCore/Debug/InternalThreadState.h>
+@@ -45,8 +47,31 @@ static void HandleSegfaultForCodeCacheFinalization(FEXCore::Core::InternalThread
+ // - call-ret shadow stack overflow
+ // - guest-side self-modifying code (SMC)
+ // - lazy loading of mapped code cache pages
++// The unit the host enforces page protection in. Guest pages are 4 KiB, but
++// under the SteamARM Darwin runtime (LxrtJit::Available()) a host page is
++// 16 KiB and a 4 KiB mprotect only changes the union of the guest pages that
++// share it: write-protecting one code page next to a writable neighbour
++// protected nothing, guest SMC went unseen and stale translations ran (V8's
++// WebAssembly jump-table patching recompiled forever). SMC tracking therefore
++// protects and unprotects whole host pages, one writable VMA at a time --
++// for 64-bit guests only. A 32-bit guest (at a guest base) stays at 4 KiB:
++// there the host-page mode turned every data store next to code into an
++// invalidation (~1500 SIGBUS/s in the i386 Steam client) and the client
++// crashed within minutes with corrupted registers (MEASURED: alive 10+ min
++// at 4 KiB, dead after 4-6 at 16). Guest SMC inside a shared host page is
++// then missed for 32-bit guests (tests/elf/i386_smc_subpage.c) -- known gap.
++static uint64_t SMCPageSize() {
++  static const uint64_t Size =
++    (FEXCore::LxrtJit::Available() && _SyscallHandler && _SyscallHandler->Is64BitMode()) ? 0x4000 : FEXCore::Utils::FEX_PAGE_SIZE;
++  return Size;
++}
++
+ bool SyscallHandler::HandleSegfault(FEXCore::Core::InternalThreadState* Thread, int Signal, void* info, void* ucontext) {
+-  const auto FaultAddress = (uintptr_t)((siginfo_t*)info)->si_addr;
++  // A 32-bit guest at a base faults at host addresses; the VMA table and
++  // the guest's idea of the world are in guest addresses.
++  const auto HostFaultAddress = (uintptr_t)((siginfo_t*)info)->si_addr;
++  const auto FaultAddress = (GuestBase && HostFaultAddress >= GuestBase && HostFaultAddress < GuestBase + (1ULL << 32)) ?
++                              HostFaultAddress - GuestBase : HostFaultAddress;
+ 
+   auto ThreadObject = FEX::HLE::ThreadManager::GetStateObjectFromFEXCoreThread(Thread);
+   auto CallRetStackInfo = ThreadObject->GetCallRetStackInfo();
+@@ -83,9 +108,10 @@ bool SyscallHandler::HandleSegfault(FEXCore::Core::InternalThreadState* Thread,
+     }
+ 
+     auto FaultBase = FEXCore::AlignDown(FaultAddress, FEXCore::Utils::FEX_PAGE_SIZE);
++    const auto SMCPage = SMCPageSize();
+ 
+     auto UnprotectRegionCallback = [](uintptr_t Start, uintptr_t Length) {
+-      auto rv = mprotect((void*)Start, Length, PROT_READ | PROT_WRITE);
++      auto rv = mprotect((void*)FEX::HLE::G2H(Start), Length, PROT_READ | PROT_WRITE);
+       LogMan::Throw::AFmt(rv == 0, "mprotect({}, {}) failed", Start, Length);
+     };
+ 
+@@ -109,8 +135,29 @@ bool SyscallHandler::HandleSegfault(FEXCore::Core::InternalThreadState* Thread,
+           }
+         }
+       } while ((VMA = VMA->ResourceNextVMA));
+-    } else {
++    } else if (SMCPage == FEXCore::Utils::FEX_PAGE_SIZE) {
+       _SyscallHandler->TM.InvalidateGuestCodeRange(Thread, FaultBase, FEXCore::Utils::FEX_PAGE_SIZE, UnprotectRegionCallback);
++    } else {
++      // Every guest page of the host page may hold code and was protected
++      // together; invalidate them all and make the writable ones writable
++      // again (a read-only neighbour stays read-only).
++      auto UnprotectWritableCallback = [](uintptr_t Start, uintptr_t Length) {
++        auto& VMAs = _SyscallHandler->VMATracking.VMAs;
++        auto It = VMAs.upper_bound(Start);
++        if (It != VMAs.begin()) {
++          --It;
++        }
++        for (; It != VMAs.end() && It->first < Start + Length; ++It) {
++          const auto Lo = std::max<uint64_t>(It->first, Start);
++          const auto Hi = std::min<uint64_t>(It->first + It->second.Length, Start + Length);
++          if (Lo < Hi && It->second.Prot.Writable) {
++            auto rv = mprotect((void*)FEX::HLE::G2H(Lo), Hi - Lo, PROT_READ | PROT_WRITE);
++            LogMan::Throw::AFmt(rv == 0, "mprotect({}, {}) failed", Lo, Hi - Lo);
++          }
++        }
++      };
++      FaultBase = FEXCore::AlignDown(FaultAddress, SMCPage);
++      _SyscallHandler->TM.InvalidateGuestCodeRange(Thread, FaultBase, SMCPage, UnprotectWritableCallback);
+     }
+ 
+     FEXCORE_PROFILE_INSTANT_INCREMENT(Thread, AccumulatedSMCCount, 1);
+@@ -134,8 +181,8 @@ bool SyscallHandler::HandleSegfault(FEXCore::Core::InternalThreadState* Thread,
+ }
+ 
+ void SyscallHandler::MarkGuestExecutableRange(FEXCore::Core::InternalThreadState* Thread, uint64_t Start, uint64_t Length) {
+-  const auto Base = Start & FEXCore::Utils::FEX_PAGE_MASK;
+-  const auto Top = FEXCore::AlignUp(Start + Length, FEXCore::Utils::FEX_PAGE_SIZE);
++  const auto Base = FEXCore::AlignDown(Start, SMCPageSize());
++  const auto Top = FEXCore::AlignUp(Start + Length, SMCPageSize());
+ 
+   {
+     if (SMCChecks != FEXCore::Config::CONFIG_SMC_MTRACK) {
+@@ -180,13 +227,13 @@ void SyscallHandler::MarkGuestExecutableRange(FEXCore::Core::InternalThreadState
+               const auto MirroredBase = std::max(VMAOffsetBase, OffsetBase);
+               const auto MirroredSize = std::min(OffsetTop, VMAOffsetTop) - MirroredBase;
+ 
+-              auto rv = mprotect((void*)(MirroredBase - VMAOffsetBase + VMABase), MirroredSize, PROT_READ);
++              auto rv = mprotect((void*)FEX::HLE::G2H(MirroredBase - VMAOffsetBase + VMABase), MirroredSize, PROT_READ);
+               LogMan::Throw::AFmt(rv == 0, "mprotect({}, {}) failed", MirroredBase, MirroredSize);
+             }
+           } while ((VMA = VMA->ResourceNextVMA));
+ 
+         } else if (Mapping->second.Prot.Writable) {
+-          int rv = mprotect((void*)ProtectBase, ProtectSize, PROT_READ);
++          int rv = mprotect((void*)FEX::HLE::G2H(ProtectBase), ProtectSize, PROT_READ);
+ 
+           LogMan::Throw::AFmt(rv == 0, "mprotect({}, {}) failed", ProtectBase, ProtectSize);
+         }
+@@ -317,6 +364,15 @@ void* SyscallHandler::GuestMmap(bool Is64Bit, FEXCore::Core::InternalThreadState
+     auto lk = FEXCore::GuardSignalDeferringSectionWithFallback(VMATracking.Mutex, Thread);
+ 
+     bool Map32Bit = !Is64Bit || (flags & FEX::HLE::X86_64_MAP_32BIT);
++    // 64-bit low window: a mapping the guest pins below 4 GiB (its ET_EXEC
++    // image, brk, MAP_FIXED) goes to the window through the bitset allocator,
++    // which also owns munmap/mremap of those pages (GuestMunmap routes every
++    // address below 4 GiB there).
++    constexpr int FEX_MAP_FIXED_NOREPLACE = 0x100000;
++    if (!Map32Bit && FEX::HLE::GuestBase && (flags & (MAP_FIXED | FEX_MAP_FIXED_NOREPLACE)) && addr &&
++        reinterpret_cast<uint64_t>(addr) + length <= (1ULL << 32)) {
++      Map32Bit = true;
++    }
+     if (Map32Bit) {
+       Result = (uint64_t)Get32BitAllocator()->Mmap((void*)addr, length, prot, flags, fd, offset);
+       if (FEX::HLE::HasSyscallError(Result)) {
+@@ -324,7 +380,9 @@ void* SyscallHandler::GuestMmap(bool Is64Bit, FEXCore::Core::InternalThreadState
+       }
+       LOGMAN_THROW_A_FMT(Is64Bit || (Result >> 32) == 0 || (Result >> 32) == 0xFFFFFFFF, "values must fit to 32 bits");
+     } else {
+-      Result = reinterpret_cast<uint64_t>(::mmap(reinterpret_cast<void*>(addr), length, prot, flags, fd, offset));
++      // Under the runtime the host never executes guest code (see below).
++      const int HostProt = FEXCore::LxrtJit::Available() ? (prot & ~PROT_EXEC) : prot;
++      Result = reinterpret_cast<uint64_t>(::mmap(reinterpret_cast<void*>(addr), length, HostProt, flags, fd, offset));
+       if (Result == ~0ULL) {
+         return reinterpret_cast<void*>(-errno);
+       }
+@@ -470,7 +528,16 @@ uint64_t SyscallHandler::GuestMprotect(FEXCore::Core::InternalThreadState* Threa
+ 
+   {
+     auto lk = FEXCore::GuardSignalDeferringSection(VMATracking.Mutex, Thread);
+-    Result = ::mprotect(addr, len, prot);
++    // 32-bit guest at a base: mprotect the HOST page, track the GUEST address.
++    void* HostAddr = (FEX::HLE::GuestBase && reinterpret_cast<uintptr_t>(addr) < 0x1'0000'0000ULL)
++                       ? FEX::HLE::G2H(addr) : addr;
++    // Guest-base memory is never host-executed (see LinuxAllocator.cpp HostProt).
++    // Guest memory is never host-executed: a 32-bit guest at a base never
++    // (LinuxAllocator.cpp HostProt), and under the SteamARM runtime no guest at
++    // all -- W|X there becomes Darwin MAP_JIT, whose per-thread W^X switch
++    // flipped on every guest data store (wineboot fault storm, MEASURED).
++    const bool NoExec = HostAddr != addr || FEXCore::LxrtJit::Available();
++    Result = ::mprotect(HostAddr, len, NoExec ? (prot & ~PROT_EXEC) : prot);
+     if (Result == -1) {
+       return -errno;
+     }
+diff --git a/Source/Tools/LinuxEmulation/LinuxSyscalls/ThreadManager.cpp b/Source/Tools/LinuxEmulation/LinuxSyscalls/ThreadManager.cpp
+index 69e10b3d2..58aca30e5 100644
+--- a/Source/Tools/LinuxEmulation/LinuxSyscalls/ThreadManager.cpp
++++ b/Source/Tools/LinuxEmulation/LinuxSyscalls/ThreadManager.cpp
+@@ -167,7 +167,8 @@ void ThreadManager::SetThreadName(const char* name) {
+   pthread_setname_np(pthread_self(), name);
+ }
+ 
+-constexpr size_t CALLRET_STACK_ALLOC_SIZE = FEXCore::Core::InternalThreadState::CALLRET_STACK_SIZE + 2 * FEXCore::Utils::FEX_PAGE_SIZE;
++constexpr size_t CALLRET_STACK_ALLOC_SIZE =
++  FEXCore::Core::InternalThreadState::CALLRET_STACK_SIZE + 2 * FEXCore::Core::InternalThreadState::CALLRET_GUARD_SIZE;
+ 
+ FEX::HLE::ThreadStateObject*
+ ThreadManager::CreateThread(const FEXCore::Core::CPUState* NewThreadState, uint64_t ParentTID, FEX::HLE::ThreadStateObject* InheritThread) {
+@@ -191,7 +192,7 @@ ThreadManager::CreateThread(const FEXCore::Core::CPUState* NewThreadState, uint6
+   FEXCore::Allocator::VirtualTHPControl(reinterpret_cast<void*>(AllocBase), CALLRET_STACK_ALLOC_SIZE, FEXCore::Allocator::THPControl::Disable);
+ 
+   // Set the base used for invalidation to the start past the guard pages
+-  ThreadStateObject->Thread->CallRetStackBase = reinterpret_cast<void*>(AllocBase + FEXCore::Utils::FEX_PAGE_SIZE);
++  ThreadStateObject->Thread->CallRetStackBase = reinterpret_cast<void*>(AllocBase + FEXCore::Core::InternalThreadState::CALLRET_GUARD_SIZE);
+   ::mprotect(ThreadStateObject->Thread->CallRetStackBase, FEXCore::Core::InternalThreadState::CALLRET_STACK_SIZE, PROT_READ | PROT_WRITE);
+   Frame->State.callret_sp = ThreadStateObject->GetCallRetStackInfo().DefaultLocation;
+ 
+diff --git a/Source/Tools/LinuxEmulation/LinuxSyscalls/ThreadManager.h b/Source/Tools/LinuxEmulation/LinuxSyscalls/ThreadManager.h
+index dfcd4b0eb..282356560 100644
+--- a/Source/Tools/LinuxEmulation/LinuxSyscalls/ThreadManager.h
++++ b/Source/Tools/LinuxEmulation/LinuxSyscalls/ThreadManager.h
+@@ -118,7 +118,8 @@ struct ThreadStateObject : public FEXCore::Allocator::FEXAllocOperators {
+   CallRetStackInfo GetCallRetStackInfo() {
+     uint64_t Base = reinterpret_cast<uint64_t>(Thread->CallRetStackBase);
+     // Leave some room from the base for the default location to allow for underflows without constant exceptions
+-    return {Base - FEXCore::Utils::FEX_PAGE_SIZE, Base + FEXCore::Core::InternalThreadState::CALLRET_STACK_SIZE + FEXCore::Utils::FEX_PAGE_SIZE,
++    return {Base - FEXCore::Core::InternalThreadState::CALLRET_GUARD_SIZE,
++            Base + FEXCore::Core::InternalThreadState::CALLRET_STACK_SIZE + FEXCore::Core::InternalThreadState::CALLRET_GUARD_SIZE,
+             Base + FEXCore::Core::InternalThreadState::CALLRET_STACK_SIZE / 4};
+   }
+ 
+diff --git a/Source/Tools/LinuxEmulation/LinuxSyscalls/x32/FD.cpp b/Source/Tools/LinuxEmulation/LinuxSyscalls/x32/FD.cpp
+index c5dad94e5..9004716ce 100644
+--- a/Source/Tools/LinuxEmulation/LinuxSyscalls/x32/FD.cpp
++++ b/Source/Tools/LinuxEmulation/LinuxSyscalls/x32/FD.cpp
+@@ -6,6 +6,7 @@ $end_info$
+ */
+ 
+ #include "LinuxSyscalls/Syscalls.h"
++#include "LinuxSyscalls/GuestBase.h"
+ #include "LinuxSyscalls/x32/IoctlEmulation.h"
+ #include "LinuxSyscalls/x32/Syscalls.h"
+ #include "LinuxSyscalls/x32/SyscallsEnum.h"
+@@ -77,38 +78,38 @@ auto fcntlHandler = [](FEXCore::Core::CpuStateFrame* Frame, int fd, int cmd, uin
+   case OP_GETLK64_32: {
+     cmd = F_GETLK;
+     lock_arg = (void*)&tmp;
+-    FaultSafeUserMemAccess::VerifyIsReadable(reinterpret_cast<void*>(arg), sizeof(flock64_32));
+-    tmp = *reinterpret_cast<flock64_32*>(arg);
++    FaultSafeUserMemAccess::VerifyIsReadable(reinterpret_cast<void*>(G2H(arg)), sizeof(flock64_32));
++    tmp = *reinterpret_cast<flock64_32*>(G2H(arg));
+     break;
+   }
+   case OP_SETLK64_32: {
+     cmd = F_SETLK;
+     lock_arg = (void*)&tmp;
+-    FaultSafeUserMemAccess::VerifyIsReadable(reinterpret_cast<void*>(arg), sizeof(flock64_32));
+-    tmp = *reinterpret_cast<flock64_32*>(arg);
++    FaultSafeUserMemAccess::VerifyIsReadable(reinterpret_cast<void*>(G2H(arg)), sizeof(flock64_32));
++    tmp = *reinterpret_cast<flock64_32*>(G2H(arg));
+     break;
+   }
+   case OP_SETLKW64_32: {
+     cmd = F_SETLKW;
+     lock_arg = (void*)&tmp;
+-    FaultSafeUserMemAccess::VerifyIsReadable(reinterpret_cast<void*>(arg), sizeof(flock64_32));
+-    tmp = *reinterpret_cast<flock64_32*>(arg);
++    FaultSafeUserMemAccess::VerifyIsReadable(reinterpret_cast<void*>(G2H(arg)), sizeof(flock64_32));
++    tmp = *reinterpret_cast<flock64_32*>(G2H(arg));
+     break;
+   }
+   case F_OFD_SETLK:
+   case F_OFD_GETLK:
+   case F_OFD_SETLKW: {
+     lock_arg = (void*)&tmp;
+-    FaultSafeUserMemAccess::VerifyIsReadable(reinterpret_cast<void*>(arg), sizeof(flock64_32));
+-    tmp = *reinterpret_cast<flock64_32*>(arg);
++    FaultSafeUserMemAccess::VerifyIsReadable(reinterpret_cast<void*>(G2H(arg)), sizeof(flock64_32));
++    tmp = *reinterpret_cast<flock64_32*>(G2H(arg));
+     break;
+   }
+   case F_GETLK:
+   case F_SETLK:
+   case F_SETLKW: {
+     lock_arg = (void*)&tmp;
+-    FaultSafeUserMemAccess::VerifyIsReadable(reinterpret_cast<void*>(arg), sizeof(flock_32));
+-    tmp = *reinterpret_cast<flock_32*>(arg);
++    FaultSafeUserMemAccess::VerifyIsReadable(reinterpret_cast<void*>(G2H(arg)), sizeof(flock_32));
++    tmp = *reinterpret_cast<flock_32*>(G2H(arg));
+     break;
+   }
+ 
+@@ -122,18 +123,18 @@ auto fcntlHandler = [](FEXCore::Core::CpuStateFrame* Frame, int fd, int cmd, uin
+   if (Result != -1) {
+     switch (old_cmd) {
+     case OP_GETLK64_32: {
+-      FaultSafeUserMemAccess::VerifyIsWritable(reinterpret_cast<void*>(arg), sizeof(flock64_32));
+-      *reinterpret_cast<flock64_32*>(arg) = tmp;
++      FaultSafeUserMemAccess::VerifyIsWritable(reinterpret_cast<void*>(G2H(arg)), sizeof(flock64_32));
++      *reinterpret_cast<flock64_32*>(G2H(arg)) = tmp;
+       break;
+     }
+     case F_OFD_GETLK: {
+-      FaultSafeUserMemAccess::VerifyIsWritable(reinterpret_cast<void*>(arg), sizeof(flock64_32));
+-      *reinterpret_cast<flock64_32*>(arg) = tmp;
++      FaultSafeUserMemAccess::VerifyIsWritable(reinterpret_cast<void*>(G2H(arg)), sizeof(flock64_32));
++      *reinterpret_cast<flock64_32*>(G2H(arg)) = tmp;
+       break;
+     }
+     case F_GETLK: {
+-      FaultSafeUserMemAccess::VerifyIsWritable(reinterpret_cast<void*>(arg), sizeof(flock_32));
+-      *reinterpret_cast<flock_32*>(arg) = tmp;
++      FaultSafeUserMemAccess::VerifyIsWritable(reinterpret_cast<void*>(G2H(arg)), sizeof(flock_32));
++      *reinterpret_cast<flock_32*>(G2H(arg)) = tmp;
+       break;
+     } break;
+     case F_DUPFD:
+diff --git a/Source/Tools/LinuxEmulation/LinuxSyscalls/x32/IoctlEmulation.cpp b/Source/Tools/LinuxEmulation/LinuxSyscalls/x32/IoctlEmulation.cpp
+index f5ccfcfdb..027ac07f5 100644
+--- a/Source/Tools/LinuxEmulation/LinuxSyscalls/x32/IoctlEmulation.cpp
++++ b/Source/Tools/LinuxEmulation/LinuxSyscalls/x32/IoctlEmulation.cpp
+@@ -1,6 +1,7 @@
+ // SPDX-License-Identifier: MIT
+ #include "Ioctl/drm.h"
+ #include "LinuxSyscalls/Syscalls.h"
++#include "LinuxSyscalls/GuestBase.h"
+ #include "LinuxSyscalls/x32/Syscalls.h"
+ #include "LinuxSyscalls/x32/Ioctl/asound.h"
+ #include "LinuxSyscalls/x32/Ioctl/drm.h"
+@@ -47,7 +48,7 @@ namespace V4l2 {
+   static uint32_t V4l2Handler(FEXCore::Core::CpuStateFrame* Frame, int fd, uint32_t cmd, uint32_t args) {
+     switch (_IOC_NR(cmd)) {
+     case _IOC_NR(FEX_VIDIOC_G_FMT): {
+-      fex_v4l2_format* format = reinterpret_cast<fex_v4l2_format*>(args);
++      fex_v4l2_format* format = reinterpret_cast<fex_v4l2_format*>(G2H(args));
+       v4l2_format Host_format {.type = format->type};
+       if (Host_format.type == V4L2_BUF_TYPE_VIDEO_OVERLAY || Host_format.type == V4L2_BUF_TYPE_VIDEO_OUTPUT_OVERLAY) {
+         uint64_t Result = ::ioctl(fd, cmd, args);
+@@ -61,7 +62,7 @@ namespace V4l2 {
+       break;
+     }
+     case _IOC_NR(FEX_VIDIOC_S_FMT): {
+-      fex_v4l2_format* format = reinterpret_cast<fex_v4l2_format*>(args);
++      fex_v4l2_format* format = reinterpret_cast<fex_v4l2_format*>(G2H(args));
+       v4l2_format Host_format = *format;
+       if (Host_format.type == V4L2_BUF_TYPE_VIDEO_OVERLAY || Host_format.type == V4L2_BUF_TYPE_VIDEO_OUTPUT_OVERLAY) {
+         uint64_t Result = ::ioctl(fd, cmd, args);
+@@ -75,7 +76,7 @@ namespace V4l2 {
+       break;
+     }
+     case _IOC_NR(FEX_VIDIOC_QUERYBUF): {
+-      auto format = reinterpret_cast<fex_v4l2_buffer*>(args);
++      auto format = reinterpret_cast<fex_v4l2_buffer*>(G2H(args));
+       v4l2_buffer Host_format = *format;
+ 
+       uint64_t Result = ::ioctl(fd, VIDIOC_QUERYBUF, &Host_format);
+@@ -86,7 +87,7 @@ namespace V4l2 {
+       break;
+     }
+     case _IOC_NR(FEX_VIDIOC_G_FBUF): {
+-      auto format = reinterpret_cast<fex_v4l2_framebuffer*>(args);
++      auto format = reinterpret_cast<fex_v4l2_framebuffer*>(G2H(args));
+       v4l2_framebuffer Host_format = *format;
+ 
+       uint64_t Result = ::ioctl(fd, VIDIOC_G_FBUF, &Host_format);
+@@ -97,7 +98,7 @@ namespace V4l2 {
+       break;
+     }
+     case _IOC_NR(FEX_VIDIOC_S_FBUF): {
+-      auto format = reinterpret_cast<fex_v4l2_framebuffer*>(args);
++      auto format = reinterpret_cast<fex_v4l2_framebuffer*>(G2H(args));
+       v4l2_framebuffer Host_format = *format;
+ 
+       uint64_t Result = ::ioctl(fd, VIDIOC_S_FBUF, &Host_format);
+@@ -108,7 +109,7 @@ namespace V4l2 {
+       break;
+     }
+     case _IOC_NR(FEX_VIDIOC_QBUF): {
+-      auto format = reinterpret_cast<fex_v4l2_buffer*>(args);
++      auto format = reinterpret_cast<fex_v4l2_buffer*>(G2H(args));
+       v4l2_buffer Host_format = *format;
+ 
+       uint64_t Result = ::ioctl(fd, VIDIOC_QBUF, &Host_format);
+@@ -119,7 +120,7 @@ namespace V4l2 {
+       break;
+     }
+     case _IOC_NR(FEX_VIDIOC_DQBUF): {
+-      auto format = reinterpret_cast<fex_v4l2_buffer*>(args);
++      auto format = reinterpret_cast<fex_v4l2_buffer*>(G2H(args));
+       v4l2_buffer Host_format = *format;
+ 
+       uint64_t Result = ::ioctl(fd, VIDIOC_DQBUF, &Host_format);
+@@ -130,7 +131,7 @@ namespace V4l2 {
+       break;
+     }
+     case _IOC_NR(FEX_VIDIOC_ENUMSTD): {
+-      auto format = reinterpret_cast<fex_v4l2_standard*>(args);
++      auto format = reinterpret_cast<fex_v4l2_standard*>(G2H(args));
+       v4l2_standard Host_format = *format;
+ 
+       uint64_t Result = ::ioctl(fd, VIDIOC_ENUMSTD, &Host_format);
+@@ -141,7 +142,7 @@ namespace V4l2 {
+       break;
+     }
+     case _IOC_NR(FEX_VIDIOC_ENUMINPUT): {
+-      auto format = reinterpret_cast<fex_v4l2_input*>(args);
++      auto format = reinterpret_cast<fex_v4l2_input*>(G2H(args));
+       v4l2_input Host_format = *format;
+ 
+       uint64_t Result = ::ioctl(fd, VIDIOC_ENUMINPUT, &Host_format);
+@@ -152,7 +153,7 @@ namespace V4l2 {
+       break;
+     }
+     case _IOC_NR(FEX_VIDIOC_G_EDID): {
+-      auto format = reinterpret_cast<fex_v4l2_edid*>(args);
++      auto format = reinterpret_cast<fex_v4l2_edid*>(G2H(args));
+       v4l2_edid Host_format = *format;
+ 
+       uint64_t Result = ::ioctl(fd, VIDIOC_G_EDID, &Host_format);
+@@ -163,7 +164,7 @@ namespace V4l2 {
+       break;
+     }
+     case _IOC_NR(FEX_VIDIOC_S_EDID): {
+-      auto format = reinterpret_cast<fex_v4l2_edid*>(args);
++      auto format = reinterpret_cast<fex_v4l2_edid*>(G2H(args));
+       v4l2_edid Host_format = *format;
+ 
+       uint64_t Result = ::ioctl(fd, VIDIOC_S_EDID, &Host_format);
+@@ -174,7 +175,7 @@ namespace V4l2 {
+       break;
+     }
+     case _IOC_NR(FEX_VIDIOC_TRY_FMT): {
+-      fex_v4l2_format* format = reinterpret_cast<fex_v4l2_format*>(args);
++      fex_v4l2_format* format = reinterpret_cast<fex_v4l2_format*>(G2H(args));
+       v4l2_format Host_format = *format;
+       if (Host_format.type == V4L2_BUF_TYPE_VIDEO_OVERLAY || Host_format.type == V4L2_BUF_TYPE_VIDEO_OUTPUT_OVERLAY) {
+         uint64_t Result = ::ioctl(fd, cmd, args);
+@@ -188,7 +189,7 @@ namespace V4l2 {
+       break;
+     }
+     case _IOC_NR(FEX_VIDIOC_G_EXT_CTRLS): {
+-      auto format = reinterpret_cast<fex_v4l2_ext_controls*>(args);
++      auto format = reinterpret_cast<fex_v4l2_ext_controls*>(G2H(args));
+       v4l2_ext_controls Host_format = *format;
+ 
+       uint64_t Result = ::ioctl(fd, VIDIOC_G_EXT_CTRLS, &Host_format);
+@@ -199,7 +200,7 @@ namespace V4l2 {
+       break;
+     }
+     case _IOC_NR(FEX_VIDIOC_S_EXT_CTRLS): {
+-      auto format = reinterpret_cast<fex_v4l2_ext_controls*>(args);
++      auto format = reinterpret_cast<fex_v4l2_ext_controls*>(G2H(args));
+       v4l2_ext_controls Host_format = *format;
+ 
+       uint64_t Result = ::ioctl(fd, VIDIOC_S_EXT_CTRLS, &Host_format);
+@@ -210,7 +211,7 @@ namespace V4l2 {
+       break;
+     }
+     case _IOC_NR(FEX_VIDIOC_TRY_EXT_CTRLS): {
+-      auto format = reinterpret_cast<fex_v4l2_ext_controls*>(args);
++      auto format = reinterpret_cast<fex_v4l2_ext_controls*>(G2H(args));
+       v4l2_ext_controls Host_format = *format;
+ 
+       uint64_t Result = ::ioctl(fd, VIDIOC_TRY_EXT_CTRLS, &Host_format);
+@@ -221,7 +222,7 @@ namespace V4l2 {
+       break;
+     }
+     case _IOC_NR(FEX_VIDIOC_DQEVENT): {
+-      auto format = reinterpret_cast<fex_v4l2_event*>(args);
++      auto format = reinterpret_cast<fex_v4l2_event*>(G2H(args));
+       v4l2_event Host_format = *format;
+ 
+       uint64_t Result = ::ioctl(fd, VIDIOC_DQEVENT, &Host_format);
+@@ -232,7 +233,7 @@ namespace V4l2 {
+       break;
+     }
+     case _IOC_NR(FEX_VIDIOC_CREATE_BUFS): {
+-      auto format = reinterpret_cast<fex_v4l2_create_buffers*>(args);
++      auto format = reinterpret_cast<fex_v4l2_create_buffers*>(G2H(args));
+       upstream_v4l2_create_buffers Host_format = *format;
+ 
+       uint64_t Result = ::ioctl(fd, VIDIOC_CREATE_BUFS, &Host_format);
+@@ -243,7 +244,7 @@ namespace V4l2 {
+       break;
+     }
+     case _IOC_NR(FEX_VIDIOC_PREPARE_BUF): {
+-      auto format = reinterpret_cast<fex_v4l2_buffer*>(args);
++      auto format = reinterpret_cast<fex_v4l2_buffer*>(G2H(args));
+       v4l2_buffer Host_format = *format;
+ 
+       uint64_t Result = ::ioctl(fd, VIDIOC_PREPARE_BUF, &Host_format);
+@@ -305,7 +306,7 @@ namespace DRM {
+   static uint32_t AMDGPU_Handler(FEXCore::Core::CpuStateFrame* Frame, int fd, uint32_t cmd, uint32_t args) {
+     switch (_IOC_NR(cmd)) {
+     case _IOC_NR(FEX_DRM_IOCTL_AMDGPU_GEM_METADATA): {
+-      AMDGPU::fex_drm_amdgpu_gem_metadata* val = reinterpret_cast<AMDGPU::fex_drm_amdgpu_gem_metadata*>(args);
++      AMDGPU::fex_drm_amdgpu_gem_metadata* val = reinterpret_cast<AMDGPU::fex_drm_amdgpu_gem_metadata*>(G2H(args));
+       drm_amdgpu_gem_metadata Host_val = *val;
+       uint64_t Result = ioctl(fd, DRM_IOCTL_AMDGPU_GEM_METADATA, &Host_val);
+       if (Result != -1) {
+@@ -340,7 +341,7 @@ namespace DRM {
+   static uint32_t RADEON_Handler(FEXCore::Core::CpuStateFrame* Frame, int fd, uint32_t cmd, uint32_t args) {
+     switch (_IOC_NR(cmd)) {
+     case _IOC_NR(FEX_DRM_IOCTL_RADEON_CP_INIT): {
+-      RADEON::fex_drm_radeon_init_t* val = reinterpret_cast<RADEON::fex_drm_radeon_init_t*>(args);
++      RADEON::fex_drm_radeon_init_t* val = reinterpret_cast<RADEON::fex_drm_radeon_init_t*>(G2H(args));
+       drm_radeon_init_t Host_val = *val;
+       uint64_t Result = ioctl(fd, DRM_IOCTL_RADEON_CP_INIT, &Host_val);
+       if (Result != -1) {
+@@ -350,7 +351,7 @@ namespace DRM {
+       break;
+     }
+     case _IOC_NR(FEX_DRM_IOCTL_RADEON_CLEAR): {
+-      RADEON::fex_drm_radeon_clear_t* val = reinterpret_cast<RADEON::fex_drm_radeon_clear_t*>(args);
++      RADEON::fex_drm_radeon_clear_t* val = reinterpret_cast<RADEON::fex_drm_radeon_clear_t*>(G2H(args));
+       drm_radeon_clear_t Host_val = *val;
+       uint64_t Result = ioctl(fd, DRM_IOCTL_RADEON_CLEAR, &Host_val);
+       if (Result != -1) {
+@@ -360,7 +361,7 @@ namespace DRM {
+       break;
+     }
+     case _IOC_NR(FEX_DRM_IOCTL_RADEON_STIPPLE): {
+-      RADEON::fex_drm_radeon_stipple_t* val = reinterpret_cast<RADEON::fex_drm_radeon_stipple_t*>(args);
++      RADEON::fex_drm_radeon_stipple_t* val = reinterpret_cast<RADEON::fex_drm_radeon_stipple_t*>(G2H(args));
+       drm_radeon_stipple_t Host_val = *val;
+       uint64_t Result = ioctl(fd, DRM_IOCTL_RADEON_STIPPLE, &Host_val);
+       if (Result != -1) {
+@@ -370,7 +371,7 @@ namespace DRM {
+       break;
+     }
+     case _IOC_NR(FEX_DRM_IOCTL_RADEON_TEXTURE): {
+-      RADEON::fex_drm_radeon_texture_t* val = reinterpret_cast<RADEON::fex_drm_radeon_texture_t*>(args);
++      RADEON::fex_drm_radeon_texture_t* val = reinterpret_cast<RADEON::fex_drm_radeon_texture_t*>(G2H(args));
+       drm_radeon_texture_t Host_val = *val;
+       uint64_t Result = ioctl(fd, DRM_IOCTL_RADEON_TEXTURE, &Host_val);
+       if (Result != -1) {
+@@ -380,7 +381,7 @@ namespace DRM {
+       break;
+     }
+     case _IOC_NR(FEX_DRM_IOCTL_RADEON_VERTEX2): {
+-      RADEON::fex_drm_radeon_vertex2_t* val = reinterpret_cast<RADEON::fex_drm_radeon_vertex2_t*>(args);
++      RADEON::fex_drm_radeon_vertex2_t* val = reinterpret_cast<RADEON::fex_drm_radeon_vertex2_t*>(G2H(args));
+       drm_radeon_vertex2_t Host_val = *val;
+       uint64_t Result = ioctl(fd, DRM_IOCTL_RADEON_VERTEX2, &Host_val);
+       if (Result != -1) {
+@@ -390,7 +391,7 @@ namespace DRM {
+       break;
+     }
+     case _IOC_NR(FEX_DRM_IOCTL_RADEON_CMDBUF): {
+-      RADEON::fex_drm_radeon_cmd_buffer_t* val = reinterpret_cast<RADEON::fex_drm_radeon_cmd_buffer_t*>(args);
++      RADEON::fex_drm_radeon_cmd_buffer_t* val = reinterpret_cast<RADEON::fex_drm_radeon_cmd_buffer_t*>(G2H(args));
+       drm_radeon_cmd_buffer_t Host_val = *val;
+       uint64_t Result = ioctl(fd, DRM_IOCTL_RADEON_CMDBUF, &Host_val);
+       if (Result != -1) {
+@@ -400,7 +401,7 @@ namespace DRM {
+       break;
+     }
+     case _IOC_NR(FEX_DRM_IOCTL_RADEON_GETPARAM): {
+-      RADEON::fex_drm_radeon_getparam_t* val = reinterpret_cast<RADEON::fex_drm_radeon_getparam_t*>(args);
++      RADEON::fex_drm_radeon_getparam_t* val = reinterpret_cast<RADEON::fex_drm_radeon_getparam_t*>(G2H(args));
+       drm_radeon_getparam_t Host_val = *val;
+       uint64_t Result = ioctl(fd, DRM_IOCTL_RADEON_GETPARAM, &Host_val);
+       if (Result != -1) {
+@@ -410,7 +411,7 @@ namespace DRM {
+       break;
+     }
+     case _IOC_NR(FEX_DRM_IOCTL_RADEON_ALLOC): {
+-      RADEON::fex_drm_radeon_mem_alloc_t* val = reinterpret_cast<RADEON::fex_drm_radeon_mem_alloc_t*>(args);
++      RADEON::fex_drm_radeon_mem_alloc_t* val = reinterpret_cast<RADEON::fex_drm_radeon_mem_alloc_t*>(G2H(args));
+       drm_radeon_mem_alloc_t Host_val = *val;
+       uint64_t Result = ioctl(fd, DRM_IOCTL_RADEON_ALLOC, &Host_val);
+       if (Result != -1) {
+@@ -420,7 +421,7 @@ namespace DRM {
+       break;
+     }
+     case _IOC_NR(FEX_DRM_IOCTL_RADEON_IRQ_EMIT): {
+-      RADEON::fex_drm_radeon_irq_emit_t* val = reinterpret_cast<RADEON::fex_drm_radeon_irq_emit_t*>(args);
++      RADEON::fex_drm_radeon_irq_emit_t* val = reinterpret_cast<RADEON::fex_drm_radeon_irq_emit_t*>(G2H(args));
+       drm_radeon_irq_emit_t Host_val = *val;
+       uint64_t Result = ioctl(fd, DRM_IOCTL_RADEON_IRQ_EMIT, &Host_val);
+       if (Result != -1) {
+@@ -430,7 +431,7 @@ namespace DRM {
+       break;
+     }
+     case _IOC_NR(FEX_DRM_IOCTL_RADEON_SETPARAM): {
+-      RADEON::fex_drm_radeon_setparam_t* val = reinterpret_cast<RADEON::fex_drm_radeon_setparam_t*>(args);
++      RADEON::fex_drm_radeon_setparam_t* val = reinterpret_cast<RADEON::fex_drm_radeon_setparam_t*>(G2H(args));
+       drm_radeon_setparam_t Host_val = *val;
+       uint64_t Result = ioctl(fd, DRM_IOCTL_RADEON_SETPARAM, &Host_val);
+       if (Result != -1) {
+@@ -440,7 +441,7 @@ namespace DRM {
+       break;
+     }
+     case _IOC_NR(FEX_DRM_IOCTL_RADEON_GEM_CREATE): {
+-      RADEON::fex_drm_radeon_gem_create* val = reinterpret_cast<RADEON::fex_drm_radeon_gem_create*>(args);
++      RADEON::fex_drm_radeon_gem_create* val = reinterpret_cast<RADEON::fex_drm_radeon_gem_create*>(G2H(args));
+       drm_radeon_gem_create Host_val = *val;
+       uint64_t Result = ioctl(fd, DRM_IOCTL_RADEON_GEM_CREATE, &Host_val);
+       if (Result != -1) {
+@@ -475,7 +476,7 @@ namespace DRM {
+   static uint32_t MSM_Handler(FEXCore::Core::CpuStateFrame* Frame, int fd, uint32_t cmd, uint32_t args) {
+     switch (_IOC_NR(cmd)) {
+     case _IOC_NR(FEX_DRM_IOCTL_MSM_WAIT_FENCE): {
+-      MSM::fex_drm_msm_wait_fence* val = reinterpret_cast<MSM::fex_drm_msm_wait_fence*>(args);
++      MSM::fex_drm_msm_wait_fence* val = reinterpret_cast<MSM::fex_drm_msm_wait_fence*>(G2H(args));
+       drm_msm_wait_fence Host_val = *val;
+       uint64_t Result = ::ioctl(fd, DRM_IOCTL_MSM_WAIT_FENCE, &Host_val);
+       if (Result != -1) {
+@@ -537,7 +538,7 @@ namespace DRM {
+   static uint32_t I915_Handler(FEXCore::Core::CpuStateFrame* Frame, int fd, uint32_t cmd, uint32_t args) {
+ #define SIMPLE(enum, type)                                               \
+   case _IOC_NR(FEX_##enum): {                                            \
+-    I915::fex_##type* guest = reinterpret_cast<I915::fex_##type*>(args); \
++    I915::fex_##type* guest = reinterpret_cast<I915::fex_##type*>(G2H(args)); \
+     type host = *guest;                                                  \
+     uint64_t Result = ::ioctl(fd, enum, &host);                          \
+     if (Result != -1) {                                                  \
+@@ -632,7 +633,7 @@ namespace DRM {
+   static uint32_t VC4_Handler(FEXCore::Core::CpuStateFrame* Frame, int fd, uint32_t cmd, uint32_t args) {
+     switch (_IOC_NR(cmd)) {
+     case _IOC_NR(FEX_DRM_IOCTL_VC4_PERFMON_GET_VALUES): {
+-      FEX::HLE::x32::VC4::fex_drm_vc4_perfmon_get_values* val = reinterpret_cast<FEX::HLE::x32::VC4::fex_drm_vc4_perfmon_get_values*>(args);
++      FEX::HLE::x32::VC4::fex_drm_vc4_perfmon_get_values* val = reinterpret_cast<FEX::HLE::x32::VC4::fex_drm_vc4_perfmon_get_values*>(G2H(args));
+       drm_vc4_perfmon_get_values Host_val = *val;
+       uint64_t Result = ::ioctl(fd, DRM_IOCTL_VC4_PERFMON_GET_VALUES, &Host_val);
+       if (Result != -1) {
+@@ -668,7 +669,7 @@ namespace DRM {
+   static uint32_t V3D_Handler(FEXCore::Core::CpuStateFrame* Frame, int fd, uint32_t cmd, uint32_t args) {
+     switch (_IOC_NR(cmd)) {
+     case _IOC_NR(FEX_DRM_IOCTL_V3D_SUBMIT_CSD): {
+-      FEX::HLE::x32::V3D::fex_drm_v3d_submit_csd* val = reinterpret_cast<FEX::HLE::x32::V3D::fex_drm_v3d_submit_csd*>(args);
++      FEX::HLE::x32::V3D::fex_drm_v3d_submit_csd* val = reinterpret_cast<FEX::HLE::x32::V3D::fex_drm_v3d_submit_csd*>(G2H(args));
+       drm_v3d_submit_csd Host_val = FEX::HLE::x32::V3D::fex_drm_v3d_submit_csd::SafeConvertToHost(val, _IOC_SIZE(cmd));
+       uint64_t Result = ::ioctl(fd, DRM_IOCTL_V3D_SUBMIT_CSD, &Host_val);
+       if (Result != -1) {
+@@ -773,7 +774,7 @@ namespace DRM {
+   static uint32_t Handler(FEXCore::Core::CpuStateFrame* Frame, int fd, uint32_t cmd, uint32_t args) {
+ #define SIMPLE(enum, type)                                             \
+   case _IOC_NR(FEX_##enum): {                                          \
+-    DRM::fex_##type* guest = reinterpret_cast<DRM::fex_##type*>(args); \
++    DRM::fex_##type* guest = reinterpret_cast<DRM::fex_##type*>(G2H(args)); \
+     type host = *guest;                                                \
+     uint64_t Result = ::ioctl(fd, enum, &host);                        \
+     if (Result != -1) {                                                \
+@@ -785,7 +786,7 @@ namespace DRM {
+ 
+     switch (_IOC_NR(cmd)) {
+     case _IOC_NR(FEX_DRM_IOCTL_VERSION): {
+-      fex_drm_version* version = reinterpret_cast<fex_drm_version*>(args);
++      fex_drm_version* version = reinterpret_cast<fex_drm_version*>(G2H(args));
+       drm_version Host_Version = *version;
+       uint64_t Result = ::ioctl(fd, DRM_IOCTL_VERSION, &Host_Version);
+       if (Result != -1) {
+@@ -823,7 +824,7 @@ namespace DRM {
+       SIMPLE(DRM_IOCTL_MODE_GETFB2, drm_mode_fb_cmd2)
+ 
+     case _IOC_NR(FEX_DRM_IOCTL_WAIT_VBLANK): {
+-      fex_drm_wait_vblank* guest = reinterpret_cast<fex_drm_wait_vblank*>(args);
++      fex_drm_wait_vblank* guest = reinterpret_cast<fex_drm_wait_vblank*>(G2H(args));
+       drm_wait_vblank Host {};
+       Host.request = guest->request;
+       uint64_t Result = ::ioctl(fd, FEX_DRM_IOCTL_WAIT_VBLANK, &Host);
+diff --git a/Source/Tools/LinuxEmulation/LinuxSyscalls/x32/Semaphore.cpp b/Source/Tools/LinuxEmulation/LinuxSyscalls/x32/Semaphore.cpp
+index cc3f2d9e8..9f8f3fff2 100644
+--- a/Source/Tools/LinuxEmulation/LinuxSyscalls/x32/Semaphore.cpp
++++ b/Source/Tools/LinuxEmulation/LinuxSyscalls/x32/Semaphore.cpp
+@@ -5,6 +5,7 @@ tags: LinuxSyscalls|syscalls-x86-32
+ $end_info$
+ */
+ 
++#include "LinuxSyscalls/GuestBase.h"
+ #include "LinuxSyscalls/Syscalls.h"
+ #include "LinuxSyscalls/x32/Syscalls.h"
+ #include "LinuxSyscalls/x32/Types.h"
+@@ -178,7 +179,7 @@ _ipc(FEXCore::Core::CpuStateFrame* Frame, uint32_t call, uint32_t first, uint32_
+     break;
+   }
+   case OP_SEMTIMEDOP: {
+-    timespec32* timeout = reinterpret_cast<timespec32*>(fifth);
++    timespec32* timeout = reinterpret_cast<timespec32*>(FEX::HLE::G2H(fifth));
+     struct timespec tp64 {};
+     struct timespec* timed_ptr {};
+     if (timeout) {
+@@ -194,7 +195,7 @@ _ipc(FEXCore::Core::CpuStateFrame* Frame, uint32_t call, uint32_t first, uint32_
+     // Requires a temporary buffer
+     fextl::vector<uint8_t> Tmp(second + sizeof(size_t));
+     struct msgbuf* TmpMsg = reinterpret_cast<struct msgbuf*>(Tmp.data());
+-    msgbuf_32* src = reinterpret_cast<msgbuf_32*>(ptr);
++    msgbuf_32* src = reinterpret_cast<msgbuf_32*>(FEX::HLE::G2H(ptr));
+     FaultSafeUserMemAccess::VerifyIsReadable(src, sizeof(*src));
+     FaultSafeUserMemAccess::VerifyIsReadable(src->mtext, second);
+     TmpMsg->mtype = src->mtype;
+@@ -210,7 +211,7 @@ _ipc(FEXCore::Core::CpuStateFrame* Frame, uint32_t call, uint32_t first, uint32_
+     if (Version != 0) {
+       Result = ::syscall(SYSCALL_DEF(msgrcv), first, TmpMsg, second, fifth, third);
+       if (Result != -1) {
+-        msgbuf_32* src = reinterpret_cast<msgbuf_32*>(ptr);
++        msgbuf_32* src = reinterpret_cast<msgbuf_32*>(FEX::HLE::G2H(ptr));
+         FaultSafeUserMemAccess::VerifyIsWritable(src, sizeof(*src));
+         FaultSafeUserMemAccess::VerifyIsWritable(src->mtext, Result);
+         src->mtype = TmpMsg->mtype;
+@@ -221,10 +222,10 @@ _ipc(FEXCore::Core::CpuStateFrame* Frame, uint32_t call, uint32_t first, uint32_
+         compat_uptr_t msgp;
+         compat_long_t msgtyp;
+       };
+-      compat_ipc_kludge* ipck = reinterpret_cast<compat_ipc_kludge*>(ptr);
++      compat_ipc_kludge* ipck = reinterpret_cast<compat_ipc_kludge*>(FEX::HLE::G2H(ptr));
+       Result = ::syscall(SYSCALL_DEF(msgrcv), first, TmpMsg, second, ipck->msgtyp, third);
+       if (Result != -1) {
+-        msgbuf_32* src = reinterpret_cast<msgbuf_32*>(ipck->msgp);
++        msgbuf_32* src = reinterpret_cast<msgbuf_32*>(FEX::HLE::G2H(ipck->msgp));
+         FaultSafeUserMemAccess::VerifyIsWritable(src, sizeof(*src));
+         FaultSafeUserMemAccess::VerifyIsWritable(src->mtext, Result);
+         src->mtype = TmpMsg->mtype;
+@@ -295,7 +296,8 @@ _ipc(FEXCore::Core::CpuStateFrame* Frame, uint32_t call, uint32_t first, uint32_
+     }
+     auto Result = FEX::HLE::_SyscallHandler->GuestShmat(false, Frame->Thread, first, reinterpret_cast<const void*>(ptr), second);
+     if (!FEX::HLE::HasSyscallError(Result)) {
+-      *reinterpret_cast<uint32_t*>(third) = Result;
++      // ipc() takes plain integers, so the thunk leaves `third` a guest address.
++      *reinterpret_cast<uint32_t*>(FEX::HLE::G2H(third)) = Result;
+     }
+     return Result;
+   }
+diff --git a/Source/Tools/LinuxEmulation/LinuxSyscalls/x32/Socket.cpp b/Source/Tools/LinuxEmulation/LinuxSyscalls/x32/Socket.cpp
+index f72673e56..234f59535 100644
+--- a/Source/Tools/LinuxEmulation/LinuxSyscalls/x32/Socket.cpp
++++ b/Source/Tools/LinuxEmulation/LinuxSyscalls/x32/Socket.cpp
+@@ -6,6 +6,7 @@ $end_info$
+ */
+ 
+ #include "LinuxSyscalls/Syscalls.h"
++#include "LinuxSyscalls/GuestBase.h"
+ #include "LinuxSyscalls/x32/Syscalls.h"
+ #include "LinuxSyscalls/x32/Types.h"
+ #include "LinuxSyscalls/x64/Syscalls.h"
+@@ -659,11 +660,11 @@ void RegisterSocket(FEX::HLE::SyscallHandler* Handler) {
+       break;
+     }
+     case OP_BIND: {
+-      Result = ::bind(Arguments[0], reinterpret_cast<const struct sockaddr*>(Arguments[1]), Arguments[2]);
++      Result = ::bind(Arguments[0], reinterpret_cast<const struct sockaddr*>(G2H(Arguments[1])), Arguments[2]);
+       break;
+     }
+     case OP_CONNECT: {
+-      Result = ::connect(Arguments[0], reinterpret_cast<const struct sockaddr*>(Arguments[1]), Arguments[2]);
++      Result = ::connect(Arguments[0], reinterpret_cast<const struct sockaddr*>(G2H(Arguments[1])), Arguments[2]);
+       break;
+     }
+     case OP_LISTEN: {
+@@ -671,37 +672,37 @@ void RegisterSocket(FEX::HLE::SyscallHandler* Handler) {
+       break;
+     }
+     case OP_ACCEPT: {
+-      Result = ::accept(Arguments[0], reinterpret_cast<struct sockaddr*>(Arguments[1]), reinterpret_cast<socklen_t*>(Arguments[2]));
++      Result = ::accept(Arguments[0], reinterpret_cast<struct sockaddr*>(G2H(Arguments[1])), reinterpret_cast<socklen_t*>(G2H(Arguments[2])));
+       break;
+     }
+     case OP_GETSOCKNAME: {
+-      Result = ::getsockname(Arguments[0], reinterpret_cast<struct sockaddr*>(Arguments[1]), reinterpret_cast<socklen_t*>(Arguments[2]));
++      Result = ::getsockname(Arguments[0], reinterpret_cast<struct sockaddr*>(G2H(Arguments[1])), reinterpret_cast<socklen_t*>(G2H(Arguments[2])));
+       break;
+     }
+     case OP_GETPEERNAME: {
+-      Result = ::getpeername(Arguments[0], reinterpret_cast<struct sockaddr*>(Arguments[1]), reinterpret_cast<socklen_t*>(Arguments[2]));
++      Result = ::getpeername(Arguments[0], reinterpret_cast<struct sockaddr*>(G2H(Arguments[1])), reinterpret_cast<socklen_t*>(G2H(Arguments[2])));
+       break;
+     }
+     case OP_SOCKETPAIR: {
+-      Result = ::socketpair(Arguments[0], Arguments[1], Arguments[2], reinterpret_cast<int32_t*>(Arguments[3]));
++      Result = ::socketpair(Arguments[0], Arguments[1], Arguments[2], reinterpret_cast<int32_t*>(G2H(Arguments[3])));
+       break;
+     }
+     case OP_SEND: {
+-      Result = ::send(Arguments[0], reinterpret_cast<const void*>(Arguments[1]), Arguments[2], Arguments[3]);
++      Result = ::send(Arguments[0], reinterpret_cast<const void*>(G2H(Arguments[1])), Arguments[2], Arguments[3]);
+       break;
+     }
+     case OP_RECV: {
+-      Result = ::recv(Arguments[0], reinterpret_cast<void*>(Arguments[1]), Arguments[2], Arguments[3]);
++      Result = ::recv(Arguments[0], reinterpret_cast<void*>(G2H(Arguments[1])), Arguments[2], Arguments[3]);
+       break;
+     }
+     case OP_SENDTO: {
+-      Result = ::sendto(Arguments[0], reinterpret_cast<const void*>(Arguments[1]), Arguments[2], Arguments[3],
+-                        reinterpret_cast<struct sockaddr*>(Arguments[4]), reinterpret_cast<socklen_t>(Arguments[5]));
++      Result = ::sendto(Arguments[0], reinterpret_cast<const void*>(G2H(Arguments[1])), Arguments[2], Arguments[3],
++                        reinterpret_cast<struct sockaddr*>(G2H(Arguments[4])), reinterpret_cast<socklen_t>(Arguments[5]));
+       break;
+     }
+     case OP_RECVFROM: {
+-      Result = ::recvfrom(Arguments[0], reinterpret_cast<void*>(Arguments[1]), Arguments[2], Arguments[3],
+-                          reinterpret_cast<struct sockaddr*>(Arguments[4]), reinterpret_cast<socklen_t*>(Arguments[5]));
++      Result = ::recvfrom(Arguments[0], reinterpret_cast<void*>(G2H(Arguments[1])), Arguments[2], Arguments[3],
++                          reinterpret_cast<struct sockaddr*>(G2H(Arguments[4])), reinterpret_cast<socklen_t*>(G2H(Arguments[5])));
+       break;
+     }
+     case OP_SHUTDOWN: {
+@@ -713,24 +714,24 @@ void RegisterSocket(FEX::HLE::SyscallHandler* Handler) {
+       break;
+     }
+     case OP_GETSOCKOPT: {
+-      return GetSockOpt(Arguments[0], Arguments[1], Arguments[2], reinterpret_cast<void*>(Arguments[3]),
+-                        reinterpret_cast<socklen_t*>(Arguments[4]));
++      return GetSockOpt(Arguments[0], Arguments[1], Arguments[2], reinterpret_cast<void*>(G2H(Arguments[3])),
++                        reinterpret_cast<socklen_t*>(G2H(Arguments[4])));
+       break;
+     }
+     case OP_SENDMSG: {
+-      return SendMsg(Arguments[0], reinterpret_cast<const struct msghdr32*>(Arguments[1]), Arguments[2]);
++      return SendMsg(Arguments[0], reinterpret_cast<const struct msghdr32*>(G2H(Arguments[1])), Arguments[2]);
+       break;
+     }
+     case OP_RECVMSG: {
+-      return RecvMsg(Arguments[0], reinterpret_cast<struct msghdr32*>(Arguments[1]), Arguments[2]);
++      return RecvMsg(Arguments[0], reinterpret_cast<struct msghdr32*>(G2H(Arguments[1])), Arguments[2]);
+       break;
+     }
+     case OP_ACCEPT4: {
+-      return ::accept4(Arguments[0], reinterpret_cast<struct sockaddr*>(Arguments[1]), reinterpret_cast<socklen_t*>(Arguments[2]), Arguments[3]);
++      return ::accept4(Arguments[0], reinterpret_cast<struct sockaddr*>(G2H(Arguments[1])), reinterpret_cast<socklen_t*>(G2H(Arguments[2])), Arguments[3]);
+       break;
+     }
+     case OP_RECVMMSG: {
+-      timespec32* timeout_ts = reinterpret_cast<timespec32*>(Arguments[4]);
++      timespec32* timeout_ts = reinterpret_cast<timespec32*>(G2H(Arguments[4]));
+       struct timespec tp64 {};
+       struct timespec* timed_ptr {};
+       if (timeout_ts) {
+@@ -748,7 +749,7 @@ void RegisterSocket(FEX::HLE::SyscallHandler* Handler) {
+       break;
+     }
+     case OP_SENDMMSG: {
+-      return SendMMsg(Arguments[0], reinterpret_cast<mmsghdr_32*>(Arguments[1]), Arguments[2], Arguments[3]);
++      return SendMMsg(Arguments[0], reinterpret_cast<mmsghdr_32*>(G2H(Arguments[1])), Arguments[2], Arguments[3]);
+       break;
+     }
+     default: LOGMAN_MSG_A_FMT("Unsupported socketcall op: {}", call); break;
+diff --git a/Source/Tools/LinuxEmulation/LinuxSyscalls/x32/Syscalls.h b/Source/Tools/LinuxEmulation/LinuxSyscalls/x32/Syscalls.h
+index b44e0cf85..651e2413b 100644
+--- a/Source/Tools/LinuxEmulation/LinuxSyscalls/x32/Syscalls.h
++++ b/Source/Tools/LinuxEmulation/LinuxSyscalls/x32/Syscalls.h
+@@ -6,6 +6,9 @@ $end_info$
+ */
+ 
+ #pragma once
++#include "LinuxSyscalls/GuestBaseThunk.h"
++#include <string_view>
++#include <type_traits>
+ 
+ #include <FEXCore/fextl/memory.h>
+ #include <FEXCore/fextl/string.h>
+@@ -119,7 +122,18 @@ void RegisterSyscall(SyscallHandler* Handler, int SyscallNumber, const char* Nam
+ // This is some glue logic that will cast a lambda and call the base RegisterSyscall implementation
+ template<class F>
+ void RegisterSyscall(SyscallHandler* _Handler, int num, const char* name, F f) {
+-  RegisterSyscall(_Handler, num, name, +f);
++  if constexpr (!std::is_class_v<F>) {
++    // Plain functions (SyscallPassthroughN<>) take integer arguments that the
++    // runtime translates itself.
++    RegisterSyscall(_Handler, num, name, +f);
++  } else if (IsGuestBaseExcluded(name)) {
++    RegisterSyscall(_Handler, num, name, +f);
++  } else {
++    // GuestBase is known before any handler is registered (FEXInterpreter
++    // sets it right after the ELF is identified); the thunk costs nothing
++    // when it is zero beyond one compare per pointer argument.
++    RegisterSyscall(_Handler, num, name, MakeGuestBaseThunk<F>(+f));
++  }
+ }
+ 
+ } // namespace FEX::HLE::x32
+diff --git a/Source/Tools/LinuxEmulation/LinuxSyscalls/x32/Thread.cpp b/Source/Tools/LinuxEmulation/LinuxSyscalls/x32/Thread.cpp
+index 448e2a5c0..c2b46d996 100644
+--- a/Source/Tools/LinuxEmulation/LinuxSyscalls/x32/Thread.cpp
++++ b/Source/Tools/LinuxEmulation/LinuxSyscalls/x32/Thread.cpp
+@@ -7,6 +7,7 @@ $end_info$
+ 
+ #include "ArchHelpers/UContext.h"
+ #include "LinuxSyscalls/SignalDelegator.h"
++#include "LinuxSyscalls/GuestBase.h"
+ #include "LinuxSyscalls/Syscalls.h"
+ #include "LinuxSyscalls/x32/Syscalls.h"
+ #include "LinuxSyscalls/x32/Thread.h"
+@@ -48,7 +49,9 @@ constexpr uint32_t TLS_NextEntry = 12;
+ constexpr uint32_t TLS_MaxEntry = TLS_NextEntry + 3;
+ 
+ uint64_t SetThreadArea(FEXCore::Core::CpuStateFrame* Frame, void* tls) {
+-  struct x32::user_desc* u_info = reinterpret_cast<struct x32::user_desc*>(tls);
++  // clone(CLONE_SETTLS) hands the guest's user_desc pointer in raw; the
++  // set_thread_area syscall thunk already based it. G2H is idempotent.
++  struct x32::user_desc* u_info = reinterpret_cast<struct x32::user_desc*>(FEX::HLE::G2H(tls));
+   FaultSafeUserMemAccess::VerifyIsReadable(u_info, sizeof(*u_info));
+ 
+   if (u_info->entry_number == -1) {
+@@ -127,7 +130,9 @@ void RegisterThread(FEX::HLE::SyscallHandler* Handler) {
+                                     .child_tid = reinterpret_cast<uint64_t>(child_tid),
+                                     .parent_tid = reinterpret_cast<uint64_t>(parent_tid),
+                                     .exit_signal = flags & CSIGNAL,
+-                                    .stack = reinterpret_cast<uint64_t>(stack),
++                                    // The syscall thunk based `stack` like any pointer, but it
++                                    // becomes the child's guest ESP: hand back the guest value.
++                                    .stack = FEX::HLE::H2G(reinterpret_cast<uint64_t>(stack)),
+                                     .stack_size = 0, // This syscall isn't able to see the stack size
+                                     .tls = reinterpret_cast<uint64_t>(tls),
+                                     .set_tid = 0, // This syscall isn't able to select TIDs
+@@ -189,7 +194,9 @@ void RegisterThread(FEX::HLE::SyscallHandler* Handler) {
+     auto ThreadObject = FEX::HLE::ThreadManager::GetStateObjectFromCPUState(Frame);
+     // Retain the robust list head but don't give it to the kernel
+     // The kernel would break if it tried parsing a 32bit robust list from a 64bit process
+-    ThreadObject->ThreadInfo.robust_list_head = reinterpret_cast<uint64_t>(head);
++    // Guest base: the thunk handed us the host pointer; get_robust_list must
++    // return the guest one (Steam dereferences it).
++    ThreadObject->ThreadInfo.robust_list_head = FEX::HLE::H2G(reinterpret_cast<uint64_t>(head));
+     return 0;
+   });
+ 
+diff --git a/Source/Tools/LinuxEmulation/LinuxSyscalls/x32/Types.h b/Source/Tools/LinuxEmulation/LinuxSyscalls/x32/Types.h
+index 52ef4e601..f4502271f 100644
+--- a/Source/Tools/LinuxEmulation/LinuxSyscalls/x32/Types.h
++++ b/Source/Tools/LinuxEmulation/LinuxSyscalls/x32/Types.h
+@@ -6,6 +6,7 @@ $end_info$
+ */
+ 
+ #pragma once
++#include "LinuxSyscalls/GuestBase.h"
+ 
+ #include <FEXCore/Utils/CompilerDefs.h>
+ 
+@@ -84,13 +85,13 @@ public:
+   // In the case of non-void type, we can index the pointer
+   template<typename T2 = T, typename = std::enable_if<!std::is_same<T2, void>::value, T2>>
+   T2& operator[](size_t idx) const {
+-    return *reinterpret_cast<T2*>(Ptr + sizeof(T2) * idx);
++    return *reinterpret_cast<T2*>(G2H(Ptr) + sizeof(T2) * idx);
+   }
+ 
+   // In the case of void type, we need to trivially convert
+   template<typename T2 = T, typename = std::enable_if<std::is_same<T2, void>::value, T2>>
+   operator T2*() const {
+-    return reinterpret_cast<T2*>(Ptr);
++    return reinterpret_cast<T2*>(G2H(Ptr));
+   }
+ 
+   operator T*() const {
+@@ -108,8 +109,9 @@ public:
+   uint32_t Ptr;
+ 
+ private:
++  // The one place a 32-bit guest pointer becomes a host pointer.
+   T* Interpret() const {
+-    return reinterpret_cast<T*>(Ptr);
++    return reinterpret_cast<T*>(G2H(Ptr));
+   }
+ };
+ static_assert(std::is_trivially_copyable_v<compat_ptr<void>>);
+@@ -127,7 +129,7 @@ public:
+   auto_compat_ptr(uint32_t In)
+     : compat_ptr<T> {compat_ptr<T>::FromAddress(In)} {}
+   auto_compat_ptr(T* In)
+-    : compat_ptr<T> {compat_ptr<T>::FromAddress(static_cast<uint32_t>(reinterpret_cast<uintptr_t>(In)))} {}
++    : compat_ptr<T> {compat_ptr<T>::FromAddress(static_cast<uint32_t>(FEX::HLE::H2G(reinterpret_cast<uintptr_t>(In))))} {}
+ };
+ 
+ template<typename T>
+@@ -235,15 +237,17 @@ struct FEX_ANNOTATE("alias-x86_32-iovec") FEX_ANNOTATE("fex-match") iovec32 {
+ 
+   iovec32() = delete;
+ 
++  // Guest base: iov_base is a guest address (G2H/H2G are the identity
++  // without a base, and idempotent with one).
+   operator iovec() const {
+     iovec vec {};
+-    vec.iov_base = reinterpret_cast<void*>(iov_base);
++    vec.iov_base = reinterpret_cast<void*>(FEX::HLE::G2H(static_cast<uint64_t>(iov_base)));
+     vec.iov_len = iov_len;
+     return vec;
+   }
+ 
+   iovec32(const struct iovec& vec) {
+-    iov_base = static_cast<uint32_t>(reinterpret_cast<uintptr_t>(vec.iov_base));
++    iov_base = static_cast<uint32_t>(FEX::HLE::H2G(reinterpret_cast<uintptr_t>(vec.iov_base)));
+     iov_len = vec.iov_len;
+   }
+ };
+diff --git a/Source/Tools/LinuxEmulation/LinuxSyscalls/x64/Syscalls.h b/Source/Tools/LinuxEmulation/LinuxSyscalls/x64/Syscalls.h
+index e2525eccf..c3f7d0e1f 100644
+--- a/Source/Tools/LinuxEmulation/LinuxSyscalls/x64/Syscalls.h
++++ b/Source/Tools/LinuxEmulation/LinuxSyscalls/x64/Syscalls.h
+@@ -6,6 +6,7 @@ $end_info$
+ */
+ 
+ #pragma once
++#include "LinuxSyscalls/GuestBaseThunk.h"
+ 
+ #include "LinuxSyscalls/FileManagement.h"
+ #include "LinuxSyscalls/Syscalls.h"
+@@ -92,7 +93,15 @@ void RegisterSyscall(SyscallHandler* Handler, int SyscallNumber, const char* Nam
+ // This is some glue logic that will cast a lambda and call the base RegisterSyscall implementation
+ template<class F>
+ void RegisterSyscall(SyscallHandler* _Handler, int num, const char* name, F f) {
+-  RegisterSyscall(_Handler, num, name, +f);
++  // Pointer arguments into a 64-bit ET_EXEC guest's low window get the base
++  // (GuestBaseThunk.h); identity for everything else and for PIE guests.
++  if constexpr (!std::is_class_v<F>) {
++    RegisterSyscall(_Handler, num, name, +f);
++  } else if (IsGuestBaseExcluded(name)) {
++    RegisterSyscall(_Handler, num, name, +f);
++  } else {
++    RegisterSyscall(_Handler, num, name, MakeGuestBaseThunk<F>(+f));
++  }
+ }
+ 
+ void RegisterEpoll(FEX::HLE::SyscallHandler* Handler);
+diff --git a/Source/Tools/LinuxEmulation/LinuxSyscalls/x64/Thread.cpp b/Source/Tools/LinuxEmulation/LinuxSyscalls/x64/Thread.cpp
+index b61eeb720..b20a31c8b 100644
+--- a/Source/Tools/LinuxEmulation/LinuxSyscalls/x64/Thread.cpp
++++ b/Source/Tools/LinuxEmulation/LinuxSyscalls/x64/Thread.cpp
+@@ -5,6 +5,7 @@ tags: LinuxSyscalls|syscalls-x86-64
+ $end_info$
+ */
+ 
++#include "LinuxSyscalls/GuestBase.h"
+ #include "LinuxSyscalls/SignalDelegator.h"
+ #include "LinuxSyscalls/Syscalls.h"
+ #include "LinuxSyscalls/x64/Syscalls.h"
+@@ -266,9 +267,11 @@ void RegisterThread(FEX::HLE::SyscallHandler* Handler) {
+             .child_tid = reinterpret_cast<uint64_t>(child_tid),
+             .parent_tid = reinterpret_cast<uint64_t>(parent_tid),
+             .exit_signal = flags & CSIGNAL,
+-            .stack = reinterpret_cast<uint64_t>(stack),
++            // `stack` and `tls` become guest RSP and FS base: undo the syscall
++            // thunk's base (low-window guests, GuestBase.h).
++            .stack = FEX::HLE::H2G(reinterpret_cast<uint64_t>(stack)),
+             .stack_size = 0, // This syscall isn't able to see the stack size
+-            .tls = reinterpret_cast<uint64_t>(tls),
++            .tls = FEX::HLE::H2G(reinterpret_cast<uint64_t>(tls)),
+             .set_tid = 0, // This syscall isn't able to select TIDs
+             .set_tid_size = 0,
+             .cgroup = 0, // This syscall can't select cgroups
+diff --git a/Source/Tools/LinuxEmulation/VDSO_Emulation.cpp b/Source/Tools/LinuxEmulation/VDSO_Emulation.cpp
+index 50a9bae57..3de07d82f 100644
+--- a/Source/Tools/LinuxEmulation/VDSO_Emulation.cpp
++++ b/Source/Tools/LinuxEmulation/VDSO_Emulation.cpp
+@@ -1,5 +1,6 @@
+ // SPDX-License-Identifier: MIT
+ #include "VDSO_Emulation.h"
++#include "LinuxSyscalls/GuestBase.h"
+ 
+ #include "LinuxSyscalls/Syscalls.h"
+ #include "LinuxSyscalls/x32/Types.h"
+@@ -618,7 +619,10 @@ static void LoadGuestVDSOSymbols(char* VDSOBase) {
+   constexpr auto ELFMachine = Is64Bit ? EM_X86_64 : EM_386;
+ 
+   // We need to load symbols we care about.
+-  auto Header = reinterpret_cast<const ELFHeaderType*>(VDSOBase);
++  // VDSOBase is a GUEST address (GuestMmap); read the image through the host
++  // view and keep the resulting symbol pointers as guest addresses.
++  const char* HostBase = static_cast<const char*>(FEX::HLE::G2H(VDSOBase));
++  auto Header = reinterpret_cast<const ELFHeaderType*>(HostBase);
+ 
+   // Check ELF magic.
+   if (Header->e_ident[EI_MAG0] != ELFMAG0 || Header->e_ident[EI_MAG1] != ELFMAG1 || Header->e_ident[EI_MAG2] != ELFMAG2 ||
+@@ -632,10 +636,10 @@ static void LoadGuestVDSOSymbols(char* VDSOBase) {
+   }
+ 
+   // First walk the section headers to find the symbol table.
+-  auto RawShdrs = reinterpret_cast<const ELFSHeaderType*>(VDSOBase + Header->e_shoff);
++  auto RawShdrs = reinterpret_cast<const ELFSHeaderType*>(HostBase + Header->e_shoff);
+ 
+   const auto StrHeader = &RawShdrs[Header->e_shstrndx];
+-  const char* SHStrings = VDSOBase + StrHeader->sh_offset;
++  const char* SHStrings = HostBase + StrHeader->sh_offset;
+ 
+   struct SymbolTypes {
+     const char* name;
+@@ -662,12 +666,12 @@ static void LoadGuestVDSOSymbols(char* VDSOBase) {
+       continue;
+     }
+ 
+-    const char* StrTab = VDSOBase + StringTableHeader->sh_offset;
++    const char* StrTab = HostBase + StringTableHeader->sh_offset;
+     size_t NumSymbols = SymTableHeader->sh_size / SymTableHeader->sh_entsize;
+ 
+     for (size_t i = 0; i < NumSymbols; ++i) {
+       uint64_t offset = SymTableHeader->sh_offset + i * SymTableHeader->sh_entsize;
+-      auto Symbol = reinterpret_cast<const ELFSymbolType*>(VDSOBase + offset);
++      auto Symbol = reinterpret_cast<const ELFSymbolType*>(HostBase + offset);
+       if (ELF32_ST_VISIBILITY(Symbol->st_other) != STV_HIDDEN && Symbol->st_value != 0) {
+         const char* Name = &StrTab[Symbol->st_name];
+         if (Name[0] != '\0') {
+@@ -750,14 +754,14 @@ static void LoadFEXGeneratedCode(FEXCore::Core::InternalThreadState* Thread, boo
+ 
+     if (!VDSOPointers.VDSO_kernel_sigreturn) {
+       VDSOPointers.VDSO_kernel_sigreturn = reinterpret_cast<void*>(reinterpret_cast<uintptr_t>(Mapping->X86GeneratedCodePtr) + CurrentCodeOffset);
+-      memcpy(VDSOPointers.VDSO_kernel_sigreturn, sigreturn_32_code.data(), sigreturn_32_code.size());
++      memcpy(FEX::HLE::G2H(VDSOPointers.VDSO_kernel_sigreturn), sigreturn_32_code.data(), sigreturn_32_code.size());
+       CurrentCodeOffset += sigreturn_32_code.size();
+     }
+ 
+     if (!VDSOPointers.VDSO_kernel_rt_sigreturn) {
+       VDSOPointers.VDSO_kernel_rt_sigreturn =
+         reinterpret_cast<void*>(reinterpret_cast<uintptr_t>(Mapping->X86GeneratedCodePtr) + CurrentCodeOffset);
+-      memcpy(VDSOPointers.VDSO_kernel_rt_sigreturn, rt_sigreturn_32_code.data(), rt_sigreturn_32_code.size());
++      memcpy(FEX::HLE::G2H(VDSOPointers.VDSO_kernel_rt_sigreturn), rt_sigreturn_32_code.data(), rt_sigreturn_32_code.size());
+       CurrentCodeOffset += rt_sigreturn_32_code.size();
+     }
+   }
+@@ -768,7 +772,7 @@ static void LoadFEXGeneratedCode(FEXCore::Core::InternalThreadState* Thread, boo
+     };
+ 
+     VDSOPointers.VDSO_FEX_CallbackRET = reinterpret_cast<void*>(reinterpret_cast<uintptr_t>(Mapping->X86GeneratedCodePtr) + CurrentCodeOffset);
+-    memcpy(VDSOPointers.VDSO_FEX_CallbackRET, CallbackRetCode.data(), CallbackRetCode.size());
++    memcpy(FEX::HLE::G2H(VDSOPointers.VDSO_FEX_CallbackRET), CallbackRetCode.data(), CallbackRetCode.size());
+     CurrentCodeOffset += CallbackRetCode.size();
+   }
+ 

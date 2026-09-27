@@ -1,0 +1,60 @@
+The ELF libvulkan.so.1 shim: an ordinary Vulkan consumer, no VM.
+Apple M4, macOS 27, MoltenVK 1.4.2. 2026-09-24.
+
+WHY A SHIM AT ALL. Stage 4 step 1 proved a guest ELF can call MoltenVK through
+the runtime's private dlopen/dlsym bridge. DXVK will never do that: it links
+against libvulkan.so.1 by SONAME and calls the API. So the bridge has to be
+wrapped in something that looks to Linux exactly like the Vulkan loader.
+
+WHAT IT IS: an ordinary Linux aarch64 shared object, built on the host with
+clang+lld -- no cross toolchain, no guest involved -- exporting 431 entry
+points, each a four-instruction tail-call thunk:
+
+    adrp    x16, lxrt_vk_table
+    add     x16, x16, :lo12:lxrt_vk_table
+    ldr     x16, [x16, #N*8]
+    cbz     x16, .Lmissing
+    br      x16
+
+A tail call is signature-agnostic. Arguments stay in the registers and on the
+stack where the caller put them, so one thunk shape serves every prototype
+without the generator knowing a single one. x16 (IP0) is the register AAPCS64
+reserves for veneers, so clobbering it is correct rather than convenient.
+An entry point MoltenVK does not export traps at `brk #2` instead of branching
+through zero.
+
+The table is filled once by an ELF constructor that calls the bridge. The shim
+is built -nostdlib and pulls in no libc.
+
+WHAT RUNS: a dynamically linked Fedora binary, compiled with `-lvulkan`, that
+calls the Vulkan API directly and knows nothing about any of this.
+
+  [lxrt] PT_INTERP /lib/ld-linux-aarch64.so.1 -> .../ld-linux-aarch64.so.1
+  [lxrt] rewrite: 41918 words scanned | svc 54 rewritten | tls 31 rewritten
+  vkEnumerateInstanceVersion -> 1.4.357
+  extensiones de instancia: 18
+  vkCreateInstance -> 0
+    [0] Apple M4
+  vkDestroyInstance ok
+
+The guest's own ld.so resolved libvulkan.so.1 out of LXRT_ROOT, mapped it, and
+the runtime rewrote the syscall and TLS sites in everything it pulled in.
+
+MEASURED:
+
+  vkGetPhysicalDeviceProperties, direct through the bridge   11.6 ns
+  vkGetPhysicalDeviceProperties, through the ELF shim        12.0 ns
+  -> the thunk costs 0.4 ns
+
+For comparison, the same call in the VM went: Mesa venus encodes it, writes a
+virtio ring, VM exit, virglrenderer in another process decodes it, then
+MoltenVK. That path was never measured per-call because it was never the
+interesting number -- but it is a ring transfer and a process boundary against
+four instructions.
+
+STILL MISSING before a game renders:
+* presentation -- a VkSurfaceKHR backed by a CAMetalLayer the runtime owns;
+* VK_KHR_swapchain end to end, which is where the VM's Venus port needed
+  emulated sync-fd semaphores;
+* the entry points a real DXVK run actually touches, verified rather than
+  assumed -- 431 exported is not 431 exercised.

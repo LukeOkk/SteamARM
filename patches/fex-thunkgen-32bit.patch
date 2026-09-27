@@ -1,0 +1,82 @@
+FEX thunkgen: leave out what cannot be repacked, report errors (SteamARM)
+
+With THUNKGEN_SKIP_UNREPACKABLE set (scripts/build-fex-thunks.sh, 32-bit
+Vulkan only), a function with a pointer parameter whose pointee can be
+neither passed through nor repacked is left out, named on stderr, instead of
+failing the whole library; the guest then gets NULL for it from
+vkGet*ProcAddr. thunkgen's own errors (std::runtime_error) are printed
+instead of ending in an uncaught-exception abort without a message.
+
+--- a/ThunkLibs/Generator/gen.cpp	2026-09-27 10:11:16
++++ b/ThunkLibs/Generator/gen.cpp	2026-09-27 10:11:16
+@@ -10,6 +10,7 @@
+ #include <iostream>
+ #include <string_view>
+ #include <unordered_map>
++#include <unordered_set>
+ #include <variant>
+ 
+ #include <fmt/format.h>
+@@ -350,6 +351,38 @@
+     return ret;
+   }();
+ 
++  // SteamARM: with THUNKGEN_SKIP_UNREPACKABLE set, a function with a pointer
++  // parameter whose pointee can be neither passed through nor repacked is
++  // left out (and named on stderr) instead of failing the whole library.
++  // Used for the 32-bit Vulkan thunks, where upstream excludes such functions
++  // by hand; the guest then gets NULL from vkGet*ProcAddr for them.
++  if (std::getenv("THUNKGEN_SKIP_UNREPACKABLE")) {
++    std::unordered_set<std::string> skipped;
++    for (auto& thunk : thunks) {
++      for (unsigned param_idx = 0; param_idx != thunk.param_types.size(); ++param_idx) {
++        auto& param_type = thunk.param_types[param_idx];
++        if (!param_type->isPointerType() || thunk.param_annotations[param_idx].is_passthrough ||
++            thunk.param_annotations[param_idx].assume_compatible ||
++            (thunk.callbacks.contains(param_idx) && thunk.callbacks.at(param_idx).is_stub)) {
++          continue;
++        }
++        auto pointee = context.getCanonicalType(param_type->getPointeeType()->getLocallyUnqualifiedSingleStepDesugaredType().getTypePtr());
++        if (types.contains(pointee) && LookupType(context, pointee).assumed_compatible) {
++          continue;
++        }
++        auto it = type_compat.find(context.getCanonicalType(param_type->getPointeeType().getTypePtr()));
++        if (it != type_compat.end() && it->second == TypeCompatibility::None) {
++          fprintf(stderr, "thunkgen: skipping %s (parameter %u: %s)\n", thunk.function_name.c_str(), param_idx,
++                  param_type.getAsString().c_str());
++          skipped.insert(thunk.function_name);
++          break;
++        }
++      }
++    }
++    std::erase_if(thunks, [&](const auto& t) { return skipped.contains(t.function_name); });
++    std::erase_if(thunked_api, [&](const auto& t) { return skipped.contains(t.function_name); });
++  }
++
+   static auto format_decl = [](clang::QualType type, const std::string_view& name) {
+     clang::QualType innermostPointee = type;
+     while (innermostPointee->isPointerType()) {
+--- a/ThunkLibs/Generator/main.cpp	2026-09-27 10:11:16
++++ b/ThunkLibs/Generator/main.cpp	2026-09-27 10:11:16
+@@ -15,7 +15,7 @@
+   std::cerr << "Usage: " << program_name << " <filename> <libname> <gen_target> <output_filename> -- <clang_flags>\n";
+ }
+ 
+-int main(int argc, char* const argv[]) {
++static int real_main(int argc, char* const argv[]) {
+   llvm::sys::PrintStackTraceOnErrorSignal(argv[0]);
+ 
+   if (argc < 6) {
+@@ -114,3 +114,12 @@
+   });
+   return Tool.run(std::make_unique<GenerateThunkLibsActionFactory>(std::move(libname), std::move(output_filenames), data_layout).get());
+ }
++
++int main(int argc, char* const argv[]) {
++  try {
++    return real_main(argc, argv);
++  } catch (const std::exception& e) {
++    fprintf(stderr, "thunkgen: %s\n", e.what());
++    return 1;
++  }
++}

@@ -1,0 +1,32 @@
+FEX: find a shebang interpreter outside the rootfs too (SteamARM)
+
+GetShebangInterpFile() only looked for the interpreter under FEX's rootfs.
+Inside a pressure-vessel container that is not the container's /usr, so
+Proton's "#!/usr/bin/env python3" was not recognised as a script; execve
+returned ENOEXEC and glibc's execvp ran the Python launcher with /bin/sh
+("from: not found", MEASURED). The interpreter is now also looked up as
+named.
+
+--- a/Source/Tools/LinuxEmulation/LinuxSyscalls/Syscalls.cpp	2026-09-27 02:13:54
++++ b/Source/Tools/LinuxEmulation/LinuxSyscalls/Syscalls.cpp	2026-09-27 02:13:54
+@@ -162,12 +162,20 @@
+ 
+     // If the filename is absolute then prepend the rootfs
+     // If it is relative then don't append the rootfs
++    const fextl::string AsNamed = ShebangProgram;
+     if (ShebangProgram[0] == '/') {
+       ShebangProgram = FEX::HLE::_SyscallHandler->RootFSPath() + ShebangProgram;
+     }
+ 
+     if (FHU::Filesystem::Exists(ShebangProgram)) {
+       return ShebangProgram;
++    }
++    // Not in the rootfs: the interpreter as the process sees it. Inside a
++    // pressure-vessel container the rootfs is not the container's /usr, and
++    // "#!/usr/bin/env python3" (Proton's own launcher) came back ENOEXEC;
++    // glibc's execvp then ran the Python script with /bin/sh.
++    if (AsNamed[0] == '/' && FHU::Filesystem::Exists(AsNamed)) {
++      return AsNamed;
+     }
+   }
+ 

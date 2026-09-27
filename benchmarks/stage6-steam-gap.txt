@@ -1,0 +1,114 @@
+What is missing between here and the Steam client.
+Measured on the running Fedora guest with ftrace, 2026-09-25.
+
+Steam was LIVE for this measurement: the client (pid 923), six web helpers, the
+launcher service, all under FEX via binfmt, with FEXServer running. Two 10 s
+windows: one system-wide, one filtered to Steam's 11 processes.
+
+HEADLINE: 91 syscalls implemented. Of the 86 distinct syscalls Steam actually
+uses, 66 are implemented and 20 are not -- 1.28% of the call volume. That
+percentage is misleading. Every one of the 20 is fatal on first use, and
+together they are the event loop.
+
+LIVE FD CENSUS in Steam's process tree right now:
+
+  49 anon_inode:[eventfd]      46 anon_inode:[eventpoll]
+   4 anon_inode:[signalfd]      2 anon_inode:[timerfd]
+   1 inotify                    0 io_uring
+
+The `steam` process alone holds 17 eventfd and 7 epoll descriptors. This is not
+the embedded browser: without epoll and eventfd the client does not start.
+
+P0, BLOCKS START-UP:
+  epoll_create1/ctl/pwait/pwait2 (20/21/22/441) -- 33334 calls per 10 s
+    system-wide, the 4th most frequent syscall on the machine. NO DARWIN
+    EQUIVALENT: kqueue is a different model (level vs edge, EPOLLONESHOT,
+    EPOLLEXCLUSIVE, epoll nested in epoll), and the resulting fd must be
+    waitable by the ppoll() already implemented. This is a table of synthetic
+    descriptors over kqueue, not a switch case.
+  eventfd2 (19) -- 49 live fds. Coupled to the above: the fd must be pollable.
+  futex CMP_REQUEUE/REQUEUE/WAKE_OP -- glibc's pthread_cond_broadcast uses
+    CMP_REQUEUE, and futex runs at 50210 calls per 10 s.
+  waitid (95), openat2 (437), statx (291) -- structure translation.
+  memfd_create (279), execveat (281), rt_sigtimedwait (137) -- FEX itself calls
+    these three directly.
+  ioctl (29) -- in the enum with no case. The _IOC encoding differs.
+
+P1, VALVE'S OWN IPC: System V semaphores and shared memory. libtier0_s.so
+imports semget/semop/semctl, and `ipcs` shows five live semaphore arrays and
+shared segments of 10 805 760 bytes created by steamwebhelper. Darwin's default
+kern.sysv.shmmax is 4 MiB -- smaller than one of those segments -- and Darwin
+has no semtimedop at all.
+
+P2, FD FAMILIES WITH NO EQUIVALENT: inotify (CEF, SDL3 for controller hotplug,
+and pressure-vessel-wrap all import it), timerfd, signalfd, mremap, ptrace.
+
+THE BIG DECISION -- pressure-vessel, and it is not deferrable:
+
+  srt-bwrap's undefined symbols: unshare, setns, mount, umount2, capget,
+  capset, sethostname, pivot_root. Its strings: CLONE_NEW*, uid_map, gid_map,
+  --unshare-user, --add-seccomp-fd, /proc/self/mountinfo, overlayfs.
+
+  macOS has none of it. Not namespaces, not bind mounts, not user namespaces,
+  not capabilities.
+
+  ARCHITECTURE_TARGET §4 said "namespaces are implemented only if
+  pressure-vessel proves to need them". It needs them, and they cannot be
+  implemented. Worse, measured here: Steam's own UI already goes through
+  pressure-vessel (pv-adverb 1320 -> steamwebhelper 1346), so this is not a
+  problem that waits until a game launches.
+
+  Three ways out, and one must be chosen:
+   (a) reimplement bwrap's bind-mount plan as path rewriting inside the runtime
+       -- the machinery exists already (translate() + LXRT_ROOT + procfs.c);
+   (b) bypass pressure-vessel entirely (STEAM_RUNTIME=0, PRESSURE_VESSEL_*);
+   (c) a fake bwrap that only execs its child.
+
+RULED OUT WITH EVIDENCE:
+  io_uring -- zero live fds, zero calls in both windows, and no io_uring_*
+    symbol in libcef.so, steamwebhelper, steamclient, libtier0_s.so or
+    pressure-vessel-wrap. Permanent -ENOSYS is the correct answer.
+  rseq -- -ENOSYS is already correct; glibc disables rseq and continues.
+
+/proc BEYOND self: the binaries reference ~40 distinct /proc paths, including
+meminfo, cpuinfo, stat, mounts, sys/fs/nr_open, sys/kernel/yama/ptrace_scope,
+/proc/<other pid>/status, and /proc/self/ns/*. The static ones are generable;
+/proc/self/ns/* and other processes' entries are not.
+
+RECOMMENDED ORDER: epoll+eventfd -> futex CMP_REQUEUE -> waitid/openat2/statx
+-> SysV sem+shm -> memfd/execveat/rt_sigtimedwait (these three unblock FEX) ->
+wider /proc -> the pressure-vessel decision -> inotify/timerfd/signalfd.
+
+STATUS, 2026-09-25 later: of the 20 missing syscalls, these now exist and are
+covered by tests/elf/run.sh against the same binaries on a real Linux kernel:
+  epoll/eventfd, futex CMP_REQUEUE/REQUEUE/WAKE_OP, waitid, openat2, statx,
+  SysV sem+shm, memfd_create (+ seals on write/pwrite/writev/mmap), execveat,
+  rt_sigtimedwait, mremap (22/22), mincore, timerfd (create/settime/gettime),
+  signalfd4, inotify (init1/add_watch/rm_watch).
+Still absent: ptrace (no plan; Steam's own use is optional), io_uring (correct
+-ENOSYS), and the /proc/self/ns/* family, which cannot exist here.
+The pressure-vessel decision is taken in MIGRATION_PLAN Stage 6, on the
+evidence in stage6-bwrap-plan.txt.
+Scores under the runtime vs the same binaries on Linux, 2026-09-25 evening:
+mremap 22/22, inotify 41/41, syscall families 26/26, guest-driven W^X 6/6;
+timerfd+signalfd 20/23 (ABSTIME arming and readiness through epoll still
+wrong -- open). The epoll fix pass left a NULL dereference in EPOLL_CTL_ADD
+(lxrt_epoll_ctl, addr 0x19) that killed every glibc test; found by the family
+tests within minutes, fixed.
+timerfd+signalfd, later: 23/23. Two root causes, both measured: the guest's
+CLOCK_MONOTONIC (mach_absolute_time) and Darwin's clock_gettime(MONOTONIC)
+are different bases (3.8 s apart here), so an ABSTIME deadline never fired
+until every module read the guest's clock through lxrt_guest_clock_ns(); and
+kqueue's EVFILT_SIGNAL ignores pthread_kill(), which is how the runtime
+delivers self-directed signals, so signal.c now nudges every signalfd whose
+mask holds the signal (lxrt_signalfd_notify).
+THE PRESSURE-VESSEL DECISION, BUILT (2026-09-25, late): runtime/mounts.c
+interprets a bwrap plan -- every option the real plan uses, plus `--args FD`
+the way pressure-vessel passes it -- into a fresh sandbox root plus a bind
+table carried to children in LXRT_MOUNTS. tests/elf/bwrap_test.c runs one
+plan through the real bwrap on Linux (11/11) and through mounts.c under the
+runtime (11/11): ro-bind refuses writes with EROFS, bind is writable, symlink
+answers readlink, tmpfs is a fresh directory, --ro-bind-data lands the fd's
+bytes, --setenv/--unsetenv/--chdir take effect, /proc/self exists. What it
+is not: isolation. --unshare-*/--cap-*/--uid/--gid/--seccomp are refused
+with ENOSYS and a message, because the evidence says they are never asked.

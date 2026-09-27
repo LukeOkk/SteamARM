@@ -1,0 +1,74 @@
+A process model, and the four number spaces that had to be translated to get one.
+Apple M4, macOS 27. 2026-09-24.
+
+THE DECISION. Stage 5 found the first thing the single-address-space design
+does not absorb: FEX spawns FEXServer as a separate process. Rather than patch
+FEX, the runtime got a real process model, because Steam will need one anyway
+(a client, several web helpers and a game).
+
+  fork()   -> Darwin's fork(). The child inherits the whole address space:
+              guest image, rewritten code, trampolines. Only the calling thread
+              survives, which is what Linux promises too.
+  execve() -> re-executes THIS runtime on the target binary. A Linux ELF cannot
+              be handed to Darwin's execve; lxrun can, with the guest path as
+              its argument. The child is a fresh runtime with a fresh rewriting
+              pass, which is the only way a new image gets its svc sites
+              handled.
+  wait4()  -> wait4. The wait status encoding happens to agree bit for bit.
+
+The cost is stated rather than hidden: a second process is a second runtime.
+Nothing the single address space buys -- the 0.8 ns graphics bridge above all
+-- applies across that boundary.
+
+RESULT: FEXServer starts, stays alive, and FEX connects to it. FEX then reaches
+`hlt #1` inside its own code, which is where Stage 5 currently stops.
+
+WHAT ELSE FEX NEEDED, all of which Steam needs too:
+
+* Linux abstract AF_UNIX sockets (`\0name`). No filesystem-free socket
+  namespace exists on Darwin. They are now materialised under
+  $TMPDIR/lxrt-abstract-<uid>/. Both ends are guest code going through the same
+  translation, so they agree. What is lost: auto-cleanup on last close, and
+  isolation from anything else using that directory. bind() unlinks first so a
+  crashed run does not block a restart.
+
+* A synthetic /proc. FEXServer dies on read_symlink("/proc/self/exe") before
+  doing anything else. Materialised as real files the runtime owns -- exe,
+  cmdline, status, maps, fd -- so ordinary open/read/readlink work with only a
+  prefix substitution. `maps` is generated from mach_vm_region_recurse, so the
+  addresses are true; `fd` is rebuilt on each lookup from F_GETPATH.
+
+* getdents64, which Darwin does not have. C++'s directory_iterator uses it, and
+  that is how FEXServer enumerates /proc/self/fd.
+
+THE FOURTH SILENT NUMBER SPACE: fcntl file locks.
+
+  command   Linux  Darwin      l_type    Linux  Darwin
+  F_GETLK       5       7      F_RDLCK       0       1
+  F_SETLK       6       8      F_WRLCK       1       3
+  F_SETLKW      7       9      F_UNLCK       2       2
+
+and struct flock is {type, whence, start, len, pid} on Linux against
+{start, len, pid, type, whence} on Darwin. FEXServer takes a lock to enforce a
+single instance, got an unrelated errno, and exited without a message.
+
+That makes four: errno values, open() flags, sockaddr layout, and now file
+locks. Every one of them has a working low range and diverges after it, which
+is exactly why each was found late.
+
+THE WORST BUG OF THE SESSION, and it was mine:
+
+  `alloc_pool_near` probed candidate addresses for a trampoline pool with
+  mmap(MAP_FIXED). MAP_FIXED does not fail when the address is taken -- it
+  SILENTLY UNMAPS what is there. About 40% of vulkaninfo runs died with a
+  SIGBUS executing inside libc, long after the pool had quietly deleted a page
+  of it.
+
+  Linux has MAP_FIXED_NOREPLACE for this. Darwin's equivalent is
+  mach_vm_allocate with VM_FLAGS_FIXED, which fails instead of overwriting.
+  With that, 20 consecutive vulkaninfo runs pass.
+
+  The lesson is not "use the right flag". It is that the failure appeared three
+  stages after the code was written, in an unrelated binary, as a crash with no
+  connection to its cause -- and the only reason it was caught is that a test
+  suite ran a large real program repeatedly.

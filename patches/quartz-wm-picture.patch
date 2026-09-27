@@ -1,0 +1,15 @@
+diff --git a/src/x-input.m b/src/x-input.m
+index da239c0..ea18998 100644
+--- a/src/x-input.m
++++ b/src/x-input.m
+@@ -38,7 +38,10 @@
+ #include <X11/Xatom.h>
+ #include <X11/keysym.h>
+ #include <X11/extensions/applewm.h>
++/* AppKit (via frame.h) already defines a QuickDraw Picture. */
++#define Picture X11_Picture
+ #include <X11/extensions/Xrandr.h>
++#undef Picture
+ 
+ #include <unistd.h>
+ 

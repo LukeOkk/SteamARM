@@ -1,0 +1,36 @@
+PT_LOAD alignment of real Linux aarch64 binaries.
+Fedora 43 aarch64 guest, kernel 6.17.1. 2026-09-23.
+
+PERFORMANCE_BASELINE §5 predicted the 4 KiB/16 KiB page conflict would be the
+first wall of the ELF loader: "Linux ELFs linked for 4 KiB pages must be mapped
+on a 16 KiB-page Darwin."
+
+Measured, and it is not:
+
+  == Fedora aarch64 system
+  ls                        0x10000
+  bash                      0x10000
+  libc.so.6                 0x10000
+  ld-linux-aarch64.so.1     0x10000
+  python3                   0x10000
+  libvulkan.so.1            0x10000
+
+  == this project's own chain
+  FEX                       0x10000
+  wine (Proton ARM64)       0x10000
+
+  == every PT_LOAD in /usr/bin
+  3548  0x10000
+  (no other value appears)
+
+0x10000 is 64 KiB, an exact multiple of Darwin's 16 KiB page. Segments map
+cleanly with no straddling and no permission unioning. This is not a Fedora
+quirk: 64 KiB is the aarch64 psABI's max-page-size, so it should hold across
+distributions.
+
+runtime/elf.c still checks p_align % 16384 and refuses an image that violates
+it, rather than assuming.
+
+NOT SURVEYED: x86-64 and i386 Linux binaries, which use 0x1000 (4 KiB) and
+would straddle. That matters for Stage 5, not Stage 2, because under FEX guest
+addresses are not host addresses.
