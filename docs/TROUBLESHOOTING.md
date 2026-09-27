@@ -37,7 +37,14 @@ The first start updates the client and can take several minutes. Watch
 the newest `~/SteamARM-roots/logs/steam-*.log`. If Steam exits right away, stop it from
 the launcher (**Detener**) and start it again.
 
-**Steam uses "Proton ARM64" / games don't start**
+**Proton (ARM64) is listed / chosen and the game doesn't start**
+Valve's ARM64 Protons run an ARM64 Wine that macOS cannot host: it needs the
+low 4 GiB of memory and the x18 register, both reserved by macOS. Pick
+**Proton Experimental** (x86) for the game in its Properties →
+Compatibility. The ARM64 entries only appear when **Configuración →
+Procesador → Mostrar Proton ARM64 en Steam** is on.
+
+**Steam uses "Proton ARM64" / games don't start (old note)**
 Steam must see an x86-64 machine. SteamARM hides FEX's hypervisor CPUID bit
 for that. If you changed FEX options by hand, go back to the defaults.
 

@@ -235,6 +235,14 @@ struct SettingsView: View {
                 choice("Código automodificable (SMC)", $draft.fexSMC, ["none", "mtrack", "full"])
                 Toggle("Precisión reducida x87", isOn: $draft.fexX87Reduced)
             }
+            Section("Steam") {
+                Toggle("Mostrar Proton ARM64 en Steam", isOn: $draft.showProtonARM64)
+                Text("Steam ofrece Proton Experimental (ARM64) y Proton 11 (ARM64) además de los x86. "
+                     + "En macOS esas versiones no arrancan juegos: el Wine ARM64 necesita la memoria baja "
+                     + "y el registro x18 que macOS reserva. Usa Proton x86 (Proton Experimental) para jugar. "
+                     + "Reinicia Steam para aplicar.")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
         }
     }
 

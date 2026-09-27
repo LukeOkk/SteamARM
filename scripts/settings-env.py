@@ -154,6 +154,27 @@ def audio_volume(s):
         return 100
 
 
+def write_fex_appconfig(s):
+    """FEX's per-program config for the Steam client: HideHypervisorBit makes
+    Steam see an x86 machine and offer the x86 Protons only. Off (launcher:
+    "Mostrar Proton ARM64 en Steam"), Steam also lists its ARM64 Protons."""
+    root = "/tmp/lxrt-steamroot/tmp/fexhome/.fex-emu/AppConfig"
+    if not os.path.isdir(root):
+        return
+    hide = "0" if s.get("showProtonARM64") else "1"
+    path = os.path.join(root, "steam.json")
+    try:
+        with open(path) as f:
+            cfg = json.load(f)
+    except (OSError, ValueError):
+        cfg = {}
+    cfg.setdefault("Config", {})["HideHypervisorBit"] = hide
+    tmp = path + ".tmp"
+    with open(tmp, "w") as f:
+        json.dump(cfg, f)
+    os.replace(tmp, path)
+
+
 def write_limits(s, total=None):
     top = usable_gb(total)
     dram = int(s.get("dramGB") or 0) or top
@@ -164,6 +185,7 @@ def write_limits(s, total=None):
     with open(tmp, "w") as f:
         f.write("GUEST_MAX_MB=%d\n" % (dram * 1024))
     os.replace(tmp, os.path.join(d, "limits.env"))
+    write_fex_appconfig(s)
 
 
 def load(path):
