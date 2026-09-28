@@ -1,6 +1,8 @@
 #!/bin/bash
 # Start one app of the SteamARM launcher, no VM: the X server if it is not
-# running, then the app's guest command under FEX and the runtime. The
+# running, then the app's guest command under the runtime -- directly for an
+# aarch64 program (scripts/run-native.sh), through FEX for an x86 one
+# (scripts/run-fex.sh), by the entry's "architecture" (default x86_64). The
 # launcher's counterpart of scripts/run-steam.sh (see launcher/SPEC.md).
 #
 #   scripts/run-app.sh <app-id>            start (or re-show) an app from
@@ -18,8 +20,8 @@
 # is the Xvnc geometry (vnc only), applied when Xvnc is (re)started with no app
 # running; "metalHud" exports MTL_HUD_ENABLED=1; "extraEnv" goes to every app.
 # The PID of the launched program goes to $STATE/launcher/running.pid (its id
-# to running.id, its display mode to running.display) and its output to
-# $STATE/logs/<id>-<time>.log.
+# to running.id, its display mode to running.display, "<arch> <translator>" to
+# running.arch) and its output to $STATE/logs/<id>-<time>.log.
 set -u
 cd "$(dirname "$0")/.." || exit 1
 ROOT=/tmp/lxrt-steamroot
@@ -29,10 +31,11 @@ LDIR="$STATE/launcher"
 PIDFILE="$LDIR/running.pid"
 IDFILE="$LDIR/running.id"
 MODEFILE="$LDIR/running.display"
+ARCHFILE="$LDIR/running.arch"
 X11_BUNDLE_ID=org.steamarm.X11
 STEAM_PATTERN='build/lxrun .*ubuntu12_32/steam '
 
-usage() { sed -n '2,22p' "$0" | sed 's/^# \{0,1\}//'; }
+usage() { sed -n '2,24p' "$0" | sed 's/^# \{0,1\}//'; }
 
 # Runtime processes that are guest programs: everything but Xvnc and FEXServer.
 # (The pattern must name build/lxrun: a bare word would match this shell. The
@@ -48,11 +51,11 @@ guest_pids() {
 
 stop_guests() {
     for p in $(guest_pids); do kill -9 "$p" 2>/dev/null; done
-    rm -f "$ROOT/tmp/fexhome/.steam/steam.pid" "$PIDFILE" "$IDFILE" "$MODEFILE"
+    rm -f "$ROOT/tmp/fexhome/.steam/steam.pid" "$PIDFILE" "$IDFILE" "$MODEFILE" "$ARCHFILE"
 }
 
-# Prints shell assignments (APP_NAME, APP_ROOT, APP_FEXROOTFS, GEOMETRY, DMODE and the
-# arrays APP_ENV, APP_CMD) for app $1, from apps.json and settings.json.
+# Prints shell assignments (APP_NAME, APP_ARCH, APP_ROOT, APP_FEXROOTFS, GEOMETRY, DMODE
+# and the arrays APP_ENV, APP_CMD) for app $1, from apps.json and settings.json.
 resolve_app() {
     /usr/bin/python3 - "$1" "$LDIR/apps.json" "$LDIR/settings.json" <<'PY'
 import json, os, re, shlex, sys
@@ -69,6 +72,8 @@ steam = {
     "id": "steam", "name": "Steam",
     "command": ["/bin/bash", "/tmp/fexhome/.local/share/Steam/steam.sh", "-noverifyfiles"],
     "root": "/tmp/lxrt-steamroot", "fexRootfs": "/", "env": {},
+    # The x86 client under FEX: TRANSITIONAL_COMPATIBILITY (docs/APPLICATION_MANAGER.md).
+    "architecture": "x86_64",
 }
 apps = load(apps_path, [])
 if isinstance(apps, dict):
@@ -86,6 +91,11 @@ if app_id == "steam" and not os.path.exists(
 if not cmd:
     sys.stderr.write("run-app: app %r has no command\n" % app_id)
     sys.exit(2)
+# ARM64-first: aarch64 runs directly under the runtime, x86 through FEX.
+arch = str(app.get("architecture") or "x86_64")
+if arch not in ("aarch64", "x86_64", "i386"):
+    sys.stderr.write("run-app: app %r has architecture %r (aarch64, x86_64 or i386)\n" % (app_id, arch))
+    sys.exit(2)
 settings = load(settings_path, {})
 if not isinstance(settings, dict):
     settings = {}
@@ -102,6 +112,9 @@ env.update(senv.env_from_settings(settings))
 senv.write_limits(settings)
 pairs = []
 for k, v in sorted(env.items()):
+    # Translator settings are for x86 payloads only, never a native program.
+    if arch == "aarch64" and str(k).startswith("FEX_"):
+        continue
     if re.match(r"^[A-Za-z_][A-Za-z0-9_]*$", str(k)):
         pairs.append("%s=%s" % (k, v))
 
@@ -115,7 +128,9 @@ if mode not in ("native", "vnc"):
 
 q = shlex.quote
 print("APP_NAME=%s" % q(str(app.get("name") or app_id)))
-print("APP_ROOT=%s" % q(str(app.get("root") or "/tmp/lxrt-steamroot")))
+print("APP_ARCH=%s" % q(arch))
+default_root = "/tmp/lxrt-arm64root" if arch == "aarch64" else "/tmp/lxrt-steamroot"
+print("APP_ROOT=%s" % q(str(app.get("root") or default_root)))
 fr = app.get("fexRootfs")
 print("APP_FEXROOTFS=%s" % q("/" if fr is None else str(fr)))
 print("GEOMETRY=%s" % q(geometry))
@@ -208,6 +223,11 @@ mkdir -p "$LOGS" "$LDIR"
 
 SPEC="$(resolve_app "$ID")" || exit 2
 eval "$SPEC"
+if [ "$APP_ARCH" = aarch64 ]; then
+    RUNNER=scripts/run-native.sh; TRANSLATOR=none
+else
+    RUNNER=scripts/run-fex.sh; TRANSLATOR=FEX
+fi
 MODE="${STEAMARM_DISPLAY:-$DMODE}"
 case "$MODE" in
     native) DISP=:2 ;;
@@ -218,9 +238,11 @@ esac
 if [ "$DRY" = 1 ]; then
     echo "app:      $ID ($APP_NAME)"
     echo "display:  $MODE (DISPLAY=$DISP)"
-    echo "root:     LXRT_ROOT=$APP_ROOT FEX_ROOTFS=$APP_FEXROOTFS DISPLAY=$DISP"
+    echo "arch:     $APP_ARCH (translator: $TRANSLATOR, session: ZERO-VM)"
+    if [ "$APP_ARCH" = aarch64 ]; then echo "root:     LXRT_ROOT=$APP_ROOT DISPLAY=$DISP"
+    else echo "root:     LXRT_ROOT=$APP_ROOT FEX_ROOTFS=$APP_FEXROOTFS DISPLAY=$DISP"; fi
     echo "env:      ${APP_ENV[*]+${APP_ENV[*]}}"
-    echo "command:  scripts/run-fex.sh ${APP_CMD[*]}"
+    echo "command:  $RUNNER ${APP_CMD[*]}"
     if [ "$MODE" = native ]; then
         if native_x_running; then echo "x11:      native X server running on :2"
         else echo "x11:      would start the native X server on :2 (scripts/run-x11-native.sh)"; fi
@@ -275,14 +297,20 @@ scripts/input.sh start >/dev/null || echo "run-app: no controllers for games (sc
 
 L="$LOGS/$ID-$(date +%Y%m%d-%H%M%S).log"
 echo "$L" > "$LOGS/current"
-# env execs nohup, which execs run-fex.sh, which execs build/lxrun: $! ends up
+# env execs nohup, which execs the runner, which execs build/lxrun: $! ends up
 # being the runtime process of the program itself.
-env ${APP_ENV[@]+"${APP_ENV[@]}"} DISPLAY=$DISP LXRT_ROOT="$APP_ROOT" FEX_ROOTFS="$APP_FEXROOTFS" \
-    nohup scripts/run-fex.sh "${APP_CMD[@]}" > "$L" 2>&1 < /dev/null &
+if [ "$APP_ARCH" = aarch64 ]; then
+    env ${APP_ENV[@]+"${APP_ENV[@]}"} DISPLAY=$DISP LXRT_ROOT="$APP_ROOT" \
+        nohup "$RUNNER" "${APP_CMD[@]}" > "$L" 2>&1 < /dev/null &
+else
+    env ${APP_ENV[@]+"${APP_ENV[@]}"} DISPLAY=$DISP LXRT_ROOT="$APP_ROOT" FEX_ROOTFS="$APP_FEXROOTFS" \
+        nohup "$RUNNER" "${APP_CMD[@]}" > "$L" 2>&1 < /dev/null &
+fi
 echo $! > "$PIDFILE"
 echo "$ID" > "$IDFILE"
 echo "$MODE" > "$MODEFILE"
-echo "$APP_NAME starting on $DISP (log $L)."
+echo "$APP_ARCH $TRANSLATOR" > "$ARCHFILE"
+echo "$APP_NAME ($APP_ARCH, translator: $TRANSLATOR) starting on $DISP (log $L)."
 
 if [ "$MODE" = vnc ]; then
     show_display vnc
