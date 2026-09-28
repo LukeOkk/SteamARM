@@ -1,0 +1,84 @@
+Stage 19: the Steam Frame image as ARM64 base, and the macOS limits on ARM64 Proton
+Written 2026-09-28 in a Linux container (no Mac, no lxrun). Each fact is labelled.
+
+1. Reading the Steam Frame recovery image without btrfs-progs
+-------------------------------------------------------------
+MEASURED on the owner's Mac (reported): btrfs restore, three btrfs-progs versions
+up to v7.1, stops on steamframe-oobe-repair-20260922.5153644-0.3.0.img with
+"zstd frame incomplete"; btrfs check is clean.
+
+VERIFIED IN SOURCE / MEASURED (synthetic images, Linux, btrfs-progs 7.1):
+btrfs-progs' decompress_zstd() fails when a zstd frame does not end inside a
+ram_bytes-sized buffer. The kernel stops at ram_bytes and ignores the rest. Three
+extents rewritten so their frames decode to ram_bytes + 16 KiB:
+    btrfs restore -s          -> "ERROR: zstd frame incomplete", file left empty
+    steamframe-image.py extract -> every file identical to the source tree
+tests/steamframe_image/run.sh, 12/12:
+    zstd, zlib, lzo extents; default subvolume; GPT with 4096-byte sectors;
+    symlinks, hard links, sparse files, inline extents; the larger-frame case.
+
+HYPOTHESIS (to MEASURE with `steamframe-image.py diagnose` on the real image):
+the Steam Frame image has frame-larger-than-ram extents (written by a kernel
+whose page size differs from the sector size). If diagnose instead reports
+frame-incomplete-input or short-output, the image or the partition copy is
+truncated or damaged.
+
+2. Why ARM64 Proton cannot run as a native arm64 macOS process
+--------------------------------------------------------------
+VERIFIED IN SOURCE, xnu main (apple-oss-distributions/xnu), bsd/kern/mach_loader.c
+load_machfile():
+    if (enforce_hard_pagezero && result->is_64bit_addr && (header->cputype == CPU_TYPE_ARM64)) {
+        /* 64 bit ARM binary must have "hard page zero" of 4GB to cover the lower 32 bit address space */
+        if (vm_map_has_hard_pagezero(map, 0x100000000) == FALSE) { ... return LOAD_BADMACHO; }
+__PAGEZERO is not mapped: load_segment() raises map->min_offset past it, and
+vm_map_raise_min_offset() cannot lower it again. A MAP_FIXED or VM_FLAGS_FIXED
+below min_offset returns KERN_INVALID_ADDRESS (mmap: ENOMEM). For execve, a
+LOAD_BADMACHO after the point of no return becomes SIGKILL (kern_exec.c,
+badtoolate). That is the exit 137 in stage2-pagezero.txt and the SIGKILL at
+0x7ffe0000.
+The 4 GiB rule applies only to cputype ARM64. x86_64 binaries (Rosetta) need
+only 0x1000, which is how CrossOver's x86_64 Wine maps low memory.
+
+VERIFIED IN SOURCE, wine master: dlls/ntdll/unix/virtual.c maps
+user_shared_data at the fixed address 0x7ffe0000 and exit(1)s if that fails. The
+x64 syscall stubs of the ARM64EC ntdll embed "testb $1,0x7ffe0308". Third-party
+binaries read the page directly too (the Go runtime reads 0x7ffe0008/0x7ffe0014).
+32-bit (wow64) games need all their memory below 2/4 GiB. So the page cannot be
+moved for arbitrary games.
+
+Same conclusion as stage18 ("Proton ARM64 on macOS: measured, not viable
+natively"), now with the kernel code that enforces it.
+
+3. Two leads, both to MEASURE on the Mac
+----------------------------------------
+a) x18. VERIFIED IN SOURCE, xnu main osfmk/arm64/machine_task.c,
+   machine_task_process_signature():
+       /* Temporary override for tasks before macOS 13. Those were allowed to use
+          x18 for their purposes on Apple Silicon. */
+       if (platform == PLATFORM_MACOS && sdk < sdk_version(13, 0, 0))
+           task->preserve_x18 = true;
+   A binary whose LC_BUILD_VERSION sdk is below 13.0 keeps x18 across
+   preemption. If macOS 27 still does this, lxrun linked with
+   -Wl,-platform_version,macos,12.0,12.3 would let Linux code (libcef's
+   `blr x18`) and the ARM64 Windows ABI (TEB in x18) use x18 without rewriting.
+   Measure: tests/x18_preserve/run.sh (builds the same program with the current
+   SDK and with sdk 12.3; expected ZEROED / PRESERVED).
+   Side effect to check: sdk < fall-2024 also turns off the 1 GHz timebase
+   (uses_1ghz_timebase), so mach_absolute_time units differ. The runtime must
+   use mach_timebase_info.
+
+b) Soft PAGEZERO. VERIFIED IN SOURCE, xnu-12377.101.15 and later (research
+   agent, not re-read here): enforce_hard_pagezero is cleared when
+   ml_satisfies_x86_64_requirements() holds. It names the entitlements
+   com.apple.developer.cross-architecture-support(-unmanaged) and
+   com.apple.private.4k-pages. The page zero then becomes one hard page plus a
+   PROT_NONE mapping that MAP_FIXED could replace. In public xnu that function is
+   a stub returning false. UNKNOWN: whether the shipping macOS 27 kernel
+   implements it, and whether a third-party developer can get that entitlement.
+   It would be the only native-arm64 route to 0x7ffe0000.
+
+4. Not done here (needs the Mac)
+--------------------------------
+Extracting and inventorying the real image, the NSS fix measured on
+steamwebhelper, and Steam's Compatibility list under the ARM64 client all need
+the owner's Mac with lxrun.
