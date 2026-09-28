@@ -1,5 +1,7 @@
 Stage 19: the Steam Frame image as ARM64 base, and the macOS limits on ARM64 Proton
 Written 2026-09-28 in a Linux container (no Mac, no lxrun). Each fact is labelled.
+Section 2 was checked by two adversarial reviewers. The kernel part stood. The
+"cannot run at all" conclusion was refuted by Madeira and is rewritten below.
 
 1. Reading the Steam Frame recovery image without btrfs-progs
 -------------------------------------------------------------
@@ -13,7 +15,7 @@ ram_bytes-sized buffer. The kernel stops at ram_bytes and ignores the rest. Thre
 extents rewritten so their frames decode to ram_bytes + 16 KiB:
     btrfs restore -s          -> "ERROR: zstd frame incomplete", file left empty
     steamframe-image.py extract -> every file identical to the source tree
-tests/steamframe_image/run.sh, 12/12:
+tests/steamframe_image/run.sh, 14/14 (12 at first commit, + repo compare):
     zstd, zlib, lzo extents; default subvolume; GPT with 4096-byte sectors;
     symlinks, hard links, sparse files, inline extents; the larger-frame case.
 
@@ -23,31 +25,57 @@ whose page size differs from the sector size). If diagnose instead reports
 frame-incomplete-input or short-output, the image or the partition copy is
 truncated or damaged.
 
-2. Why ARM64 Proton cannot run as a native arm64 macOS process
---------------------------------------------------------------
-VERIFIED IN SOURCE, xnu main (apple-oss-distributions/xnu), bsd/kern/mach_loader.c
-load_machfile():
+2. ARM64 Proton as a native arm64 macOS process: not unmodified; patched, maybe
+----------------------------------------------------------------------------------
+VERIFIED IN SOURCE, xnu (apple-oss-distributions/xnu, main and xnu-12377.121.6),
+bsd/kern/mach_loader.c load_machfile():
     if (enforce_hard_pagezero && result->is_64bit_addr && (header->cputype == CPU_TYPE_ARM64)) {
         /* 64 bit ARM binary must have "hard page zero" of 4GB to cover the lower 32 bit address space */
         if (vm_map_has_hard_pagezero(map, 0x100000000) == FALSE) { ... return LOAD_BADMACHO; }
-__PAGEZERO is not mapped: load_segment() raises map->min_offset past it, and
-vm_map_raise_min_offset() cannot lower it again. A MAP_FIXED or VM_FLAGS_FIXED
-below min_offset returns KERN_INVALID_ADDRESS (mmap: ENOMEM). For execve, a
-LOAD_BADMACHO after the point of no return becomes SIGKILL (kern_exec.c,
-badtoolate). That is the exit 137 in stage2-pagezero.txt and the SIGKILL at
-0x7ffe0000.
-The 4 GiB rule applies only to cputype ARM64. x86_64 binaries (Rosetta) need
-only 0x1000, which is how CrossOver's x86_64 Wine maps low memory.
+__PAGEZERO is not mapped. load_segment() raises map->min_offset past it.
+vm_map_raise_min_offset() refuses to go backwards, and nothing lowers
+min_offset after exec. A MAP_FIXED or VM_FLAGS_FIXED below it returns
+KERN_INVALID_ADDRESS (mmap: ENOMEM, mach_vm_allocate: kr=1).
+- The SIGKILL: for execve (or POSIX_SPAWN_SETEXEC), LOAD_BADMACHO lands after the
+  point of no return (kern_exec.c, badtoolate) and becomes SIGKILL, exit 137, as in
+  stage2-pagezero.txt. A plain posix_spawn returns EBADMACHO instead.
+- The rule applies only when the main binary's cputype is ARM64. An x86_64 main
+  binary (Rosetta) needs only 0x1000, which is how x86_64 Wine and CrossOver get
+  low memory.
 
-VERIFIED IN SOURCE, wine master: dlls/ntdll/unix/virtual.c maps
-user_shared_data at the fixed address 0x7ffe0000 and exit(1)s if that fails. The
-x64 syscall stubs of the ARM64EC ntdll embed "testb $1,0x7ffe0308". Third-party
-binaries read the page directly too (the Go runtime reads 0x7ffe0008/0x7ffe0014).
-32-bit (wow64) games need all their memory below 2/4 GiB. So the page cannot be
-moved for arbitrary games.
+VERIFIED IN SOURCE, wine master:
+- The unix ntdll maps user_shared_data at the fixed address 0x7ffe0000 and calls
+  exit(1) if that fails (dlls/ntdll/unix/virtual.c:201, 4118-4124).
+- Wine's own reads of the page go through a handful of hard-coded pointers:
+  unix virtual.c, ntdll thread.c, kernelbase sync.c and others. A fork can move them.
+- Code outside Wine cannot be patched. The x64 export thunks that FEX runs for x64
+  Nt* calls embed "testb $1,0x7ffe0308", and the Go runtime reads 0x7ffe0008 and
+  0x7ffe0014.
+- 32-bit (wow64) games need all their memory below 2/4 GiB. For 64-bit games,
+  0x7ffe0000 is the only low mapping Wine cannot do without; the other low
+  reservations are best-effort.
+So unmodified Valve Proton ARM64 cannot start in an unentitled native arm64
+process. This matches stage18.
 
-Same conclusion as stage18 ("Proton ARM64 on macOS: measured, not viable
-natively"), now with the kernel code that enforces it.
+VERIFIED IN SOURCE (a third-party project, not measured here): this is not an
+absolute impossibility. Madeira (github.com/intraducine/iridium,
+testrepos/Madeira) runs Wine ARM64EC + FEX + DXMT as one Mach process on iOS, which
+has the same 4 GiB rule:
+- build/ntdll-unix/virtual_ios.c:14592 "iOS arm64 has mandatory 4GB __PAGEZERO --
+  can't map at 0x7ffe0000". It allocates the shared-data page anywhere and
+  registers 0x7ffe0000 as a "sub-floor window" onto it (:14628).
+- build/ntdll-unix/signal_arm64_ios.c:10360-10377: accesses to that window fault into
+  a Mach exception handler that emulates the load. "COST ... one Mach exception per
+  access ... ~25k/sec". An anti-tamper poll "took 2.3 MILLION Mach exceptions"
+  (virtual_ios.c:14613).
+- It restores x18 (the TEB) from TLS and binary-patches x18 uses.
+- Its README says "Thumper and ULTRAKILL are playable". 32-bit (wow64) is not
+  supported.
+Consequence for SteamARM: an ARM64 Proton on macOS is possible only as a patched
+Wine. It needs a relocated shared-data page with fault-serviced reads, and a way to
+keep x18 (see 3a). Its speed depends on how often a game touches 0x7ffe0000.
+Valve's Proton ARM64 binaries cannot be used unmodified, and wow64 games stay on
+the current x86 Proton under FEX, which already relocates the guest address space.
 
 3. Two leads, both to MEASURE on the Mac
 ----------------------------------------
@@ -75,7 +103,13 @@ b) Soft PAGEZERO. VERIFIED IN SOURCE, xnu-12377.101.15 and later (research
    PROT_NONE mapping that MAP_FIXED could replace. In public xnu that function is
    a stub returning false. UNKNOWN: whether the shipping macOS 27 kernel
    implements it, and whether a third-party developer can get that entitlement.
-   It would be the only native-arm64 route to 0x7ffe0000.
+   Hints that it does: libsyscall exports a thread_set_x86_64_compat trap (-108)
+   that the public trap table leaves as kern_invalid, and xnu's own tests call
+   these "x86-64 emulation entitlements" that AMFI enforces. The entitlement path
+   does not lower min_offset after exec. At exec it raises min_offset by only one
+   page and maps the rest of __PAGEZERO PROT_NONE, which MAP_FIXED could replace.
+   It would be the only native-arm64 route to a real mapping at 0x7ffe0000. Check:
+   disassemble _ml_satisfies_x86_64_requirements in the Mac's kernelcache.
 
 4. Not done here (needs the Mac)
 --------------------------------
