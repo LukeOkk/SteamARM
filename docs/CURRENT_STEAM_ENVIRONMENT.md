@@ -90,8 +90,11 @@ payloads, and FEX only for x86/i386 game code.
 
 Steam started from the launcher. Every guest process is a separate
 `build/lxrun` Darwin process (`fork` is a Darwin fork, and `execve` re-execs
-`lxrun`, `runtime/process.c:13-27`). When a guest execs an x86 or i386 ELF,
-`lxrun` hands it to `/usr/lib/lxrt-emu/FEX` (`runtime/main.c:357-390`).
+`lxrun`, `runtime/process.c:13-27`). An x86 program's own execs go through
+FEX re-executing itself (`process.c:92-113`). When an aarch64 guest, or the
+bwrap interpreter, execs an x86 or i386 ELF, `lxrun` hands it to
+`/usr/lib/lxrt-emu/FEX`, the way binfmt_misc does on Linux
+(`runtime/main.c:357-390`).
 
 ```
 SteamARM.app                                         Mach-O arm64
@@ -274,10 +277,17 @@ Everything below has to go for "everything ARM64 except game payloads".
 Proton, the game payload loads x86 X11/xcb, PulseAudio and SDL libraries from
 the FEX rootfs.
 
-- HYPOTHESIS: forwarding X11/xcb and libpulse to their aarch64 versions would
-  cut FEX time in Wine's display and audio paths.
-- UNKNOWN: whether the pinned FEX still ships generators for them. Not
-  measured; not a priority while real games are unverified.
+What the pinned FEX (`08f451d3b`) can forward, VERIFIED IN SOURCE in its
+`Data/ThunksDB.json`:
+
+| library | thunk in FEX | THUNK_CANDIDATE for SteamARM? |
+|---|---|---|
+| Vulkan | yes | in use |
+| GL | yes | HYPOTHESIS: only with an aarch64 GLX on the host side, which macOS lacks (Zink over the shim would be one) |
+| asound (ALSA) | yes | low value: Wine talks to PulseAudio here (`PULSE_SERVER`) |
+| drm, wayland-client, cuda | yes | not applicable on macOS |
+| X11/xcb, libpulse | no | would need new thunk definitions. HYPOTHESIS: they would cut FEX time in Wine's display and audio paths. Not measured, and not a priority while real games are unverified. |
+| SDL2 | source only (`ThunkLibs/libSDL2`), not in ThunksDB | same as X11 |
 
 ## 7. Where Steam is hard-wired, and what the ARM64 client changes
 
