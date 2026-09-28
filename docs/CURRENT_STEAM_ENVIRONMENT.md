@@ -73,6 +73,11 @@ payloads, and FEX only for x86/i386 game code.
     `steam` executable only (`scripts/install-steamroot-gfx.sh:100-105`).
   - A native ARM64 client does not run under FEX, so this trick cannot apply
     to it. See §7.
+  - Two measurements disagree on how far the x86 client goes. Commit
+    `06cbc41` (later, when an "ARM64 Protons" toggle was tried) says that with
+    the leaves visible the x86 client registers no ARM64 Proton, and only
+    Valve's native arm64 client lists them. Both are in the record; the
+    native client's behaviour is what matters from here on.
 - **How many client processes FEX translates today:**
   - Every guest process in Steam's tree except FEXServer. Xvnc is excluded too
     (and is aarch64 anyway), but it only runs in VNC mode.
@@ -213,12 +218,12 @@ This is VERIFIED IN SOURCE; details in `docs/APPLICATION_MANAGER.md`.
 
 | component | tag | x86 debt | note |
 |---|---|---|---|
-| Shim `build/libvulkan.so.1`: `vulkan_shim.{c,S}`, `gen.py`, `wsi.c`, `features.c`, `fallback.c`, `memcap.c` | KEEP | NOT_APPLICABLE | An aarch64 caller links the shim directly, with no thunk (MEASURED, `stage4-shim.txt:29-32`; `tests/elf/run.sh`, check 12). The feature spoofs work around MoltenVK gaps and do not depend on the ISA. MoltenVK is loaded by absolute path, with no ICD JSON (`shim/gen.py:75-78`). |
+| Shim `build/libvulkan.so.1`: `vulkan_shim.{c,S}`, `gen.py`, `wsi.c`, `features.c`, `fallback.c`, `memcap.c` | KEEP | NOT_APPLICABLE | Not built with `-ffixed-x18` (`Makefile:96-102`), so it relies on the runtime's x18 rewriter like any other guest library. An aarch64 caller links the shim directly, with no thunk (MEASURED, `stage4-shim.txt:29-32`; `tests/elf/run.sh`, check 12). The feature spoofs work around MoltenVK gaps and do not depend on the ISA. MoltenVK is loaded by absolute path, with no ICD JSON (`shim/gen.py:75-78`). |
 | `shim/gen_rebase.py` → `vk_rebase.c` | GUEST_X86_REQUIRED | GAME_PAYLOAD_EXCEPTION | With no guest base these wrappers only forward, so they cost nothing for aarch64 callers. |
 | `shim/map32.c` | GUEST_I386_REQUIRED | GAME_PAYLOAD_EXCEPTION | Passes calls through unless FEX reports a 32-bit guest base. |
 | FEX Vulkan thunks: guest `libvulkan-guest.so` (x86-64 and i386), host `libvulkan-host.so` (aarch64), `thunkgen` | GUEST_X86_REQUIRED / GUEST_I386_REQUIRED | GAME_PAYLOAD_EXCEPTION | |
 | x86 rootfs Vulkan loader + lavapipe | GUEST_X86_REQUIRED | GAME_PAYLOAD_EXCEPTION | The thunk overlay bypasses it (`stage10-vulkan-thunks.txt:11-12`). |
-| FEX patches: `guest-base`, `thunk-args`, `wx` + `LxrtJit.h`, `x18`, `thunkgen-macos`, `shebang` | KEEP | GAME_PAYLOAD_EXCEPTION | `guest-base` also forces the low window for executables whose names start with `wine` (`:1179-1180`). `shebang` is TEMPORARY_X86_DEPENDENCY: whether an ARM64 SLR still runs x86 scripts under FEX is UNKNOWN. |
+| FEX patches: `guest-base`, `thunk-args`, `wx` + `LxrtJit.h`, `x18`, `thunkgen-macos`, `shebang` | KEEP | GAME_PAYLOAD_EXCEPTION | `guest-base` also forces the low window for executables whose names start with `wine` (`:1179-1180`). `shebang` is for Proton's own `#!/usr/bin/env python3` launcher under FEX inside the container (`stage15-steam-proton-path.txt:59-62`). |
 | FEX patches: `guest-reserve`, `thunkgen-32bit`, `thunks-guestbase32` | GUEST_I386_REQUIRED | GAME_PAYLOAD_EXCEPTION | |
 | `patches/fex-lxrt-hide-hypervisor.patch` | REMOVE_LATER | TEMPORARY_X86_DEPENDENCY | Its only purpose is to steer the x86 client's choice of Proton and SLR. |
 | XQuartz 21.1.24 + `xquartz-remote-layer`, `-signals-to-server-thread`, `-log-file-env` patches; quartz-wm + `quartz-wm-picture`; `run-x11-native.sh` | KEEP | NOT_APPLICABLE | Cross-process CALayerHost presentation, no per-frame copy (MEASURED, `stage12-native-present.txt`). |
@@ -232,7 +237,7 @@ This is VERIFIED IN SOURCE; details in `docs/APPLICATION_MANAGER.md`.
 | `steamarm-inputd` (SDL, IOKit) + `runtime/evdev.c` + `tools/inputd/PROTOCOL.md` | KEEP | NOT_APPLICABLE | |
 | PulseAudio (Homebrew), socket at `<root>/tmp/pulse/native`; `runtime/pathfd.c` stand-in for O_PATH | KEEP | NOT_APPLICABLE | The socket lives inside the guest root so pressure-vessel can bind it. Until this audit, `run-app.sh` started `audio.sh` without `LXRT_ROOT`, so the socket was always in the Steam root and an aarch64 entry had none. Now there is one server, with a socket in each root that asks for one (`tests/audio/run.sh`). |
 | eventfd, futex WAIT/WAKE/BITSET/REQUEUE | KEEP | NOT_APPLICABLE | The esync substrate. |
-| `futex_waitv` (fsync), ntsync | UNKNOWN | — | `futex_waitv` (449) is in the guest-base pointer table (`runtime/gbase.c:102`); whether it is implemented was not checked. ntsync does not exist. The esync/fsync toggles only set `PROTON_NO_ESYNC`/`PROTON_NO_FSYNC` (`settings-env.py:71-74`). |
+| `futex_waitv` (fsync), ntsync | missing | — | `futex_waitv` (449) is **not implemented**. It appears only in the guest-base pointer table (`runtime/gbase.c:102`); `dispatch.c` has no case for it, so it returns ENOSYS. Wine's fsync needs it. HYPOTHESIS: Proton notices and falls back to esync, so the launcher's fsync toggle (`PROTON_NO_FSYNC`, `settings-env.py:71-74`) changes nothing today. ntsync does not exist either. |
 
 ### 5.6 Launcher (`launcher/`, Mach-O arm64)
 
@@ -395,7 +400,8 @@ Behaviours of the Steam client that the runtime handles specially
 3. Does SLR Arm64's pressure-vessel emit the bwrap plan `mounts.c` handles?
    Does it expect Valve's FEX, or binfmt, for x86 games?
 4. How is x86 Proton offered to an ARM64 client (§7)?
-5. Is `futex_waitv` implemented, and so does the fsync toggle mean anything?
+5. fsync needs `futex_waitv`, which lxrun lacks (§5.5). Implement it (a wait
+   on several futexes at once), or say in the launcher that only esync applies.
 6. MoltenVK has no version pin: it comes from Homebrew and is measured only on
    1.4.2.
 7. Real games are not verified (`README.md`). Known defects that remain open:
