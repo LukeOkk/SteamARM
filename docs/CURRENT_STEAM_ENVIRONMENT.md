@@ -131,12 +131,13 @@ Sources:
 | path | what it is | ISA | tag |
 |---|---|---|---|
 | `~/SteamARM-roots/lxrt-root` → `/tmp/lxrt-root` | Fedora 43 aarch64 root, built from 66 root RPMs (plus 5 build-only) pinned in `scripts/mkroot-rpm.lock` (`stage9-vmfree-build.txt:427-429`). It holds glibc, bash, the X client libraries, Xvnc + Mesa swrast, and FEX + FEXServer. | aarch64 | REPLACE_WITH_HOLO (keep it until the Holo tree is inventoried: FEX, FEXServer and `tests/elf` run from it) |
-| `~/SteamARM-roots/x86-rootfs` | FEX's Ubuntu 24.04 x86-64 image from rootfs.fex-emu.gg (`scripts/fetch-x86-rootfs.sh`). Adds i386 GTK2/libXtst for the client, and amd64 `lsof` + libtirpc for the client's port check. | x86-64 + i386 | GUEST_X86_REQUIRED / GAME_PAYLOAD_EXCEPTION (the client-only additions are REMOVE_LATER) |
-| `~/SteamARM-roots/steamroot` → `/tmp/lxrt-steamroot` | The x86-64 tree cloned as `/`, plus the aarch64 emulator side in `/usr/lib/lxrt-emu` (`scripts/mksteamroot.sh:5-10`). `/` is x86 because pressure-vessel inspects the host through file descriptors and captures host libraries. | mixed | REPLACE_WITH_HOLO / REPLACE_WITH_ARM64 |
+| `~/SteamARM-roots/x86-rootfs` | FEX's Ubuntu 24.04 x86-64 image from rootfs.fex-emu.gg (`scripts/fetch-x86-rootfs.sh`). Adds amd64 `lsof` + libtirpc for the client's port check, and i386 GTK2/libXtst (who added them, and why, is not recorded: `stage9-vmfree-build.txt:535-536`). | x86-64 + i386 | GUEST_X86_REQUIRED / GAME_PAYLOAD_EXCEPTION (the client-only additions are REMOVE_LATER) |
+| `~/SteamARM-roots/steamroot` → `/tmp/lxrt-steamroot` | The x86-64 tree cloned as `/`, plus the aarch64 emulator side in `/usr/lib/lxrt-emu` (`scripts/mksteamroot.sh:5-10`). The script's stated reason for an x86 `/` (a comment, not measured): pressure-vessel inspects the host through directory file descriptors, which FEX's path-based rootfs overlay does not cover. | mixed | REPLACE_WITH_HOLO / REPLACE_WITH_ARM64 |
 | `steamroot/tmp/fexhome` (guest `/tmp/fexhome`) | Guest `HOME` (`run-fex.sh:31`; passwd user `steam`, `mksteamroot.sh:61-64`). Holds the Steam install, `.fex-emu`, and FEX's rootfs clone `RootFS/Ubuntu_24_04`. | data | KEEP the convention. This path is baked into Steam's configuration and symlinks (`scripts/env-links.sh:2-4`). |
 | `/usr/lib/lxrt-emu` (inside the Steam root) | The only host directory visible inside pressure-vessel containers. Holds `FEX-emu`, the thunks, the shim and the aarch64 X libraries (`runtime/mounts.c:283-312`). | aarch64 | KEEP for game payloads. The X libraries are REPLACE_WITH_HOLO. |
 | `~/SteamARM-roots/samples` → `/tmp/lxrt-samples` | aarch64 test programs | aarch64 | KEEP |
 | `/tmp/lxrt-arm64root` | The ARM64 base. It is to be linked to the root extracted from the Steam Frame image (`docs/STEAM_FRAME_IMAGE.md`). Nothing creates it yet. | aarch64 | new, REPLACE_WITH_HOLO target |
+| `steamframe-oobe-repair-20260922.5153644-0.3.0.img` (on the owner's Mac) | Valve's Steam Frame recovery image: the source of the ARM64 userspace. It is read with `scripts/steamframe-image.py` (read-only, never booted, never bundled). What it contains is UNKNOWN until `inventory` runs (`docs/STEAM_FRAME_REFERENCE.md`). | data (aarch64 contents) | STEAM_RUNTIME_OWNED; PROPRIETARY_DO_NOT_REDISTRIBUTE |
 | `$STEAMARM_STATE/launcher/` | `apps.json`, `settings.json`, `running.{pid,id,display,arch}` | data | KEEP |
 | `/tmp/lxrt-shm-<uid>`, `/tmp/lxrt-sig`, `/tmp/lxrt-input` | Host directories behind `/dev/shm`, the cross-process signal mailboxes and the evdev sockets | host | KEEP |
 
@@ -176,8 +177,9 @@ This is VERIFIED IN SOURCE; details in `docs/APPLICATION_MANAGER.md`.
 |---|---|---|---|
 | `Makefile` (lxrun, vdso, shim, inputd, launcher) | KEEP | NOT_APPLICABLE | Everything it builds is arm64. |
 | `scripts/setup.sh` (ten steps) | KEEP | TEMPORARY_X86_DEPENDENCY | Its `steam` step is x86: `install-steam.sh`, then the thunks, then `install-steamroot-gfx.sh`. |
-| `scripts/mkroot-rpm.sh` + `.lock`, `toolchain-aarch64-linux-fedora.cmake`, the Fedora sysroot | KEEP | NOT_APPLICABLE | The same unpacking technique (no scriptlets, relative symlinks) would work for Holo packages. |
-| Fedora root: Xvnc + closure, xkbcomp/xkeyboard-config, Mesa swrast | REMOVE_LATER | NOT_APPLICABLE | Used only by the VNC display mode, which cannot show the Metal layer (`stage12-native-present.txt:37`). |
+| `scripts/mkroot-rpm.sh` + `.lock` | KEEP | NOT_APPLICABLE | The same unpacking technique (no scriptlets, relative symlinks) would work for Holo packages. |
+| The Fedora sysroot `sysroot-f43` + `toolchain-aarch64-linux-fedora.cmake` | KEEP | GAME_PAYLOAD_EXCEPTION | Everything built against them serves x86 payloads: FEX, the thunk host libraries and `thunkgen` (`build-fex-host.sh:248-258`, `build-fex-thunks.sh:267-282`). lxrun, the shim and the launcher use Homebrew clang without it. |
+| Fedora root: Xvnc + closure (about 40 packages), xkbcomp/xkeyboard-config, Mesa swrast | REMOVE_LATER | NOT_APPLICABLE | Used only by the VNC display mode, which cannot show the Metal layer (`stage12-native-present.txt:37`). |
 | `scripts/build-fex-host.sh` (FEX `08f451d3b` + 7 patches, `-ffixed-x18`, relinked as FEX-emu) | KEEP | GAME_PAYLOAD_EXCEPTION | |
 | `scripts/build-fex-thunks.sh` + the Ubuntu 24.04 x86-64/i386 dev sysroots | KEEP | GAME_PAYLOAD_EXCEPTION | Builds Vulkan thunks only (64-bit and 32-bit). No other library is thunked. |
 | `scripts/fetch-x86-rootfs.sh` | GUEST_X86_REQUIRED | GAME_PAYLOAD_EXCEPTION | It also disables 8 Mesa ICD manifests so the x86 Vulkan loader sees only lavapipe (bypassed by the thunk overlay). |
@@ -188,7 +190,7 @@ This is VERIFIED IN SOURCE; details in `docs/APPLICATION_MANAGER.md`.
 | `scripts/run-app.sh`, `scripts/settings-env.py` | KEEP | TEMPORARY_X86_DEPENDENCY | `settings-env.py` exports `FEX_*` and the Proton knobs to every app. `run-app.sh` now drops `FEX_*` for aarch64 entries. |
 | `scripts/run-fex.sh` | KEEP | GAME_PAYLOAD_EXCEPTION | For x86 payloads. `scripts/run-native.sh` is the aarch64 counterpart. |
 | `scripts/run-steam.sh` | REMOVE_LATER | TEMPORARY_X86_DEPENDENCY | A command-line duplicate of `run-app.sh steam`. |
-| `scripts/run-x11-native.sh`, `audio.sh`, `input.sh`, `safeguard.sh`, `env-links.sh`, `make-release.sh`, `cdp.py`, `default-output.py`, `make-icon.py`, `make-icns.sh` | KEEP | NOT_APPLICABLE | `safeguard.sh` also restarts FEXServer (`:85-92`), which only x86 payloads need. |
+| `scripts/run-x11-native.sh`, `audio.sh`, `input.sh`, `safeguard.sh`, `env-links.sh`, `make-release.sh`, `cdp.py`, `default-output.py`, `make-icon.py`, `make-icns.sh` | KEEP | NOT_APPLICABLE | `safeguard.sh` also restarts FEXServer when it is missing. Until this audit it did so for any guest, so a pure aarch64 session got a FEXServer and a FEX `/bin/true` every 5 s. It now does so only while an x86 guest runs (`has_x86_guest`). |
 | `scripts/vnc_auth.py`, `vnc_click.py`, `vnc_snapshot.py` | REMOVE_LATER | NOT_APPLICABLE | VNC mode only. |
 | `scripts/steamframe-image.py`, `tests/steamframe_image`, `tests/x18_preserve` | KEEP | NOT_APPLICABLE | The ARM64 base tooling. |
 
@@ -216,7 +218,7 @@ This is VERIFIED IN SOURCE; details in `docs/APPLICATION_MANAGER.md`.
 | FEX patches: `guest-reserve`, `thunkgen-32bit`, `thunks-guestbase32` | GUEST_I386_REQUIRED | GAME_PAYLOAD_EXCEPTION | |
 | `patches/fex-lxrt-hide-hypervisor.patch` | REMOVE_LATER | TEMPORARY_X86_DEPENDENCY | Its only purpose is to steer the x86 client's choice of Proton and SLR. |
 | XQuartz 21.1.24 + `xquartz-remote-layer`, `-signals-to-server-thread`, `-log-file-env` patches; quartz-wm + `quartz-wm-picture`; `run-x11-native.sh` | KEEP | NOT_APPLICABLE | Cross-process CALayerHost presentation, no per-frame copy (MEASURED, `stage12-native-present.txt`). |
-| aarch64 X client libraries copied into `/usr/lib/lxrt-emu` (from the Fedora root) | REPLACE_WITH_HOLO | NOT_APPLICABLE | UNKNOWN whether Holo's libxcb ABI matches what `wsi.c` declares by hand. |
+| aarch64 X client libraries copied into `/usr/lib/lxrt-emu` (libX11, libxcb, libXau, libXdmcp from the Fedora root) | KEEP | GAME_PAYLOAD_EXCEPTION | Their one consumer once Xvnc is gone is the aarch64 Vulkan host thunk, which loads them for x86 payloads (`install-steamroot-gfx.sh`). They can later come from the Holo root instead (REPLACE_WITH_HOLO); UNKNOWN whether Holo's libxcb ABI matches what `wsi.c` declares by hand. |
 | Xvnc mode (display `:1`, Screen Sharing) | REMOVE_LATER | NOT_APPLICABLE | Games cannot present through it. |
 
 ### 5.5 Input, audio, sync
@@ -261,8 +263,8 @@ Everything below has to go for "everything ARM64 except game payloads".
 | i386 client `ubuntu12_32/steam` + `steamui.so` + scout i386 libraries | Valve's Linux client | the ARM64 client from the Steam Frame image |
 | x86-64 `steamwebhelper` (CEF) | Steam's UI | ARM64 CEF from the same image |
 | x86-64 bash running `steam.sh`, `setup.sh`, `steam-runtime-check-requirements`, the launcher service | the bootstrap scripts | the image's aarch64 shell and tools |
-| amd64 `lsof` + libtirpc (`fetch-x86-rootfs.sh:40-47`) | the client checks its websocket peer with `lsof -i TCP@127.0.0.1:<port>` (MEASURED, `stage8-steam-zero-vm.txt:296-300`) | an aarch64 `lsof`. HYPOTHESIS: the ARM64 client runs the same check. |
-| i386 GTK2 + libXtst (`fetch-x86-rootfs.sh:35-39`) | the i386 client's UI | nothing |
+| amd64 `lsof` + libtirpc (`fetch-x86-rootfs.sh:40-47`) | the client checks its websocket peer with `lsof -i TCP@127.0.0.1:<port>` (MEASURED, `stage8-steam-zero-vm.txt:296-311`) | an aarch64 `lsof`. HYPOTHESIS: the ARM64 client runs the same check. |
+| i386 GTK2 + libXtst (`fetch-x86-rootfs.sh:35-39`) | presumably the i386 client; no record of who added them (`stage9-vmfree-build.txt:535-536`) | nothing |
 | x86-64 pressure-vessel tools for **steamwebhelper's** container | the client starts its UI through pressure-vessel (MEASURED, `stage6-steam-gap.txt:57-58`) | SLR Arm64 for the client. The x86 SLR stays for x86 Proton. |
 | FEXServer started on the **client's** launch path (`run-fex.sh:61-66`) | FEX needs it | started on the first x86 payload instead (TEMPORARY until the client is ARM64) |
 | Xvnc's `xkbcomp` running an x86 bash (`run-steam.sh:62-70`) | VNC mode | removed with VNC mode |

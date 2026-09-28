@@ -53,7 +53,23 @@ esac
 
 # Guests are the processes whose executable is lxrun. Matching "build/lxrun"
 # anywhere in the command line also killed shells that merely mentioned it.
-guest_pids() { ps -Ao pid=,comm= | awk '$2 ~ /(^|\/)lxrun$/ {print $1}'; }
+# Match the LAST field: comm is the path lxrun was exec'd by, and a release
+# lives under "~/Library/Application Support/SteamARM/src"; with a space in
+# that path, $2 would miss the guest and the limits below would not see it.
+guest_pids() { ps -Ao pid=,comm= | awk '$NF ~ /(^|\/)lxrun$/ {print $1}'; }
+
+# An x86 guest is an lxrun process running FEX: run-fex.sh starts lxrun FEX-gb,
+# and FEX re-execs itself for every x86 exec (runtime/process.c, lxrt_execve),
+# so a FEX path is in its command line. FEXServer does not count. An aarch64
+# session (scripts/run-native.sh) has none, and must not get a FEXServer.
+has_x86_guest() {
+    local p
+    for p in $(guest_pids); do
+        ps -o command= -p "$p" 2>/dev/null |
+            grep -qE '/FEX(Interpreter|Loader)?(-[A-Za-z0-9]+)?( |$)' && return 0
+    done
+    return 1
+}
 
 kill_guests() {
     echo "$(date '+%F %T') KILL: $1"
@@ -70,7 +86,7 @@ while true; do
         [ -n "$g" ] && GUEST_MB=$g
     fi
     level=$(sysctl -n kern.memorystatus_level 2>/dev/null || echo 100)
-    read -r gcount grss <<<"$(ps -Ao rss=,comm= | awk '$2 ~ /(^|\/)lxrun$/ {c++; s+=$1} END {print c+0, int((s+0)/1024)}')"
+    read -r gcount grss <<<"$(ps -Ao rss=,comm= | awk '$NF ~ /(^|\/)lxrun$/ {c++; s+=$1} END {print c+0, int((s+0)/1024)}')"
     fse=$(ps -Ao rss,comm | awk '/fseventsd$/ {print int($1/1024); exit}')
     fse=${fse:-0}
     read -r vmobj mapent <<<"$(zprint 2>/dev/null | awk '$1=="vm.objects" {o=$7} $1=="VM.map.entries" {e=$7} END {print o+0, e+0}')"
@@ -82,11 +98,13 @@ while true; do
     elif [ "$mapent" -gt "$MAX_MAPENT" ]; then kill_guests "kernel VM.map.entries ${mapent} > ${MAX_MAPENT}"
     fi
     n=$((n + 1))
-    # FEXServer is shared by every x86 program. If it is gone while guests
+    # FEXServer is shared by every x86 program. If it is gone while x86 guests
     # run (it crashed, or an older one timed out), a game started from Steam
     # dies in 5 s with "Couldn't connect to FEXServer socket" (MEASURED):
-    # bring it back the way run-fex.sh starts it.
-    if [ $((n % 5)) -eq 0 ] && [ "$gcount" -gt 0 ] && ! pgrep -f 'lxrun .*FEXServer' >/dev/null; then
+    # bring it back the way run-fex.sh starts it. Only for x86 guests: an
+    # aarch64 session otherwise got a FEXServer (and a FEX /bin/true) every 5 s.
+    if [ $((n % 5)) -eq 0 ] && [ "$gcount" -gt 0 ] && ! pgrep -f 'lxrun .*FEXServer' >/dev/null \
+       && has_x86_guest; then
         echo "$(date '+%F %T') FEXServer missing with ${gcount} guests: restarting it"
         (cd "$(dirname "$0")/.." && scripts/run-fex.sh /bin/true >/dev/null 2>&1 &)
     fi
