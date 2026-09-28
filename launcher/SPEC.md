@@ -5,6 +5,10 @@ com.steamarm.launcher) that runs Linux apps through the SteamARM runtime (no VM)
 styled like Ryujinx / GameHub. UI text in Spanish.
 
 ## Context
+The launch path below predates the ARM64-first dispatch: `aarch64` entries
+now run through `scripts/run-native.sh`, without FEX. The current lifecycle is
+in `docs/APPLICATION_MANAGER.md`.
+
 - `build/lxrun` = Linux-compat runtime; `scripts/run-fex.sh <guest-program> [args]`
   runs an x86 Linux program (env LXRT_ROOT = guest root; the Steam root is
   /tmp/lxrt-steamroot -> ~/SteamARM-roots/steamroot; guest /tmp/fexhome is $HOME;

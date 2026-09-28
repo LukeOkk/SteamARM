@@ -230,7 +230,7 @@ This is VERIFIED IN SOURCE; details in `docs/APPLICATION_MANAGER.md`.
 | component | tag | x86 debt | note |
 |---|---|---|---|
 | `steamarm-inputd` (SDL, IOKit) + `runtime/evdev.c` + `tools/inputd/PROTOCOL.md` | KEEP | NOT_APPLICABLE | |
-| PulseAudio (Homebrew), socket at `$ROOT/tmp/pulse/native`; `runtime/pathfd.c` stand-in for O_PATH | KEEP | NOT_APPLICABLE | The socket lives inside the Steam root so pressure-vessel can bind it. With two roots, where it lives is an open question. |
+| PulseAudio (Homebrew), socket at `<root>/tmp/pulse/native`; `runtime/pathfd.c` stand-in for O_PATH | KEEP | NOT_APPLICABLE | The socket lives inside the guest root so pressure-vessel can bind it. Until this audit, `run-app.sh` started `audio.sh` without `LXRT_ROOT`, so the socket was always in the Steam root and an aarch64 entry had none. Now there is one server, with a socket in each root that asks for one (`tests/audio/run.sh`). |
 | eventfd, futex WAIT/WAKE/BITSET/REQUEUE | KEEP | NOT_APPLICABLE | The esync substrate. |
 | `futex_waitv` (fsync), ntsync | UNKNOWN | — | `futex_waitv` (449) is in the guest-base pointer table (`runtime/gbase.c:102`); whether it is implemented was not checked. ntsync does not exist. The esync/fsync toggles only set `PROTON_NO_ESYNC`/`PROTON_NO_FSYNC` (`settings-env.py:71-74`). |
 
@@ -242,8 +242,9 @@ This is VERIFIED IN SOURCE; details in `docs/APPLICATION_MANAGER.md`.
 | `LauncherModel.swift` | KEEP | TEMPORARY_X86_DEPENDENCY | Adopts a running Steam by the ps substring `ubuntu12_32/steam ` (`:288`). `needsSetup` checks for the x86 `steam.sh`. |
 | `Models.swift` | KEEP | TEMPORARY_X86_DEPENDENCY | Has a stale copy of Steam's definition in `AppEntry.steam` (`:72-75`), which `run-app.sh` never reads. `Paths.guestRoot` = `/tmp/lxrt-steamroot` for every app. |
 | `Installers.swift` | KEEP | REPLACE_WITH_ARM64 | Heroic and Prism deliberately pick x86-64 assets. Whether usable aarch64 builds exist is UNKNOWN. |
-| `AddAppView.swift` | KEEP | NOT_APPLICABLE since `748bc97` | Now records the ISA from `e_machine` (`ELFInspector`). |
+| `AddAppView.swift` | KEEP | TEMPORARY_X86_DEPENDENCY | Since `748bc97` it records the ISA from `e_machine` (`ELFInspector`). It still installs into `Paths.appsRoot`, inside the x86 Steam root. |
 | `ApplicationCore.swift` (new) | KEEP | NOT_APPLICABLE | Holds `LinuxBaseEnvironment`, `LaunchPlanner` and `SessionMachine`. |
+| `SPEC.md` | KEEP | TEMPORARY_X86_DEPENDENCY | Its launch description (every app through `run-fex.sh`) predates `748bc97`; `docs/APPLICATION_MANAGER.md` is the current one. |
 | `SETTINGS_IMPLEMENTATION.md` | REMOVE_LATER | NOT_APPLICABLE | Stale at `:44` and `:46`. |
 
 ### 5.7 Record and docs

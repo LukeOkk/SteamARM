@@ -66,7 +66,7 @@ scripts/make-release.sh     # the downloadable .dmg, in build/release/
 Tests: `tests/elf/run.sh`, `tests/elf/run_i386.sh`,
 `tests/elf/run_vk_device.sh`, `tests/win/run.sh`,
 `tests/win/run_steam_path.sh`, `tests/x18_preserve/run.sh`,
-`tests/steamframe_image/run.sh` (Linux), `make test-launcher-core`.
+`tests/steamframe_image/run.sh` (Linux), `tests/audio/run.sh`, `make test-launcher-core`.
 
 The Steam Frame recovery image as the ARM64 base (read on the Mac, no VM, no
 mount): [docs/STEAM_FRAME_IMAGE.md](docs/STEAM_FRAME_IMAGE.md).
