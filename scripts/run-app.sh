@@ -129,8 +129,18 @@ if mode not in ("native", "vnc"):
 q = shlex.quote
 print("APP_NAME=%s" % q(str(app.get("name") or app_id)))
 print("APP_ARCH=%s" % q(arch))
-default_root = "/tmp/lxrt-arm64root" if arch == "aarch64" else "/tmp/lxrt-steamroot"
-print("APP_ROOT=%s" % q(str(app.get("root") or default_root)))
+ARM64_ROOT, X86_ROOT = "/tmp/lxrt-arm64root", "/tmp/lxrt-steamroot"
+root = str(app.get("root") or (ARM64_ROOT if arch == "aarch64" else X86_ROOT))
+# The rule of LaunchPlanner (launcher/ApplicationCore.swift): the ARM64 base
+# runs aarch64 code only, the x86-64 Steam root only x86 code under FEX. An
+# aarch64 program in the x86 root would find no aarch64 loader or libraries.
+same = lambda a, b: os.path.realpath(a) == os.path.realpath(b)
+if (arch == "aarch64" and same(root, X86_ROOT)) or (arch != "aarch64" and same(root, ARM64_ROOT)):
+    want = ARM64_ROOT if arch == "aarch64" else X86_ROOT
+    sys.stderr.write("run-app: app %r is %s but its root is %s; %s programs run in %s. "
+                     "Install it there.\n" % (app_id, arch, root, arch, want))
+    sys.exit(2)
+print("APP_ROOT=%s" % q(root))
 fr = app.get("fexRootfs")
 print("APP_FEXROOTFS=%s" % q("/" if fr is None else str(fr)))
 print("GEOMETRY=%s" % q(geometry))

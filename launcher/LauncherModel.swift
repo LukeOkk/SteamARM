@@ -336,6 +336,7 @@ final class LauncherModel: ObservableObject {
         try? FileManager.default.removeItem(at: Paths.pidFile)
         try? FileManager.default.removeItem(at: Paths.idFile)
         try? FileManager.default.removeItem(at: Paths.displayFile)
+        try? FileManager.default.removeItem(at: Paths.archFile)
         if quick, let name = running?.name {
             alert = "\(name) terminó enseguida. Revisa el registro en \(logPath ?? Paths.logs.path)."
         }

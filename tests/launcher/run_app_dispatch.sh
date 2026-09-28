@@ -12,7 +12,10 @@ cat > "$W/launcher/apps.json" <<'JSON'
 [{"id":"arm","name":"ARM","command":["/usr/bin/hello"],"env":{},"kind":"custom","architecture":"aarch64"},
  {"id":"x86","name":"x86","command":["/opt/apps/x/run"],"root":"/tmp/lxrt-steamroot","fexRootfs":"/","env":{},"kind":"custom"},
  {"id":"i386","name":"i386","command":["/opt/apps/y/run"],"env":{},"kind":"custom","architecture":"i386"},
- {"id":"bad","name":"bad","command":["/x"],"architecture":"armv7"}]
+ {"id":"bad","name":"bad","command":["/x"],"architecture":"armv7"},
+ {"id":"armx86root","name":"a","command":["/opt/apps/a/run"],"root":"/tmp/lxrt-steamroot","architecture":"aarch64"},
+ {"id":"x86armroot","name":"b","command":["/opt/apps/b/run"],"root":"/tmp/lxrt-arm64root","architecture":"x86_64"},
+ {"id":"armcustom","name":"c","command":["/bin/c"],"root":"/tmp/some-other-root","architecture":"aarch64"}]
 JSON
 echo '{"fexTSO":"fast"}' > "$W/launcher/settings.json"
 pass=0 fail=0
@@ -31,5 +34,9 @@ expect x86   'FEX_TSOENABLED=1'
 expect i386  'translator: FEX'
 expect steam 'command:  scripts/run-fex.sh /bin/bash /tmp/fexhome/.local/share/Steam/steam.sh'
 expect bad   "architecture 'armv7'"
+# LaunchPlanner's rule: the ARM64 base runs aarch64 only, the Steam root x86 only.
+expect armx86root "is aarch64 but its root is /tmp/lxrt-steamroot" 'command:'
+expect x86armroot "is x86_64 but its root is /tmp/lxrt-arm64root" 'command:'
+expect armcustom  'LXRT_ROOT=/tmp/some-other-root'
 echo "$pass passed, $fail failed"
 [ "$fail" -eq 0 ]

@@ -45,7 +45,7 @@ and Steam as one application among others.
 | ApplicationDefinition carries the ISA | `AppEntry.architecture` (`aarch64` / `x86_64` / `i386`; nil = x86_64, so existing `apps.json` files keep working) | done |
 | LinuxBaseEnvironment | `LinuxBaseEnvironment` with two built-ins: `arm64` (`/tmp/lxrt-arm64root`, no translator) and `legacy-x86` (`/tmp/lxrt-steamroot`, FEX, `transitional`) | model done; the launcher does not read it yet |
 | ARM64-first launch plan | `LaunchPlanner`: aarch64 runs natively only, never through FEX; x86_64/i386 run through FEX only; `usesVirtualMachine` is always false | done, tested |
-| Runner per ISA | `run-app.sh` sends aarch64 entries to the new `scripts/run-native.sh` (`build/lxrun <program>`, no `FEX_*` variables). It writes `running.arch` = `<arch> <translator>` | done, dry-run tested |
+| Runner per ISA | `run-app.sh` sends aarch64 entries to the new `scripts/run-native.sh` (`build/lxrun <program>`, no `FEX_*` variables). It writes `running.arch` = `<arch> <translator>`, and refuses an aarch64 entry in the x86 root or an x86 entry in the ARM64 base, as `LaunchPlanner` does | done, dry-run tested |
 | Session state machine | `SessionMachine`: `idle → starting → running → stopping → cleanup → idle`, `starting → failed → cleanup → idle`, `running → crashed / exited → cleanup → idle`. The lock is taken before any process exists | model done, tested; `LauncherModel` still uses its own `Phase` |
 
 Steam, Heroic and Prism are marked `x86_64`, so they behave exactly as
@@ -66,13 +66,16 @@ It runs two tests:
 
 ## Next steps, in order (all need the Mac)
 
-1. **Build and smoke-test.** Run `make launcher test-launcher-core`. Then add
-   an aarch64 test program as an app, for example the `hello_dyn` sample from
-   `scripts/mkroot-rpm.sh` copied into the ARM64 root. Launch it from the
-   launcher, and check its log and `running.arch = "aarch64 none"`.
+1. **Build and smoke-test.** Run `make launcher test-launcher-core`. Then copy
+   an aarch64 test program into the ARM64 root, for example the `hello_dyn`
+   sample from `scripts/mkroot-rpm.sh`. Add an entry for it to `apps.json` by
+   hand, with `"architecture": "aarch64"` and `"root": "/tmp/lxrt-arm64root"`
+   ("Añadir app" cannot do this yet, step 5). Launch it from the launcher, and
+   check its log and `running.arch = "aarch64 none"`.
 2. **The ARM64 root at `/tmp/lxrt-arm64root`.** Link the root extracted from
    the Steam Frame image there (`docs/STEAM_FRAME_IMAGE.md`), from
-   `scripts/env-links.sh` like the other two roots. Until then, the launcher
+   `scripts/env-links.sh` (done: it links `~/SteamARM-roots/arm64root` when
+   that exists). Until then, the launcher
    must show aarch64 entries as unavailable, not failing.
 3. **Exit status and a process group per session.** `run-app.sh` should start
    the program under a small wrapper. The wrapper creates a new session
@@ -86,10 +89,15 @@ It runs two tests:
    the lock in `launch` before running the script, and release it only after
    cleanup. `RunningView` shows the architecture and translator from
    `running.arch`, and `Session Mode: ZERO-VM`.
-5. **One Steam definition.** Move Steam out of the `run-app.sh` dict and
+5. **"Añadir app" per ISA.** Today every added program is copied under the
+   Steam root (`Paths.appsRoot`) before its ISA is read, and its entry gets
+   `root = /tmp/lxrt-steamroot`. For aarch64 programs `run-app.sh` refuses
+   that pairing. The add flow must read the ELF first and install aarch64
+   programs under the ARM64 base, with that root.
+6. **One Steam definition.** Move Steam out of the `run-app.sh` dict and
    `AppEntry.steam` into a single JSON (`$STATE/launcher/builtin.json`, or
    `apps.json` with `builtIn: true`) read by both.
-6. **Steam ARM64 as its own entry.** Once the client from the Steam Frame
+7. **Steam ARM64 as its own entry.** Once the client from the Steam Frame
    root reaches a stable UI under lxrun, add it as an entry with
    `architecture: aarch64` and `root: /tmp/lxrt-arm64root`; its command comes
    from the inventory. The x86 client remains as TRANSITIONAL_COMPATIBILITY

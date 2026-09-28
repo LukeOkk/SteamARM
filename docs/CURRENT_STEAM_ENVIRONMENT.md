@@ -9,10 +9,14 @@ payloads, and FEX only for x86/i386 game code.
 - Five readers each went through one area: `runtime/`, `scripts/` and the
   `Makefile`, `launcher/`, graphics/input/audio, and `benchmarks/` plus
   `docs/`. Every claim came with a `path:line`.
-- Each area is then checked by a reviewer asked to refute it. **Status:
-  draft.** That pass was still running when this was committed; the key
-  citations were re-read by hand, and the pass's corrections come in a
-  follow-up commit.
+- Each area was then checked by a reviewer asked to refute it, and a last
+  reviewer looked for what all of them missed. Their corrections are applied
+  here. They also found four bugs, now fixed:
+  - `safeguard.sh` started FEXServer for ARM64 sessions;
+  - `audio.sh` had no socket in the ARM64 root;
+  - `run-app.sh` accepted aarch64 entries in the x86 root;
+  - `docs/ARCHITECTURE.md` described the memory-ordering (TSO) setting
+    backwards.
 - Nothing here was run on a Mac; the MEASURED facts come from the benchmark
   record.
 - For how a launch works in detail, see `docs/APPLICATION_MANAGER.md`.
@@ -85,6 +89,9 @@ payloads, and FEX only for x86/i386 game code.
     processes, all under FEX through binfmt. Among them were the client, six
     web helpers and the launcher service (`stage6-steam-gap.txt:4-6`).
   - Under lxrun, without the VM, the number has not been counted: UNKNOWN.
+    From the launch chain, at least 7 at the library view: bash, the client,
+    the launcher service, pv-adverb, the webhelper browser, its zygote and one
+    renderer. HYPOTHESIS: 8-12 with the GPU, network and utility processes.
     To measure on the Mac, with Steam at the library view:
     `ps -axo command= | grep '[b]uild/lxrun' | grep -v -e Xvnc -e FEXServer | wc -l`
     (the same filter the launcher uses, `launcher/Models.swift`, `Shell.guestProcesses`).
@@ -109,13 +116,12 @@ SteamARM.app                                         Mach-O arm64
    ├─ scripts/audio.sh start: pulseaudio (Homebrew)   Mach-O arm64
    ├─ scripts/input.sh start: steamarm-inputd         Mach-O arm64
    └─ scripts/run-fex.sh  (safeguard.sh watchdog: macOS script)
-      ├─ lxrun FEXServer --persistent=0               aarch64 ELF; exists only for x86
-      │    (LXRT_ROOT=/tmp/lxrt-root, run-fex.sh:61-66)
       └─ lxrun FEX-gb /bin/bash …/Steam/steam.sh -noverifyfiles   (run-fex.sh:73)
          x86-64 bash under FEX, LXRT_ROOT=/tmp/lxrt-steamroot, FEX_ROOTFS=/
          └─ ubuntu12_32/steam                         i386 under FEX (guest base)
             ├─ steam-runtime-check-requirements, launcher service, lsof (amd64)
-            ├─ pressure-vessel-wrap → pv-adverb       x86-64 ET_EXEC (low window)
+            ├─ pressure-vessel-wrap = pv-adverb       x86-64 ET_EXEC (low window); one PID:
+            │                                          the bwrap exec is interpreted, then replaced
             │  └─ steamwebhelper + zygote, renderers, GPU and network processes
             │                                          x86-64 CEF under FEX
             └─ game: reaper → SteamLinuxRuntime_4/_v2-entry-point
@@ -123,7 +129,19 @@ SteamARM.app                                         Mach-O arm64
                → proton (python3) → wine/wineserver (x86-64, or i386 for 32-bit)
                → DXVK / VKD3D-Proton → libvulkan-guest.so (x86 thunk)
                → libvulkan-host.so (aarch64) → shim libvulkan.so.1 → MoltenVK → Metal
+
+launchd
+└─ lxrun FEXServer --foreground --persistent=0       aarch64 ELF; exists only for x86
+     (started from a subshell, so pv-adverb never waits on it; run-fex.sh:61-66)
 ```
+
+Two FEX binaries run in one Steam session:
+
+- `FEX-gb`, from the aarch64 test root (`/tmp/lxrt-root/usr/bin`), runs the
+  client tree. Each x86 exec there re-executes the same image (`process.c:92-113`).
+- `FEX-emu` (`/usr/lib/lxrt-emu/FEX` in the Steam root, relinked with its own
+  loader path, `build-fex-host.sh:287-304`) runs whatever the bwrap interpreter
+  execs: the steamwebhelper container and every game.
 
 Sources:
 
@@ -164,7 +182,17 @@ This is VERIFIED IN SOURCE; details in `docs/APPLICATION_MANAGER.md`.
 - Only one app runs at a time.
 - Since `748bc97`, entries marked `aarch64` go to `scripts/run-native.sh`
   (lxrun, no FEX). Steam, Heroic and Prism are still marked `x86_64`, so in
-  practice everything still goes through FEX.
+  practice everything still goes through FEX. `run-app.sh` refuses an
+  aarch64 entry whose root is the x86 Steam root, and an x86 entry whose root
+  is the ARM64 base, as `LaunchPlanner` does. "Añadir app" still installs
+  every program under the Steam root, so an aarch64 program added that way is
+  refused until the add flow installs into the ARM64 base.
+- Nothing stops the host side after the app exits: X11.bin and quartz-wm,
+  PulseAudio, `steamarm-inputd`, FEXServer and the 1 Hz `safeguard.sh` loop
+  keep running (no caller of their `stop`). This is harmless, but it is not
+  "back to idle".
+- The launcher's FEX settings (Procesador) reach the Steam client too, since
+  the client runs under FEX: today they tune the Steam UI as well as games.
 
 ## 5. Components
 
