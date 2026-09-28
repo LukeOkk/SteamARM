@@ -20,7 +20,9 @@ reads the image itself, read-only, with its own btrfs reader:
                                    release, pacman packages, ELF architectures
                                    and interpreters, FEX / Steam / Proton /
                                    Steam Linux Runtime / gamescope / Vulkan ICDs
-                                   / NSS, x86 remnants
+                                   / NSS, x86 remnants, pacman repositories
+  compare   INV.json REPO.db...    image packages against pacman repository
+                                   databases (e.g. holo-core-aarch64-preview)
 
 Decompression follows the kernel, not btrfs-progs: the kernel stops a zstd
 (or zlib) stream once it has produced the extent's ram_bytes and ignores the
@@ -1027,6 +1029,117 @@ COMPONENTS = {
 }
 
 
+def pacman_repos(root):
+    """[repo] sections of etc/pacman.conf with their Server URLs ($repo/$arch
+    expanded), following Include= files inside the root."""
+    conf = os.path.join(root, 'etc/pacman.conf')
+    if not os.path.isfile(conf):
+        return []
+    arch = 'aarch64'
+    repos, cur = [], None
+
+    def servers_from(path, name):
+        out = []
+        try:
+            for line in open(path, encoding='utf-8', errors='replace'):
+                line = line.split('#', 1)[0].strip()
+                if line.startswith('Server'):
+                    url = line.split('=', 1)[1].strip()
+                    out.append(url.replace('$repo', name).replace('$arch', arch))
+        except OSError:
+            pass
+        return out
+
+    for line in open(conf, encoding='utf-8', errors='replace'):
+        line = line.split('#', 1)[0].strip()
+        if not line:
+            continue
+        if line.startswith('[') and line.endswith(']'):
+            name = line[1:-1]
+            cur = None if name == 'options' else dict(name=name, servers=[])
+            if cur:
+                repos.append(cur)
+        elif '=' in line:
+            k, v = (x.strip() for x in line.split('=', 1))
+            if k == 'Architecture' and v not in ('auto', ''):
+                arch = v.split()[0]
+            elif cur and k == 'Server':
+                cur['servers'].append(v.replace('$repo', cur['name']).replace('$arch', arch))
+            elif cur and k == 'Include':
+                cur['servers'] += servers_from(os.path.join(root, v.lstrip('/')), cur['name'])
+    return repos
+
+
+def read_repo_db(src):
+    """Packages of a pacman sync database (<repo>.db: a tar, gzip/xz/bz2/zstd
+    compressed), from a local file or an https URL."""
+    import io
+    import tarfile
+    import urllib.request
+    if src.startswith(('http://', 'https://')):
+        with urllib.request.urlopen(src, timeout=60) as r:
+            raw = r.read()
+    else:
+        raw = open(src, 'rb').read()
+    if raw[:4] == b'\x28\xb5\x2f\xfd':
+        global _ZSTD
+        if _ZSTD is None:
+            zstd_decode(b'', 0)            # resolves the zstandard import
+        if not _ZSTD:
+            die('this repo database is zstd-compressed: pip3 install zstandard')
+        raw = _ZSTD.ZstdDecompressor().decompressobj().decompress(raw)
+    pkgs = {}
+    with tarfile.open(fileobj=io.BytesIO(raw)) as tf:
+        for m in tf.getmembers():
+            if not m.name.endswith('/desc'):
+                continue
+            fields, cur = {}, None
+            for line in tf.extractfile(m).read().decode('utf-8', 'replace').splitlines():
+                if line.startswith('%') and line.endswith('%'):
+                    cur = line.strip('%')
+                    fields[cur] = []
+                elif line and cur:
+                    fields[cur].append(line)
+            one = lambda k: (fields.get(k) or [''])[0]
+            pkgs[one('NAME')] = dict(version=one('VERSION'), arch=one('ARCH'),
+                                     filename=one('FILENAME'), sha256=one('SHA256SUM'),
+                                     license=fields.get('LICENSE', []))
+    return pkgs
+
+
+def cmd_compare(args):
+    """Image packages (inventory --json) against one or more repo databases."""
+    inv = json.load(open(args.inventory))
+    image = {p['name']: p for p in inv.get('packages', [])}
+    repos = {}
+    for src in args.repo:
+        name = os.path.basename(src.rstrip('/')).split('.db')[0]
+        for pkg, info in read_repo_db(src).items():
+            repos.setdefault(pkg, (name, info))
+    rows, counts = [], collections.Counter()
+    for pkg in sorted(set(image) | set(repos)):
+        iv = image.get(pkg, {}).get('version', '')
+        rname, rinfo = repos.get(pkg, ('', {}))
+        rv = rinfo.get('version', '')
+        if iv and rv:
+            state = 'same' if iv == rv else 'differs'
+        else:
+            state = 'image-only' if iv else 'repo-only'
+        counts[state] += 1
+        arch = image.get(pkg, {}).get('arch') or rinfo.get('arch', '')
+        rows.append((pkg, iv, rv, rname, arch, state))
+    L = ['## Steam Frame image vs repository (generated by steamframe-image.py compare)\n',
+         ', '.join(f'{k} {v}' for k, v in sorted(counts.items())) + '\n',
+         '| package | image | repository | repo | arch | state |', '|---|---|---|---|---|---|']
+    for r in rows:
+        if args.all or r[5] != 'same':
+            L.append('| ' + ' | '.join(r) + ' |')
+    md = '\n'.join(L) + '\n'
+    if args.md:
+        open(args.md, 'w').write(md)
+    print(md if not args.md else f'{sum(counts.values())} packages: {dict(counts)} -> {args.md}')
+
+
 def cmd_inventory(args):
     root = os.path.abspath(args.root)
     rep = dict(root=root)
@@ -1101,6 +1214,7 @@ def cmd_inventory(args):
                 if any(k in fn.lower() for k in ('steam', 'fex', 'lepton', 'gamescope', 'holo', 'jupiter', 'frame')):
                     units.append(f'{d}/{fn}')
     rep['systemd_units'] = units
+    rep['pacman_repos'] = pacman_repos(root)
     if args.json:
         with open(args.json, 'w') as f:
             json.dump(rep, f, indent=1, sort_keys=True)
@@ -1147,6 +1261,9 @@ def inventory_markdown(rep):
     by = collections.Counter(os.path.dirname(x['path']) for x in rep['non_aarch64_elf'])
     for d, c in by.most_common(25):
         L.append(f'- `{d}/` {c}')
+    L.append('\n### pacman repositories (etc/pacman.conf)\n')
+    for r in rep.get('pacman_repos', []):
+        L.append(f'- `[{r["name"]}]`: ' + ', '.join(f'`{u}`' for u in r['servers'][:3]))
     L.append('\n### Packages (name, version, arch, license)\n')
     L.append('| package | version | arch | license |\n|---|---|---|---|')
     for p in rep['packages']:
@@ -1183,6 +1300,12 @@ def main():
     a.add_argument('--json')
     a.add_argument('--md')
     a.set_defaults(func=cmd_inventory)
+    a = sub.add_parser('compare', help='image packages vs pacman repo databases (holo-core-aarch64-preview, ...)')
+    a.add_argument('inventory', help='JSON written by `inventory --json`')
+    a.add_argument('repo', nargs='+', help='<repo>.db file or https URL (see the repositories inventory lists)')
+    a.add_argument('--md')
+    a.add_argument('--all', action='store_true', help='also list packages whose versions match')
+    a.set_defaults(func=cmd_compare)
     args = ap.parse_args()
     args.func(args)
 

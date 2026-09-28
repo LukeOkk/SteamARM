@@ -159,5 +159,25 @@ python3 "$TOOL" inventory "$W/x_zstd" --json "$W/inv.json" --md "$W/inv.md" >/de
 python3 -c "import json,sys; j=json.load(open(sys.argv[1])); sys.exit(0 if j['os_release'].get('ID')=='steamos' else 1)" "$W/inv.json" \
     && ok "inventory reads os-release" || bad "inventory"
 
+echo "== pacman repositories and compare"
+mkdir -p "$W/x_zstd/etc/pacman.d"
+printf '[options]\nArchitecture = auto\n[holo-core-aarch64-preview]\nInclude = /etc/pacman.d/m\n' > "$W/x_zstd/etc/pacman.conf"
+echo 'Server = https://mirror.invalid/$repo/os/$arch' > "$W/x_zstd/etc/pacman.d/m"
+mkdir -p "$W/x_zstd/usr/lib/holo/pacmandb/local/nss-3.117-1"
+printf '%%NAME%%\nnss\n\n%%VERSION%%\n3.117-1\n\n%%ARCH%%\naarch64\n' > "$W/x_zstd/usr/lib/holo/pacmandb/local/nss-3.117-1/desc"
+python3 "$TOOL" inventory "$W/x_zstd" --json "$W/inv2.json" --md "$W/inv2.md" >/dev/null
+grep -q 'mirror.invalid/holo-core-aarch64-preview/os/aarch64' "$W/inv2.md" && ok "inventory lists pacman repositories" || bad "pacman repositories"
+python3 - "$W/repo.db" <<'PY2'
+import io, sys, tarfile, zstandard
+buf = io.BytesIO()
+with tarfile.open(fileobj=buf, mode='w') as tf:
+    for n, v in (('nss', '3.118-1'), ('glibc', '2.42-1')):
+        d = f'%NAME%\n{n}\n\n%VERSION%\n{v}\n\n%ARCH%\naarch64\n'.encode()
+        ti = tarfile.TarInfo(f'{n}-{v}/desc'); ti.size = len(d); tf.addfile(ti, io.BytesIO(d))
+open(sys.argv[1], 'wb').write(zstandard.ZstdCompressor().compress(buf.getvalue()))
+PY2
+out="$(python3 "$TOOL" compare "$W/inv2.json" "$W/repo.db")"
+case "$out" in *'| nss | 3.117-1 | 3.118-1 |'*'differs'*) ok "compare finds the version difference" ;; *) bad "compare"; echo "$out" | tail -4 ;; esac
+
 echo "$pass passed, $fail failed"
 [ "$fail" -eq 0 ]
