@@ -108,8 +108,17 @@ as it does today with Steam.
 After extraction, the tree is a complete ARM64 userspace. To use it as the
 native Steam client's root:
 
-- point `LXRT_ROOT` at it, or bind it where the ARM64 client's root lives
-  today;
+- keep the extracted copy untouched, and derive the root from it as an APFS
+  clone on the same volume. Then link the derived root where the launcher
+  looks for the ARM64 base (`/tmp/lxrt-arm64root`, which is also the
+  `LXRT_ROOT` default of `scripts/run-native.sh`):
+
+  ```sh
+  cp -cR /Volumes/SteamFrameRoot/rootfs /Volumes/SteamFrameRoot/arm64root
+  ln -sfn /Volumes/SteamFrameRoot/arm64root ~/SteamARM-roots/arm64root
+  scripts/env-links.sh        # links /tmp/lxrt-arm64root while the volume is attached
+  ```
+
 - add SteamARM's `libvulkan.so.1` shim and its ICD JSON;
 - move Qualcomm-only ICDs and services aside in the derived root, not in the
   extracted copy;

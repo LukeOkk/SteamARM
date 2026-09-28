@@ -165,11 +165,12 @@ This is VERIFIED IN SOURCE; details in `docs/APPLICATION_MANAGER.md`.
 | component | tag | x86 debt | note |
 |---|---|---|---|
 | Core: ELF loader, section-aware rewriting and trampolines, x18 virtualisation, TLS in a TSD slot, synthetic system registers, the Linux-shaped stack, vDSO. Files: `main.c`, `elf.c`, `elfsect.c`, `rewrite.c`, `trampoline.S`, `x18.c`, `tls.c`, `sysreg.c`, `stack.c`, `vdso*`. | KEEP | NOT_APPLICABLE | Any aarch64 Linux code needs these, including an ARM64 client, SLR and CEF. `elf.c` refuses ET_EXEC; aarch64 images surveyed so far are PIE (`stage2-elf-survey.txt:8-13`). |
-| The Linux API on Darwin: `dispatch.c`, `thread.c`, `futex_ops.c`, `epoll_eventfd.c`, `inotify.c`, `timerfd_signalfd.c`, `fileops2.c`, `socket.c`, `signal.c`, `sysv_ipc.c`, `process.c`, `procfs.c`, `procpid.c`, `proc_ext.c`, `sysfs.c`, `privmap.c`, `jit.c` | KEEP | TEMPORARY_X86_DEPENDENCY in places (see §7) | Generic. Its FEX-specific paths are the mmap/mprotect/brk/prctl cases, the binfmt hand-off, `/proc/self/exe`, the `procfs` untranslate and signal diagnostics. |
-| `mounts.c` (pressure-vessel's bwrap plan interpreted in-process) | KEEP | TEMPORARY_X86_DEPENDENCY | HYPOTHESIS: SLR Arm64 uses the same pressure-vessel. The plan it was checked against came from x86 SLR 3 (`stage6-bwrap-plan.txt`). The "emulator binds" (`mounts.c:283-312`) are FEX-specific. |
+| The Linux API on Darwin: `dispatch.c`, `thread.c`, `futex_ops.c`, `epoll_eventfd.c`, `inotify.c`, `timerfd_signalfd.c`, `fileops2.c`, `socket.c`, `signal.c`, `sysv_ipc.c`, `process.c`, `procfs.c`, `procpid.c`, `proc_ext.c`, `sysfs.c`, `privmap.c`, `jit.c` | KEEP | GAME_PAYLOAD_EXCEPTION where it serves FEX | Generic. Its FEX-specific paths stay for x86 games under an ARM64 client: the mmap/mprotect/brk/prctl cases, the binfmt hand-off, FEX's `/proc/self/exe` re-exec, the `/proc/cpuinfo` untranslate, SIGBUS left to FEX's unaligned-atomic backpatching. One rule is client-only and wrong for native code: RWX mprotect granted as RW (`dispatch.c:1303-1315`, §7). |
+| `mounts.c` (pressure-vessel's bwrap plan interpreted in-process) | KEEP | GAME_PAYLOAD_EXCEPTION (emulator binds only) | HYPOTHESIS: SLR Arm64 uses the same pressure-vessel. The plan it was checked against came from x86 SLR 3 (`stage6-bwrap-plan.txt`). The "emulator binds" (`mounts.c:283-312`) are FEX-specific. |
 | `subpage.c` (4 KiB guest pages inside 16 KiB host pages), `shmirror.c` | KEEP | GAME_PAYLOAD_EXCEPTION | x86 images use `p_align` 0x1000; aarch64 ones measured so far use 0x10000 (`stage2-elf-alignment.txt:10-29`). The shim itself is linked with 4 KiB pages (`dispatch.c:1188-1190`). Rebuilding it with 16 KiB segments would remove the one ARM64-side user. |
-| `gbase.c` (32-bit guest base; pointer rebasing for about 120 syscalls; fix-up of low-pointer faults) | GUEST_I386_REQUIRED | GAME_PAYLOAD_EXCEPTION | Also serves the 64-bit low window for x86-64 ET_EXEC tools and Wine. |
-| `evdev.c`, `window.m`, `remote_layer.m` | KEEP | NOT_APPLICABLE | `window.m` (`LXRT_NR_WINDOW`) is used only by `tests/elf/vk_present.c` and `vk_triangle.c`. It is a REMOVE_LATER candidate once those tests present through X. |
+| `gbase.c` (32-bit guest base; pointer rebasing for about 120 syscalls; fix-up of low-pointer faults) | KEEP | GAME_PAYLOAD_EXCEPTION | Host code, not guest code. Serves i386 guests and the 64-bit low window of x86-64 Wine and ET_EXEC tools. The fix-up exists for DXVK's 64-bit `vkCreateInstance` (`gbase.c:212-279`). |
+| `evdev.c`, `window.m`, `remote_layer.m` | KEEP | NOT_APPLICABLE | `window.m` has two parts. Every process uses its lazy main-thread pump (`lxrt_window_pump`). Its NSWindow + CAMetalLayer path (`0x4C580010`/`11`) is used only by `tests/elf/vk_present.c` and `vk_triangle.c`; that part is a REMOVE_LATER candidate once those tests present through X. |
+| `resources/lxrt.entitlements` (allow-jit), Makefile lxrt section, `tests/elf/`, `tests/x18_check.*`, `tests/x18_preserve/` | KEEP | NOT_APPLICABLE (`tests/elf` i386/Vulkan-thunk suites: GAME_PAYLOAD_EXCEPTION) | Without the entitlement, MAP_JIT is refused. |
 
 ### 5.2 Build and install (`Makefile`, `scripts/`)
 
@@ -203,7 +204,7 @@ This is VERIFIED IN SOURCE; details in `docs/APPLICATION_MANAGER.md`.
 | `steam.sh`, `setup.sh`, `steam-runtime-check-requirements`, the launcher service | x86-64 bash / ELF | REPLACE_WITH_HOLO | TEMPORARY_X86_DEPENDENCY |
 | Steam Linux Runtime 4.0 (pressure-vessel, `srt-bwrap`, `pv-adverb`, python3; all ET_EXEC) | x86-64 | STEAM_RUNTIME_OWNED | UPSTREAM_ARM64_PENDING. The x86 SLR is needed for as long as x86 Proton runs inside it. SLR 4.0 Arm64 exists, but has not been measured here. |
 | Proton Experimental (Wine, DXVK, VKD3D-Proton) | x86-64 + i386 | STEAM_RUNTIME_OWNED | GAME_PAYLOAD_EXCEPTION |
-| Proton (ARM64) | aarch64 | STEAM_RUNTIME_OWNED | Cannot start unmodified on macOS (`stage19` §2). Hidden today. |
+| Proton (ARM64) | aarch64 | STEAM_RUNTIME_OWNED | Hidden today. MEASURED: Proton 11.0 (ARM64) `wine cmd` under lxrun cannot reserve its low ranges and exits in 2 s (`stage18-settings-audio-controllers.txt:136-141`). The reason is verified in xnu and Wine (`stage19` §2). A patched Wine might work. |
 
 ### 5.4 Graphics, presentation, FEX patches
 
@@ -307,11 +308,39 @@ Behaviours of the Steam client that the runtime handles specially
 | netlink uevent socket offered only inside bwrap containers (outside one, the client's window never appeared) | `socket.c:282-321` | UNKNOWN: tuned against the x86 client's udev threads |
 | `/proc/<pid>/fd`, `/proc/net/tcp` for `lsof` | `procpid.c` | yes, with an aarch64 `lsof` |
 | `max_user_namespaces = 0`, so CEF starts with `--no-sandbox` | `proc_ext.c:1171-1181` | yes |
-| mprotect RWX outside MAP_JIT granted as **RW** (x86 V8 under FEX never executes that memory) | `dispatch.c:1303-1315` | **no, and harmful**: a native ARM64 V8 executes its own JIT output, so an RWX request turned into RW faults on the first call. HYPOTHESIS: the first ARM64 steamwebhelper run hits this. Ways out: map RWX requests to MAP_JIT and flip W^X on the fault, or start CEF with `--js-flags=--jitless` as a fallback that costs speed. |
+| mprotect RWX outside MAP_JIT granted as **RW** (x86 V8 under FEX never executes that memory) | `dispatch.c:1303-1315` | **no**, see below |
 | `PR_SET_MEM_MODEL` → EINVAL, so FEX keeps TSO | `dispatch.c:2648-2658` | no for the client; yes for FEX payloads |
 | `/proc/cpuinfo` untranslate, so FEX recognises it | `procfs.c:451-457` | no for the client; yes for FEX payloads |
 | AppKit started lazily; `OBJC_DISABLE_INITIALIZE_FORK_SAFETY=YES` on every exec | `window.m:104-135`, `process.c:138-161` | yes. UNKNOWN whether an ARM64 webhelper that loads the shim directly hits the ObjC fork kill that `steamwebhelper.json` avoids today. |
 | AT_PAGESZ 16384 | `stack.c:38-43` | yes. UNKNOWN whether the ARM64 client and CEF accept 16 KiB pages (the Steam Frame kernel's page size is not recorded here). |
+
+**A native ARM64 V8 has no JIT under lxrun (HYPOTHESIS, from measured parts).**
+
+- Apple Silicon gives no memory that is writable and executable at once. A
+  MAP_JIT region is either one or the other, per thread (MEASURED,
+  `stage5-jit.txt`).
+- The flip cannot be done behind the guest's back. A
+  `pthread_jit_write_protect_np` issued inside a signal handler does not
+  survive the handler's return (MEASURED, `stage5-jit.txt:28-36`,
+  `runtime/jit.c:1-15`). FEX works because it was patched to ask for the flip
+  itself (private syscall `0x4C580020`).
+- MAP_JIT cannot be applied to an existing range either: MAP_JIT together
+  with MAP_FIXED returns EINVAL (`dispatch.c:977-982`).
+- So with today's runtime an unpatched ARM64 V8 fails in every case:
+  - without the rule, at its RWX mprotect (EACCES);
+  - with the rule, when it executes its code (a fault).
+- This does not stop the network process, which runs no JS; the NSS FATAL
+  comes first. It stops the renderers.
+- The likely ways out:
+  - run steamwebhelper with `--js-flags=--jitless` (no JIT and no
+    WebAssembly; slower JS), set in the derived root's `steamwebhelper.sh`;
+  - a CEF whose V8 asks for the flip, as FEX does;
+  - store emulation in the runtime. Keep the thread in execute mode, and on
+    each faulting store to a JIT page flip to write mode inside the handler,
+    do the store there, flip back and step past it. Stores made inside the
+    handler do land (MEASURED, `stage5-jit.txt:57-75`); the cost is one fault
+    per store instruction (HYPOTHESIS: acceptable for UI JS).
+- Whichever way is chosen, the RW rule should apply only to FEX guests.
 
 **The Proton-selection problem turns around.**
 
@@ -330,8 +359,8 @@ Behaviours of the Steam client that the runtime handles specially
 | workaround | where | ARM64 client |
 |---|---|---|
 | `svc` rewriting, TPIDR_EL0 in a TSD slot, x18 virtualisation, sysreg rewriting | runtime core | **yes**. Prebuilt ARM64 libraries use x18 (libcef `blr x18`, `stage19` §3a). `tests/x18_preserve` checks whether a macOS SDK < 13 binary keeps x18 (`stage19` §3a). |
-| Guest-driven W^X flip (`0x4C580020`), RWX → MAP_JIT | `jit.c`, FEX `wx` patch | the mechanism, yes. UNKNOWN whether ARM64 V8 can use it without patching (the client's JIT does not know the private syscall). |
-| Sub-page (4 KiB on 16 KiB) | `subpage.c` | mostly no. HYPOTHESIS: Holo images use 64 KiB alignment, to be checked by `steamframe-image.py inventory`. |
+| Guest-driven W^X flip (`0x4C580020`), RWX → MAP_JIT | `jit.c`, FEX `wx` patch | the mechanism, yes; an unpatched ARM64 V8 cannot use it (§7) |
+| Sub-page (4 KiB on 16 KiB) | `subpage.c` | mostly no. HYPOTHESIS: Holo images use 64 KiB alignment; `steamframe-image.py inventory` reports it. |
 | Guest base / low window, pointer rebasing, 32-bit thunks, `map32` | `gbase.c`, FEX patches, shim | no for the client; yes for x86/i386 games |
 | bwrap interpreter | `mounts.c` | yes (HYPOTHESIS: SLR Arm64 is pressure-vessel too) |
 | HideHypervisorBit for `steam` | `install-steamroot-gfx.sh:104-105` + patch | no (not under FEX); the problem it solved turns around (§7) |
@@ -349,8 +378,9 @@ Behaviours of the Steam client that the runtime handles specially
    at what path, and does its `steamwebhelper` get past BrowserReady and the
    NSS network-process FATAL under lxrun? This is next on the Mac, using
    `docs/STEAM_FRAME_IMAGE.md`.
-2. Are all ELFs in that tree PIE and 64 KiB-aligned? `steamframe-image.py
-   inventory` answers this.
+2. Are all ELFs in that tree PIE and 16 KiB-aligned (or more), and what page
+   size is its kernel built for? The "Loading under lxrun" section of
+   `steamframe-image.py inventory` answers this.
 3. Does SLR Arm64's pressure-vessel emit the bwrap plan `mounts.c` handles?
    Does it expect Valve's FEX, or binfmt, for x86 games?
 4. How is x86 Proton offered to an ARM64 client (§7)?
@@ -369,8 +399,8 @@ In order:
 1. On the Mac, extract and inventory the Steam Frame root. Link it to
    `/tmp/lxrt-arm64root`.
 2. Run the image's client with `scripts/run-native.sh`, as an `aarch64`
-   launcher entry. Expect the RWX→RW rule (§7) to be the first runtime change
-   an ARM64 CEF needs.
+   launcher entry. Once the NSS FATAL is gone, expect the renderers to need
+   `--js-flags=--jitless` (§7).
 3. Replace the `ubuntu12_32/steam` pattern, the `steamui.so` test and
    `needsSetup` with keys taken from the inventory.
 4. Classify the Holo tree with the same tags, in
