@@ -83,9 +83,17 @@ the image:
   gamescope;
 - Vulkan ICDs, where Qualcomm's Turnip/freedreno must be replaced by
   SteamARM's MoltenVK shim;
-- NSS: `libsoftokn3.so` and `libfreeblpriv3.so` sit next to `libnss3.so`, so
-  the steamwebhelper FATAL is gone with this base;
-- systemd units for Steam, FEX, Lepton and gamescope.
+- NSS: whether `libsoftokn3.so` and `libfreeblpriv3.so` sit next to
+  `libnss3.so`. If they do, the steamwebhelper FATAL should be gone with this
+  base (HYPOTHESIS until the inventory shows them);
+- systemd units for Steam, FEX, Lepton and gamescope;
+- what `lxrun` can load:
+  - aarch64 `ET_EXEC` files, which `runtime/elf.c` refuses;
+  - executables and `ld.so` whose segments are aligned below the 16 KiB host
+    page, also refused;
+  - libraries in the same case, which go through `runtime/subpage.c`;
+  - the page size the image's kernel was built for, from its config or its
+    `Image` header.
 
 ## Licence
 

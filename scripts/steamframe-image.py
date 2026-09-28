@@ -947,9 +947,9 @@ def elf_info(path):
                 return None
             is64, le = h[4] == 2, h[5] == 1
             if not le:
-                return dict(machine='big-endian', interp=None, type=None)
+                return dict(machine='big-endian', interp=None, type=None, aligns=[])
             etype, machine = u16(h, 16), u16(h, 18)
-            interp = None
+            interp, aligns = None, []
             if is64:
                 phoff, phentsize, phnum = u64(h, 32), u16(h, 54), u16(h, 56)
             else:
@@ -959,14 +959,18 @@ def elf_info(path):
                 ph = f.read(phentsize * phnum)
                 for i in range(phnum):
                     o = i * phentsize
-                    if len(ph) < o + 16 or u32(ph, o) != 3:
+                    if len(ph) < o + (56 if is64 else 32):
+                        continue
+                    if u32(ph, o) == 1:                       # PT_LOAD: p_align
+                        aligns.append(u64(ph, o + 48) if is64 else u32(ph, o + 28))
+                    if u32(ph, o) != 3:
                         continue
                     off, sz = (u64(ph, o + 8), u64(ph, o + 32)) if is64 else (u32(ph, o + 4), u32(ph, o + 16))
                     if sz < 4096:
                         f.seek(off)
                         interp = f.read(sz).rstrip(b'\0').decode('utf-8', 'replace')
             return dict(machine=EM.get(machine, str(machine)), type={2: 'exec', 3: 'dyn'}.get(etype, etype),
-                        interp=interp)
+                        interp=interp, aligns=aligns)
     except OSError:
         return None
 
@@ -1027,6 +1031,50 @@ COMPONENTS = {
     'audio': ['pipewire', 'libpulse', 'wireplumber'],
     'qualcomm/hardware': ['qcom', 'adreno', 'firmware/qcom', 'hexagon', 'fastrpc'],
 }
+
+
+HOST_PAGE = 0x4000       # Darwin arm64; runtime/elf.c refuses program segments not aligned to it
+PAGE_FLAGS = {1: '4K', 2: '16K', 3: '64K'}
+
+
+def kernel_pages(root):
+    """Page size the image's kernel was built for: CONFIG_ARM64_*_PAGES from a
+    kernel config, and the page-size field of an arm64 Image header (flags
+    bits 1-2, Documentation/arch/arm64/booting.rst), gzip-wrapped or raw."""
+    import glob
+    import gzip
+    out = []
+    for pat in ('usr/lib/modules/*/config', 'usr/lib/modules/*/build/.config', 'boot/config*'):
+        for p in sorted(glob.glob(os.path.join(root, pat))):
+            cfg = read_kv(p)
+            page = next((k[len('CONFIG_ARM64_'):-len('_PAGES')] for k, v in cfg.items()
+                         if v == 'y' and k.startswith('CONFIG_ARM64_') and k.endswith('_PAGES')
+                         and k[len('CONFIG_ARM64_'):-len('_PAGES')] in ('4K', '16K', '64K')), None)
+            out.append(dict(file=os.path.relpath(p, root), source='config', page=page,
+                            va_bits=cfg.get('CONFIG_ARM64_VA_BITS')))
+    for pat in ('usr/lib/modules/*/vmlinuz', 'usr/lib/modules/*/Image*', 'boot/Image*', 'boot/vmlinuz*'):
+        for p in sorted(glob.glob(os.path.join(root, pat))):
+            try:
+                with open(p, 'rb') as f:
+                    head = f.read(1 << 20)
+            except OSError:
+                continue
+            kind = 'raw'
+            if head[:2] == b'\x1f\x8b':
+                kind = 'gzip'
+                try:
+                    head = gzip.GzipFile(fileobj=__import__('io').BytesIO(head)).read(64)
+                except (OSError, EOFError):
+                    head = b''
+            elif head[:2] == b'MZ' and head[4:8] == b'zimg':
+                out.append(dict(file=os.path.relpath(p, root), source='EFI zboot (compressed)', page=None))
+                continue
+            if len(head) >= 64 and head[0x38:0x3c] == b'ARM\x64':
+                page = PAGE_FLAGS.get((u64(head, 0x18) >> 1) & 3, 'unspecified')
+                out.append(dict(file=os.path.relpath(p, root), source=f'Image header ({kind})', page=page))
+            else:
+                out.append(dict(file=os.path.relpath(p, root), source=f'not an arm64 Image ({kind})', page=None))
+    return out
 
 
 def pacman_repos(root):
@@ -1153,6 +1201,7 @@ def cmd_inventory(args):
     non_arm = []
     comps = collections.defaultdict(list)
     libs = {}
+    align, exec_a64, small = collections.Counter(), [], []
     nfiles = 0
     for dp, dns, fns in os.walk(root):
         rel = os.path.relpath(dp, root)
@@ -1175,6 +1224,18 @@ def cmd_inventory(args):
                 interps[(info['machine'], info['interp'])] += 1
             if info['machine'] != 'aarch64':
                 non_arm.append(dict(path=relp, machine=info['machine'], interp=info['interp']))
+            else:
+                # What lxrun can load: runtime/elf.c refuses ET_EXEC and, for the
+                # programs it maps itself (executables and ld.so), segments not
+                # aligned to the 16 KiB host page; libraries mapped by ld.so with
+                # smaller alignment go through runtime/subpage.c instead.
+                if info['aligns']:
+                    align[min(info['aligns'])] += 1
+                if info['type'] == 'exec':
+                    exec_a64.append(relp)
+                elif info['aligns'] and min(info['aligns']) % HOST_PAGE:
+                    small.append(dict(path=relp, p_align=min(info['aligns']),
+                                      program=bool(info['interp']) or 'ld-linux' in fn))
             if fn.startswith(('libc.so.6', 'libstdc++.so.6.', 'libnss3.so', 'libsoftokn3.so',
                               'libfreeblpriv3.so', 'libvulkan.so.1')):
                 libs.setdefault(fn, []).append(relp)
@@ -1182,6 +1243,11 @@ def cmd_inventory(args):
     rep['elf_by_machine'] = dict(elf)
     rep['interpreters'] = [dict(machine=m, interp=i, count=c) for (m, i), c in interps.most_common()]
     rep['non_aarch64_elf'] = non_arm
+    rep['aarch64_loading'] = dict(
+        min_p_align={hex(a): c for a, c in sorted(align.items())},
+        et_exec=sorted(exec_a64),
+        below_host_page=sorted(small, key=lambda x: (not x['program'], x['path'])))
+    rep['kernel_pages'] = kernel_pages(root)
     rep['components'] = {k: sorted(v) for k, v in comps.items()}
     rep['key_libraries'] = libs
     icds = []
@@ -1245,6 +1311,24 @@ def inventory_markdown(rep):
     L.append('| machine | PT_INTERP | files |\n|---|---|---|')
     for x in rep['interpreters'][:20]:
         L.append(f'| {x["machine"]} | `{x["interp"]}` | {x["count"]} |')
+    ld = rep.get('aarch64_loading')
+    if ld:
+        progs = [x for x in ld['below_host_page'] if x['program']]
+        L.append('\n### Loading under lxrun (aarch64 ELF)\n')
+        L.append('Smallest PT_LOAD p_align per file: ' +
+                 ', '.join(f'{a} {c}' for a, c in ld['min_p_align'].items()))
+        L.append(f'\n- ET_EXEC (lxrun refuses them, runtime/elf.c): {len(ld["et_exec"])}')
+        for p in ld['et_exec'][:20]:
+            L.append(f'  - `{p}`')
+        L.append(f'- executables (PT_INTERP) and ld.so below the 16 KiB host page '
+                 f'(refused when lxrun runs them): {len(progs)}')
+        for x in progs[:20]:
+            L.append(f'  - `{x["path"]}` p_align {x["p_align"]:#x}')
+        L.append(f'- libraries below the 16 KiB host page (runtime/subpage.c path): '
+                 f'{len(ld["below_host_page"]) - len(progs)}')
+        for x in rep.get('kernel_pages', []):
+            L.append(f'- kernel `{x["file"]}` ({x["source"]}): page size {x["page"] or "unknown"}'
+                     + (f', VA bits {x["va_bits"]}' if x.get('va_bits') else ''))
     L.append('\n### Components found (paths, first 12 each)\n')
     for k, v in sorted(rep['components'].items()):
         L.append(f'- **{k}** ({len(v)}): ' + ', '.join(f'`{p}`' for p in v[:12]))

@@ -159,6 +159,44 @@ python3 "$TOOL" inventory "$W/x_zstd" --json "$W/inv.json" --md "$W/inv.md" >/de
 python3 -c "import json,sys; j=json.load(open(sys.argv[1])); sys.exit(0 if j['os_release'].get('ID')=='steamos' else 1)" "$W/inv.json" \
     && ok "inventory reads os-release" || bad "inventory"
 
+echo "== what lxrun can load"
+python3 - "$W/x_zstd" <<'PY'
+import os, struct, sys
+root = sys.argv[1]
+def elf(rel, etype, align, interp):
+    # ELF64 aarch64: header, PT_INTERP (optional), one PT_LOAD
+    ph = []
+    body = (interp.encode() + b'\0') if interp else b''
+    off = 64 + 56 * (2 if interp else 1)
+    if interp:
+        ph.append(struct.pack('<IIQQQQQQ', 3, 4, off, 0, 0, len(body), len(body), 1))
+    ph.append(struct.pack('<IIQQQQQQ', 1, 5, 0, 0, 0, off + len(body), off + len(body), align))
+    eh = b'\x7fELF\x02\x01\x01' + bytes(9) + struct.pack('<HHIQQQIHHHHHH', etype, 183, 1, 0, 64, 0, 0,
+                                                       64, 56, len(ph), 64, 0, 0)
+    p = os.path.join(root, rel); os.makedirs(os.path.dirname(p), exist_ok=True)
+    open(p, 'wb').write(eh + b''.join(ph) + body)
+elf('usr/bin/good', 3, 0x10000, '/lib/ld-linux-aarch64.so.1')
+elf('usr/bin/small', 3, 0x1000, '/lib/ld-linux-aarch64.so.1')
+elf('usr/lib/libsmall.so', 3, 0x1000, None)
+elf('usr/bin/static', 2, 0x10000, None)
+mod = os.path.join(root, 'usr/lib/modules/6.99.0-holo'); os.makedirs(mod, exist_ok=True)
+open(os.path.join(mod, 'config'), 'w').write(
+    '# CONFIG_ARM64_16K_PAGES is not set\nCONFIG_ARM64_4K_PAGES=y\nCONFIG_ARM64_VA_BITS=48\n')
+img = bytearray(64); struct.pack_into('<Q', img, 0x18, 2 << 1); img[0x38:0x3c] = b'ARM\x64'
+open(os.path.join(mod, 'vmlinuz'), 'wb').write(bytes(img))
+PY
+python3 "$TOOL" inventory "$W/x_zstd" --json "$W/inv_ld.json" --md "$W/inv_ld.md" >/dev/null
+python3 - "$W/inv_ld.json" <<'PY' && ok "inventory reports ET_EXEC, sub-16K segments and kernel page size" || bad "loading report"
+import json, sys
+j = json.load(open(sys.argv[1]))
+ld, k = j['aarch64_loading'], j['kernel_pages']
+small = {x['path']: x['program'] for x in ld['below_host_page']}
+ok = (ld['et_exec'] == ['usr/bin/static'] and small == {'usr/bin/small': True, 'usr/lib/libsmall.so': False}
+      and ld['min_p_align'] == {'0x1000': 2, '0x10000': 2}
+      and [(x['source'], x['page']) for x in k] == [('config', '4K'), ('Image header (raw)', '16K')])
+sys.exit(0 if ok else print(json.dumps([ld, k], indent=1)) or 1)
+PY
+
 echo "== pacman repositories and compare"
 mkdir -p "$W/x_zstd/etc/pacman.d"
 printf '[options]\nArchitecture = auto\n[holo-core-aarch64-preview]\nInclude = /etc/pacman.d/m\n' > "$W/x_zstd/etc/pacman.conf"
