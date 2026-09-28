@@ -185,6 +185,7 @@ This is VERIFIED IN SOURCE; details in `docs/APPLICATION_MANAGER.md`.
 | component | tag | x86 debt | note |
 |---|---|---|---|
 | `Makefile` (lxrun, vdso, shim, inputd, launcher) | KEEP | NOT_APPLICABLE | Everything it builds is arm64. |
+| Homebrew formulae (`setup.sh:33-34`) | KEEP | NOT_APPLICABLE, except `mingw-w64`: GAME_PAYLOAD_EXCEPTION | `mingw-w64` only builds the Windows test probes in `tests/win`. |
 | `scripts/setup.sh` (ten steps) | KEEP | TEMPORARY_X86_DEPENDENCY | Its `steam` step is x86: `install-steam.sh`, then the thunks, then `install-steamroot-gfx.sh`. |
 | `scripts/mkroot-rpm.sh` + `.lock` | KEEP | NOT_APPLICABLE | The same unpacking technique (no scriptlets, relative symlinks) would work for Holo packages. |
 | The Fedora sysroot `sysroot-f43` + `toolchain-aarch64-linux-fedora.cmake` | KEEP | GAME_PAYLOAD_EXCEPTION | Everything built against them serves x86 payloads: FEX, the thunk host libraries and `thunkgen` (`build-fex-host.sh:248-258`, `build-fex-thunks.sh:267-282`). lxrun, the shim and the launcher use Homebrew clang without it. |
@@ -193,7 +194,7 @@ This is VERIFIED IN SOURCE; details in `docs/APPLICATION_MANAGER.md`.
 | `scripts/build-fex-thunks.sh` + the Ubuntu 24.04 x86-64/i386 dev sysroots | KEEP | GAME_PAYLOAD_EXCEPTION | Builds Vulkan thunks only (64-bit and 32-bit). No other library is thunked. |
 | `scripts/fetch-x86-rootfs.sh` | GUEST_X86_REQUIRED | GAME_PAYLOAD_EXCEPTION | It also disables 8 Mesa ICD manifests so the x86 Vulkan loader sees only lavapipe (bypassed by the thunk overlay). |
 | `scripts/mksteamroot.sh` | REPLACE_WITH_HOLO | REPLACE_WITH_ARM64 | Exists for the x86-as-`/` design. |
-| `scripts/install-steam.sh` (`steam_latest.deb` → `bootstraplinux_ubuntu12_32.tar.xz`) | REPLACE_WITH_HOLO | REPLACE_WITH_ARM64 | No arm64 bootstrap URL exists anywhere in the repo. The ARM64 client comes from the Steam Frame image instead. |
+| `scripts/install-steam.sh` (`steam_latest.deb` → `bootstraplinux_ubuntu12_32.tar.xz`) | REPLACE_WITH_HOLO | TEMPORARY_X86_DEPENDENCY | No arm64 bootstrap URL exists anywhere in the repo. The ARM64 client comes from the Steam Frame image instead. |
 | `scripts/install-steamroot-gfx.sh`: install of shim, thunks and X libraries | KEEP | GAME_PAYLOAD_EXCEPTION | |
 | `scripts/install-steamroot-gfx.sh:99-110`: FEX `AppConfig` for `steam` (HideHypervisorBit) and for `steamwebhelper` (Vulkan thunks off) | REMOVE_LATER | TEMPORARY_X86_DEPENDENCY | Keyed on the x86 client's executable names. |
 | `scripts/run-app.sh`, `scripts/settings-env.py` | KEEP | TEMPORARY_X86_DEPENDENCY | `settings-env.py` exports `FEX_*` and the Proton knobs to every app. `run-app.sh` now drops `FEX_*` for aarch64 entries. |
