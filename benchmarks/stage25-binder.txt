@@ -45,7 +45,7 @@ MEASURED:
    polls like servicemanager; the host floor for the same three-process
    relay over Unix sockets is 8-9 us. `service list` takes 60 ms median,
    `toybox true` 58 ms: process start-up, not binder, is the cost.
-7. tests: tests/elf/run.sh BINDER_IPC (20 checks, two processes, raw ioctls
+7. tests: tests/elf/run.sh BINDER_IPC (21 checks, two processes, raw ioctls
    against the Linux UAPI header) and BINDER_POOL; tests/android/run.sh
    15 passed + ART's expected failure. Full-suite numbers at the end.
 
@@ -211,8 +211,15 @@ R12. Review. A read-only review by Codex (gpt-6-sol, effort high) of
     BC_FREE_BUFFER should go to thread->todo" and "a death notice for an
     already dead node should go to the looper's thread->todo": in Linux
     v5.10 both go to proc->todo (binder.c lines 3565 and 3913 of v5.10).
-    BINDER_IPC after the fixes: 20/20, 3 runs; BINDER_POOL 3/3;
-    tests/android 14 passed + 1 expected failure.
+    BINDER_IPC after the fixes: 20/20, 3 runs, then 21/21 with the
+    TF_CLEAR_BUF check; BINDER_POOL 3/3; tests/android 14 passed + 1
+    expected failure (15 with idmap2d, R9).
+R13. The hub's default directory is in /tmp: the runtime now refuses one it
+    does not own or that others can read or write (lstat: owner, mode
+    & 077 == 0). MEASURED with a 0755 directory: "[lxrt] binder:
+    /tmp/lxrt-binder-perm is not a private directory of this user; no
+    binder driver" and open(/dev/binder) = ENOENT. The tests use mktemp -d
+    (0700).
 
 Licences and downloads
 ----------------------
@@ -250,3 +257,7 @@ Both lxrun builds, one after the other, each from `rm -f build/lxrun`:
   python3 -m unittest tests/test_docs_records.py: OK (6 tests)
 No binder hub, servicemanager, service or test process was left running
 afterwards (ps).
+After R13 (the last runtime change), default build again: make lxrt
+launcher rc 0; make test-launcher-core rc 0 (same counts as above);
+tests/elf/run.sh 76 passed, 0 failed (BINDER_IPC: 21 checks);
+tests/android/run.sh 15 passed, 0 failed, 1 expected failure.

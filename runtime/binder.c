@@ -213,15 +213,26 @@ static int hide_fd(int fd)
     return fd;
 }
 
+// The hub's directory. In /tmp by default, so it must be this user's own
+// and closed to others: a directory someone else made (or can write to)
+// would let them stand in for the driver. NULL: refuse to use it.
 static const char *binder_dir(void)
 {
     static char dir[128];
-    if (dir[0]) return dir;
+    static bool checked, ok;
+    if (checked) return ok ? dir : NULL;
+    checked = true;
     const char *e = getenv("LXRT_BINDER_DIR");
     if (e && *e) snprintf(dir, sizeof dir, "%s", e);
     else snprintf(dir, sizeof dir, "/tmp/lxrt-binder-%u", (unsigned)getuid());
     mkdir(dir, 0700);
-    return dir;
+    struct stat st;
+    ok = lstat(dir, &st) == 0 && S_ISDIR(st.st_mode) && st.st_uid == getuid() &&
+         (st.st_mode & 077) == 0;
+    if (!ok)
+        fprintf(lxrt_trace_stream(), "[lxrt] binder: %s is not a private directory of this "
+                                     "user; no binder driver\n", dir);
+    return ok ? dir : NULL;
 }
 
 static const char *self_exe(void)
@@ -382,6 +393,8 @@ fail:
 long lxrt_binder_open(int context, int lflags)
 {
     const char *dir = binder_dir();
+    if (!dir)
+        return LERR(ENOENT);
     int s = -1;
     for (int attempt = 0; attempt < 4 && s < 0; attempt++) {
         s = try_connect(dir);
@@ -912,7 +925,7 @@ long lxrt_binder_mmap(uint64_t addr, uint64_t len, int prot, int lflags, int fd,
     uint64_t size = len > SZ_4M ? SZ_4M : len;
     uint64_t hlen = LXRT_ALIGN_UP(size, LXRT_HOST_PAGE);
     char path[256];
-    snprintf(path, sizeof path, "%s/buf-%d-XXXXXX", binder_dir(), (int)getpid());
+    snprintf(path, sizeof path, "%s/buf-%d-XXXXXX", binder_dir(), (int)getpid());   // open checked it
     int bfd = mkstemp(path);
     if (bfd < 0) { ret = LERR(errno); goto out; }
     unlink(path);
