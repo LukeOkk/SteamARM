@@ -1,0 +1,78 @@
+FEX: a shared mapping made writable drops the translations of its mirrors (SteamARM)
+
+SMC tracking (mtrack) write-protects every writable view of shared memory
+whose code FEX translated through another view (MarkGuestExecutableRange).
+A guest mprotect that makes such a view writable again lifts that
+protection on the host, and FEX only invalidated translations in the
+mprotected range itself, where there are none: later writes through the
+view rewrote code whose translations FEX kept running. ART's JIT code
+cache is exactly that: a memfd mapped as an executable view and a writable
+view, and ScopedCodeCacheWrite flips the writable view from read-only to
+read-write around every code write. After code cache collections reused
+memory, x86-64 ART under FEX ran old methods' code and computed wrong
+results, 3 runs of 3 (MEASURED; correct with FEX_SMCCHECKS=full;
+SteamARM benchmarks/stage25-art-x86-fex.txt, tests/android/run.sh). Now the
+mirrors' translations of the range are invalidated when a shared mapping
+becomes writable; running that code again translates it and protects the
+view again. Nothing changes for private memory or with other SMC modes.
+
+diff --git a/Source/Tools/LinuxEmulation/LinuxSyscalls/SyscallsSMCTracking.cpp b/Source/Tools/LinuxEmulation/LinuxSyscalls/SyscallsSMCTracking.cpp
+--- a/Source/Tools/LinuxEmulation/LinuxSyscalls/SyscallsSMCTracking.cpp
++++ b/Source/Tools/LinuxEmulation/LinuxSyscalls/SyscallsSMCTracking.cpp
+@@ -541,6 +541,7 @@
+ 
+ uint64_t SyscallHandler::GuestMprotect(FEXCore::Core::InternalThreadState* Thread, void* addr, size_t len, int prot) {
+   uint64_t Result {};
++  fextl::vector<std::pair<uint64_t, uint64_t>> MirrorRanges;
+ 
+   {
+     auto lk = FEXCore::GuardSignalDeferringSection(VMATracking.Mutex, Thread);
+@@ -559,9 +560,48 @@
+     }
+ 
+     TrackMprotect(Thread, addr, len, prot);
++
++    // Shared memory made writable: the host mprotect just lifted the write
++    // protection SMC tracking had put on this view of memory whose code was
++    // translated through another view of it (MarkGuestExecutableRange
++    // protects every writable mirror), so its next rewrites would go unseen.
++    // Drop the translations of every view of the range now; running that code
++    // again translates it again and protects this view again. ART's JIT
++    // flips the writable view of its code cache (a memfd mapped twice) from
++    // read-only to read-write around every code write (ScopedCodeCacheWrite),
++    // and x86-64 ART ran stale translations of freed methods after code cache
++    // collections (MEASURED, SteamARM benchmarks/stage25-art-x86-fex.txt).
++    if ((prot & PROT_WRITE) && SMCChecks == FEXCore::Config::CONFIG_SMC_MTRACK) {
++      const auto Base = reinterpret_cast<uint64_t>(addr);
++      const auto Top = Base + FEXCore::AlignUp(len, FEXCore::Utils::FEX_PAGE_SIZE);
++      auto Mapping = VMATracking.VMAs.lower_bound(Top);
++      while (Mapping != VMATracking.VMAs.begin()) {
++        --Mapping;
++        const auto MapBase = Mapping->first;
++        const auto MapTop = MapBase + Mapping->second.Length;
++        if (MapTop <= Base) {
++          break;
++        }
++        if (!Mapping->second.Flags.Shared || !Mapping->second.Resource) {
++          continue;
++        }
++        const auto OffsetBase = std::max(MapBase, Base) - MapBase + Mapping->second.Offset;
++        const auto OffsetTop = std::min(MapTop, Top) - MapBase + Mapping->second.Offset;
++        for (auto VMA = Mapping->second.Resource->FirstVMA; VMA; VMA = VMA->ResourceNextVMA) {
++          const auto Lo = std::max<uint64_t>(VMA->Offset, OffsetBase);
++          const auto Hi = std::min<uint64_t>(VMA->Offset + VMA->Length, OffsetTop);
++          if (Lo < Hi && VMA->Base != MapBase) {
++            MirrorRanges.emplace_back(Lo - VMA->Offset + VMA->Base, Hi - Lo);
++          }
++        }
++      }
++    }
+   }
+ 
+   InvalidateCodeRangeIfNecessary(Thread, reinterpret_cast<uint64_t>(addr), len, false);
++  for (const auto& [MirrorBase, MirrorLength] : MirrorRanges) {
++    TM.InvalidateGuestCodeRange(Thread, MirrorBase, MirrorLength);
++  }
+ 
+   // Prepare for delayed code cache load after ld/Wine is done applying relocations.
+   // Hooking into mprotect is a reliable heuristic that matches behavior of ld (for ELF) and Wine (for PE).

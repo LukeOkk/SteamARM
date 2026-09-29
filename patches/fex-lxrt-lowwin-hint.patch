@@ -1,0 +1,41 @@
+FEX: honour a free mmap hint below 4 GiB in the 64-bit low window (SteamARM, Darwin host)
+
+Linux places a non-fixed mapping at its hint when the range is free. Darwin
+maps nothing below 4 GiB, so in the 64-bit low window (fex-lxrt-guest-base.patch,
+FEX_LOWWINDOW=1) such a hint went to the host and landed above 4 GiB. x86-64
+ART reserves its boot image at ART_BASE_ADDRESS (0x70000000) plus a random
+delta that way, got another address back, and ran without a boot image
+("Failed to mmap at expected address, mapped at 0x10e4e8000 instead of
+0x6f7a0000", MEASURED, benchmarks/stage25-art-x86-fex.txt). The window's
+allocator now tries the hint as MAP_FIXED_NOREPLACE first; a taken range
+falls back to the previous behaviour. 64-bit guests with a guest base only;
+32-bit guests and 64-bit processes without the window are unchanged.
+
+diff --git a/Source/Tools/LinuxEmulation/LinuxSyscalls/SyscallsSMCTracking.cpp b/Source/Tools/LinuxEmulation/LinuxSyscalls/SyscallsSMCTracking.cpp
+--- a/Source/Tools/LinuxEmulation/LinuxSyscalls/SyscallsSMCTracking.cpp
++++ b/Source/Tools/LinuxEmulation/LinuxSyscalls/SyscallsSMCTracking.cpp
+@@ -373,7 +373,23 @@
+         reinterpret_cast<uint64_t>(addr) + length <= (1ULL << 32)) {
+       Map32Bit = true;
+     }
+-    if (Map32Bit) {
++    // A plain hint below 4 GiB (no MAP_FIXED) in the 64-bit low window: Linux
++    // places the mapping there when the range is free, and only elsewhere
++    // when it is not. The host (Darwin) never can, so the window's allocator
++    // tries the hint as MAP_FIXED_NOREPLACE; if that range is taken the
++    // mapping goes where it would have gone before. x86-64 ART reserves its
++    // boot image this way, at 0x70000000 plus a random delta, and fell back
++    // to running without it ("Failed to mmap at expected address", MEASURED,
++    // SteamARM benchmarks/stage25-art-x86-fex.txt).
++    bool HintDone = false;
++    if (!Map32Bit && Is64Bit && FEX::HLE::GuestBase && addr && !(flags & (MAP_FIXED | FEX_MAP_FIXED_NOREPLACE)) &&
++        reinterpret_cast<uint64_t>(addr) + length <= (1ULL << 32)) {
++      Result = (uint64_t)Get32BitAllocator()->Mmap((void*)addr, length, prot, flags | FEX_MAP_FIXED_NOREPLACE, fd, offset);
++      HintDone = !FEX::HLE::HasSyscallError(Result);
++    }
++    if (HintDone) {
++      // Placed at the hint, inside the window.
++    } else if (Map32Bit) {
+       Result = (uint64_t)Get32BitAllocator()->Mmap((void*)addr, length, prot, flags, fd, offset);
+       if (FEX::HLE::HasSyscallError(Result)) {
+         return reinterpret_cast<void*>(Result);
