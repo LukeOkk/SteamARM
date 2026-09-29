@@ -1,0 +1,364 @@
+Stage 26 -- Android system properties under lxrun: a property service with no init and no VM (2026-09-29)
+======================================================================================================
+
+ZERO-VM. No virtual machine, no guest kernel, no FEX. Host: Mac mini M4,
+16 GB, macOS 27.0. Base: 3651c06 (stage 25, binder in userspace). Every
+Android program below is an unmodified Android 11 arm64 binary from the
+Waydroid LineageOS 18.1 root of benchmarks/stage25-android-userspace.txt
+(/Volumes/SteamARMAndroid/root), run by lxrun as a macOS process. Nothing
+was signed in to, nothing was downloaded into the root, no Google component
+was fetched, no Steam client was started. Other sessions ran guests on the
+same Mac (a FEXServer and another agent's guests were running); every
+process below was started by this session and stopped by its own PID or
+left by itself (the property services and binder hubs, when idle). Home
+paths are written as ~. Labels: MEASURED, VERIFIED IN SOURCE, UPSTREAM
+DOCUMENTED, HYPOTHESIS, UNKNOWN.
+
+Result
+------
+MEASURED:
+1. /dev/__properties__ exists for every lxrun guest of an Android root: a
+   host process, `lxrun --property-service <dir> <root>` (runtime/
+   propsvc.c), builds property_info and one bionic prop_area per SELinux
+   context from the image's own property_contexts and .prop files, as
+   Android 11's init does, and serves /dev/socket/property_service. The
+   runtime (runtime/props.c) maps the two guest paths to the service's
+   private directory, starts the service on demand, and reports the area
+   files as root-owned, which bionic requires.
+2. bionic reads them unmodified: getprop lists 224 properties, every
+   ro.build.* value of /system/build.prop among them (23 of 23);
+   ro.build.fingerprint is derived from the image's own values as init
+   derives it (the image sets none).
+3. setprop in one guest, getprop in another; ro.* written once (the image's
+   values cannot be changed, a new ro.* takes its first value only); the
+   property_contexts types are checked (an int refuses "abc"); ctl.* is
+   refused and logged (there is no init); persist.* is stored in init's
+   PersistentProperties protobuf and restored by a fresh boot.
+4. __system_property_wait works across processes: a bionic program linked
+   against the image's own libc.so waits for a property that does not exist
+   yet and wakes when another guest's setprop creates and then changes it.
+   The wake is the service's __ulock_wake on the shared file mapping
+   reaching the guest's FUTEX_WAIT: 1000 of 1000 changes seen, median
+   18.6 us after the setter's send when back to back, 100 us when 5 ms
+   apart.
+5. hwservicemanager now sets hwservicemanager.ready through the property
+   service, and lshal lists hwservicemanager's 5 interfaces. Three HIDL HALs
+   of the image register with it and are listed: android.hidl.allocator@1.0
+   (IAllocator/ashmem), android.hardware.configstore@1.1
+   (ISurfaceFlingerConfigs) and android.hardware.memtrack@1.0 (IMemtrack,
+   passthrough to memtrack.waydroid.so). lshal exits 72
+   (DUMP_BINDERIZED_ERROR | IO_ERROR): its thread and client columns read
+   /dev/binderfs/binder_logs/proc/<pid>, the binder driver's debug state,
+   which the userspace driver does not publish.
+6. No start-up cost: `toybox true` median 38.6 ms with properties, 38.7 ms
+   with the service switched off. The first bionic process of a root boots
+   the service (9-13 ms of the service's time; 57 ms for that process).
+7. tests/android/run.sh: 29 passed + ART's expected failure (was 15 + 1).
+   Full-suite numbers at the end.
+
+Sources read (VERIFIED IN SOURCE)
+---------------------------------
+Downloaded to the session's scratch directory for reading only (Apache-2.0,
+nothing committed): LineageOS/android_bionic lineage-18.1 b67b033,
+LineageOS/android_system_core lineage-18.1 9242067 (init, property_service,
+base), LineageOS/android_frameworks_native lineage-18.1 103c04d
+(cmds/lshal). The branch heads are later than the image's build
+(2025-06-27); the files below are the Android 11 code the image carries
+(the layout constants are checked against the image by the runs below).
+
+bionic libc/system_properties:
+- prop_area.cpp: PA_SIZE 128 KiB, PROP_AREA_MAGIC 0x504f5250,
+  PROP_AREA_VERSION 0xfc6ed0ab; map_prop_area_rw (init: O_CREAT|O_EXCL
+  0444, ftruncate, MAP_SHARED read-write); map_fd_ro (every other process:
+  fstat must say uid 0, gid 0, no group/other write, size >= the header;
+  then MAP_SHARED PROT_READ and magic/version checked). prop_area header:
+  bytes_used, serial, magic, version, 28 reserved words (128 bytes); data_
+  starts with the root prop_bt and a PROP_VALUE_MAX (92) "dirty backup
+  area". prop_bt {namelen, prop, left, right, children, name[]}: a trie on
+  '.'-separated pieces whose siblings form a binary tree ordered by length
+  then bytes; offsets are stored with release and loaded with consume.
+- prop_info.cpp / prop_info.h: {serial, value[92] | {error_message[56],
+  offset}, name[]}, 96 bytes before the name; serial = value length << 24,
+  bit 0 = dirty, bit 16 = kLongFlag (a value >= 92 bytes, ro.* only, kept
+  after the prop_info at a relative offset).
+- system_properties.cpp: Init (the directory, then access() of
+  property_info -> ContextsSerialized), Update (backup copy, release fence,
+  serial|1, copy, release fence, new serial, __futex_wake on the property's
+  serial, then the global serial of properties_serial and its wake), Add,
+  Wait (__futex_wait on a serial with a relative timeout), and line 324:
+  Wait returns -1 -- true, in a bool function -- when the areas were never
+  mapped.
+- contexts_serialized.cpp, context_node.cpp: property_info names the
+  contexts; one area file per context under /dev/__properties__, opened on
+  first use; properties_serial holds the global serial.
+- libc/bionic/system_property_set.cpp: the client. PROP_MSG_SETPROP2
+  (0x00020001) when ro.property_service.version >= 2, else the old fixed
+  128-byte PROP_MSG_SETPROP; stream socket /dev/socket/property_service;
+  u32 command, u32 length + name, u32 length + value (one writev), u32
+  result read with MSG_WAITALL.
+
+system_core:
+- property_service/libpropertyinfoserializer (property_info_file.cpp,
+  trie_builder.cpp, trie_serializer.cpp, trie_node_arena.h) and
+  libpropertyinfoparser/property_info_parser.cpp: the property_info format
+  (header, sorted context and type string tables, a trie of name pieces
+  with prefix and exact entries) and its lookup; LoadPath also requires
+  uid 0 / gid 0.
+- init/property_service.cpp: PropertySet (ro.* write-once, persist.*
+  written after load), CheckPermissions (legal name, SELinux, type),
+  HandlePropertySet (ctl.*, sys.powerctl, restorecon), handle_property_set_fd
+  (2 s receive timeout, 0xffff length limit), LoadProperties (trimming,
+  import with filter, ctl./sys.powerctl/restorecon keys ignored),
+  PropertyLoadBootDefaults (file order: /system/etc/prop.default,
+  /system/build.prop, /system_ext/build.prop, /vendor/default.prop,
+  /vendor/build.prop, /odm/etc/build.prop, /product/build.prop,
+  /factory/factory.prop ro.*; later files override earlier ones; then the
+  derived ro.product.* and ro.build.fingerprint), CreateSerializedProperty
+  Info (plat, system_ext, vendor, product, odm property_contexts; default
+  u:object_r:default_prop:s0 / string), ExportKernelBootProps,
+  StartPropertyService (ro.property_service.version=2).
+- init/util.cpp IsLegalPropertyName/Value; init/property_type.cpp
+  CheckType; base/include/android-base/parseint.h, parsedouble.h;
+  init/persistent_properties.cpp (/data/property/persistent_properties, a
+  PersistentProperties protobuf rewritten through .tmp and rename).
+- base/properties.cpp:155-169 WaitForPropertyCreation loops while
+  __system_property_find is null, and its UpdateTimeSpec does not end the
+  loop at the timeout. With no areas, Wait answers true at once (above):
+  that is the busy loop lshal was in at stage 25 (R0), now VERIFIED IN
+  SOURCE instead of a HYPOTHESIS.
+- frameworks_native cmds/lshal/ListCommand.cpp:209, 730-734: the thread
+  and client columns come from /dev/binderfs/binder_logs/proc/<pid>;
+  without it: "no information for PID ..., are you root?" and
+  DUMP_BINDERIZED_ERROR | IO_ERROR.
+
+Design (runtime/props.h, docs/ANDROID_RUNTIME_ARCHITECTURE.md "Properties")
+---------------------------------------------------------------------------
+- One property state per Android root: LXRT_PROPERTY_DIR, else
+  /tmp/lxrt-props-<uid>-<hash of the root's real path>, private (mode 0700,
+  the user's own; otherwise no property service is offered, as for the
+  binder hub). In it: __properties__/ (property_info 0444, 160 context
+  files and properties_serial, 128 KiB each, sparse: 44 KB on disk),
+  property_service (the socket), service.lock, spawn.lock, service.pid,
+  service.log.
+- The service: a boot builds everything in __properties__.new and renames
+  it into place, so no guest sees half of it; a service started again
+  finds the areas and adopts them (they are the state; nothing is reset).
+  It leaves after LXRT_PROPERTY_IDLE seconds without a setprop (default
+  60; 0 never), or when its directory is removed. Removing the directory
+  is the "reboot" of that root's properties.
+- Guests: /dev/__properties__[/...] and /dev/socket/property_service are
+  translated to that directory. The first process that finds no
+  property_info starts the service (posix_spawn of lxrun itself; its first
+  process boots, binds, forks the service and exits, so the areas exist
+  when the spawner's waitpid returns); a connect() to the socket that finds
+  no listener starts it and retries once. fstat/stat/statx of the area
+  files answer uid 0 and gid 0 (only in a process that has looked at
+  /dev/__properties__, and only when the device number matches).
+- Writes: the service maps the area files read-write MAP_SHARED; guests map
+  them read-only MAP_SHARED (a real host mapping: 128 KiB is whole 16 KiB
+  pages, and dispatch.c registers it as shared for futexes). Updates follow
+  Update/Add above; wakes are __ulock_wake(UL_COMPARE_AND_WAIT_SHARED |
+  ULF_WAKE_ALL) on the serial words, the queue runtime/futex_ops.c parks a
+  guest's non-private FUTEX_WAIT on in a shared mapping.
+- Boot values: LXRT_PROPERTY_BOOTARGS stands for the kernel command line
+  (androidboot.x=y -> ro.boot.x; empty by default; "qemu" is not honoured),
+  then init's ExportKernelBootProps defaults (ro.hardware=unknown,
+  ro.bootmode=unknown, ...), the .prop files in init's order, the derived
+  properties, ro.property_service.version=2, /data/local.prop (debuggable
+  builds), the persistent properties, ro.persistent_properties.ready=true.
+  Nothing else is invented: no certification-related property is set or
+  changed; ro.build.fingerprint is the image's own derivation (userdebug,
+  test-keys).
+- Persistent file: LXRT_PROPERTY_PERSIST, else the guest's own
+  /data/property/persistent_properties in the root (init's path and
+  format), so persist.* survives with the rest of the root's /data.
+- Not done, stated: no SELinux (CheckMacPerms and CanReadProperty are not
+  applied; every area is readable), no init to act on ctl.* (refused,
+  PROP_ERROR_HANDLE_CONTROL_MESSAGE, logged), no property triggers ("on
+  property:" actions), no vendor_load_properties hook, restorecon is a
+  no-op (selinux.restorecon_recursive is set at once), sys.powerctl only
+  logged. Every guest is the Mac user: ro.* write-once is the protocol's
+  rule, not a security boundary (a guest could chmod the area files).
+
+Runs, in order
+--------------
+R0. Before (3651c06; and the same with LXRT_PROPERTY_SERVICE=0 on the new
+    runtime):
+      getprop ro.build.version.sdk -> "" rc 0
+      hwservicemanager: "libc: Using old property service protocol
+        ("ro.property_service.version" is not set)", then 'Failed to set
+        "hwservicemanager.ready" (error 2). HAL services will not start!'
+      lshal list: state R, 100.0% CPU, no output, killed by its 15 s alarm
+        (rc 142).
+R1. Probe on the host, before writing the service (a C program in the
+    scratch directory): two unrelated processes (separate execs, no fork)
+    map one 128 KiB file MAP_SHARED, the waiter read-only, the waker
+    read-write; the waiter parks with __ulock_wait(UL_COMPARE_AND_WAIT_SHARED)
+    at offsets 8, 4096 and 65536; the waker stores and calls
+    __ulock_wake(UL_COMPARE_AND_WAIT_SHARED | ULF_WAKE_ALL): 3 of 3 woke
+    after 1.01 s (the waker's delay) and read the new value. The queue key
+    is the file's VM object and offset, so a host service can wake a guest.
+    (docs/ANDROID_ZERO_VM_FEASIBILITY.md listed this as an open question.)
+R2. First boot of the service (foreground): property_info 44,552 bytes, 160
+    contexts; 211 properties from the .prop files ("Couldn't load"
+    /vendor_extra/build.prop, imported by /system/build.prop with a filter,
+    and /factory/factory.prop: neither exists in this image); ro.product.
+    {brand,device,manufacturer,model,name} set from ro.product.product.*;
+    ro.build.fingerprint =
+    waydroid/lineage_waydroid_arm64/waydroid_arm64:11/RQ3A.211001.001/150:
+    userdebug/test-keys. Boot 26.8 ms cold, 9.0-13.1 ms afterwards. The
+    first attempt used the scratch directory: "socket path too long"
+    (Darwin's sun_path is 104 bytes); the directories are in /tmp since.
+R3. property_info against AOSP's own serializer: libpropertyinfoserializer
+    and libpropertyinfoparser from system_core 9242067, built on the Mac
+    with clang++ and a four-function stand-in for android-base/strings.h,
+    fed the same three property_contexts in init's order: 44,552 bytes,
+    byte-identical to the service's file. Lookups of 2,854 names (every key
+    of every .prop file, every property_contexts entry with suffixes, a few
+    made up) with AOSP's parser on both files: 0 mismatches.
+R4. Guests against the service (private directory):
+      getprop ro.build.version.sdk -> 30
+      getprop | wc -l -> 224
+      setprop steamarm.test.a hello; getprop steamarm.test.a -> hello
+      setprop ro.build.version.sdk 99 -> rc 1, "libc: Unable to set property
+        "ro.build.version.sdk" to "99": error code: 0xb" (READ_ONLY), still 30
+      service log: "set steamarm.test.a=hello (pid ...)", "Unable to set
+        property 'ro.build.version.sdk' from pid:...: Read-only property was
+        already set"
+R5. Negative control: the same runtime without the uid-0 stat answer (a
+    patched copy built in the scratch directory): getprop
+    ro.build.version.sdk -> "" (bionic's map_fd_ro refuses a file owned by
+    uid 501); with it -> 30.
+R6. __system_property_wait (tests/android/props_wait.c: bionic's public
+    declarations and crtbegin's _start, linked with ld.lld against
+    <root>/apex/com.android.runtime/lib64/bionic/libc.so, PT_INTERP
+    /system/bin/linker64; no NDK). A waiter for steamarm.test.b=go started
+    before the property existed; 1 s later setprop steamarm.test.b notyet,
+    0.5 s later setprop ... go:
+      woke: steamarm.test.b=go after 1606 ms (2 futex wakeups)
+    (one wake of the global serial for the creation, one of the property's
+    serial). Then a change of an existing property: woke after 1046 ms (1).
+R7. Wake latency and set cost. A host client of the socket (scratch) sets
+    steamarm.bench to 1..N with PROP_MSG_SETPROP2 and timestamps each send
+    (CLOCK_REALTIME); the bionic program follows the property with
+    __system_property_wait and timestamps each wakeup.
+      N=1000, 5 ms apart: 1000 of 1000 values seen; wake after send median
+        100.2 us (p90 128, p99 176, max 295, min 42); set round trip
+        (connect, send, reply) median 418 us (p90 508, p99 647).
+      N=2000, back to back: 2000 of 2000 seen; wake after send median
+        18.6 us (p90 24, p99 39, max 154); round trip median 73 us.
+    The difference is the idle process's wakeup on macOS (HYPOTHESIS: CPU
+    idle states), not the service's work.
+R8. Start-up, 10 runs each, median (min-max), wall time of the process:
+      toybox true, properties on                   38.6 ms (38.3-39.2)
+      toybox true, LXRT_PROPERTY_SERVICE=0         38.7 ms (37.8-40.4)
+      getprop ro.build.version.sdk                 28.2 ms (27.8-28.9)
+      getprop (224 properties)                     32.7 ms (32.5-33.0)
+      setprop (service running)                    28.5 ms (28.1-31.7)
+      the first bionic process of a root (boots the service): 57.4 ms
+      a setprop that restarts an idle-exited service: 71.2 ms (adopt 7.0 ms)
+    (toybox true was 58 ms at stage 25 on the same Mac; today's lower
+    number is the Mac's state, with and without properties alike.)
+R9. hwservicemanager with the property service:
+      service log: "set hwservicemanager.ready=true (pid ...)" 53 ms after
+        the service started; getprop hwservicemanager.ready -> true after 2
+        polls
+      logcat: "hwservicemanager is ready now."; the "old property service
+        protocol" and "Failed to set" lines are gone
+      lshal list: hwservicemanager's android.hidl.base@1.0::IBase,
+        android.hidl.manager@1.0/1.1/1.2::IServiceManager,
+        android.hidl.token@1.0::ITokenManager, each "/default", server = its
+        pid; stderr "Warning: Skipping ...: no information for PID ..., are
+        you root?"; exit 72 (see Result 5).
+R10. HIDL HALs (hwservicemanager, servicemanager and vndservicemanager
+    running): android.hidl.allocator@1.0-service,
+    android.hardware.configstore@1.1-service and
+    android.hardware.memtrack@1.0-service each log "HidlServiceManagement:
+    Registered ..."; lshal list shows IAllocator/ashmem,
+    ISurfaceFlingerConfigs 1.0 and 1.1, IMemtrack and two IBase, with the
+    servers' pids. configstore installs its minijail seccomp policy first
+    ("libminijail: allowing syscall: ..."). memtrack loads
+    memtrack.waydroid.so: libhardware found it through ro.board.platform
+    (ro.hardware is "unknown", init's default without androidboot.hardware).
+R11. ART with properties: dalvikvm64 aborts exactly as before ("Could not
+    find contiguous low-memory space.", heap.cc:493); the properties do not
+    move the heap wall.
+R12. Review. A read-only review by Codex (gpt-6-sol, effort high) of
+    props.c, propsvc.c and the hooks, against the AOSP sources above,
+    reported 6 findings; it found the prop_area/prop_bt/prop_info layout,
+    the long-value offsets and the update fences equal to bionic's. All 6
+    fixed (commit "property service review fixes"), each checked against a
+    small synthetic root on the host:
+    - High: guest paths into the root did not resolve ".."; a /data link
+      climbing out of the root would have put the persistent file outside
+      it. Now resolved like a chroot: with /data ->
+      ../../../../../../tmp/outside the file is
+      <root>/tmp/outside/property/persistent_properties, nothing outside.
+    - An area directory without property_info failed every later start
+      (rename over a non-empty directory); an area with an offset past its
+      end would have been followed. Now the areas are validated before
+      adoption and bad state is set aside: "cannot adopt ...; moved to
+      __properties__.bad-<pid>, booting again" in both cases (a root
+      children offset of 128 KiB - 128 written into default_prop's area:
+      "an offset points outside the area").
+    - A protobuf with good records then garbage applied the good part and
+      kept the file; init deletes it and applies nothing. Now the same
+      ("Could not parse protobuf (deleted)"). init's legacy
+      /data/property/persist.* files are migrated when there is no
+      protobuf (a persist.steamarm.legacy file became a record and a
+      property, the file went).
+    - Derived ro.product.brand and the fingerprint truncated a long ro.*
+      value (92 and 1024 bytes): a 120-byte ro.product.product.brand now
+      reaches ro.product.brand and ro.build.fingerprint whole.
+    - A service leaving when idle could, with a client that connects and
+      sends nothing, drain for longer than the 5 s others waited: the drain
+      is capped at 2 s in all and the waits are 10 s.
+    After the fixes: property_info still byte-identical (R3), the battery
+    29 passed + 1 expected failure.
+
+Licences and downloads
+----------------------
+Nothing new in the repository or the root except tests/android/props_wait.c
+(written here). The AOSP/LineageOS sources above were read in the session's
+scratch directory (Apache-2.0) and not committed; the property service is a
+port of their semantics in C, not a copy. The root is the one of
+benchmarks/stage25-android-userspace.txt (VANILLA, no Google apps); the
+tests write only in the root's /data/local/tmp (and delete what they put
+there) and in private /tmp directories they remove.
+
+What the native services need next
+----------------------------------
+- init, or its part that matters here: a start order (logd, servicemanager,
+  hwservicemanager, vndservicemanager, the HALs), restarts, and property
+  triggers ("on property:..." actions, e.g. hwservicemanager.rc's
+  "onrestart setprop hwservicemanager.ready false"). The property service
+  has no trigger hook yet.
+- Shared memory across processes: HALs hand ashmem/memfd buffers to their
+  clients (the allocator above is one); lxrun's memfd sealing holds within
+  one process (docs/LEPTON_REUSE_ANALYSIS.md 7). Now that ro.vndk.version
+  is set (30), libcutils' ashmem may take its memfd path (HYPOTHESIS, not
+  exercised: no client of IAllocator was run).
+- The binder driver's debug state (/dev/binderfs/binder_logs) for lshal's
+  thread and client columns: cosmetic.
+- For anything Java, the ART heap (docs/ANDROID_RUNTIME_ARCHITECTURE.md)
+  is unchanged and still first.
+
+Test suites (final tree)
+------------------------
+Default build (sdk 27.0), from the final commit's runtime:
+  make lxrt launcher              rc 0
+  make test-launcher-core         rc 0: application core and app entry all
+                                  passed; 80 python tests OK; 39/0, 32/0,
+                                  10/0; guest_env 26/0; mkarmroot 25/0;
+                                  run_steam_arm64 10/0; 35/0
+  tests/elf/run.sh                76 passed, 0 failed (26 s; BINDER_IPC 21
+                                  checks, BINDER_POOL)
+  tests/elf/run_i386.sh           18 passed, 0 failed
+  tests/android/run.sh            29 passed, 0 failed, 1 expected failure
+                                  (ART), 15 s
+  python3 -m unittest tests/test_docs_records.py: OK (6 tests)
+LXRT_KEEP_X18=1 build (sdk 12.3), rm -f build/lxrun first:
+  tests/android/run.sh            29 passed, 0 failed, 1 expected failure
+No property service, binder hub, servicemanager or test process of this
+session was left running afterwards (ps), and no /tmp/lxrt-props-*
+directory remained.

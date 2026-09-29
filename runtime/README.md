@@ -49,6 +49,8 @@ malloc+stdio+snprintf ok, strlen=27
 | `main.c` | `lxrun`, with `--trace` and `--dry-run` |
 | `binder.c` | `/dev/binder`, `/dev/hwbinder`, `/dev/vndbinder` for the guest: open, ioctl, mmap, poll, fd passing |
 | `binder_hub.c` | the binder driver's state as a host process, `lxrun --binder-hub <dir>` (`docs/ANDROID_RUNTIME_ARCHITECTURE.md`, "Binder") |
+| `props.c` | `/dev/__properties__` and `/dev/socket/property_service` for Android guests: the service's directory, started on demand; the area files look root-owned |
+| `propsvc.c` | Android's system property service as a host process, `lxrun --property-service <dir> <root>`: the areas built from the image, setprop (`docs/ANDROID_RUNTIME_ARCHITECTURE.md`, "Properties") |
 
 Guest absolute paths resolve inside `LXRT_ROOT` when it is set;
 `scripts/mkroot-rpm.sh` populates one from pinned Fedora RPMs, with no VM (the

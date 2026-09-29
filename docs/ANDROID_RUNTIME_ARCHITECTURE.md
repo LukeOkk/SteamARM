@@ -1,7 +1,7 @@
 # Android userspace on lxrun, with no VM
 
-Status 2026-09-29, stage 25 (`benchmarks/stage25-android-userspace.txt`,
-`benchmarks/stage25-binder.txt`).
+Status 2026-09-29, stage 26 (`benchmarks/stage25-android-userspace.txt`,
+`benchmarks/stage25-binder.txt`, `benchmarks/stage26-android-properties.txt`).
 The owner's goal is Android on the Mac: install APKs and, later, the Google
 Play Store, with **zero VM** (`AGENTS.md`). This page says what of Android
 runs today, how to run it, what stops Java, and what the next layers need.
@@ -22,8 +22,11 @@ Binder, the other wall, is down: lxrun now provides `/dev/binder`,
 `/dev/hwbinder` and `/dev/vndbinder` in userspace, and Android's own
 `servicemanager` runs as the context manager for Android's own `service`
 and `dumpsys` clients and for a native service in another process
-(MEASURED, "Binder" below). The ART heap is what stands between this and an
-APK.
+(MEASURED, "Binder" below). System properties are there too: a property
+service built from the image's own files serves `/dev/__properties__` and
+`setprop`, so `hwservicemanager` announces itself, `lshal` lists it, and
+HIDL HALs of the image register with it (MEASURED, "Properties" below).
+The ART heap is what stands between this and an APK.
 
 ## What runs today (MEASURED)
 
@@ -33,17 +36,20 @@ APK.
 | `toybox echo`, `uname -a`, `id`, `cat`, `grep -E`, `seq`, `paste`, `date`, `wc` | correct output (`id`: "bad uid 501", the Mac's uid is not an Android one) |
 | `toybox sha256sum` / `md5sum` of `framework.jar` (27 MB) | equal to the Mac's `shasum` / `md5`; libcrypto's FIPS self-test passes |
 | `/system/bin/sh` (mksh): arithmetic, loops, `$(...)`, pipes | correct, with fork and exec |
-| `getprop ro.build.version.sdk` | empty, exit 0 (no property service) |
+| `getprop ro.build.version.sdk`, `getprop` | "30"; the image's 224 properties (its `.prop` files, as init loads them) |
+| `setprop` in one process, `getprop` or `__system_property_wait` in another | the new value; the waiter wakes (a futex wake from the property service); `ro.*` written once, types checked, `ctl.*` refused, `persist.*` kept |
 | `/apex/com.android.art/bin/dexdump -d hello.dex` | the D8-built classes and their bytecode |
 | `servicemanager`, then `service list`, `service check`, `service call`, `dumpsys -l` | the context manager on the userspace `/dev/binder`; "Found 1 services: 0 manager: [android.os.IServiceManager]" |
 | a native service (another process) registering with `servicemanager` | listed by `service list` with its interface name, called by `service call` with an int and with a file descriptor, removed when it dies |
 | `vndservicemanager /dev/vndbinder`, `vndservice list` | the vendor context, "Found 1 services" |
-| `hwservicemanager` | context manager on `/dev/hwbinder`; cannot set `hwservicemanager.ready` (no property service), so HIDL clients (`lshal`) never start (see "Binder") |
+| `hwservicemanager`, then `lshal list` | context manager on `/dev/hwbinder`, sets `hwservicemanager.ready`; `lshal` lists its 5 interfaces (exit 72: no binder debug logs for its thread/client columns) |
+| HIDL HALs: `android.hidl.allocator@1.0-service`, `android.hardware.configstore@1.1-service`, `android.hardware.memtrack@1.0-service` | registered with `hwservicemanager`, listed by `lshal` |
 | `dalvikvm64 -cp hello.dex Hello` (and `-Xint`), `dex2oat64` | abort: "Could not find contiguous low-memory space." |
 
 Start-up costs (10 runs, median): `toybox true` 58 ms, `mksh -c true`
 41 ms, a `$(toybox echo x)` fork and exec 90 ms, `sha256sum` of 27 MB
-74 ms.
+74 ms (stage 25). At stage 26 `toybox true` measured 38.6 ms with the
+property areas and 38.7 ms without: properties cost nothing at start-up.
 
 ## How to run it
 
@@ -52,7 +58,7 @@ scripts/mkandroidroot.sh          # download, sha256-check, extract (once)
 make lxrt                         # or: rm -f build/lxrun && make lxrt LXRT_KEEP_X18=1
 LXRT_ROOT=/Volumes/SteamARMAndroid/root LXRT_GUEST_PAGE=4096 \
     build/lxrun /system/bin/toybox uname -a
-tests/android/run.sh              # the battery: 7 passed, 1 expected failure
+tests/android/run.sh              # the battery: 29 passed, 1 expected failure
 python3 tests/android/logd.py /Volumes/SteamARMAndroid/root   # "logcat", see below
 ```
 
@@ -73,6 +79,10 @@ python3 tests/android/logd.py /Volumes/SteamARMAndroid/root   # "logcat", see be
 - Android logs go to logd's socket, not to stderr. `tests/android/logd.py`
   binds `<root>/dev/socket/logdw` on the Mac and prints each record; ART's
   abort messages above came from it.
+- Properties need nothing: the first bionic process starts the property
+  service for its root ("Properties" below). `LXRT_PROPERTY_DIR` picks a
+  private property state (the tests use one), `LXRT_PROPERTY_SERVICE=0`
+  switches it off.
 
 ## The root (for the next agent)
 
@@ -205,13 +215,15 @@ binder descriptor). Against it:
   identity-credential HAL).
 - `vndservicemanager /dev/vndbinder` with `vndservice list`: a separate
   context with its own context manager.
-- `hwservicemanager` becomes the context manager of `/dev/hwbinder`, but
-  cannot set `hwservicemanager.ready` ("Failed to set ... (error 2). HAL
-  services will not start!": there is no property service). `lshal` never
-  opens `/dev/hwbinder`; it spins at 100% CPU with no syscalls. That
-  libhidl waits for that property rests on the string "Waited for
-  hwservicemanager.ready for a second" in `libhidlbase.so`; where exactly
-  it spins is HYPOTHESIS. Properties come next (below), not binder.
+- `hwservicemanager` becomes the context manager of `/dev/hwbinder`. At
+  stage 25 it could not set `hwservicemanager.ready` ("Failed to set ...
+  (error 2). HAL services will not start!") and `lshal` spun at 100% CPU
+  with no syscalls: libbase's WaitForPropertyCreation loops while the
+  property is missing, and bionic's `__system_property_wait` answers
+  "true" at once when there are no property areas (VERIFIED IN SOURCE at
+  stage 26, `benchmarks/stage26-android-properties.txt`). With the
+  property service (stage 26, "Properties" below) it sets the property,
+  `lshal` lists its interfaces, and HIDL HALs register with it.
 - Costs: a sync round trip between two lxrun processes is 36-38 us to a
   looper parked in BINDER_WRITE_READ (libbinder's thread pool) and 46-55 us
   to a server that polls as servicemanager does (5,000 calls each). The
@@ -324,32 +336,111 @@ more than one service (VERIFIED IN SOURCE, `cmds/dumpsys/dumpsys.cpp`,
 
 ```sh
 tests/elf/run.sh                  # BINDER_IPC and BINDER_POOL (needs the Fedora sysroot)
-tests/android/run.sh              # servicemanager, service, dumpsys, vndservicemanager
+tests/android/run.sh              # servicemanager, service, dumpsys, vndservicemanager, hwservicemanager
 LXRT_BINDER_LOG=1 ...             # the hub logs every transaction to <dir>/hub.log
 ```
 
-### Around binder, before anything Java could run even with ART fixed
+## Properties (stage 26, `benchmarks/stage26-android-properties.txt`)
 
-- **Properties.** bionic reads `/dev/__properties__` (an mmapped trie and
-  per-context areas written by init's property service). Absent today,
-  every read is empty (MEASURED). Options: generate the areas offline from
-  the image's `*.prop` and `property_contexts` files with a host tool, or
-  run init's property service; `setprop` needs a writer
-  (`/dev/socket/property_service`). This is now the first wall for native
-  services: hwservicemanager cannot announce `hwservicemanager.ready`, so
-  no HIDL client or HAL starts (MEASURED, "Binder" above).
-- **Shared memory across processes.** Parcels carry ashmem or memfd
-  descriptors; binder passes them (FD objects), but lxrun's memfd seals
-  hold only inside one process (`docs/LEPTON_REUSE_ANALYSIS.md` 7), and
-  libcutils decides between ashmem and memfd from a property: `service`
-  logs "ashmem: memfd: ro.vndk.version not defined or invalid ()"
-  (MEASURED).
+### What works (MEASURED)
+
+- Every bionic process of the root finds `/dev/__properties__`:
+  `property_info` and one 128 KiB area per SELinux context (160 in this
+  image) plus `properties_serial`, in bionic's own formats, built from the
+  image's `property_contexts` (plat, system_ext, vendor) and `.prop` files
+  in init's order. `getprop` lists 224 properties; every `ro.build.*` value
+  of `/system/build.prop` is there. `property_info` is byte-identical to
+  what AOSP's own serializer (built on the Mac from system_core) makes of
+  the same files, and 2,854 lookups agree.
+- `ro.build.fingerprint` and `ro.product.{brand,device,manufacturer,model,
+  name}` are derived from the image's own values exactly as init derives
+  them (this image sets none). Nothing certification-related is invented
+  or changed; the build is what it says: userdebug, test-keys.
+- `setprop` in one guest, `getprop` in another. `ro.*` is written once:
+  `setprop ro.build.version.sdk 99` fails (0xb, READ_ONLY) and it stays
+  30. Types from `property_contexts` are checked (`service.adb.tcp.port`
+  is an int: "abc" refused). `ctl.*` is refused and logged: there is no
+  init to start or stop anything. `persist.*` goes to init's protobuf file
+  and comes back on a fresh boot.
+- `__system_property_wait` across processes: a bionic program linked
+  against the image's libc (`tests/android/props_wait.c`) wakes when
+  another guest creates, then changes, the property. 1000 of 1000 changes
+  seen; the waiter wakes 18.6 us (median) after the setter sends, back to
+  back, 100 us with 5 ms between sets.
+- `hwservicemanager` sets `hwservicemanager.ready`; `lshal list` shows its
+  5 interfaces; `android.hidl.allocator@1.0-service`,
+  `android.hardware.configstore@1.1-service` and
+  `android.hardware.memtrack@1.0-service` register with it. `lshal` exits
+  72 because its thread and client columns read
+  `/dev/binderfs/binder_logs/proc/<pid>`, the binder driver's debug state,
+  which the userspace driver does not publish.
+- Costs: none at start-up (`toybox true` 38.6 ms with, 38.7 ms without);
+  `getprop` of one value 28 ms, `setprop` 28.5 ms (process start-up); the
+  service boots in 9-13 ms and adopts existing areas in 7 ms.
+
+### How it is built
+
+Android's property state lives in memory that init writes and every
+process maps read-only; here the writer is a host process, the **property
+service** (`runtime/propsvc.c`, `lxrun --property-service <dir> <root>`),
+one per Android root, and the guest side is `runtime/props.c`.
+
+| piece | what | where |
+|---|---|---|
+| directory | `LXRT_PROPERTY_DIR`, else `/tmp/lxrt-props-<uid>-<hash of the root's real path>`; the user's own, mode 0700, or no property service is offered | `runtime/props.c` |
+| guest paths | `/dev/__properties__[/...]` and `/dev/socket/property_service` lead into it; everything else under `/dev/socket` stays in the root | `runtime/dispatch.c` `translate_one` |
+| start | the first process that finds no `property_info` starts the service (its first process boots, binds the socket, forks the service and exits, so the areas exist when the spawner's `waitpid` returns); a `connect()` to the socket that finds nobody listening starts it and retries once | `runtime/props.c`, `runtime/socket.c` |
+| ownership | bionic maps an area only if `fstat` says uid 0, gid 0 (`prop_area.cpp` `map_fd_ro`); `fstat`, `stat` and `statx` of the directory and its files answer that | `runtime/props.c` `lxrt_props_fix_stat` |
+| boot | property_info (libpropertyinfoserializer's format), the areas, then init's values: `LXRT_PROPERTY_BOOTARGS` as the kernel command line (`androidboot.x=y`, empty by default), `ExportKernelBootProps`' defaults, the `.prop` files, the derived properties, `ro.property_service.version=2`, `/data/local.prop` (debuggable build), the persistent ones, `ro.persistent_properties.ready`; built in `__properties__.new` and renamed into place | `runtime/propsvc.c` |
+| writes | the service's own `MAP_SHARED` mapping of the files; bionic's `Update` step for step (dirty bit, backup area, release fences, serial), then `__ulock_wake(UL_COMPARE_AND_WAIT_SHARED)` on the property's serial and on the global one: the queue a guest's `FUTEX_WAIT` in a shared mapping parks on (`runtime/futex_ops.c`); two unrelated processes meet there (MEASURED) | `runtime/propsvc.c` |
+| setprop | `PROP_MSG_SETPROP2` and the old `PROP_MSG_SETPROP`; legal name and value, the type check, `ro.*` once, `persist.*` stored, `ctl.*` refused; the peer must be this user | `runtime/propsvc.c` |
+| persistent file | `LXRT_PROPERTY_PERSIST`, else the root's `/data/property/persistent_properties` (init's path and protobuf format) | `runtime/propsvc.c` |
+| lifetime | leaves after `LXRT_PROPERTY_IDLE` seconds without a setprop (default 60, 0 never) or when its directory goes; the areas stay readable, and a service started again adopts them. Removing the directory resets ("reboots") the root's properties | `runtime/propsvc.c` |
+
+Deviations, stated rather than hidden:
+
+- No SELinux: init's MAC checks (`CheckMacPerms`, `CanReadProperty`) are
+  not applied, and every area is readable by every guest.
+- No init: `ctl.*` is refused (`PROP_ERROR_HANDLE_CONTROL_MESSAGE`), no
+  "on property:" trigger runs, `sys.powerctl` is only logged,
+  `selinux.restorecon_recursive` is set at once (there are no labels to
+  restore), no `vendor_load_properties` hook.
+- Every guest is the Mac user, as for binder: `ro.*` is write-once by the
+  protocol, not by permissions (a guest could `chmod` an area file).
+- The property state outlives the processes that used it (it is files):
+  a later run of the same root sees the earlier run's non-persistent
+  values until the directory is removed. On Android a reboot clears them.
+- `ro.hardware` is "unknown" (init's default with no
+  `androidboot.hardware`); libhardware still finds the image's
+  `*.waydroid.so` modules through `ro.board.platform`.
+
+### How to run it
+
+```sh
+tests/android/run.sh                                   # properties, setprop, wait, hwservicemanager, lshal, a HAL
+LXRT_PROPERTY_DIR=/tmp/my-props ... build/lxrun ...    # a private property state (mode 0700)
+cat /tmp/lxrt-props-<uid>-<hash>/service.log           # every set, refusal and start
+LXRT_PROPERTY_SERVICE=0 ...                            # no properties (stage 25 behaviour)
+```
+
+### Around binder and properties, before anything Java could run even with ART fixed
+
 - **init.** Lepton runs Android's own init in a container with SELinux,
   ueventd and device-mapper removed (`docs/LEPTON_REUSE_ANALYSIS.md` 3.7);
   here init would have to run as an ordinary process with no mount or pid
   namespace: a plan interpreter in the spirit of `runtime/mounts.c`, or a
   hand-written start order (logd, servicemanager, hwservicemanager,
-  vndservicemanager, then zygote).
+  vndservicemanager, the HALs, then zygote). The property service has the
+  state init's `.rc` files act on, but no trigger hook yet ("on
+  property:...", `onrestart setprop hwservicemanager.ready false`). This is
+  now the first wall for native Android services.
+- **Shared memory across processes.** Parcels carry ashmem or memfd
+  descriptors; binder passes them (FD objects), but lxrun's memfd seals
+  hold only inside one process (`docs/LEPTON_REUSE_ANALYSIS.md` 7). HALs
+  hand such buffers to their clients (the ashmem allocator above
+  registers, but nothing has allocated through it yet). libcutils picks
+  ashmem or memfd from `ro.vndk.version`, which is now set (30); which path
+  it takes here is HYPOTHESIS until measured.
 - **logd.** `tests/android/logd.py` stands in for its write socket; the
   real logd needs its sockets and `/proc/kmsg` (optional).
 - **Linker namespaces.** `linkerconfig` is ET_EXEC and cannot run under
@@ -380,11 +471,13 @@ LXRT_BINDER_LOG=1 ...             # the hub logs every transaction to <dir>/hub.
 1. The ART heap (above): without it, nothing Java runs. Start with a
    feasibility count of the reference sites outside the poisoning hooks in
    ART's source.
-2. Binder: done in userspace (stage 25, above). Next on it: libbinder's own
-   thread pool in a real Android daemon (tested so far with raw ioctls),
-   ashmem/memfd sharing across processes, and the cost per call.
-3. Properties and a minimal init sequence: now the first wall for native
-   Android services (hwservicemanager.ready, HIDL, `setprop`).
+2. Binder: done in userspace (stage 25, above). Next on it: ashmem/memfd
+   sharing across processes, the binder debug logs `lshal` reads, and the
+   cost per call.
+3. Properties: done (stage 26, above). The next wall for native Android
+   services is init: a start order for the daemons and HALs, restarts, and
+   the property triggers of the `.rc` files, on top of this property
+   service; then shared memory between a HAL and its clients.
 4. Then zygote with the rebuilt ART, system_server, `pm install` of an
    arm64-v8a APK, and a window (Lepton's graphics analysis, 4).
 
@@ -392,7 +485,12 @@ LXRT_BINDER_LOG=1 ...             # the hub logs every transaction to <dir>/hub.
 
 - `tests/android/run.sh`: the programs above against the root; ART is an
   expected failure with the heap reason; binder with servicemanager,
-  `service`, `dumpsys`, a native service and vndservicemanager.
+  `service`, `dumpsys`, a native service and vndservicemanager; properties
+  (getprop against the image's files, setprop across processes, `ro.*`,
+  types, `ctl.*`, `persist.*` across a fresh boot,
+  `__system_property_wait` in a program linked against the image's libc
+  (`tests/android/props_wait.c`), the service leaving when idle and
+  adopting its areas again), hwservicemanager with `lshal` and a HIDL HAL.
 - `tests/elf/run.sh` BINDER_IPC and BINDER_POOL (`tests/elf/binder_ipc.c`):
   the binder driver between lxrun processes with raw ioctls.
 - `tests/elf/run.sh` ANDROID_BIONIC_RT and "kept TLS reads"
@@ -400,3 +498,5 @@ LXRT_BINDER_LOG=1 ...             # the hub logs every transaction to <dir>/hub.
   root needed.
 - `benchmarks/stage25-android-userspace.txt`: every run, before and after.
 - `benchmarks/stage25-binder.txt`: the binder runs and costs.
+- `benchmarks/stage26-android-properties.txt`: the property service, the
+  sources it follows, its runs and costs.

@@ -386,6 +386,13 @@ processes is coherent through the host page cache, and a futex wait in one
 is woken by the other, since both map the same VM object. Not tested across
 unrelated processes.
 
+Update, stage 26 (MEASURED, `benchmarks/stage26-android-properties.txt`):
+done without init, as a host property service (`runtime/propsvc.c`). What
+properties need held across unrelated processes: guests read the service's
+writes to the shared areas, and a guest's `__system_property_wait` is woken
+by the service's process-shared ulock wake on the same file. See
+`docs/ANDROID_RUNTIME_ARCHITECTURE.md`, "Properties".
+
 | | |
 |---|---|
 | effort | S with Android's init; M if SteamARM has to write the property service itself (3.7) |
@@ -755,7 +762,11 @@ with the reason (the stage that has not passed), never as a working card.
 - Binder transaction latency through a broker on Darwin, against what
   SurfaceFlinger and the framework need per frame.
 - Whether two lxrun processes mapping the same property file see each
-  other's futex wakes.
+  other's futex wakes. Answered at stage 26 for what properties need: two
+  unrelated host processes meet on one wait queue through a shared file,
+  and the property service's wake reaches a guest's `FUTEX_WAIT`
+  (MEASURED, `benchmarks/stage26-android-properties.txt`). Two guests
+  waking each other through a file was not run.
 - The cost of forking a zygote with a large preloaded heap under lxrun.
 - Whether Mach ports (for IOSurface sharing) can be passed between lxrun
   guests.
