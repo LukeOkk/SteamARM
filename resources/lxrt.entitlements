@@ -4,8 +4,12 @@
 <dict>
     <!-- A guest JIT (FEX) needs a code buffer. Apple Silicon refuses plain
          read-write-execute to any process; MAP_JIT is the only alternative and
-         it requires this entitlement. runtime/jit.c drives the per-thread
-         write/execute switch from the resulting faults. -->
+         it requires this entitlement. The per-thread write/execute switch is
+         requested by the guest itself, through private syscall 0x4C580020
+         (runtime/jit.c:17-29; FEX carries the call, patches/fex-lxrt-wx.patch).
+         Driving it from faults does not work: a flip made inside a signal
+         handler does not survive the handler's return (runtime/jit.c:8-15,
+         benchmarks/stage5-jit.txt). -->
     <key>com.apple.security.cs.allow-jit</key>
     <true/>
 </dict>

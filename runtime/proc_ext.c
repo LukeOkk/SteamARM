@@ -96,15 +96,17 @@
 // hw.memsize/16384 = 1048576, the shortfall being the firmware carveout.
 //
 // Today the two are the same number, so nothing observable depends on the
-// distinction. They are split anyway because this project has a live
-// 4 KiB / 16 KiB page-size conflict -- FEX wants 4 KiB guest pages, hv_vm_map
-// wants 16 KiB -- and the day LXRT_HOST_PAGE moves to 4096 a single
-// page_bytes() reading vm_kernel_page_size would put statm, stat's rss,
-// vmstat's nr_* and the auxv fallback's AT_PAGESZ 4x away from the guest's own
-// sysconf(_SC_PAGESIZE), silently. Converting instead of warning is the fix:
-// the numbers stay right on either granule, so there is nothing left to warn
-// about, and a per-read fprintf into the guest's stderr would be worse than
-// the divergence it announced.
+// distinction. They are split anyway because guest and host page sizes need
+// not agree: x86 guests under FEX use 4 KiB pages inside the 16 KiB host pages
+// (runtime/subpage.c), while the host page itself cannot be 4 KiB on Apple
+// Silicon Darwin (LXRT_HOST_PAGE is 16384, lxrt.h:19; "the host page cannot be
+// subdivided", subpage.c:12). Were the guest granule ever to differ from the
+// host's, a single page_bytes() reading vm_kernel_page_size would put statm,
+// stat's rss, vmstat's nr_* and the auxv fallback's AT_PAGESZ 4x away from the
+// guest's own sysconf(_SC_PAGESIZE), silently. Converting instead of warning
+// is the fix: the numbers stay right on either granule, so there is nothing
+// left to warn about, and a per-read fprintf into the guest's stderr would be
+// worse than the divergence it announced.
 static uint64_t guest_page_bytes(void)
 {
     return (uint64_t)LXRT_HOST_PAGE;
