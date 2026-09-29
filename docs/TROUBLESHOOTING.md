@@ -41,6 +41,34 @@ the launcher (**Detener**) and start it again.
 Steam must see an x86-64 machine. SteamARM hides FEX's hypervisor CPUID bit
 for that. If you changed FEX options by hand, go back to the defaults.
 
+**Why aren't all the ARM64 tools selectable?**
+The ARM64 Proton and FEX downloads can be installed without being runnable
+by this macOS runtime. Valve's ARM64 Proton requires native ARM64 Steam;
+Valve explicitly excludes an x86 Steam client running through FEX. Native
+Wine ARM64EC also needs low-address mappings and Windows' x18 TEB convention
+that this runtime does not yet implement. The current working route uses
+the macOS-patched FEX and x86 Proton, with no VM. Enabling the hypervisor
+leaves alone does not implement ARM64 support.
+
+**Procesador → Compatibilidad instalada** lists the installed tools and their
+status. `python3 scripts/compat-status.py` provides the same inventory and
+scans both `steamapps/common` and Steam's `compatibilitytools.d` folders. A
+community tool such as Bannerlator appears after it is installed there; ARM64
+tools remain listed as incompatible with this macOS runtime. This is an
+installation check, not a promise that every game will run.
+
+**Steam says "MoltenVK 0.2.2210"**
+That is Steam decoding MoltenVK's decimal driver version `10402` as a Vulkan
+bit-packed version. It corresponds to **MoltenVK 1.4.2**, not an older driver.
+**Gráficos → MoltenVK instalado** queries the actual library version, using
+the same library search order as the Vulkan shim. The raw driver version is
+left intact. `tests/elf/run_vk_device.sh` verifies GPU submission and readback
+through both x86-64 and i386 FEX thunks and logs the driver's own information.
+
+**Launching after a reboot fails to find /tmp/lxrt-root**
+The launch scripts now recreate their volatile root links before starting
+guests, including direct `scripts/run-fex.sh` use.
+
 **A Windows game doesn't start**
 Games are not verified yet, so some won't run. In **Configuración →
 Registros**, enable the Proton log, start the game again, and look at

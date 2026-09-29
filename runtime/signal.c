@@ -578,6 +578,14 @@ static void host_handler(int dsig, siginfo_t *dinfo, void *uap)
     pthread_mutex_unlock(&g_actions_lock);
 
     if (act.handler == 0 || act.handler == 1) {
+        if (act.handler == 0 && getenv("LXRT_DEBUG_DEFAULT_FAULTS") &&
+            (dsig == SIGSEGV || dsig == SIGBUS || dsig == SIGILL || dsig == SIGFPE)) {
+            fprintf(lxrt_trace_stream(), "[lxrt] default guest fault: darwin %d addr %p\n",
+                    dsig, dinfo ? dinfo->si_addr : NULL);
+            signal(dsig, SIG_DFL);
+            raise(dsig);
+            return;
+        }
         if (dsig == SIGTRAP && act.handler == 0) {
             // Kept installed for the stub (below); a real SIGTRAP with the
             // default action re-executes under SIG_DFL and terminates.
@@ -1122,7 +1130,9 @@ long lxrt_rt_sigaction(int lsig, const void *uact, void *uoldact, size_t sigsets
         // action to any other SIGTRAP.
         sa.sa_sigaction = host_handler;
         sa.sa_flags = SA_SIGINFO | SA_ONSTACK | SA_NODEFER;
-    } else if (g_actions[lsig].handler == 0) {
+    } else if (g_actions[lsig].handler == 0 &&
+               (!getenv("LXRT_DEBUG_DEFAULT_FAULTS") ||
+                !(dsig == SIGSEGV || dsig == SIGBUS || dsig == SIGILL || dsig == SIGFPE))) {
         sa.sa_handler = SIG_DFL;
     } else if (g_actions[lsig].handler == 1) {
         sa.sa_handler = SIG_IGN;

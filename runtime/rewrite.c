@@ -88,9 +88,28 @@ static struct lxrt_rewrite_report g_totals;
 
 // Every pool handed out, so a later mapping over one can be recognised rather
 // than silently corrupting live trampolines.
-#define MAX_POOLS 256
+#define MAX_POOLS 1024
 static struct { uint64_t start, end; } g_pools[MAX_POOLS];
 static int g_npools;
+
+#define MAX_ELF_GAPS 128
+static struct { uint64_t next, end; } g_elf_gaps[MAX_ELF_GAPS];
+static int g_nelf_gaps;
+
+void lxrt_pool_offer_elf_gap(uint64_t start, uint64_t end)
+{
+    if (!start || end <= start || start % LXRT_HOST_PAGE ||
+        end % LXRT_HOST_PAGE)
+        return;
+    for (int i = 0; i < g_nelf_gaps; i++)
+        if (g_elf_gaps[i].next == start && g_elf_gaps[i].end == end)
+            return;
+    if (g_nelf_gaps < MAX_ELF_GAPS) {
+        g_elf_gaps[g_nelf_gaps].next = start;
+        g_elf_gaps[g_nelf_gaps].end = end;
+        g_nelf_gaps++;
+    }
+}
 
 bool lxrt_pool_contains(uint64_t addr)
 {
@@ -134,11 +153,35 @@ static bool encode_b(uint64_t from, uint64_t to, uint32_t *out)
     return true;
 }
 
+static uint8_t *reserve_pool_at(uint64_t candidate, uint64_t range_start,
+                                uint64_t range_end, size_t need, size_t *got)
+{
+    if (!candidate)
+        return NULL;
+    // VM_FLAGS_FIXED fails on an occupied range; MAP_FIXED would destroy guest
+    // code or host data and cannot be used to probe for a free gap.
+    mach_vm_address_t at = candidate;
+    if (mach_vm_allocate(mach_task_self(), &at, need, VM_FLAGS_FIXED) != KERN_SUCCESS)
+        return NULL;
+    uint32_t tmp;
+    if (!encode_b(range_start, at, &tmp) ||
+        !encode_b(range_end, at + need, &tmp) ||
+        mprotect((void *)at, need, PROT_READ | PROT_WRITE) != 0) {
+        mach_vm_deallocate(mach_task_self(), at, need);
+        return NULL;
+    }
+    if (g_npools < MAX_POOLS) {
+        g_pools[g_npools].start = at;
+        g_pools[g_npools].end = at + need;
+        g_npools++;
+    }
+    *got = need;
+    return (uint8_t *)at;
+}
+
 // A trampoline pool must sit within a single `b` of the code it serves, in
 // both directions. The kernel places a guest's mappings wherever it likes, so
-// the pool is placed per range rather than once per process: try immediately
-// after the range, then probe outwards, then give up and let the caller poison
-// the sites instead of leaving live `svc` behind.
+// the pool is placed per range rather than once per process.
 static uint8_t *alloc_pool_near(uint64_t range_start, uint64_t range_end,
                                 size_t need, size_t *got)
 {
@@ -160,36 +203,66 @@ static uint8_t *alloc_pool_near(uint64_t range_start, uint64_t range_end,
     candidates[n++] = LXRT_ALIGN_UP(range_end, LXRT_HOST_PAGE);
 
     for (int i = 0; i < n; i++) {
-        if (candidates[i] == 0)
-            continue;
-        // NOT mmap(MAP_FIXED): that silently unmaps whatever is already at the
-        // address. Probing with it destroyed live library code roughly 40% of
-        // runs, surfacing as a SIGBUS executing inside libc long afterwards.
-        // Linux has MAP_FIXED_NOREPLACE for this; Darwin's equivalent is
-        // mach_vm_allocate with VM_FLAGS_FIXED, which fails instead of
-        // overwriting.
-        mach_vm_address_t at = candidates[i];
-        if (mach_vm_allocate(mach_task_self(), &at, need, VM_FLAGS_FIXED)
-                != KERN_SUCCESS)
-            continue;
-        void *p = (void *)at;
-        if (mprotect(p, need, PROT_READ | PROT_WRITE) != 0) {
-            mach_vm_deallocate(mach_task_self(), at, need);
-            continue;
+        uint8_t *pool = reserve_pool_at(candidates[i], range_start,
+                                        range_end, need, got);
+        if (pool)
+            return pool;
+    }
+
+    // A very large ELF (libcef.so has a 162 MiB executable segment) may fill
+    // every 16 MiB probe point while leaving a smaller linker gap in branch
+    // range. Walk the VM map to find that gap rather than choosing a distant
+    // pool that forces us to poison valid guest instructions.
+    uint64_t lo = range_end > B_RANGE ? range_end - B_RANGE : 0;
+    uint64_t hi = range_start <= UINT64_MAX - B_RANGE ? range_start + B_RANGE
+                                                       : UINT64_MAX;
+    uint64_t cursor = LXRT_ALIGN_UP(lo, LXRT_HOST_PAGE);
+    for (int i = 0; i < 1024 && cursor < hi; i++) {
+        mach_vm_address_t region = cursor;
+        mach_vm_size_t size = 0;
+        vm_region_basic_info_data_64_t info;
+        mach_msg_type_number_t count = VM_REGION_BASIC_INFO_COUNT_64;
+        mach_port_t object = MACH_PORT_NULL;
+        kern_return_t kr = mach_vm_region(mach_task_self(), &region, &size,
+                                          VM_REGION_BASIC_INFO_64,
+                                          (vm_region_info_t)&info, &count,
+                                          &object);
+        if (object != MACH_PORT_NULL)
+            mach_port_deallocate(mach_task_self(), object);
+        uint64_t gap_end = kr == KERN_SUCCESS ? region : hi;
+        if (gap_end > cursor && gap_end - cursor >= need) {
+            uint8_t *pool = reserve_pool_at(cursor, range_start,
+                                            range_end, need, got);
+            if (pool)
+                return pool;
         }
-        // The probe only helps if every site in the range can reach it.
+        if (kr != KERN_SUCCESS || region + size <= cursor || region + size >= hi)
+            break;
+        cursor = LXRT_ALIGN_UP(region + size, LXRT_HOST_PAGE);
+    }
+
+    // A large ELF can leave no *unmapped* space within branch range: ld.so
+    // first reserves its full span, including holes between PT_LOADs. Those
+    // holes contain no ELF data. The caller offers only host pages wholly
+    // inside a program-header-proven hole, so borrowing one is safe.
+    for (int i = 0; i < g_nelf_gaps; i++) {
+        uint64_t at = g_elf_gaps[i].next;
         uint32_t tmp;
-        if (encode_b(range_start, (uint64_t)p, &tmp) &&
-            encode_b(range_end, (uint64_t)p + need, &tmp)) {
-            *got = need;
-            if (g_npools < MAX_POOLS) {
-                g_pools[g_npools].start = (uint64_t)p;
-                g_pools[g_npools].end = (uint64_t)p + need;
-                g_npools++;
-            }
-            return p;
-        }
-        mach_vm_deallocate(mach_task_self(), (mach_vm_address_t)p, need);
+        if (g_elf_gaps[i].end - at < need || g_npools >= MAX_POOLS ||
+            !encode_b(range_start, at, &tmp) ||
+            !encode_b(range_end, at + need, &tmp) ||
+            mprotect((void *)at, need, PROT_READ | PROT_WRITE) != 0)
+            continue;
+        g_elf_gaps[i].next += need;
+        g_pools[g_npools].start = at;
+        g_pools[g_npools].end = at + need;
+        g_npools++;
+        *got = need;
+        if (lxrt_trace_on())
+            fprintf(lxrt_trace_stream(),
+                    "[lxrt] trampoline pool in ELF load gap 0x%llx+0x%zx\n",
+                    (unsigned long long)at, need);
+        return (uint8_t *)at;
     }
 
     // Nothing near enough was free. Let the kernel choose: encode_b at the call
@@ -250,8 +323,11 @@ static bool in_code(uint64_t addr, const struct lxrt_range *code, int ncode)
 
 static bool x18_site(uint64_t addr, uint32_t insn, const struct lxrt_range *code, int ncode)
 {
-    return ncode > 0 && lxrt_x18_enabled() && in_code(addr, code, ncode) &&
-           lxrt_x18_touches(insn);
+    static int off = -1;                       // LXRT_NO_X18=1: diagnostic, no x18 pass
+    if (off < 0) off = getenv("LXRT_NO_X18") != NULL;
+    extern bool lxrt_elf_in_function(uint64_t addr);
+    return !off && ncode > 0 && lxrt_x18_enabled() && in_code(addr, code, ncode) &&
+           lxrt_x18_touches(insn) && lxrt_elf_in_function(addr);
 }
 
 static size_t count_sites(uint64_t start, uint64_t end,
@@ -354,8 +430,9 @@ int lxrt_rewrite_range(uint64_t start, uint64_t end,
     return lxrt_rewrite_range_code(start, end, NULL, 0, rep, err);
 }
 
-int lxrt_rewrite_range_code(uint64_t start, uint64_t end, const struct lxrt_range *code,
-                            int ncode, struct lxrt_rewrite_report *rep, char **err)
+static int rewrite_chunk_code(uint64_t start, uint64_t end,
+                              const struct lxrt_range *code, int ncode,
+                              struct lxrt_rewrite_report *rep, char **err)
 {
     memset(rep, 0, sizeof(*rep));
     if (end <= start)
@@ -386,15 +463,18 @@ int lxrt_rewrite_range_code(uint64_t start, uint64_t end, const struct lxrt_rang
         unsigned rt = 0;
         uint64_t site = (uint64_t)&w[i];
         if (x18_site(site, w[i], code, ncode)) {
+            uint32_t original = w[i];
             struct x18_plan plan;
             uint64_t tramp = pool ? (uint64_t)(pool + used) : 0;
             lxrt_x18_plan(w[i], site, tramp, x18_slot, tls_slot, &plan);
             uint32_t site_insn = 0, back_insn = 0, alt_insn = 0;
             bool fits = pool && plan.verdict == X18_OK &&
                         used + (size_t)plan.nwords * 4 <= pool_size &&
-                        plan.back_idx >= 0 && plan.back_idx < plan.nwords &&
+                        (plan.terminal ||
+                         (plan.back_idx >= 0 && plan.back_idx < plan.nwords &&
+                          encode_b(tramp + (uint64_t)plan.back_idx * 4,
+                                   site + 4, &back_insn))) &&
                         encode_b(site, tramp, &site_insn) &&
-                        encode_b(tramp + (uint64_t)plan.back_idx * 4, site + 4, &back_insn) &&
                         (plan.alt_idx < 0 ||
                          encode_b(tramp + (uint64_t)plan.alt_idx * 4, plan.alt_target, &alt_insn));
             if (plan.verdict == X18_UNSUPPORTED) {
@@ -404,7 +484,7 @@ int lxrt_rewrite_range_code(uint64_t start, uint64_t end, const struct lxrt_rang
                 rep->x18_unsupported++;
                 if (lxrt_trace_on())
                     fprintf(lxrt_trace_stream(), "[lxrt]    x18 site 0x%llx (%08x) unsupported: %s\n",
-                            (unsigned long long)site, w[i], plan.why ? plan.why : "?");
+                            (unsigned long long)site, original, plan.why ? plan.why : "?");
                 continue;
             }
             if (!fits) {
@@ -414,7 +494,8 @@ int lxrt_rewrite_range_code(uint64_t start, uint64_t end, const struct lxrt_rang
             }
             uint32_t *t = (uint32_t *)(pool + used);
             memcpy(t, plan.words, (size_t)plan.nwords * 4);
-            t[plan.back_idx] = back_insn;
+            if (plan.back_idx >= 0)
+                t[plan.back_idx] = back_insn;
             if (plan.alt_idx >= 0)
                 t[plan.alt_idx] = alt_insn;
             w[i] = site_insn;
@@ -450,6 +531,11 @@ int lxrt_rewrite_range_code(uint64_t start, uint64_t end, const struct lxrt_rang
         if (!pool || used + tsize > pool_size ||
             !encode_b(site, tramp, &site_insn) ||
             !encode_b(tramp + br_off, site + 4, &back_insn)) {
+            if (kind == SITE_SVC && lxrt_trace_on() && rep->sites_unreachable < 3)
+                fprintf(lxrt_trace_stream(),
+                        "[lxrt] svc pool unreachable: site 0x%llx pool 0x%llx used %zu/%zu size %zu\n",
+                        (unsigned long long)site, (unsigned long long)tramp,
+                        used, pool_size, tsize);
             // No reachable trampoline. Poison rather than leave the original:
             // per Stage 1 a live `svc` runs an arbitrary Darwin syscall, and a
             // live `mrs TPIDR_EL0` reads a register Darwin clobbers. Both are
@@ -510,6 +596,28 @@ int lxrt_rewrite_range_code(uint64_t start, uint64_t end, const struct lxrt_rang
     }
     sys_icache_invalidate((void *)start, (size_t)(end - start));
     accumulate(rep);
+    return 0;
+}
+
+int lxrt_rewrite_range_code(uint64_t start, uint64_t end,
+                            const struct lxrt_range *code, int ncode,
+                            struct lxrt_rewrite_report *rep, char **err)
+{
+    // AArch64's direct branch reaches only +/-128 MiB. CEF has a single
+    // executable PT_LOAD larger than that; one trampoline pool cannot serve
+    // both ends, so the old whole-segment scan poisoned its TLS/syscall sites.
+    // Give each 32 MiB slice its own nearby pool. Code-section ranges remain
+    // in absolute guest addresses and can be shared by all slices.
+    const uint64_t chunk_size = 32ull << 20;
+    memset(rep, 0, sizeof(*rep));
+    for (uint64_t pos = start; pos < end;) {
+        uint64_t next = end - pos > chunk_size ? pos + chunk_size : end;
+        struct lxrt_rewrite_report one;
+        if (rewrite_chunk_code(pos, next, code, ncode, &one, err) != 0)
+            return -1;
+        report_add(rep, &one);
+        pos = next;
+    }
     return 0;
 }
 

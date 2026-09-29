@@ -201,12 +201,24 @@ struct EditAppView: View {
     @State var app: AppEntry
     @State private var commandText = ""
     @State private var envText = ""
+    @State private var compatibility: CompatibilityStatus?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
             Text("Editar \(app.name)").font(.title2.bold())
             Form {
                 TextField("Nombre", text: $app.name)
+                if app.kind == "windows" {
+                    Picker("Proton", selection: Binding(get: { app.protonTool ?? "Proton - Experimental" },
+                                                        set: { app.protonTool = $0 })) {
+                        ForEach(compatibility?.protons ?? []) { tool in
+                            Text(tool.supported ? tool.name : "\(tool.name) · \(tool.status)")
+                                .tag(tool.name).disabled(!tool.supported)
+                        }
+                    }
+                    Text("Cambiar Proton conserva el prefijo de esta app; una versión anterior puede no aceptar un prefijo actualizado.")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
                 LabeledContent("Icono") {
                     HStack {
                         AppIconView(app: app, size: 32)
@@ -241,6 +253,7 @@ struct EditAppView: View {
         }
         .padding(20)
         .frame(width: 560)
+        .task { compatibility = await CompatibilityStatus.load(project: model.projectDir) }
         .onAppear {
             commandText = app.command.joined(separator: "\n")
             envText = app.env.sorted { $0.key < $1.key }.map { "\($0.key)=\($0.value)" }

@@ -31,6 +31,8 @@ struct SettingsView: View {
     @State private var trusted = AXIsProcessTrusted()
     @State private var sessionStarted = false
     @State private var saveError: String?
+    @State private var compatibility: CompatibilityStatus?
+    @State private var compatibilityLoaded = false
 
     var body: some View {
         VStack(spacing: 0) {
@@ -75,6 +77,10 @@ struct SettingsView: View {
         }
         .frame(width: 1160, height: 790)
         .preferredColorScheme(.dark)
+        .task {
+            compatibility = await CompatibilityStatus.load(project: model.projectDir)
+            compatibilityLoaded = true
+        }
         .onAppear {
             guard !sessionStarted else { return }
             draft = model.settings
@@ -227,6 +233,21 @@ struct SettingsView: View {
 
     private var processorSection: some View {
         Group {
+            Section("Compatibilidad instalada") {
+                if let compatibility {
+                    LabeledContent("FEX adaptado a macOS", value: compatibility.fex.patchedInstalled ? "Instalado" : "Falta instalar")
+                    LabeledContent("FEX de Steam", value: compatibility.fex.steamInstalled ? "Instalado · requiere Linux" : "No instalado")
+                    ForEach(compatibility.protons) { proton in
+                        LabeledContent(proton.name, value: proton.status)
+                    }
+                    Text(compatibility.nativeArmReason).font(.caption).foregroundStyle(.secondary)
+                    Text("Para programas Linux x86_64: Añadir app → Personalizada. Para juegos Windows: seleccionar Proton x86_64 en Steam → Propiedades → Compatibilidad.")
+                        .font(.caption).foregroundStyle(.secondary)
+                    Text(compatibility.note).font(.caption).foregroundStyle(.secondary)
+                } else {
+                    Text(compatibilityLoaded ? "No se pudo leer el diagnóstico de compatibilidad." : "Consultando componentes…")
+                }
+            }
             Section("Caché de CPU") { Toggle("Caché de traducción en disco", isOn: $draft.fexDiskCache) }
             Section("Emulación x86 (FEX)") {
                 choice("Orden de memoria (TSO)", $draft.fexTSO, [("full", "Completo"), ("fast", "Rápido"), ("off", "Desactivado")])
@@ -241,6 +262,12 @@ struct SettingsView: View {
     private var graphicsSection: some View {
         Group {
             Section("API de gráficos") {
+                if let driver = compatibility?.moltenvk {
+                    LabeledContent("MoltenVK instalado", value: driver.version)
+                        .help(driver.path)
+                    Text("Steam puede mostrar 0.2.2210 para MoltenVK 1.4.2: interpreta su versión decimal como una versión Vulkan.")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
                 Picker("Motor", selection: $draft.graphicsBackend) {
                     Text("Vulkan (MoltenVK / Metal)").tag("vulkan")
                     Text("OpenGL (WineD3D)").tag("opengl").disabled(true)

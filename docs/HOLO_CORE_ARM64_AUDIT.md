@@ -1,62 +1,56 @@
-# Holo Core ARM64 audit
+# Auditoría Holo Core ARM64
 
-Status (2026-09-28): not started. The sources could not be reached from the
-environment that wrote this file (see below). This page says what the audit
-must produce and how to produce it on the Mac.
+Consulta inicial: 2026-09-28. Holo Core es el candidato de userspace ARM64;
+ningún kernel ni mecanismo de virtualización forma parte del runtime final.
 
-## What `holo-core-aarch64-preview` is
+## Fuentes y snapshot
 
-HYPOTHESIS: the name has the shape of a pacman repository in SteamOS' "Holo"
-distribution layer, like the Steam Deck's `holo-*` repositories. If so, it
-is not a source tree.
+- Fuente oficial: <https://gitlab.steamos.cloud/holo/holo-core-aarch64-preview>
+- Repositorio oficial de paquetes: <https://holo-packages.steamos.cloud/holo-core-aarch64-preview/>
+- Revisión clonada para lectura: `67f0d559c82cdc5c94317bad53ae45409720ef59`
+  (commit `readme: fix name ordering`, 2026-06-10).
+- El README fuente identifica la base como el estado de Arch del 2025-11-18,
+  más cambios ARM64 y correcciones de licencia; lo declara technology preview,
+  no sistema estable con garantías.
+- El índice de paquetes presenta `core` y `extra` ARM64; la revisión visible
+  más nueva fue `mash-20251118.3` (árbol listado en 2026-07-10). Conteo del
+  índice: 258 entradas en `core` y 4,312 en `extra`, incluyendo bases de datos
+  y metadatos `FILES`; no son conteos de firmas. Los `.sig` del paquete
+  `btrfs-progs` y de `core.db` no estaban publicados (404). Guardar SHA-256 y
+  licencia no equivale a verificar una firma. Verificar más reciente en cada
+  auditoría.
+- El README ofrece imágenes de contenedor `base` y `base-devel` para construir.
+  Este proyecto no las usa: paquetes oficiales se descargarán y extraerán como
+  archivos de userspace; cero VM, cero kernel invitado, cero contenedor runtime.
 
-Checked from here:
+## Encaje en ZERO-VM
 
-- `raw.githubusercontent.com/ValveSoftware/holo-core-aarch64-preview` returns
-  404 on both `main` and `master`.
-- `steamdeck-packages.steamos.cloud` and `gitlab.steamos.cloud` are blocked
-  by this environment's network policy.
+**Candidato:** filesystem ARM64 de Arch, glibc/loader, librerías y paquetes
+necesarios para FEX, Steam ARM64 cuando proceda y dispatch Linux→Darwin.
 
-Neither result says the repository does not exist.
+**Excluir del root mínimo:** kernel/initramfs, system boot, systemd services
+que requieran kernel completo, firmware y drivers Steam Frame, VR/dashboard,
+dispositivo Snapdragon, y cualquier imagen arrancable. Mantener archivos de
+licencia y manifests de package.
 
-The Steam Frame image settles it. Its `etc/pacman.conf` names the
-repositories the device installs from, with their server URLs.
-`steamframe-image.py inventory` lists them.
+El repo de fuentes es una receta de packages, no el userspace instalado ni un
+Steam Frame OS completo. Comparar su package DB/binarios con la recovery antes
+de tomar versiones o archivos. No asumir que Proton ARM64, FEX upstream,
+Gamescope ni `SteamLinuxRuntime_4-arm64` forman parte del repositorio Holo.
 
-## Procedure (on the Mac)
+## Bootstrap mínimo por resolver
 
-```sh
-python3 scripts/steamframe-image.py inventory /Volumes/SteamFrameRoot/rootfs \
-    --json ~/SteamARM-roots/logs/steamframe-inventory.json --md docs/STEAM_FRAME_INVENTORY.md
-# "pacman repositories" lists every [repo] with its server URL; the database
-# is <server>/<repo>.db, for example:
-python3 scripts/steamframe-image.py compare ~/SteamARM-roots/logs/steamframe-inventory.json \
-    'https://<server from the inventory>/holo-core-aarch64-preview.db' --md docs/HOLO_CORE_VS_STEAM_FRAME.md
-```
+Resolver dependencias desde la base de packages de Holo; no copiar una lista
+ad hoc sin metadatos de package DB. Primer conjunto a evaluar: `filesystem`,
+`glibc`, `gcc-libs`, `bash`, `coreutils`, certificates, `zlib`/`zstd`,
+`libx11`/XCB sólo si el smoke lo requiere. Conservar manifests, checksums y
+licencias; verificar firma cuando el proveedor la publique. El root debe poder ejecutar un binario AArch64 trivial, cargar
+glibc/pthread y `dlopen`, y ejecutar FEX x86-64 e i386 bajo `lxrun`.
 
-`compare` reads the repository database (a compressed tar of `desc` files) and
-sets the image's installed package versions beside it. It shows for each
-package whether the versions match, differ, or exist on only one side.
+## Diferencia conocida frente a Steam Frame
 
-## Table this audit must fill (§11.1D)
-
-| component | Holo Core preview version | Steam Frame recovery version | architecture | open source? | relevant to SteamARM? | current SteamARM equivalent | action |
-|---|---|---|---|---|---|---|---|
-
-- The version columns come from `compare`.
-- The architecture and licence come from the package database (`%ARCH%`,
-  `%LICENSE%`).
-- The last three columns come from `docs/CURRENT_STEAM_ENVIRONMENT.md`: the
-  Fedora 43 aarch64 root, FEX's x86 rootfs and Valve's Steam client.
-
-Classify each component with one of: REFERENCE_ONLY, REUSE_SOURCE,
-REUSE_BINARY_IF_LICENSE_ALLOWS, REIMPLEMENT_DARWIN_ADAPTER, FEX_REUSE,
-STEAM_RUNTIME_OWNED, HARDWARE_SPECIFIC_IGNORE, PROPRIETARY_DO_NOT_REDISTRIBUTE,
-UNKNOWN.
-
-Neither source replaces the other:
-
-- the preview repository is the open, buildable baseline;
-- the recovery image is what Valve actually ships.
-
-When they differ, find out what each package is for before picking one.
+Steam Frame recovery observada es un disco de dispositivo con ESP FAT32,
+`rootfs-A` Btrfs y `var-A`/`home` ext4; Holo es un repositorio Arch ARM64
+genérico. La comparación real de packages, ELF, FEX, Proton ARM64, runtimes y
+Gamescope sigue pendiente: `btrfs check` pasa, pero `btrfs restore` falla al
+descomprimir extents ZSTD. Ver `STEAM_FRAME_ROOTFS_AUDIT.md`.

@@ -69,6 +69,7 @@ struct AppEntry: Codable, Identifiable, Hashable {
     /// i386), read from its ELF header when it is added. nil = x86_64, the
     /// FEX path every entry took before this field existed.
     var architecture: String? = nil
+    var protonTool: String? = nil // Windows apps: installed Steam Proton directory name
 
     /// The x86 client under FEX: TRANSITIONAL_COMPATIBILITY until the ARM64
     /// client runs (docs/APPLICATION_MANAGER.md).

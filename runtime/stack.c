@@ -8,6 +8,8 @@
 
 #include "lxrt.h"
 
+
+
 #include <errno.h>
 #include <stdarg.h>
 #include <stdio.h>
@@ -15,6 +17,21 @@
 #include <string.h>
 #include <sys/mman.h>
 #include <unistd.h>
+
+// LXRT_GUEST_PAGE=4096: tell a native guest Linux's 4 KiB page instead of the
+// host's 16 KiB. Valve's arm64 Steam client ships 4 KiB-aligned libraries
+// that glibc refuses to dlopen on a 16 KiB system ("ELF load command
+// address/offset not page-aligned"); subpage.c already keeps 4 KiB mappings
+// on 16 KiB pages for FEX's guests, and it serves these the same way.
+uint64_t lxrt_guest_page(void)
+{
+    static uint64_t pg;
+    if (!pg) {
+        const char *e = getenv("LXRT_GUEST_PAGE");
+        pg = e && strcmp(e, "4096") == 0 ? 4096 : LXRT_HOST_PAGE;
+    }
+    return pg;
+}
 
 // Auxiliary vector types, from Linux's elf.h.
 enum {
@@ -74,9 +91,13 @@ void *lxrt_build_stack(const struct lxrt_image *img, int argc, char **argv,
         return NULL;
     }
 
-    // Strings live at the top of the region, growing downward; the vector is
-    // placed below them so the guest sees the usual arrangement.
-    uint8_t *top = region + LXRT_STACK_SIZE;
+    // Leave one mapped host page above the initial strings. Linux's initial
+    // stack normally has mapped slack above argv/envp; a guest may read a few
+    // bytes past an env string while comparing it. Placing the last string at
+    // the very end of our mmap made that harmless read fault at the next page.
+    // The padding stays anonymous and zero-filled, just like the rest of the
+    // stack; argv/envp and auxv still have the kernel's usual layout.
+    uint8_t *top = region + LXRT_STACK_SIZE - LXRT_HOST_PAGE;
     uint8_t *strp = top;
 
     uint64_t *argv_ptr = calloc((size_t)argc + 1, sizeof(uint64_t));
@@ -110,7 +131,7 @@ void *lxrt_build_stack(const struct lxrt_image *img, int argc, char **argv,
         { AT_PHNUM,  img->phnum },
         // The truth, not Linux's 4096: glibc uses this to align its own mmap
         // requests, and lying here produces EINVAL from Darwin later.
-        { AT_PAGESZ, LXRT_HOST_PAGE },
+        { AT_PAGESZ, lxrt_guest_page() },
         // Where the dynamic loader was mapped. glibc's ld.so relocates itself
         // against this and will crash obscurely if it is wrong; 0 is correct
         // only for a static image.

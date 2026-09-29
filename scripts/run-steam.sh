@@ -36,6 +36,8 @@ if [ "${1:-}" = "--stop" ]; then
     exit 0
 fi
 
+scripts/env-links.sh "$STATE" >/dev/null || exit 1
+
 # VNC password file: the classic VNC obfuscation (DES, fixed key) of at most
 # eight characters, which is what Xvnc's -rfbauth reads.
 PWTXT="$STATE/vncpasswd.txt"
@@ -85,7 +87,10 @@ if ! pgrep -f 'build/lxrun .*ubuntu12_32/steam ' >/dev/null; then
     VOL="$(/usr/bin/python3 scripts/settings-env.py --volume)"
     [ -n "$VOL" ] && { scripts/audio.sh start "$VOL" >/dev/null || echo "run-steam: no sound (scripts/audio.sh)" >&2; }
     scripts/input.sh start >/dev/null || echo "run-steam: no controllers for games (scripts/input.sh)" >&2
+    # Valve's Linux shader replay stalls here while processing Schedule I.
+    # This disables Steam's pre-caching, not DXVK/VKD3D or Metal's own caches.
     DISPLAY=$DISP LXRT_ROOT=$ROOT FEX_ROOTFS=/ \
+        STEAM_ENABLE_SHADER_CACHE_MANAGEMENT="${STEAM_ENABLE_SHADER_CACHE_MANAGEMENT:-0}" \
         nohup scripts/run-fex.sh /bin/bash /tmp/fexhome/.local/share/Steam/steam.sh ${VERIFY[@]+"${VERIFY[@]}"} \
         > "$L" 2>&1 &
     echo "Steam starting (log $L); the window appears in about a minute."

@@ -264,13 +264,28 @@ void lxrt_x18_plan(uint32_t i, uint64_t site, uint64_t tramp,
     int cls, fields = lxrt_x18_gpr_fields(i, &sb, &sd, &cls);
     if (cls == X18_CLS_LDST_EXCL) { reject(p, "exclusive"); return; }
     if (cls == X18_CLS_CASP) { reject(p, "casp pair"); return; }
-    if (cls == X18_CLS_BR) { reject(p, "branch register"); return; }
     if (sd && reg_at(i, 0) == 31) { reject(p, "writes sp"); return; }
     if (cls == X18_CLS_SYSREG && i != 0xd53bd052 && i != 0xd51bd052) {
         reject(p, "sysreg"); return;
     }
     if ((slot_off & 7) || slot_off >= 32768 || (tls_off & 7) || tls_off >= 32768 ||
         (site & 3) || (tramp & 3)) { reject(p, "imm overflow"); return; }
+    if (cls == X18_CLS_BR) {
+        /* x18 belongs to Darwin. Use the ABI's intra-procedure-call scratch
+         * x16 for the guest target, leaving the host's physical x18 intact.
+         * A BLR must expose the original guest return PC in x30. */
+        emit(p, 0xa9bf47f0); /* stp x16, x17, [sp, #-16]! */
+        emit(p, 0xd53bd071); /* mrs x17, tpidrro_el0 */
+        emit(p, 0x927df231); /* and x17, x17, #~7 */
+        emit(p, 0xf9400000 | ((slot_off / 8) << 10) | (17 << 5) | 16);
+        emit(p, 0xf94007f1); /* ldr x17, [sp, #8] */
+        emit(p, 0x910043ff); /* add sp, sp, #16 */
+        if (i == 0xd63f0240) materialize(p, 30, site + 4);
+        emit(p, 0xd61f0200); /* br x16 */
+        p->terminal = true;
+        p->verdict = X18_OK;
+        return;
+    }
     unsigned used = 0, s1 = 0, s2;
     for (unsigned f = 0; f < 4; ++f)
         if (fields & (1 << f)) used |= 1u << reg_at(i, field_shift[f]);
@@ -294,22 +309,25 @@ void lxrt_x18_plan(uint32_t i, uint64_t site, uint64_t tramp,
             if ((i >> 23) & 1) { reject(p, "sp writeback"); return; }
             scale = (i & (1u << 26)) ? (4u << (i >> 30)) : ((i >> 31) ? 8 : 4);
             imm = sext((i >> 15) & 127, 7) + 16 / scale;
-            if (imm > 63) { reject(p, "imm overflow"); return; }
+            /* No room to compensate in the 7-bit field (Steam's arm64
+             * client: stp x18, x17, [sp, #0x1f8]): address through S2 =
+             * the original SP instead, immediate unchanged. */
+            if (imm > 63) { sp_via_s2 = true; break; }
             j = (j & ~0x003f8000u) | (((uint32_t)imm & 127) << 15);
             break;
         case X18_CLS_LDST_UIMM:
             scale = ((i & (1u << 26)) && (i & (1u << 23))) ? 16 : (1u << (i >> 30));
             imm = ((i >> 10) & 4095) + 16 / scale;
-            if (imm > 4095) { reject(p, "imm overflow"); return; }
+            if (imm > 4095) { sp_via_s2 = true; break; }
             j = (j & ~0x003ffc00u) | ((uint32_t)imm << 10);
             break;
         case X18_CLS_LDST_UNSCALED:
             imm = sext((i >> 12) & 511, 9) + 16;
-            if (imm > 255) { reject(p, "imm overflow"); return; }
+            if (imm > 255) { sp_via_s2 = true; break; }
             j = (j & ~0x001ff000u) | (((uint32_t)imm & 511) << 12);
             break;
         case X18_CLS_ADDSUB_IMM:
-            if (i & (1u << 22)) { reject(p, "imm overflow"); return; }
+            if (i & (1u << 22)) { sp_via_s2 = true; break; }
             /* SUB's sign is opposite ADD's: preserve the original SP value. */
             imm = (int64_t)((i >> 10) & 4095) + ((i & (1u << 30)) ? -16 : 16);
             if (imm < 0 || imm > 4095) { reject(p, "imm overflow"); return; }
@@ -402,6 +420,7 @@ size_t lxrt_x18_tramp_bytes(uint32_t i) {
     bool sb, sd;
     int cls;
     (void)lxrt_x18_gpr_fields(i, &sb, &sd, &cls);
+    if (cls == X18_CLS_BR) return 44; /* stack, TSD, four MOVs, branch */
     if (cls == X18_CLS_LDST_LITERAL) return 48; /* four MOVs + load + seven */
     if (cls == X18_CLS_ADR || cls == X18_CLS_CBZ || cls == X18_CLS_TBZ) return 44;
     if (sb && reg_at(i, 5) == 31) return 44; /* temporary original-SP base */

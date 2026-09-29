@@ -109,7 +109,7 @@ final class Downloader: NSObject, URLSessionDownloadDelegate, @unchecked Sendabl
 // MARK: - Archive handling
 
 enum ArchiveKind: String {
-    case appImage, tarball, deb, elf
+    case appImage, tarball, deb, elf, windowsExe
 
     static func detect(_ url: URL) -> ArchiveKind? {
         let n = url.lastPathComponent.lowercased()
@@ -118,12 +118,30 @@ enum ArchiveKind: String {
             || n.hasSuffix(".txz") || n.hasSuffix(".tar.bz2") || n.hasSuffix(".tar") { return .tarball }
         if n.hasSuffix(".deb") { return .deb }
         if Installer.isELF(url) { return .elf }
+        if Installer.isWindowsExecutable(url) { return .windowsExe }
         return nil
     }
 }
 
 enum Installer {
     static var downloads: URL { Paths.launcherDir.appendingPathComponent("downloads") }
+
+    /// Validate the PE signature and x86 machine, not just the .exe extension.
+    static func isWindowsExecutable(_ url: URL) -> Bool {
+        guard url.pathExtension.lowercased() == "exe",
+              let fh = try? FileHandle(forReadingFrom: url) else { return false }
+        defer { try? fh.close() }
+        guard let header = try? fh.read(upToCount: 64), header.count == 64,
+              header[0] == 0x4d, header[1] == 0x5a else { return false }
+        let offset = (0..<4).reduce(UInt64(0)) { $0 | UInt64(header[60 + $1]) << (8 * $1) }
+        guard offset >= 64, offset < 16 << 20 else { return false }
+        do {
+            try fh.seek(toOffset: offset)
+            let pe = try fh.read(upToCount: 6) ?? Data()
+            return pe.count == 6 && pe.prefix(4) == Data([0x50, 0x45, 0, 0]) &&
+                ((pe[4] == 0x64 && pe[5] == 0x86) || (pe[4] == 0x4c && pe[5] == 0x01))
+        } catch { return false }
+    }
 
     static func isELF(_ url: URL) -> Bool {
         guard let fh = try? FileHandle(forReadingFrom: url) else { return false }
@@ -196,7 +214,7 @@ enum Installer {
             try check(await Shell.run("/bin/sh", ["-c",
                 "set -o pipefail; \"$0\" -xOf \"$1\" 'data.tar*' | \"$0\" -xf - -C \"$2\"",
                 bsdtar, file.path, dest.path]), "bsdtar (deb)")
-        case .elf:
+        case .elf, .windowsExe:
             try fm.createDirectory(at: dest, withIntermediateDirectories: true)
             let target = dest.appendingPathComponent(file.lastPathComponent)
             try fm.copyItem(at: file, to: target)
@@ -230,7 +248,7 @@ enum Installer {
             if name.contains(".so") { return }
             var isDir: ObjCBool = false
             guard fm.fileExists(atPath: u.path, isDirectory: &isDir), !isDir.boolValue else { return }
-            if isELF(u) || fm.isExecutableFile(atPath: u.path) { out.append(rel) }
+            if isELF(u) || isWindowsExecutable(u) || fm.isExecutableFile(atPath: u.path) { out.append(rel) }
         }
         func rank(_ r: String) -> (Int, Int, String) {
             let name = (r as NSString).lastPathComponent

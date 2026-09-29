@@ -18,8 +18,9 @@
 #     zone) or VM map entries above SAFEGUARD_MAX_MAPENT (1500000): kernel
 #     memory no RSS figure shows, and what the panicking kernel had run out of
 #     (the "vm objects" zone was 2856 MB)
-# A status line goes to $STEAMARM_STATE/logs/safeguard.log (~/SteamARM-roots) every 5 s (synced
-# to disk), so a hang leaves a trail.
+# A status line goes to $STEAMARM_STATE/logs/safeguard.log (~/SteamARM-roots) every 5 s.
+# Flush only that log: macOS sync(8) flushes every filesystem and can stall
+# game I/O at the same five-second cadence.
 set -u
 STATE="${STEAMARM_STATE:-$HOME/SteamARM-roots}"
 LOG="$STATE/logs/safeguard.log"
@@ -73,10 +74,17 @@ has_x86_guest() {
     return 1
 }
 
+# The detached guard's stdout is the log, opened by start above. fsync(1)
+# preserves crash diagnostics without forcing writes from every process and
+# volume. A direct interactive "run" has a terminal on fd 1; ignore EINVAL.
+flush_log() {
+    /usr/bin/python3 -c 'import os; os.fsync(1)' 2>/dev/null || true
+}
+
 kill_guests() {
     echo "$(date '+%F %T') KILL: $1"
     guest_pids | xargs kill -9 2>/dev/null
-    sync
+    flush_log
 }
 
 n=0
@@ -112,7 +120,7 @@ while true; do
     fi
     if [ $((n % 5)) -eq 0 ]; then
         echo "$(date '+%F %T') free=${level}% guests=${gcount} rss=${grss}MB fseventsd=${fse}MB vmobj=${vmobj} mapent=${mapent}"
-        sync
+        flush_log
     fi
     sleep 1
 done
