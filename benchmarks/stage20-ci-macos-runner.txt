@@ -1,0 +1,71 @@
+Stage 20: the first build and tests of the 0.3.4 branch on macOS (a GitHub runner)
+Measured 2026-09-29 by .github/workflows/macos.yml, job build-test, commit 03f699f:
+https://github.com/LukeOkk/SteamARM/actions/runs/36524883218
+
+Machine: GitHub-hosted macos-15 runner, "macOS 15.7.9 (24G830), Apple M1
+(Virtual)", Xcode 16.4 SDK. It is a virtual machine on Apple Silicon, not the
+owner's M4 on macOS 27. Everything below is MEASURED on that runner and says
+nothing about the M4 until repeated there.
+
+1. It builds on macOS
+---------------------
+MEASURED: `make all` builds lxrun, the vDSO, the Vulkan shim, steamarm-inputd
+and SteamARM.app, including the SwiftUI launcher (LauncherModel.swift had not
+been compiled since the per-session changes; it compiles).
+
+The first run failed, and the failure was real (run 36524772639):
+    runtime/proc_ext.c:229: static declaration of 'vm_stats' follows non-static declaration
+    .../MacOSX.sdk/usr/include/mach/vm_statistics.h:175: kern_return_t vm_stats(void *info, unsigned int *count);
+The Xcode 16.4 SDK declares a vm_stats() that the SDK on the Mac that built
+0.3.3 does not. The runtime's static helper is now host_vm_stats (03f699f).
+
+2. Tests that need no Linux roots
+---------------------------------
+MEASURED, verbatim summaries:
+    application core: all checks passed        (launcher/tests/ApplicationCoreTests.swift)
+    run_app_dispatch.sh: 10 passed, 0 failed
+    session.sh:          17 passed, 0 failed   (1 skip: macOS has no setsid command,
+                                                so the group-leader fallback is not exercised)
+    x18_check --self-test: PASS (0 failures)
+    tests/audio/run.sh:  10 passed, 0 failed   (Homebrew PulseAudio, null sink)
+Not run on the runner: tests/elf, tests/win and anything with Steam; they
+need the Linux roots that scripts/setup.sh builds on a real Mac.
+
+3. x18 is preserved for a binary built against a pre-13 SDK
+------------------------------------------------------------
+tests/x18_preserve/run.sh builds one program twice and checks x18 across
+preemption (8 threads spinning), a SIGALRM handler, 1000 sched_yield and a
+300 ms usleep. MEASURED on the runner:
+
+    build/x18_preserve_cur    (LC_BUILD_VERSION sdk 15.5)
+      preemption, threads 0-7            x18 CHANGED
+      after SIGALRM handler              x18 = 0  ZEROED
+      after 1000 sched_yield             x18 = 0  ZEROED
+      after usleep(300 ms)               x18 = 0  ZEROED
+      => x18 is NOT preserved for this binary
+    build/x18_preserve_sdk12  (LC_BUILD_VERSION sdk 12.3)
+      preemption, threads 0-7 (~3500 loops each)  x18 = 0x5a18c0de12345678  PRESERVED
+      after SIGALRM handler              PRESERVED
+      after 1000 sched_yield             PRESERVED
+      after usleep(300 ms)               PRESERVED
+      => x18 is preserved for this binary
+
+This is what benchmarks/stage19 §3a predicted from xnu's
+machine_task_process_signature() ("temporary override for tasks before
+macOS 13"), now observed on macOS 15.7.
+
+What it would mean, as a HYPOTHESIS until measured on the M4 / macOS 27:
+- lxrun linked with -Wl,-platform_version,macos,12.0,12.3 would keep a guest's
+  x18 across context switches;
+- the x18 rewriting of runtime/x18.c could then become optional; today it
+  covers libcef's `blr x18` and every other x18 use in Linux code;
+- the ARM64 Windows ABI (TEB in x18) would no longer be blocked by x18. That is
+  one of the two ARM64 Proton blockers in stage19 §2; the 0x7ffe0000 one is
+  unaffected.
+
+Still to check before relying on it:
+- the same measurement on the M4 under macOS 27;
+- that nothing in lxrun depends on the 1 GHz timebase that a pre-fall-2024 SDK
+  turns off (stage19 §3a: the runtime must use mach_timebase_info);
+- whether an sdk-12 lxrun keeps every entitlement and API it uses (MAP_JIT with
+  allow-jit, the Metal remote layer).

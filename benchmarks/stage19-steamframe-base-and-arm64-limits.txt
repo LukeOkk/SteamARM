@@ -91,6 +91,9 @@ a) x18. VERIFIED IN SOURCE, xnu main osfmk/arm64/machine_task.c,
    `blr x18`) and the ARM64 Windows ABI (TEB in x18) use x18 without rewriting.
    Measure: tests/x18_preserve/run.sh (builds the same program with the current
    SDK and with sdk 12.3; expected ZEROED / PRESERVED).
+   MEASURED 2026-09-29 on a GitHub macOS 15.7.9 runner (Apple M1, virtual):
+   cur ZEROED, sdk12 PRESERVED, exactly as predicted (benchmarks/stage20-ci-
+   macos-runner.txt). Still to measure on the M4 under macOS 27.
    Side effect to check: sdk < fall-2024 also turns off the 1 GHz timebase
    (uses_1ghz_timebase), so mach_absolute_time units differ. The runtime must
    use mach_timebase_info.
