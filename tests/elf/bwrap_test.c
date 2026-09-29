@@ -1,7 +1,7 @@
 // A bwrap plan, interpreted. As the parent, exec /usr/bin/bwrap with a plan
 // that uses every option pressure-vessel's real plan uses (benchmarks/
-// stage6-bwrap-plan.txt) and ourselves as the command; as the child, check
-// the view. On Linux the real bwrap runs the plan; under the runtime,
+// stage6-bwrap-plan.txt), plus --chmod, and ourselves as the command; as the
+// child, check the view. On Linux the real bwrap runs the plan; under the runtime,
 // runtime/mounts.c does. Same binary, same checks.
 #define _GNU_SOURCE
 #include <errno.h>
@@ -49,6 +49,7 @@ static int child(void)
     char cwd[256];
     CHECK(getcwd(cwd, sizeof cwd) && strcmp(cwd, "/data") == 0, "chdir: cwd is %s", cwd);
     CHECK(stat("/proc/self", &st) == 0, "proc: /proc/self exists");
+    CHECK(stat("/work", &st) == 0 && (st.st_mode & 07777) == 0700, "chmod: /work is %o", (unsigned)(st.st_mode & 07777));
     printf("== %d ok, %d mal\n", ok, bad);
     return bad ? 1 : 0;
 }
@@ -82,6 +83,8 @@ int main(int argc, char **argv)
         "--bind", data, "/data",
         "--ro-bind", selfdir, "/self",
         "--tmpfs", "/tmp",
+        "--dir", "/work",
+        "--chmod", "0700", "/work",
         "--proc", "/proc",
         "--dev", "/dev",
         "--ro-bind-data", fdstr, "/etc/x",

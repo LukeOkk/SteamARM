@@ -31,6 +31,17 @@ MEASURED, verbatim summaries:
 Not run on the runner: tests/elf, tests/win and anything with Steam; they
 need the Linux roots that scripts/setup.sh builds on a real Mac.
 
+After the review fixes (scripts/session.py's fork-relay for a wrapper that
+already leads a group, and the rest of 8d748ae), on main at bac65c5, MEASURED
+in run 36526190484, the run that built and published the 0.3.4 package:
+https://github.com/LukeOkk/SteamARM/actions/runs/36526190484
+    session.sh:          23 passed, 0 failed   (1 skip: the session-leader case
+                                                needs the setsid command; the
+                                                group-leader fallback now runs, as
+                                                the pipeline-leader case)
+The other summaries were the same as above, and tests/x18_preserve/run.sh gave
+the same result as in section 3.
+
 3. x18 is preserved for a binary built against a pre-13 SDK
 ------------------------------------------------------------
 tests/x18_preserve/run.sh builds one program twice and checks x18 across

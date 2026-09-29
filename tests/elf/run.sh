@@ -444,15 +444,15 @@ fi
 # 21. A bwrap plan, interpreted (runtime/mounts.c). pressure-vessel builds
 # every game's sandbox with bwrap, which needs mount namespaces Darwin lacks;
 # the plan is materialised and bind-mapped instead. The same binary runs the
-# same plan through the real bwrap on Linux and scores 11/11 there.
+# same plan through the real bwrap on Linux and scores 12/12 there.
 BWRAP_SAMPLE=$SAMPLES/bwrap_test
 if [ -f "$BWRAP_SAMPLE" ]; then
     out=$(LXRT_ROOT=$GUEST_ROOT ./build/lxrun "$BWRAP_SAMPLE" 2>/dev/null); rc=$?
     n_ok=$(grep -c "^  OK  " <<<"$out"); n_bad=$(grep -c "MAL" <<<"$out")
-    if [ "$rc" -eq 0 ] && [ "$n_ok" -eq 11 ] && [ "$n_bad" -eq 0 ]; then
-        ok "fake bwrap: 11/11 (ro-bind, bind, symlink, tmpfs, bind-data, setenv, chdir, proc)"
+    if [ "$rc" -eq 0 ] && [ "$n_ok" -eq 12 ] && [ "$n_bad" -eq 0 ]; then
+        ok "fake bwrap: 12/12 (ro-bind, bind, symlink, tmpfs, bind-data, setenv, chdir, proc, chmod)"
     else
-        bad "fake bwrap 11/11" "rc=$rc, $n_ok ok, $n_bad bad -- Linux with real bwrap scores 11/11"
+        bad "fake bwrap 12/12" "rc=$rc, $n_ok ok, $n_bad bad -- Linux with real bwrap scores 12/12"
     fi
 else
     echo "  skip  bwrap test (run scripts/mkroot-rpm.sh first)"

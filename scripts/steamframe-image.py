@@ -1033,7 +1033,7 @@ COMPONENTS = {
 }
 
 
-HOST_PAGE = 0x4000       # Darwin arm64; runtime/elf.c refuses program segments not aligned to it
+HOST_PAGE = 0x4000       # Darwin arm64; programs below it go through runtime/subpage.c
 PAGE_FLAGS = {1: '4K', 2: '16K', 3: '64K'}
 
 
@@ -1225,10 +1225,12 @@ def cmd_inventory(args):
             if info['machine'] != 'aarch64':
                 non_arm.append(dict(path=relp, machine=info['machine'], interp=info['interp']))
             else:
-                # What lxrun can load: runtime/elf.c refuses ET_EXEC and, for the
-                # programs it maps itself (executables and ld.so), segments not
-                # aligned to the 16 KiB host page; libraries mapped by ld.so with
-                # smaller alignment go through runtime/subpage.c instead.
+                # What lxrun can load: runtime/elf.c refuses ET_EXEC. Programs it
+                # maps itself (executables and ld.so) with segments below the
+                # 16 KiB host page load through runtime/subpage.c when they are
+                # 4 KiB-aligned, and are refused below that (stage 21). Libraries
+                # mapped by ld.so go through subpage.c too; glibc then needs
+                # LXRT_GUEST_PAGE=4096 to dlopen 4 KiB-aligned ones.
                 if info['aligns']:
                     align[min(info['aligns'])] += 1
                 if info['type'] == 'exec':
@@ -1321,11 +1323,13 @@ def inventory_markdown(rep):
         for p in ld['et_exec'][:20]:
             L.append(f'  - `{p}`')
         L.append(f'- executables (PT_INTERP) and ld.so below the 16 KiB host page '
-                 f'(refused when lxrun runs them): {len(progs)}')
+                 f'(runtime/subpage.c path; refused below 4 KiB): {len(progs)}')
         for x in progs[:20]:
             L.append(f'  - `{x["path"]}` p_align {x["p_align"]:#x}')
-        L.append(f'- libraries below the 16 KiB host page (runtime/subpage.c path): '
-                 f'{len(ld["below_host_page"]) - len(progs)}')
+        L.append(f'- libraries below the 16 KiB host page (runtime/subpage.c path; '
+                 f'glibc needs LXRT_GUEST_PAGE=4096): {len(ld["below_host_page"]) - len(progs)}')
+        tiny = [x for x in ld['below_host_page'] if x['p_align'] % 0x1000]
+        L.append(f'- below 4 KiB (runtime/elf.c refuses the programs among them): {len(tiny)}')
         for x in rep.get('kernel_pages', []):
             L.append(f'- kernel `{x["file"]}` ({x["source"]}): page size {x["page"] or "unknown"}'
                      + (f', VA bits {x["va_bits"]}' if x.get('va_bits') else ''))

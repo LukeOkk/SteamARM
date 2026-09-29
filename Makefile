@@ -133,7 +133,8 @@ $(LAUNCHER_BIN): $(LAUNCHER_SRCS) launcher/SDLShim.h
 	    @rpath/libSDL2-2.0.0.dylib $@
 
 # The launcher's application core without UI (launcher/ApplicationCore.swift),
-# and run-app.sh's runner choice. Both also run on Linux.
+# run-app.sh's runner choice and the session wrapper (scripts/session.py). All
+# three also run on Linux.
 .PHONY: test-launcher-core
 test-launcher-core:
 	@mkdir -p build

@@ -90,7 +90,10 @@ the image:
 - what `lxrun` can load:
   - aarch64 `ET_EXEC` files, which `runtime/elf.c` refuses;
   - executables and `ld.so` whose segments are aligned below the 16 KiB host
-    page, also refused;
+    page. Since stage 21 `runtime/elf.c` loads them through
+    `runtime/subpage.c` when they are 4 KiB-aligned, and refuses anything
+    below 4 KiB. glibc also needs `LXRT_GUEST_PAGE=4096` to dlopen 4 KiB-aligned
+    libraries (MEASURED, `benchmarks/stage21-native-arm64-client.txt`);
   - libraries in the same case, which go through `runtime/subpage.c`;
   - the page size the image's kernel was built for, from its config or its
     `Image` header.
