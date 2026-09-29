@@ -142,9 +142,11 @@ $(LAUNCHER_BIN): $(LAUNCHER_SRCS) launcher/SDLShim.h
 
 # The launcher's application core without UI (launcher/ApplicationCore.swift),
 # the settings -> environment translation and the compatibility inventory,
-# run-app.sh's runner choice, the session wrapper (scripts/session.py) and a
-# root's guest environment (scripts/guest-env.sh). All of them also run on
-# Linux (guest_env.sh skips its scripts/mkframeroot.sh part there).
+# run-app.sh's runner choice, the session wrapper (scripts/session.py), a
+# root's guest environment (scripts/guest-env.sh) and the root builders' path
+# checks and swap (scripts/roots.sh: mkarmroot.sh, mkframeroot.sh). All of
+# them also run on Linux (guest_env.sh skips its scripts/mkframeroot.sh part
+# there; mkarmroot.sh skips: APFS clones).
 .PHONY: test-launcher-core
 test-launcher-core:
 	@mkdir -p build
@@ -156,6 +158,7 @@ test-launcher-core:
 	tests/launcher/session.sh
 	tests/launcher/safeguard.sh
 	tests/launcher/guest_env.sh
+	tests/launcher/mkarmroot.sh
 
 .PHONY: launcher
 launcher: $(LAUNCHER_BIN) launcher/Info.plist.in

@@ -48,7 +48,9 @@
 # What the image already has that the Fedora root needed seeds for (stage 22):
 # X locale data, C.UTF-8 and en_US/es_* glibc locales, lsof, libnssckbi.so.
 set -euo pipefail
+CANON_BASE=$PWD                        # relative SRC/OUT/DIR: the caller's directory
 cd "$(dirname "$0")/.." || exit 1
+. scripts/roots.sh
 STATE="${STEAMARM_STATE:-$HOME/SteamARM-roots}"
 ADOPT=0 HOME_FROM=""
 while [ $# -gt 0 ]; do
@@ -60,45 +62,63 @@ while [ $# -gt 0 ]; do
         *) break ;;
     esac
 done
-SRC="${1:-/Volumes/SteamFrameRoot/rootfs}"
-SRC="${SRC%/}"
-OUT="${2:-$(dirname "$SRC")/arm64root}"
-OUT="${OUT%/}"
-[ -f "$SRC/etc/os-release" ] || { echo "no extraction at $SRC (docs/STEAM_FRAME_IMAGE.md)" >&2; exit 1; }
+SRC_ARG="${1:-/Volumes/SteamFrameRoot/rootfs}"
+refuse() { echo "refusing: $*" >&2; exit 1; }
+# Every path resolved (symlinks, trailing slashes) before anything is made,
+# cloned or deleted: a SRC that is a symlink was cloned as the link itself,
+# and every write meant for the derived root then went into the extraction.
+SRC=$(canon_path "$SRC_ARG") && [ -d "$SRC" ] ||
+    { echo "no extraction at $SRC_ARG (docs/STEAM_FRAME_IMAGE.md)" >&2; exit 1; }
+[ -f "$SRC/etc/os-release" ] || { echo "no extraction at $SRC_ARG (docs/STEAM_FRAME_IMAGE.md)" >&2; exit 1; }
 grep -qx 'ID=steamos' "$SRC/etc/os-release" ||
-    { echo "$SRC is not a SteamOS root (etc/os-release)" >&2; exit 1; }
-src_real=$(cd "$SRC" && pwd -P)
-mkdir -p "$(dirname "$OUT")"
-out_parent=$(cd "$(dirname "$OUT")" && pwd -P)
-case "$out_parent/$(basename "$OUT")/" in
-    "$src_real"/*) echo "refusing: $OUT is inside the extraction" >&2; exit 1 ;;
-esac
-[ "$(stat -f %d "$src_real")" = "$(stat -f %d "$out_parent")" ] ||
-    { echo "refusing: $OUT is not on the extraction's volume (no APFS clone)" >&2; exit 1; }
+    { echo "$SRC_ARG is not a SteamOS root (etc/os-release)" >&2; exit 1; }
+OUT_ARG="${2:-$(dirname "$SRC_ARG")/arm64root}"
+OUT=$(canon_path "$OUT_ARG") ||
+    refuse "$OUT_ARG: not a usable path (dangling symlink, a symlink to a file, or . / .. in a part that does not exist)"
+[ ! -e "$OUT" ] || [ -d "$OUT" ] || refuse "$OUT_ARG is not a directory"
+# Neither may hold the other: OUT inside the extraction writes into it (even
+# mkdir -p of OUT's parent did, before this check came first), and an
+# extraction inside OUT, OUT.new or OUT.old is deleted with them.
+if path_within "$OUT" "$SRC"; then refuse "$OUT_ARG is inside the extraction"; fi
+for victim in "$OUT" "$OUT.new" "$OUT.old"; do
+    if path_within "$SRC" "$victim"; then refuse "the extraction is inside $victim"; fi
+done
+for spared in "$STATE" "$PWD" "$HOME"; do
+    s=$(canon_path "$spared") || continue
+    for victim in "$OUT" "$OUT.new" "$OUT.old"; do
+        if path_within "$s" "$victim"; then refuse "$OUT_ARG: $victim would contain $spared"; fi
+    done
+done
+# OUT.new is made in OUT's parent (or where mkdir -p would put it).
+[ "$(stat -f %d "$SRC")" = "$(stat -f %d "$(existing_ancestor "$(dirname "$OUT")")")" ] ||
+    refuse "$OUT_ARG is not on the extraction's volume (no APFS clone)"
 if [ -e "$OUT" ] && [ ! -f "$OUT/.lxrt-frameroot" ] && [ "$ADOPT" != 1 ]; then
-    echo "refusing: $OUT exists and was not made by this script (--adopt to rebuild it)" >&2; exit 1
+    refuse "$OUT_ARG exists and was not made by this script (--adopt to rebuild it)"
 fi
-[ -z "$HOME_FROM" ] || [ -d "$HOME_FROM/.local/share/Steam" ] ||
-    { echo "--home-from: no Steam install in $HOME_FROM/.local/share/Steam" >&2; exit 1; }
+if [ -n "$HOME_FROM" ]; then
+    h=$(canon_path "$HOME_FROM") || h=""
+    [ -n "$h" ] && [ -d "$h/.local/share/Steam" ] ||
+        { echo "--home-from: no Steam install in $HOME_FROM/.local/share/Steam" >&2; exit 1; }
+    HOME_FROM=$h
+    # Read after the swap: what the swap deletes is gone by then.
+    case "$HOME_FROM/" in "$OUT"/tmp/*|"$OUT"/opt/apps/*) ;;
+        *) for victim in "$OUT" "$OUT.new" "$OUT.old"; do
+               if path_within "$HOME_FROM" "$victim"; then refuse "--home-from $HOME_FROM is inside $victim"; fi
+           done ;;
+    esac
+fi
+in_use=$(guests_on_root "$OUT")
+[ -z "$in_use" ] || refuse "guests are running on $OUT (pid $(echo $in_use)); stop them first"
 build_id=$(sed -n 's/^BUILD_ID=//p' "$SRC/etc/os-release")
 version_id=$(sed -n 's/^VERSION_ID=//p' "$SRC/etc/os-release" | tr -d '"')
 
 NEW="$OUT.new"
-KEEP="tmp opt/apps"                    # runtime state carried from root to root
-# A run that stopped during the swap left the client's home in $NEW (marked
-# .lxrt-carried): put it back before anything is deleted.
-if [ -f "$NEW/.lxrt-carried" ]; then
-    if [ ! -e "$OUT" ]; then
-        if [ -d "$OUT.old" ]; then mv "$OUT.old" "$OUT"; else mkdir -p "$OUT"; fi
-    fi
-    for d in $KEEP; do
-        if [ -e "$NEW/$d" ] && [ ! -e "$OUT/$d" ]; then
-            mkdir -p "$(dirname "$OUT/$d")"; mv "$NEW/$d" "$OUT/$d"
-        fi
-    done
-    echo "recovered the runtime state of an interrupted run into $OUT"
-fi
-rm -rf "$NEW" "$OUT.old"
+mkdir -p "$(dirname "$OUT")"
+# A run that stopped during the swap left the client's home in $NEW: put it
+# back before anything is deleted; a leftover that still holds a home is
+# never deleted (scripts/roots.sh). --adopt: OUT has no marker of ours.
+if [ "$ADOPT" = 1 ]; then root_recover "$OUT"; else root_recover "$OUT" .lxrt-frameroot; fi
+root_clear "$OUT"
 SECONDS=0
 cp -Rc "$SRC" "$NEW"
 echo "cloned $SRC in ${SECONDS} s"
@@ -125,21 +145,9 @@ EOF
     echo "overlay: etc/resolv.conf etc/localtime(${host_zone:-unchanged}) .lxrt-guest-env"
 } > "$NEW/.lxrt-frameroot"
 
-# Swap in, carrying the runtime state over; the old tree then goes.
-if [ -e "$OUT" ]; then
-    touch "$NEW/.lxrt-carried"
-    for d in $KEEP; do
-        if [ -e "$OUT/$d" ]; then
-            rm -rf "${NEW:?}/$d"; mkdir -p "$(dirname "$NEW/$d")"; mv "$OUT/$d" "$NEW/$d"
-        fi
-    done
-    mv "$OUT" "$OUT.old"
-    mv "$NEW" "$OUT"
-    rm -f "$OUT/.lxrt-carried"
-    rm -rf "$OUT.old"
-else
-    mv "$NEW" "$OUT"
-fi
+# Swap in, carrying the runtime state (tmp/, opt/apps) over; the old tree
+# then goes (scripts/roots.sh, root_swap).
+root_swap "$OUT"
 mkdir -p "$OUT/tmp"
 if [ -n "$HOME_FROM" ] && [ ! -d "$OUT/tmp/armhome/.local/share/Steam" ]; then
     mkdir -p "$OUT/tmp/armhome"
