@@ -624,13 +624,17 @@ static long rewrite_and_seal(void *p, size_t len, int want_prot, size_t scan_len
         if (g_trace)
             fprintf(lxrt_trace_stream(), "[lxrt] rewrite of mapped code failed: %s\n",
                     err ? err : "?");
-    } else if (g_trace && (rep.sites_found || rep.x18_found)) {
+    } else if (g_trace && (rep.sites_found || rep.x18_found ||
+                           rep.tls_read_found || rep.tls_write_found)) {
         fprintf(lxrt_trace_stream(), "[lxrt] mapped code at 0x%llx: %zu svc sites, "
                         "%zu rewritten, %zu poisoned | x18 %zu found, %zu rewritten, "
-                        "%zu unsupported, %zu unreachable (%d code windows)\n",
+                        "%zu unsupported, %zu unreachable (%d code windows) | "
+                        "tls %zu found, %zu rewritten, %zu poisoned\n",
                 (unsigned long long)start, rep.sites_found,
                 rep.sites_rewritten, rep.sites_unreachable, rep.x18_found,
-                rep.x18_rewritten, rep.x18_unsupported, rep.x18_unreachable, ncode);
+                rep.x18_rewritten, rep.x18_unsupported, rep.x18_unreachable, ncode,
+                rep.tls_read_found + rep.tls_write_found, rep.tls_rewritten,
+                rep.tls_unreachable);
     }
 
     if (mprotect((void *)start, (size_t)(end - start), want_prot) != 0)
@@ -1207,11 +1211,17 @@ static long do_mmap(uint64_t addr, uint64_t len, long prot, long lflags,
                 if (lxrt_rewrite_range_code(addr, addr + len, code, ncode, &rep, &err) != 0 && g_trace)
                     fprintf(lxrt_trace_stream(), "[lxrt] rewrite of sub-page code failed: %s\n",
                             err ? err : "?");
-                else if (g_trace && (rep.sites_found || rep.x18_found))
+                else if (g_trace && (rep.sites_found || rep.x18_found ||
+                                     rep.tls_read_found || rep.tls_write_found))
                     fprintf(lxrt_trace_stream(), "[lxrt] sub-page code at 0x%llx: %zu svc sites, %zu "
-                                    "rewritten, %zu poisoned | x18 %zu found, %zu rewritten\n",
+                                    "rewritten, %zu poisoned | x18 %zu found, %zu rewritten, "
+                                    "%zu unsupported, %zu unreachable (%d code windows) | "
+                                    "tls %zu found, %zu rewritten, %zu poisoned\n",
                             (unsigned long long)addr, rep.sites_found, rep.sites_rewritten,
-                            rep.sites_unreachable, rep.x18_found, rep.x18_rewritten);
+                            rep.sites_unreachable, rep.x18_found, rep.x18_rewritten,
+                            rep.x18_unsupported, rep.x18_unreachable, ncode,
+                            rep.tls_read_found + rep.tls_write_found, rep.tls_rewritten,
+                            rep.tls_unreachable);
             }
             lxrt_subpage_reapply(addr, len);
         }
