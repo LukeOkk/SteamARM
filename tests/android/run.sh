@@ -8,7 +8,9 @@
 #                                   (default build/lxrun)
 #
 # Writes only inside the root's /data/local/tmp and dev/socket (the logd
-# stand-in). Starts no daemon it does not stop; stops only its own PIDs.
+# stand-in), and in private temporary directories for the binder hub and the
+# property service (both leave by themselves when idle). Starts no daemon it
+# does not stop; stops only its own PIDs.
 set -uo pipefail
 cd "$(dirname "$0")/../.." || exit 1
 ROOT="${ANDROID_ROOT_DIR:-/Volumes/SteamARMAndroid/root}"
@@ -31,12 +33,18 @@ fi
 # PAGE_SIZE whatever AT_PAGESZ says, and Android 11's ELF files are 4 KiB-
 # aligned (runtime/subpage.c serves them).
 BCP=$(sed -n 's/^ *export BOOTCLASSPATH //p' "$ROOT/init.environ.rc")
+# Every guest here shares one private property state (runtime/propsvc.c):
+# the service is started by the first bionic process and leaves 3 s after
+# its last setprop; persistent properties go to a file in the same
+# directory instead of the root's /data/property.
+pdir=$(mktemp -d /tmp/lxrt-props-android.XXXXXX)
+PENV="LXRT_PROPERTY_DIR=$pdir LXRT_PROPERTY_IDLE=3 LXRT_PROPERTY_PERSIST=$pdir/persistent_properties"
 g() {
     env -i HOME=/data/local/tmp PATH=/system/bin:/system/xbin TERM=dumb \
         ANDROID_ROOT=/system ANDROID_DATA=/data ANDROID_ART_ROOT=/apex/com.android.art \
         ANDROID_I18N_ROOT=/apex/com.android.i18n ANDROID_TZDATA_ROOT=/apex/com.android.tzdata \
         ANDROID_STORAGE=/storage BOOTCLASSPATH="$BCP" \
-        LXRT_ROOT="$ROOT" LXRT_GUEST_PAGE=4096 ${GENV:-} \
+        LXRT_ROOT="$ROOT" LXRT_GUEST_PAGE=4096 $PENV ${GENV:-} \
         /usr/bin/perl -e 'alarm shift; exec @ARGV' "${DL:-30}" "$LXRUN" "$@" 2>/dev/null
 }
 # The same, for a daemon started with `gbg ... &`: the background subshell
@@ -46,7 +54,7 @@ gbg() {
         ANDROID_ROOT=/system ANDROID_DATA=/data ANDROID_ART_ROOT=/apex/com.android.art \
         ANDROID_I18N_ROOT=/apex/com.android.i18n ANDROID_TZDATA_ROOT=/apex/com.android.tzdata \
         ANDROID_STORAGE=/storage BOOTCLASSPATH="$BCP" \
-        LXRT_ROOT="$ROOT" LXRT_GUEST_PAGE=4096 ${GENV:-} \
+        LXRT_ROOT="$ROOT" LXRT_GUEST_PAGE=4096 $PENV ${GENV:-} \
         /usr/bin/perl -e 'alarm shift; exec @ARGV' "${DL:-30}" "$LXRUN" "$@" 2>/dev/null
 }
 
@@ -74,11 +82,116 @@ if [ "$rc" -eq 0 ] && [ "$(tr '\n' ' ' <<<"$out")" = "42 sub 100 " ]; then
     ok "sh -c: arithmetic, \$(...) fork, a toybox pipe"
 else bad "sh -c" "rc=$rc $(tr '\n' ' ' <<<"$out")"; fi
 
-# 4. Properties: there is no property service (/dev/__properties__); bionic
-# answers empty, and getprop exits 0.
+# 4. Properties (runtime/props.c, runtime/propsvc.c; benchmarks/stage26-
+# android-properties.txt): /dev/__properties__ built from the image's own
+# property_contexts and .prop files as init builds it, read by bionic itself;
+# setprop through /dev/socket/property_service. Without the service (the
+# switch off), bionic answers empty and getprop exits 0, as before.
+out=$(GENV=LXRT_PROPERTY_SERVICE=0 g /system/bin/getprop ro.build.version.sdk); rc=$?
+[ "$rc" -eq 0 ] && [ -z "$out" ] && ok "LXRT_PROPERTY_SERVICE=0: no /dev/__properties__, getprop empty, rc 0" \
+    || bad "getprop without the property service" "rc=$rc '$out'"
+sdk=$(sed -n 's/^ro.build.version.sdk=//p' "$ROOT/system/build.prop")
 out=$(g /system/bin/getprop ro.build.version.sdk); rc=$?
-[ "$rc" -eq 0 ] && [ -z "$out" ] && ok "getprop without /dev/__properties__: empty, rc 0" \
-    || bad "getprop" "rc=$rc '$out'"
+[ "$rc" -eq 0 ] && [ -n "$sdk" ] && [ "$out" = "$sdk" ] && ok "getprop ro.build.version.sdk: $out (the image's /system/build.prop)" \
+    || bad "getprop ro.build.version.sdk" "rc=$rc '$out', want '$sdk' ($(tail -3 "$pdir/service.log" 2>/dev/null))"
+all=$(g /system/bin/getprop); rc=$?
+n=0; miss=""
+while IFS='=' read -r k v; do
+    n=$((n+1))
+    grep -qxF "[$k]: [$v]" <<<"$all" || miss="$miss $k"
+done < <(grep '^ro\.build\.' "$ROOT/system/build.prop")
+cnt=$(grep -c '^\[' <<<"$all")
+if [ "$rc" -eq 0 ] && [ "$n" -gt 10 ] && [ -z "$miss" ]; then
+    ok "getprop lists $cnt properties; all $n ro.build.* values of /system/build.prop are there"
+else bad "getprop (list)" "rc=$rc, $cnt listed, missing:$miss"; fi
+# The image sets no ro.build.fingerprint: init derives it from the image's
+# own values (property_derive_build_fingerprint), nothing is made up.
+fp=$(sed -n 's/^\[ro.build.fingerprint\]: \[\(.*\)\]$/\1/p' <<<"$all")
+sysfp=$(sed -n 's/^ro.system.build.fingerprint=//p' "$ROOT/system/build.prop")
+[ -n "$fp" ] && [ "$fp" = "$sysfp" ] && ok "ro.build.fingerprint derived as init does: $fp (= the image's ro.system.build.fingerprint)" \
+    || bad "ro.build.fingerprint" "'$fp' vs ro.system.build.fingerprint '$sysfp'"
+
+g /system/bin/setprop steamarm.test.prop "hello world"; rc=$?
+out=$(g /system/bin/getprop steamarm.test.prop)
+[ "$rc" -eq 0 ] && [ "$out" = "hello world" ] && ok "setprop in one guest, getprop in another: steamarm.test.prop=[$out]" \
+    || bad "setprop/getprop" "rc=$rc '$out'"
+# ro.* is written once (init's PropertySet): the image's values stay, and a
+# new ro.* property takes its first value only.
+g /system/bin/setprop ro.build.version.sdk 99; rc=$?
+out=$(g /system/bin/getprop ro.build.version.sdk)
+if [ "$rc" -ne 0 ] && [ "$out" = "$sdk" ] &&
+   grep -q "Unable to set property 'ro.build.version.sdk'.*Read-only property was already set" "$pdir/service.log"; then
+    ok "setprop ro.build.version.sdk 99 refused (PROP_ERROR_READ_ONLY_PROPERTY), still $out"
+else bad "ro.* immutability" "rc=$rc '$out'"; fi
+g /system/bin/setprop ro.steamarm.test first; r1=$?
+g /system/bin/setprop ro.steamarm.test second; r2=$?
+out=$(g /system/bin/getprop ro.steamarm.test)
+[ "$r1" -eq 0 ] && [ "$r2" -ne 0 ] && [ "$out" = first ] && ok "a new ro.* property: first setprop taken, second refused" \
+    || bad "new ro.* property" "rc $r1/$r2 '$out'"
+# Types from property_contexts: service.adb.tcp.port is "exact int".
+g /system/bin/setprop service.adb.tcp.port abc; r1=$?
+g /system/bin/setprop service.adb.tcp.port 5555; r2=$?
+out=$(g /system/bin/getprop service.adb.tcp.port)
+[ "$r1" -ne 0 ] && [ "$r2" -eq 0 ] && [ "$out" = 5555 ] && ok "type check: service.adb.tcp.port (int) refuses 'abc', takes 5555" \
+    || bad "type check" "rc $r1/$r2 '$out'"
+# ctl.*: there is no init to start or stop a service.
+g /system/bin/setprop ctl.start steamarm_nothing; rc=$?
+[ "$rc" -ne 0 ] && grep -q "control message 'start' for 'steamarm_nothing'.*refused" "$pdir/service.log" &&
+    ok "setprop ctl.start: refused (PROP_ERROR_HANDLE_CONTROL_MESSAGE) and logged" || bad "ctl.start" "rc=$rc"
+# persist.*: stored in init's protobuf file, restored by a fresh boot of
+# another property state that uses the same file.
+g /system/bin/setprop persist.steamarm.test kept; rc=$?
+stored=$(python3 - "$pdir/persistent_properties" <<'EOF' 2>/dev/null
+import sys
+d = open(sys.argv[1], 'rb').read()
+def varint(b, i):
+    v = s = 0
+    while True:
+        c = b[i]; i += 1; v |= (c & 0x7f) << s; s += 7
+        if not c & 0x80: return v, i
+i, out = 0, []
+while i < len(d):
+    k, i = varint(d, i); n, i = varint(d, i); rec = d[i:i + n]; i += n
+    j, f = 0, {}
+    while j < len(rec):
+        k2, j = varint(rec, j); n2, j = varint(rec, j); f[k2 >> 3] = rec[j:j + n2].decode(); j += n2
+    out.append('%s=%s' % (f.get(1, ''), f.get(2, '')))
+print(' '.join(out))
+EOF
+)
+pdir2=$(mktemp -d /tmp/lxrt-props-android.XXXXXX)
+out=$(GENV="LXRT_PROPERTY_DIR=$pdir2" g /system/bin/getprop persist.steamarm.test)
+ready=$(GENV="LXRT_PROPERTY_DIR=$pdir2" g /system/bin/getprop ro.persistent_properties.ready)
+if [ "$rc" -eq 0 ] && [ "$stored" = "persist.steamarm.test=kept" ] && [ "$out" = kept ] && [ "$ready" = true ]; then
+    ok "persist.steamarm.test: stored as init's PersistentProperties protobuf, restored by a fresh boot"
+else bad "persist.*" "rc=$rc stored '$stored' fresh boot '$out' ready '$ready'"; fi
+
+# __system_property_wait across processes: a bionic program linked against
+# the image's own libc.so (tests/android/props_wait.c; no NDK needed) waits
+# for a property that does not exist yet; two setprops from other guests
+# create and change it; the service's futex wake reaches it.
+CLANG=/opt/homebrew/opt/llvm/bin/clang
+BLIBC="$ROOT/apex/com.android.runtime/lib64/bionic/libc.so"
+if [ -x "$CLANG" ] && [ -x /opt/homebrew/opt/lld/bin/ld.lld ] && [ -f "$BLIBC" ] &&
+   "$CLANG" --target=aarch64-linux-android30 -O2 -fPIE -pie -nostdlib -fno-stack-protector -ffixed-x18 \
+       -fuse-ld=lld --ld-path=/opt/homebrew/opt/lld/bin/ld.lld -Wl,--dynamic-linker=/system/bin/linker64 \
+       -Wl,-z,max-page-size=4096 -o build/props_wait tests/android/props_wait.c "$BLIBC" 2>/dev/null; then
+    mkdir -p "$ROOT/data/local/tmp"
+    cp build/props_wait "$ROOT/data/local/tmp/props_wait"
+    wlog=$(mktemp -t props-wait)
+    DL=30 g /data/local/tmp/props_wait wait steamarm.test.wait go 20 >"$wlog" &
+    wpid=$!
+    for _ in $(seq 1 100); do grep -q '^waiting' "$wlog" && break; sleep 0.1; done
+    g /system/bin/setprop steamarm.test.wait notyet
+    g /system/bin/setprop steamarm.test.wait go
+    wait "$wpid"; rc=$?
+    if [ "$rc" -eq 0 ] && grep -q '^woke: steamarm.test.wait=go' "$wlog"; then
+        ok "__system_property_wait in a third guest (linked against the image's libc): $(grep '^woke' "$wlog")"
+    else bad "__system_property_wait" "rc=$rc $(tr '\n' ' ' <"$wlog")"; fi
+    rm -f "$wlog" "$ROOT/data/local/tmp/props_wait"
+else
+    echo "  skip  __system_property_wait (no llvm clang/lld to link against the image's libc)"
+fi
 
 # 5. ART's dex tooling (libdexfile), and ART itself, on a Hello.dex made on
 # the Mac with D8 (R8_JAR: com.android.tools:r8 from Google Maven).
@@ -213,8 +326,60 @@ done
 grep -q 'manager: \[android.os.IServiceManager\]' <<<"$out" && ok "vndservicemanager on /dev/vndbinder; vndservice list: manager" \
     || bad "vndservicemanager + vndservice list" "$(head -3 <<<"$out")"
 kill "$vpid" 2>/dev/null; wait "$vpid" 2>/dev/null
+
+# hwservicemanager, the HIDL context (/dev/hwbinder): it announces itself
+# with hwservicemanager.ready through the property service, and lshal
+# (libhidl waits for that property first) lists what it serves. lshal's
+# exit status stays 72 (DUMP_BINDERIZED_ERROR | IO_ERROR): its thread and
+# client columns read /dev/binderfs/binder_logs/proc/<pid>, the binder
+# driver's debug state, which the userspace driver does not publish.
+GENV="$BENV" DL=60 gbg /system/bin/hwservicemanager >/dev/null &
+hpid=$!
+hready=""
+for _ in $(seq 1 50); do
+    [ "$(GENV="$BENV" DL=10 g /system/bin/getprop hwservicemanager.ready)" = true ] && { hready=1; break; }
+    sleep 0.1
+done
+[ -n "$hready" ] && ok "hwservicemanager set hwservicemanager.ready=true through the property service" \
+    || bad "hwservicemanager.ready" "$(grep hwservicemanager "$pdir/service.log" | tail -2)"
+out=$(GENV="$BENV" DL=30 g /system/bin/lshal list); rc=$?
+nif=$(grep -cE "::I[A-Za-z]+/default +N/A +$hpid" <<<"$out")
+if grep -qE "android\.hidl\.manager@1\.0::IServiceManager/default +N/A +$hpid" <<<"$out"; then
+    ok "lshal list (exit $rc): $nif interfaces served by hwservicemanager (pid $hpid), android.hidl.manager@1.0::IServiceManager among them"
+else bad "lshal list" "rc=$rc $(head -4 <<<"$out" | tr '\n' ' ')"; fi
+# A HIDL HAL of the image registers with it: the ashmem allocator
+# (libhidl's registerAsService, after the same property wait).
+GENV="$BENV" DL=60 gbg /system/bin/hw/android.hidl.allocator@1.0-service >/dev/null &
+apid=$!
+for _ in $(seq 1 50); do
+    out=$(GENV="$BENV" DL=30 g /system/bin/lshal list)
+    grep -qE "android\.hidl\.allocator@1\.0::IAllocator/ashmem +N/A +$apid" <<<"$out" && break
+    sleep 0.2
+done
+grep -qE "android\.hidl\.allocator@1\.0::IAllocator/ashmem +N/A +$apid" <<<"$out" &&
+    ok "a HIDL HAL registered with hwservicemanager: android.hidl.allocator@1.0::IAllocator/ashmem (pid $apid)" \
+    || bad "HIDL HAL registration" "$(grep -i allocator <<<"$out" | head -2)"
+kill "$apid" 2>/dev/null; wait "$apid" 2>/dev/null
+kill "$hpid" 2>/dev/null; wait "$hpid" 2>/dev/null
 sleep 3
 rm -rf "$bdir"
+
+# The property service leaves when idle; its areas stay, readable without
+# it, and the next setprop starts it again, which adopts them as they are.
+gone=""
+for _ in $(seq 1 100); do [ -e "$pdir/service.pid" ] || { gone=1; break; }; sleep 0.1; done
+out=$(g /system/bin/getprop steamarm.test.prop)
+g /system/bin/setprop steamarm.test.prop again; rc=$?
+out2=$(g /system/bin/getprop steamarm.test.prop)
+if [ -n "$gone" ] && [ "$out" = "hello world" ] && [ "$rc" -eq 0 ] && [ "$out2" = again ] &&
+   grep -q "adopted .*/${pdir##*/} in" "$pdir/service.log"; then
+    ok "the service left when idle, the areas stayed readable ('$out'), setprop started it again (adopted): '$out2'"
+else bad "idle and adopt" "gone=${gone:-no} '$out' rc=$rc '$out2' $(grep -c adopted "$pdir/service.log") adopted"; fi
+for d in "$pdir" "$pdir2"; do
+    for _ in $(seq 1 100); do [ -e "$d/service.pid" ] || break; sleep 0.1; done
+done
+[ -e "$pdir/service.pid" ] || [ -e "$pdir2/service.pid" ] && bad "property services still running" "$pdir $pdir2"
+rm -rf "$pdir" "$pdir2"
 
 echo
 summary="== $PASS passed, $FAIL failed"

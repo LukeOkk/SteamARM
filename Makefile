@@ -32,7 +32,7 @@ clean:
 # every size below the 4 GiB default makes the kernel SIGKILL the binary at
 # exec (measured, see benchmarks/stage2-pagezero.txt). The consequence is that
 # non-PIE Linux images, which link at 0x200000, cannot be loaded in-process.
-LXRT_SRCS := runtime/procpid.c runtime/main.c runtime/binder.c runtime/binder_hub.c runtime/elf.c runtime/elfsect.c runtime/errno_map.c runtime/fsflags.c runtime/pathfd.c runtime/evdev.c runtime/rewrite.c \
+LXRT_SRCS := runtime/procpid.c runtime/main.c runtime/binder.c runtime/binder_hub.c runtime/props.c runtime/propsvc.c runtime/elf.c runtime/elfsect.c runtime/errno_map.c runtime/fsflags.c runtime/pathfd.c runtime/evdev.c runtime/rewrite.c \
              runtime/dirents.c runtime/jit.c runtime/wxsplit.c runtime/dispatch.c runtime/x18.c runtime/gbase.c \
              runtime/epoll_eventfd.c runtime/fex_support.c runtime/fileops2.c runtime/offmap.c \
              runtime/futex_ops.c runtime/inotify.c runtime/ioctl_tty.c runtime/mounts.c runtime/memlog.c runtime/mremap.c runtime/timerfd_signalfd.c runtime/proc_ext.c runtime/privmap.c runtime/shmirror.c runtime/sysv_ipc.c runtime/process.c runtime/procfs.c runtime/signal.c runtime/socket.c runtime/stack.c runtime/storemu.c runtime/subpage.c runtime/sysfs.c runtime/sysreg.c runtime/window.m runtime/remote_layer.m runtime/thread.c runtime/tls.c runtime/trampoline.S runtime/vdso_map.c runtime/vdso_blob.S
@@ -60,7 +60,7 @@ runtime/vdso/vdso.so: runtime/vdso/vdso.c runtime/vdso/vdso.lds
 	    -Wl,-T,runtime/vdso/vdso.lds -Wl,--hash-style=both -Wl,-soname,linux-vdso.so.1 \
 	    -Wl,--build-id=none -o $@ runtime/vdso/vdso.c
 
-build/lxrun: $(LXRT_SRCS) runtime/lxrt.h runtime/binder.h runtime/x18.h runtime/storemu.h runtime/offmap.h resources/lxrt.entitlements runtime/vdso/vdso.so
+build/lxrun: $(LXRT_SRCS) runtime/lxrt.h runtime/binder.h runtime/props.h runtime/x18.h runtime/storemu.h runtime/offmap.h resources/lxrt.entitlements runtime/vdso/vdso.so
 	@mkdir -p build
 	$(CC) $(LXRT_CFLAGS) $(LXRT_LDFLAGS) $(LXRT_SRCS) -o $@.new
 	@# MAP_JIT needs the allow-jit entitlement, and a guest JIT needs MAP_JIT:
