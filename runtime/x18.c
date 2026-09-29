@@ -254,6 +254,70 @@ static void reject(struct x18_plan *p, const char *why) {
     p->why = why;
     p->back_idx = p->alt_idx = -1;
 }
+/* MRS/MSR of NZCV, FPCR or FPSR: plain EL0 state on Linux and Darwin alike,
+ * and nothing the trampoline executes reads or writes any of them (its AND is
+ * the non-flag-setting form). Bit 21 (L) and Rt are masked out. */
+static bool plain_sysreg(uint32_t i) {
+    uint32_t r = i & ~0x0020001fu;
+    return r == 0xd51b4200u || r == 0xd51b4400u || r == 0xd51b4420u;
+}
+static uint32_t tbz63(bool nz, int words, unsigned r) {
+    return (nz ? 0xb7f80000u : 0xb6f80000u) | (((uint32_t)words & 0x3fff) << 5) | r;
+}
+
+/* An instruction that computes SP from x18 (Linux code does `mov sp, x18`
+ * after a call: MEASURED in libgallium, steamclient.so and steamui.so). The
+ * new value T is built in S1 like any other result; the hard part is
+ * restoring S1/S2, saved at P = sp - 16, while SP moves to T. At no point may
+ * the saved pair sit below the live SP, where a signal frame can land.
+ *   T <= P:  SP = T, then reload the pair from P (now at or above SP).
+ *   T >= P + 16: copy the pair up to T - 16 (above the live SP), SP = T - 16,
+ *            reload from there, SP += 16.
+ *   P < T < P + 16 exists only with a misaligned SP; neither order is safe
+ *            with two registers, so it traps (brk #1) instead of corrupting.
+ * No access through SP except the pre-index push, which signal.c emulates
+ * when SP is misaligned. */
+static void plan_writes_sp(struct x18_plan *p, uint32_t j, uint64_t site, bool sp_src,
+                           unsigned s1, unsigned s2, unsigned slot_off) {
+    emit(p, 0xa9bf0000 | (s2 << 10) | (31 << 5) | s1);   /* stp S1, S2, [sp, #-16]! */
+    emit(p, 0xd53bd060 | s2);                            /* mrs S2, tpidrro_el0 */
+    emit(p, 0x927df000 | (s2 << 5) | s2);                /* and S2, S2, #~7 */
+    emit(p, 0xf9400000 | ((slot_off / 8) << 10) | (s2 << 5) | s1);
+    if (sp_src) {
+        emit(p, 0x910043e0 | s2);                        /* add S2, sp, #16 */
+        j = replace(j, 5, s2);
+    }
+    emit(p, replace(j, 0, s1));                          /* S1 = T */
+    emit(p, 0x910003e0 | s2);                            /* mov S2, sp: P */
+    emit(p, 0xcb000000 | (s1 << 16) | (s2 << 5) | s2);   /* sub S2, S2, S1: P - T */
+    int to_a = p->nwords;
+    emit(p, 0);                                          /* tbz S2, #63, T <= P */
+    emit(p, 0x91003c00 | (s2 << 5) | s2);                /* add S2, S2, #15 */
+    int to_trap = p->nwords;
+    emit(p, 0);                                          /* tbz S2, #63, T < P + 16 */
+    emit(p, 0xd1004000 | (s1 << 5) | s1);                /* sub S1, S1, #16: X */
+    emit(p, 0x910023e0 | s2);                            /* add S2, sp, #8 */
+    emit(p, 0xf9400000 | (s2 << 5) | s2);                /* ldr S2, [S2] */
+    emit(p, 0xf9000400 | (s1 << 5) | s2);                /* str S2, [S1, #8] */
+    emit(p, 0x910003e0 | s2);                            /* mov S2, sp */
+    emit(p, 0xf9400000 | (s2 << 5) | s2);                /* ldr S2, [S2] */
+    emit(p, 0xf9000000 | (s1 << 5) | s2);                /* str S2, [S1] */
+    emit(p, 0x9100001f | (s1 << 5));                     /* mov sp, S1 */
+    emit(p, 0xa9400000 | (s2 << 10) | (s1 << 5) | s1);   /* ldp S1, S2, [S1] */
+    emit(p, 0x910043ff);                                 /* add sp, sp, #16 */
+    p->back_idx = p->nwords;
+    emit(p, 0);
+    p->words[to_a] = tbz63(false, p->nwords - to_a, s2);
+    emit(p, 0x8b000000 | (s1 << 16) | (s2 << 5) | s2);   /* add S2, S2, S1: P */
+    emit(p, 0x9100001f | (s1 << 5));                     /* mov sp, S1 */
+    emit(p, 0xa9400000 | (s2 << 10) | (s2 << 5) | s1);   /* ldp S1, S2, [S2] */
+    p->alt_idx = p->nwords;
+    p->alt_target = site + 4;
+    emit(p, 0);
+    p->words[to_trap] = tbz63(false, p->nwords - to_trap, s2);
+    emit(p, 0xd4200020);                                 /* brk #1 */
+    p->verdict = X18_OK;
+}
 
 void lxrt_x18_plan(uint32_t i, uint64_t site, uint64_t tramp,
                    unsigned slot_off, unsigned tls_off, struct x18_plan *p) {
@@ -262,10 +326,13 @@ void lxrt_x18_plan(uint32_t i, uint64_t site, uint64_t tramp,
     if (!lxrt_x18_touches(i)) return;
     bool sb, sd;
     int cls, fields = lxrt_x18_gpr_fields(i, &sb, &sd, &cls);
-    if (cls == X18_CLS_LDST_EXCL) { reject(p, "exclusive"); return; }
+    /* A trampoline between a load-exclusive and its store-exclusive puts
+     * stack and TSD accesses inside the LL/SC sequence, which may clear the
+     * exclusive monitor every time and livelock the retry loop. LDAR/STLR
+     * (bit 23) are ordered, not exclusive: planned like any load/store. */
+    if (cls == X18_CLS_LDST_EXCL && !(i & (1u << 23))) { reject(p, "exclusive"); return; }
     if (cls == X18_CLS_CASP) { reject(p, "casp pair"); return; }
-    if (sd && reg_at(i, 0) == 31) { reject(p, "writes sp"); return; }
-    if (cls == X18_CLS_SYSREG && i != 0xd53bd052 && i != 0xd51bd052) {
+    if (cls == X18_CLS_SYSREG && i != 0xd53bd052 && i != 0xd51bd052 && !plain_sysreg(i)) {
         reject(p, "sysreg"); return;
     }
     if ((slot_off & 7) || slot_off >= 32768 || (tls_off & 7) || tls_off >= 32768 ||
@@ -296,6 +363,10 @@ void lxrt_x18_plan(uint32_t i, uint64_t site, uint64_t tramp,
     for (unsigned f = 0; f < 4; ++f)
         if ((fields & (1 << f)) && reg_at(i, field_shift[f]) == 18)
             j = replace(j, field_shift[f], s1);
+    if (sd && reg_at(i, 0) == 31) {
+        plan_writes_sp(p, j, site, sb && reg_at(i, 5) == 31, s1, s2, slot_off);
+        return;
+    }
 
     bool sp = sb && reg_at(i, 5) == 31;
     bool sp_via_s2 = false;
@@ -390,9 +461,11 @@ void lxrt_x18_plan(uint32_t i, uint64_t site, uint64_t tramp,
         break;
     }
     case X18_CLS_SYSREG:
-        emit(p, (i == 0xd53bd052 ? 0xf9400000 : 0xf9000000) |
-                ((tls_off / 8) << 10) | (s2 << 5) | s1);
+        if (plain_sysreg(i)) emit(p, j);
+        else emit(p, (i == 0xd53bd052 ? 0xf9400000 : 0xf9000000) |
+                     ((tls_off / 8) << 10) | (s2 << 5) | s1);
         break;
+    case X18_CLS_LDST_EXCL: /* LDAR/STLR only; exclusives were refused above */
     case X18_CLS_LDST_UIMM: case X18_CLS_LDST_UNSCALED:
     case X18_CLS_LDST_PRE_POST: case X18_CLS_LDST_REGOFF: case X18_CLS_LDST_PAIR:
     case X18_CLS_CAS: case X18_CLS_ATOMIC: case X18_CLS_ADDSUB_IMM:
@@ -420,6 +493,7 @@ size_t lxrt_x18_tramp_bytes(uint32_t i) {
     bool sb, sd;
     int cls;
     (void)lxrt_x18_gpr_fields(i, &sb, &sd, &cls);
+    if (sd && reg_at(i, 0) == 31) return 108; /* plan_writes_sp: 27 words */
     if (cls == X18_CLS_BR) return 44; /* stack, TSD, four MOVs, branch */
     if (cls == X18_CLS_LDST_LITERAL) return 48; /* four MOVs + load + seven */
     if (cls == X18_CLS_ADR || cls == X18_CLS_CBZ || cls == X18_CLS_TBZ) return 44;

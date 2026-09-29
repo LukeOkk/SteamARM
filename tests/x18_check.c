@@ -86,8 +86,43 @@ static void selftest(void) {
     CHECK(branch.words[7] == (0xf2800000u | (1u << 21) | (0x1000u << 5) | 30u));
     branch = plan(0xd65f0240);
     CHECK(branch.verdict == X18_OK && branch.terminal && branch.nwords == 7);
-    unsupported(0xd53b4212, "sysreg");
-    unsupported(0x9100025f, "writes sp");
+    /* Exclusives stay refused (LL/SC monitor); LDAR/STLR are ordered only. */
+    struct x18_plan q;
+    unsupported(0x88127fd4, "exclusive"); /* stxr w18, w20, [x30] */
+    unsupported(0xc8320e65, "exclusive"); /* stxp w18, x5, x3, [x19] */
+    q = plan(0x88dffe52); /* ldar w18, [x18]: libcef */
+    CHECK(q.verdict == X18_OK && q.nwords == 8 && q.words[4] == 0x88dffc00);
+    CHECK(q.words[3] == 0xf940fc20 && q.words[5] == 0xf900fc20);
+    q = plan(0x88dffe12); /* ldar w18, [x16] */
+    CHECK(q.verdict == X18_OK && q.words[4] == 0x88dffe00);
+    q = plan(0xc89ffff2); /* stlr x18, [sp]: original SP through S2 */
+    CHECK(q.verdict == X18_OK && q.words[4] == 0x910043e1 && q.words[5] == 0xc89ffc20);
+    /* NZCV/FPCR/FPSR are plain EL0 state; other system registers are not. */
+    unsupported(0xd53be052, "sysreg"); /* mrs x18, cntvct_el0 */
+    unsupported(0xd53b0032, "sysreg"); /* mrs x18, ctr_el0 */
+    q = plan(0xd53b4212); CHECK(q.verdict == X18_OK && q.nwords == 8 && q.words[4] == 0xd53b4200);
+    q = plan(0xd51b4212); CHECK(q.verdict == X18_OK && q.nwords == 8 && q.words[4] == 0xd51b4200);
+    q = plan(0xd53b4412); CHECK(q.verdict == X18_OK && q.words[4] == 0xd53b4400); /* fpcr */
+    q = plan(0xd51b4432); CHECK(q.verdict == X18_OK && q.words[4] == 0xd51b4420); /* fpsr */
+    /* Writes SP: S1 = T, then the direction-dependent restore. */
+    q = plan(0x9100025f); /* mov sp, x18: libgallium, steamclient.so */
+    CHECK(q.verdict == X18_OK && !q.terminal && q.nwords == 26);
+    CHECK(q.words[0] == 0xa9bf07e0 && q.words[3] == 0xf940fc20 && q.words[4] == 0x91000000);
+    CHECK(q.words[5] == 0x910003e1 && q.words[6] == 0xcb000021);
+    CHECK(q.words[7] == 0xb6f801c1 && q.words[9] == 0xb6f80201); /* +14, +16 */
+    CHECK(q.words[17] == 0x9100001f && q.words[18] == 0xa9400400 && q.words[19] == 0x910043ff);
+    CHECK(q.back_idx == 20 && q.alt_idx == 24 && q.alt_target == 0x10000004);
+    CHECK(q.words[21] == 0x8b000021 && q.words[23] == 0xa9400420 && q.words[25] == 0xd4200020);
+    q = plan(0x8b3263ff); /* add sp, sp, x18: SP source via S2 */
+    CHECK(q.verdict == X18_OK && q.nwords == 27);
+    CHECK(q.words[4] == 0x910043e1 && q.words[5] == 0x8b206020);
+    q = plan(0xd100825f); CHECK(q.verdict == X18_OK && q.words[4] == 0xd1008000);
+    q = plan(0xb240025f); CHECK(q.verdict == X18_OK && q.words[4] == 0xb2400000);
+    /* Steam's stp x18, x17, [sp, #0x1f8]: 7-bit field full, SP through S2. */
+    q = plan(0xa91fc7f2);
+    CHECK(q.verdict == X18_OK && q.nwords == 11);
+    CHECK(q.words[4] == 0x910043e1 && q.words[5] == 0xa91fc420);
+    CHECK(q.words[6] == 0xd53bd061 && q.words[7] == 0x927df021);
     unsupported(0xf8408ff2, "sp writeback");
     unsupported(0xa8c14bf2, "sp writeback");
     CHECK(plan(0xf97ffff2).verdict == X18_OK);
@@ -222,8 +257,8 @@ static void fixture_tests(void) {
         {0xc812ffe3, UINT64_C(0x80040008), X18_UNSUPPORTED}, /* stlxr w18, x3, [sp] */
         {0xc87f0ff2, UINT64_C(0x80040008), X18_UNSUPPORTED}, /* ldxp x18, x3, [sp] */
         {0xc82313f2, UINT64_C(0x80040018), X18_UNSUPPORTED}, /* stxp w3, x18, x4, [sp] */
-        {0xc8dffff2, UINT64_C(0x80040000), X18_UNSUPPORTED}, /* ldar x18, [sp] */
-        {0xc89ffff2, UINT64_C(0x80040000), X18_UNSUPPORTED}, /* stlr x18, [sp] */
+        {0xc8dffff2, UINT64_C(0x80040000), X18_OK}, /* ldar x18, [sp] */
+        {0xc89ffff2, UINT64_C(0x80040000), X18_OK}, /* stlr x18, [sp] */
         {0x4872ffe2, UINT64_C(0x80040004), X18_UNSUPPORTED}, /* caspal x18, x19, x2, x3, [sp] */
         {0xc8f2ffe3, UINT64_C(0x80040008), X18_OK}, /* casal x18, x3, [sp] */
         {0xf83203e3, UINT64_C(0x80040008), X18_OK}, /* ldadd x18, x3, [sp] */
@@ -240,7 +275,7 @@ static void fixture_tests(void) {
         {0xd65f0240, UINT64_C(0x40000), X18_OK}, /* ret x18 */
         {0xd53bd052, UINT64_C(0x40000), X18_OK}, /* mrs x18, TPIDR_EL0 */
         {0xd51bd052, UINT64_C(0x40000), X18_OK}, /* msr TPIDR_EL0, x18 */
-        {0xd53b4212, UINT64_C(0x40000), X18_UNSUPPORTED}, /* mrs x18, NZCV */
+        {0xd53b4212, UINT64_C(0x40000), X18_OK}, /* mrs x18, NZCV */
         {0x4c407252, UINT64_C(0x40000), X18_OK}, /* ld1 { v18.16b }, [x18] */
         {0x4cd27072, UINT64_C(0x40008), X18_OK}, /* ld1 { v18.16b }, [x3], x18 */
         {0x4cdf7243, UINT64_C(0x40000), X18_OK}, /* ld1 { v3.16b }, [x18], #16 */
@@ -285,7 +320,7 @@ static void fixture_tests(void) {
         {0x9b054883, UINT64_C(0x40038), X18_OK}, /* madd x3, x4, x5, x18 */
         {0x9bc47c72, UINT64_C(0x40018), X18_OK}, /* umulh x18, x3, x4 */
         {0x93c44872, UINT64_C(0x40018), X18_OK}, /* extr x18, x3, x4, #0x12 */
-        {0xb240025f, UINT64_C(0x80040000), X18_UNSUPPORTED}, /* orr sp, x18, #0x1 */
+        {0xb240025f, UINT64_C(0x80040000), X18_OK}, /* orr sp, x18, #0x1 */
     };
     for (size_t j = 0; j < ARRAY_LEN(cases); ++j) {
         bool sb, sd;

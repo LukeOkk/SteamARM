@@ -42,15 +42,16 @@ enum x18_verdict { X18_NOT_A_SITE = 0, X18_OK = 1, X18_UNSUPPORTED = 2 };
 
 struct x18_plan {
     enum x18_verdict verdict;
-    /* UNSUPPORTED: exclusive, casp pair, sp writeback, writes sp, sysreg,
-     * imm overflow, or unknown. Otherwise NULL. */
+    /* UNSUPPORTED: exclusive, casp pair, sp writeback, sysreg, imm overflow,
+     * or unknown. Otherwise NULL. */
     const char *why;
     uint32_t words[32];
     int nwords;
     int back_idx;       /* zero placeholder for branch to site+4 */
     bool terminal;      /* br/blr/ret x18: branches to guest target, no back edge */
-    int alt_idx;        /* zero placeholder for conditional taken target, or -1 */
-    uint64_t alt_target; /* original absolute conditional branch destination */
+    int alt_idx;        /* zero placeholder for a second exit, or -1 */
+    uint64_t alt_target; /* its absolute destination: the conditional branch's
+                          * target, or site+4 for a writes-sp plan */
 };
 
 /* site and tramp are instruction addresses. Offsets are byte offsets from
