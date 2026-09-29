@@ -218,6 +218,25 @@ int main(void)
     g2 = emit_const(gz + 16 * KB, 16);
     CHECK(g2() == 16, "recommitted half runs new code");
 
+    // 8b. A 4 KiB PROT_NONE guard inside a committed RWX range (V8 at 4 KiB
+    // pages puts guards at that granularity): code in the rest of that 16 KiB
+    // host page keeps running, can be rewritten, and a svc there is still
+    // rewritten before it runs. (The guard itself is not checked: on 16 KiB
+    // host pages it shares the union protection, runtime/subpage.c.)
+    uint32_t *gd = (uint32_t *)(res + 5 * MB + 256 * KB);
+    mprotect(gd, 64 * KB, PROT_READ | PROT_WRITE | PROT_EXEC);
+    fn_t gd1 = emit_const(gd, 17);
+    CHECK(gd1() == 17, "function in a 64 KiB RWX chunk");
+    if (mprotect(gd + 1 * KB, 4 * KB, PROT_NONE) == 0) {    // bytes 4..8 KiB
+        CHECK(gd1() == 17, "4 KiB guard in its host page: the function still runs");
+        gd1 = emit_const(gd, 18);
+        fn_t gd2 = emit_getpid(gd + 2 * KB);                  // bytes 8..12 KiB
+        long gp = gd2();
+        CHECK(gd1() == 18 && gp == want, "same host page: rewritten (%ld) and a svc returns getpid()=%ld", gd1(), gp);
+    } else {
+        printf("  skip 4 KiB guard (mprotect: page size %d)\n", getpagesize());
+    }
+
     // 9. A second thread keeps calling one function while this one writes
     // and runs code elsewhere -- in other host pages, then in the SAME 16 KiB
     // page as the function the other thread is running.

@@ -548,6 +548,7 @@ static void adopt_untracked(uint64_t hpage)
     int cur = (ri.protection & VM_PROT_READ ? PROT_READ : 0)
             | (ri.protection & VM_PROT_WRITE ? PROT_WRITE : 0)
             | (ri.protection & VM_PROT_EXECUTE ? PROT_EXEC : 0);
+    bool wx = lxrt_wx_intersects(hpage, LXRT_HOST_PAGE);
     for (uint64_t g = hpage; g < hpage + LXRT_HOST_PAGE; g += GUEST_PAGE) {
         bool covered = false;
         for (int i = 0; i < g_nsubs && !covered; i++)
@@ -556,7 +557,8 @@ static void adopt_untracked(uint64_t hpage)
         // A page of a native guest's RWX range (wxsplit.c) is RWX to the
         // guest whatever the host page carries at this moment.
         if (!covered)
-            record(g, g + GUEST_PAGE, lxrt_wx_contains(g) ? PROT_READ | PROT_WRITE | PROT_EXEC : cur);
+            record(g, g + GUEST_PAGE,
+                   wx && lxrt_wx_contains(g) ? PROT_READ | PROT_WRITE | PROT_EXEC : cur);
     }
 }
 

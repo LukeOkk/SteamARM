@@ -245,6 +245,19 @@ bool lxrt_wx_covered(uint64_t addr, uint64_t len)
     return r;
 }
 
+// Does any byte of [addr, addr+len) lie in the table?
+bool lxrt_wx_intersects(uint64_t addr, uint64_t len)
+{
+    if (!atomic_load(&g_n) || !len)
+        return false;
+    sigset_t old;
+    lock_nosig(&old);
+    int i = lower(addr);
+    bool r = i < atomic_load(&g_n) && g_r[i].start < addr + len;
+    unlock_nosig(&old);
+    return r;
+}
+
 int lxrt_wx_count(void) { return atomic_load(&g_n); }
 
 void lxrt_wx_forget(uint64_t addr, uint64_t len)
@@ -371,6 +384,8 @@ bool lxrt_wx_scan_for_exec(uint64_t hpage, const struct lxrt_range *r, int nr)
             size_t done = rep.sites_rewritten + rep.tls_rewritten + rep.ctr_rewritten +
                           rep.sysreg_rewritten;
             atomic_fetch_add(&st_rewritten, done);
+            if (!done && !rep.sites_unreachable && !rep.tls_unreachable)
+                continue;           // this range of the page had nothing
             // Same words as jit.c's rescan line, so one grep finds both.
             fprintf(lxrt_trace_stream(), "[lxrt] JIT output: %zu svc sites rewritten, %zu poisoned "
                     "(W^X page 0x%llx: tls %zu, ctr %zu, sysreg %zu)\n",

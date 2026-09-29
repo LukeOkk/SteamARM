@@ -877,8 +877,9 @@ fi
 # code rewritten and re-run, a second thread calling while this one writes
 # (also into its own 16 KiB page), 8 threads on one page's first fetch, a
 # live svc and an mrs tpidr_el0 in generated code (rewritten before they can
-# run), RWX -> RX -> RWX, munmap + recommit, DONTNEED, PROT_NONE inside, 5000
-# separate commits, a 4 KiB commit (subpage.c) and V8's whole-range pattern.
+# run), RWX -> RX -> RWX, munmap + recommit, DONTNEED, PROT_NONE inside, a
+# 4 KiB guard inside a committed host page, 5000 separate commits, a 4 KiB
+# commit (subpage.c), V8's whole-range pattern, and a forked child.
 # At the default 16 KiB and at LXRT_GUEST_PAGE=4096; LXRT_WX_SPLIT=0 (the old
 # read-write grant) must fail on the first call.
 if [ -f "$STAGE/usr/lib64/libc.a" ] && [ -n "$GCCDIR" ]; then
