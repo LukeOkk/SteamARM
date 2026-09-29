@@ -22,8 +22,14 @@ reads the image itself, read-only, with its own btrfs reader:
                                    Steam Linux Runtime / gamescope / Vulkan ICDs
                                    / NSS, x86 remnants, pacman repositories
                                    (private per-device mirror URLs redacted)
-  compare   INV.json REPO.db...    image packages against pacman repository
-                                   databases (e.g. holo-core-aarch64-preview)
+  compare   INV.json|ROOT REPO.db...
+                                   image packages against pacman repository
+                                   databases (e.g. holo-core-aarch64-preview):
+                                   same / differs (which side is newer, by
+                                   pacman's vercmp; pkgrel-only or version) /
+                                   image-only / repo-only (with the counterpart
+                                   named through PROVIDES/REPLACES); records
+                                   each database's sha256
 
 Decompression follows the kernel, not btrfs-progs: the kernel stops a zstd
 (or zlib) stream once it has produced the extent's ram_bytes and ignores the
@@ -978,6 +984,25 @@ def elf_info(path):
         return None
 
 
+def parse_desc(text):
+    """A pacman `desc` file (local or sync database): {FIELD: [lines]}."""
+    fields, cur = {}, None
+    for line in text.splitlines():
+        if line.startswith('%') and line.endswith('%'):
+            cur = line.strip('%')
+            fields[cur] = []
+        elif line and cur:
+            fields[cur].append(line)
+    return fields
+
+
+def desc_int(fields, key):
+    try:
+        return int((fields.get(key) or ['0'])[0])
+    except ValueError:
+        return 0
+
+
 def pacman_packages(root):
     for d in ('usr/lib/holo/pacmandb/local', 'var/lib/pacman/local',
               'usr/share/factory/var/lib/pacman/local', 'usr/lib/pacman/local'):
@@ -989,19 +1014,14 @@ def pacman_packages(root):
             desc = os.path.join(base, ent, 'desc')
             if not os.path.isfile(desc):
                 continue
-            fields, cur = {}, None
-            for line in open(desc, encoding='utf-8', errors='replace'):
-                line = line.rstrip('\n')
-                if line.startswith('%') and line.endswith('%'):
-                    cur = line.strip('%')
-                    fields[cur] = []
-                elif line and cur:
-                    fields[cur].append(line)
+            fields = parse_desc(open(desc, encoding='utf-8', errors='replace').read())
             one = lambda k: (fields.get(k) or [''])[0]
             pkgs.append(dict(name=one('NAME'), version=one('VERSION'), arch=one('ARCH'),
                              license=fields.get('LICENSE', []), url=one('URL'),
-                             packager=one('PACKAGER'), size=int(one('SIZE') or 0),
-                             desc=one('DESC')))
+                             packager=one('PACKAGER'), size=desc_int(fields, 'SIZE'),
+                             desc=one('DESC'), builddate=desc_int(fields, 'BUILDDATE'),
+                             provides=fields.get('PROVIDES', []),
+                             replaces=fields.get('REPLACES', [])))
         return d, pkgs
     return None, []
 
@@ -1142,74 +1162,318 @@ def pacman_repos(root):
     return repos
 
 
-def read_repo_db(src):
-    """Packages of a pacman sync database (<repo>.db: a tar, gzip/xz/bz2/zstd
-    compressed), from a local file or an https URL."""
-    import io
-    import tarfile
+def fetch_bytes(src):
+    """A local file or an http(s) URL, whole."""
     import urllib.request
     if src.startswith(('http://', 'https://')):
         with urllib.request.urlopen(src, timeout=60) as r:
-            raw = r.read()
-    else:
-        raw = open(src, 'rb').read()
+            return r.read()
+    with open(src, 'rb') as f:
+        return f.read()
+
+
+def parse_repo_db(raw):
+    """Packages of a pacman sync database (<repo>.db: a tar, uncompressed or
+    gzip/xz/bz2/zstd compressed), keyed by name."""
+    import io
+    import tarfile
     if raw[:4] == b'\x28\xb5\x2f\xfd':
         global _ZSTD
         if _ZSTD is None:
             zstd_decode(b'', 0)            # resolves the zstandard import
-        if not _ZSTD:
-            die('this repo database is zstd-compressed: pip3 install zstandard')
-        raw = _ZSTD.ZstdDecompressor().decompressobj().decompress(raw)
+        if _ZSTD:
+            raw = _ZSTD.ZstdDecompressor().decompressobj().decompress(raw)
+        else:                              # the same fallback as zstd_decode
+            try:
+                p = subprocess.run(['zstd', '-dcq'], input=raw, capture_output=True)
+            except FileNotFoundError:
+                die('this repo database is zstd-compressed: pip3 install zstandard '
+                    'or brew install zstd')
+            if p.returncode:
+                die('zstd could not decode the repo database: '
+                    + p.stderr.decode('utf-8', 'replace').strip())
+            raw = p.stdout
     pkgs = {}
     with tarfile.open(fileobj=io.BytesIO(raw)) as tf:
         for m in tf.getmembers():
             if not m.name.endswith('/desc'):
                 continue
-            fields, cur = {}, None
-            for line in tf.extractfile(m).read().decode('utf-8', 'replace').splitlines():
-                if line.startswith('%') and line.endswith('%'):
-                    cur = line.strip('%')
-                    fields[cur] = []
-                elif line and cur:
-                    fields[cur].append(line)
+            fields = parse_desc(tf.extractfile(m).read().decode('utf-8', 'replace'))
             one = lambda k: (fields.get(k) or [''])[0]
             pkgs[one('NAME')] = dict(version=one('VERSION'), arch=one('ARCH'),
                                      filename=one('FILENAME'), sha256=one('SHA256SUM'),
-                                     license=fields.get('LICENSE', []))
+                                     license=fields.get('LICENSE', []),
+                                     builddate=desc_int(fields, 'BUILDDATE'),
+                                     provides=fields.get('PROVIDES', []),
+                                     replaces=fields.get('REPLACES', []))
     return pkgs
 
 
-def cmd_compare(args):
-    """Image packages (inventory --json) against one or more repo databases."""
-    inv = json.load(open(args.inventory))
-    image = {p['name']: p for p in inv.get('packages', [])}
-    repos = {}
-    for src in args.repo:
-        name = os.path.basename(src.rstrip('/')).split('.db')[0]
-        for pkg, info in read_repo_db(src).items():
-            repos.setdefault(pkg, (name, info))
+def read_repo_db(src):
+    """Packages of a pacman sync database, from a local file or an https URL."""
+    return parse_repo_db(fetch_bytes(src))
+
+
+# ------------------------------------------------- pacman version ordering
+# alpm_pkg_vercmp and rpmvercmp from pacman's lib/libalpm/version.c, in the C
+# locale: [epoch:]pkgver[-pkgrel], compared segment by segment; the pkgrel only
+# counts when both sides have one. Plain string equality cannot say which side
+# is newer, and "1.5b" < "1.5" < "1.5.a" is not what sorted() gives.
+def _digit(c):
+    return '0' <= c <= '9'
+
+
+def _alpha(c):
+    return 'a' <= c <= 'z' or 'A' <= c <= 'Z'
+
+
+def rpmvercmp(a, b):
+    if a == b:
+        return 0
+    n1, n2 = len(a), len(b)
+    i = j = p1 = p2 = 0                     # one, two, ptr1, ptr2 in the C code
+    while i < n1 and j < n2:
+        while i < n1 and not (_digit(a[i]) or _alpha(a[i])):
+            i += 1
+        while j < n2 and not (_digit(b[j]) or _alpha(b[j])):
+            j += 1
+        if i >= n1 or j >= n2:
+            break
+        if i - p1 != j - p2:                # separators of different length
+            return -1 if i - p1 < j - p2 else 1
+        p1, p2 = i, j
+        isnum = _digit(a[p1])
+        kind = _digit if isnum else _alpha
+        while p1 < n1 and kind(a[p1]):
+            p1 += 1
+        while p2 < n2 and kind(b[p2]):
+            p2 += 1
+        if j == p2:                         # b has the other kind of segment here
+            return 1 if isnum else -1       # numeric beats alpha
+        s1, s2 = a[i:p1], b[j:p2]
+        if isnum:
+            s1, s2 = s1.lstrip('0'), s2.lstrip('0')
+            if len(s1) != len(s2):
+                return 1 if len(s1) > len(s2) else -1
+        if s1 != s2:
+            return -1 if s1 < s2 else 1
+        i, j = p1, p2
+    if i >= n1 and j >= n2:
+        return 0
+    one = a[i] if i < n1 else ''
+    two = b[j] if j < n2 else ''
+    # a remaining alpha segment never beats the end of the other string
+    return -1 if (not one and not _alpha(two)) or (one and _alpha(one)) else 1
+
+
+def split_evr(v):
+    """[epoch:]version[-release] -> (epoch, version, release or None)."""
+    s = 0
+    while s < len(v) and _digit(v[s]):
+        s += 1
+    se = v.rfind('-', s)
+    if s < len(v) and v[s] == ':':
+        epoch, start = v[:s] or '0', s + 1
+    else:
+        epoch, start = '0', 0
+    if se >= start:
+        return epoch, v[start:se], v[se + 1:]
+    return epoch, v[start:], None
+
+
+def vercmp(a, b):
+    """pacman's `vercmp a b`: -1 (a older), 0, 1 (a newer)."""
+    if a == b:
+        return 0
+    e1, v1, r1 = split_evr(a)
+    e2, v2, r2 = split_evr(b)
+    ret = rpmvercmp(e1, e2)
+    if ret == 0:
+        ret = rpmvercmp(v1, v2)
+        if ret == 0 and r1 is not None and r2 is not None:
+            ret = rpmvercmp(r1, r2)
+    return ret
+
+
+DEP = re.compile(r'^([^<>=]+?)\s*(?:(<=|>=|=|<|>)\s*(.*))?$')
+
+
+def parse_dep(dep):
+    """A PROVIDES/REPLACES/DEPENDS entry: 'glibc-locales=2.39-2' ->
+    ('glibc-locales', '=', '2.39-2'), 'kio<5.111' -> ('kio', '<', '5.111'),
+    'xxd' -> ('xxd', '', '')."""
+    m = DEP.match(dep.strip())
+    if not m:
+        return dep.strip(), '', ''
+    return m.group(1).strip(), m.group(2) or '', (m.group(3) or '').strip()
+
+
+def dep_allows(op, want, have):
+    """Whether version `have` is in the range `op want` (pacman's rule)."""
+    if not op or not want:
+        return True
+    c = vercmp(have, want)
+    return {'<': c < 0, '<=': c <= 0, '=': c == 0, '>=': c >= 0, '>': c > 0}[op]
+
+
+def source_label(src):
+    """How a repo database is named in a report: a URL as redact_url prints it,
+    a local file by its base name (no home directory in shared text)."""
+    if src.startswith(('http://', 'https://')):
+        return redact_url(src)
+    return os.path.basename(src)
+
+
+def load_image_packages(path):
+    """Packages from `inventory --json` output, or read from an extracted root."""
+    if os.path.isdir(path):
+        db, pkgs = pacman_packages(path)
+        if db is None:
+            die(f'{path}: no pacman local database (usr/lib/holo/pacmandb/local, var/lib/pacman/local, ...)')
+        return pkgs, db
+    inv = json.load(open(path))
+    return inv.get('packages', []), inv.get('pacman_db') or os.path.basename(path)
+
+
+def compare_packages(image, repos):
+    """image: {name: pkg}; repos: [(repo name, {name: pkg})] in pacman order (the
+    first repository with a name wins). Returns (rows, counts).
+
+    A row: package, image version, repository version, repo, arch, state
+    (same | differs | image-only | repo-only), newer (image | repo | '' when
+    pacman orders them the same), note. A package only on one side is matched
+    to its counterpart through PROVIDES/REPLACES (the image's sdl2 is the
+    repository's sdl2-compat, its holo-glibc-locales is glibc-locales)."""
+    merged = {}
+    for rname, pkgs in repos:
+        for pkg, info in pkgs.items():
+            merged.setdefault(pkg, (rname, info))
+    # Counterparts: a package on one side only, linked through PROVIDES or
+    # REPLACES to a package on the other side only. A package whose name is on
+    # both sides already has its row, and a versioned REPLACES counts only
+    # when the other package's version is in its range (KF5's kio5 replaces
+    # kio<5.111, not KF6's kio 6.x).
+    image_only = {p: i for p, i in image.items() if p not in merged}
+    repo_only = {p: i for p, (_, i) in merged.items() if p not in image}
+
+    def relations(info):
+        return [(kind, parse_dep(d)) for kind in ('provides', 'replaces')
+                for d in info.get(kind) or []]
+
+    def counterparts(pkg, info, other_only):
+        """[(name, relation)] on the other side for a one-side-only package."""
+        out = []
+        for kind, (n, op, want) in relations(info):
+            if n in other_only and n != pkg and (kind == 'provides' or dep_allows(
+                    op, want, other_only[n].get('version', ''))):
+                out.append((n, f'{"provided" if kind == "provides" else "replaced"} by this'))
+        for n, oinfo in other_only.items():
+            for kind, (dn, op, want) in relations(oinfo):
+                if dn == pkg and n != pkg and (kind == 'provides' or dep_allows(
+                        op, want, info.get('version', ''))):
+                    out.append((n, f'{kind} this'))
+        seen, uniq = set(), []
+        for n, rel in out:
+            if n not in seen:
+                seen.add(n)
+                uniq.append((n, rel))
+        return uniq
+
     rows, counts = [], collections.Counter()
-    for pkg in sorted(set(image) | set(repos)):
-        iv = image.get(pkg, {}).get('version', '')
-        rname, rinfo = repos.get(pkg, ('', {}))
-        rv = rinfo.get('version', '')
-        if iv and rv:
-            state = 'same' if iv == rv else 'differs'
+    for pkg in sorted(set(image) | set(merged)):
+        ii = image.get(pkg, {})
+        rname, ri = merged.get(pkg, ('', {}))
+        iv, rv = ii.get('version', ''), ri.get('version', '')
+        newer = note = ''
+        if pkg in image and pkg in merged:
+            if iv == rv:
+                state = 'same'
+            else:
+                state = 'differs'
+                order = vercmp(iv, rv)
+                newer = 'image' if order > 0 else ('repo' if order < 0 else '')
+                e1, v1, _ = split_evr(iv)
+                e2, v2, _ = split_evr(rv)
+                note = 'pkgrel' if rpmvercmp(e1, e2) == 0 and rpmvercmp(v1, v2) == 0 else 'version'
+                counts[f'differs:{newer or "equal-order"}'] += 1
+                counts[f'differs:{note}'] += 1
+        elif pkg in image:
+            state = 'image-only'
+            cp = counterparts(pkg, ii, repo_only)
+            if cp:
+                note = 'repo: ' + ', '.join(f'{n} {merged[n][1].get("version", "")} ({rel})' for n, rel in cp)
+                counts['image-only:counterpart'] += 1
         else:
-            state = 'image-only' if iv else 'repo-only'
+            state = 'repo-only'
+            cp = counterparts(pkg, ri, image_only)
+            if cp:
+                note = 'image: ' + ', '.join(f'{n} {image[n].get("version", "")} ({rel})' for n, rel in cp)
+                counts['repo-only:counterpart'] += 1
         counts[state] += 1
-        arch = image.get(pkg, {}).get('arch') or rinfo.get('arch', '')
-        rows.append((pkg, iv, rv, rname, arch, state))
+        arch = ii.get('arch') or ri.get('arch', '')
+        rows.append((pkg, iv, rv, rname, arch, state, newer, note))
+    return rows, counts
+
+
+STATES = ('same', 'differs', 'image-only', 'repo-only')
+
+
+def cmd_compare(args):
+    """Image packages (inventory --json, or an extracted root) against one or
+    more repo databases."""
+    pkgs, image_src = load_image_packages(args.inventory)
+    image = {p['name']: p for p in pkgs}
+    repos, sources = [], []
+    for src in args.repo:
+        raw = fetch_bytes(src)
+        name = os.path.basename(urllib.parse.urlsplit(src).path.rstrip('/') if '://' in src
+                                else src.rstrip('/')).split('.db')[0]
+        dbp = parse_repo_db(raw)
+        repos.append((name, dbp))
+        sources.append(dict(repo=name, source=source_label(src), bytes=len(raw),
+                            sha256=hashlib.sha256(raw).hexdigest(), packages=len(dbp)))
+    rows, counts = compare_packages(image, repos)
+    if args.all:
+        show = set(STATES)
+    elif args.states:
+        show = {s.strip() for s in args.states.split(',') if s.strip()}
+    else:
+        show = set(STATES) - {'same'}
+    bad = show - set(STATES)
+    if bad:
+        die(f'--states: unknown {sorted(bad)}; known: {", ".join(STATES)}')
+    d = counts
     L = ['## Steam Frame image vs repository (generated by steamframe-image.py compare)\n',
-         ', '.join(f'{k} {v}' for k, v in sorted(counts.items())) + '\n',
-         '| package | image | repository | repo | arch | state |', '|---|---|---|---|---|---|']
+         f'Image: {len(image)} packages ({image_src}).',
+         'Repositories, in pacman order (the first one that has a name wins):\n']
+    L += [f'- `{s["repo"]}`: `{s["source"]}`, {s["packages"]} packages, {s["bytes"]} bytes, '
+          f'sha256 `{s["sha256"]}`' for s in sources]
+    L += ['', ', '.join(f'{k} {d[k]}' for k in sorted(STATES) if k in d) + '\n',
+          f'differs: image newer {d["differs:image"]}, repository newer {d["differs:repo"]}, '
+          f'same order {d["differs:equal-order"]}; pkgrel only {d["differs:pkgrel"]}, '
+          f'version {d["differs:version"]}. '
+          f'image-only with a repository counterpart (PROVIDES/REPLACES) {d["image-only:counterpart"]}; '
+          f'repo-only with an image counterpart {d["repo-only:counterpart"]}.\n',
+          '| package | image | repository | repo | arch | state | newer | note |',
+          '|---|---|---|---|---|---|---|---|']
     for r in rows:
-        if args.all or r[5] != 'same':
+        if r[5] in show:
             L.append('| ' + ' | '.join(r) + ' |')
     md = '\n'.join(L) + '\n'
+    if args.json:
+        with open(args.json, 'w') as f:
+            json.dump(dict(image=dict(source=image_src, packages=len(image)), repositories=sources,
+                           counts=dict(sorted(counts.items())),
+                           rows=[dict(zip(('package', 'image', 'repository', 'repo', 'arch', 'state',
+                                           'newer', 'note'), r)) for r in rows]), f, indent=1)
     if args.md:
-        open(args.md, 'w').write(md)
-    print(md if not args.md else f'{sum(counts.values())} packages: {dict(counts)} -> {args.md}')
+        with open(args.md, 'w') as f:
+            f.write(md)
+    if args.md or args.json:
+        summary = {k: counts[k] for k in STATES if k in counts}
+        print(f'{sum(summary.values())} packages: {summary} -> {args.md or ""} {args.json or ""}'.rstrip())
+    else:
+        print(md)
 
 
 def cmd_inventory(args):
@@ -1413,10 +1677,14 @@ def main():
     a.add_argument('--md')
     a.set_defaults(func=cmd_inventory)
     a = sub.add_parser('compare', help='image packages vs pacman repo databases (holo-core-aarch64-preview, ...)')
-    a.add_argument('inventory', help='JSON written by `inventory --json`')
-    a.add_argument('repo', nargs='+', help='<repo>.db file or https URL (see the repositories inventory lists)')
+    a.add_argument('inventory', help='JSON written by `inventory --json`, or an extracted root')
+    a.add_argument('repo', nargs='+', help='<repo>.db file or https URL, in pacman order (the '
+                   'report prints a URL the way inventory prints mirrors: private ones redacted)')
     a.add_argument('--md')
+    a.add_argument('--json', help='also write every row and the counts as JSON')
     a.add_argument('--all', action='store_true', help='also list packages whose versions match')
+    a.add_argument('--states', help='comma-separated states to list (default: differs,image-only,'
+                   'repo-only; the counts always cover all four)')
     a.set_defaults(func=cmd_compare)
     args = ap.parse_args()
     args.func(args)
