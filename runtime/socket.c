@@ -11,6 +11,7 @@
 //      has no such thing and rejects the type outright.
 
 #include "lxrt.h"
+#include "props.h"
 
 #include <arpa/inet.h>
 #include <errno.h>
@@ -427,6 +428,19 @@ long lxrt_connect(int fd, const void *lsa, unsigned llen)
     if (n < 0)
         return LERR(EINVAL);
     long rc = connect(fd, (struct sockaddr *)&ss, (socklen_t)n) != 0 ? LERR(errno) : 0;
+    // Android's property service is started on demand and leaves when idle
+    // (props.c, propsvc.c): a setprop that finds nobody listening starts it
+    // and tries once more. Linux ENOENT 2, ECONNREFUSED 111.
+    if ((rc == -2 || rc == -111) && ss.ss_family == AF_UNIX && llen > 2) {
+        const struct linux_sockaddr_un *lu = lsa;
+        size_t cap = llen - 2 < sizeof lu->sun_path ? llen - 2 : sizeof lu->sun_path;
+        char g[sizeof lu->sun_path + 1];
+        size_t gl = strnlen(lu->sun_path, cap);
+        memcpy(g, lu->sun_path, gl);
+        g[gl] = 0;
+        if (lxrt_props_is_socket(g) && lxrt_props_start_service())
+            rc = connect(fd, (struct sockaddr *)&ss, (socklen_t)n) != 0 ? LERR(errno) : 0;
+    }
     // The native X server (scripts/run-x11-native.sh) is a macOS process: its
     // socket is the host's /tmp/.X11-unix/X<n>, which no guest root contains.
     // A guest X client connecting to /tmp/.X11-unix/X<n> that finds nothing in

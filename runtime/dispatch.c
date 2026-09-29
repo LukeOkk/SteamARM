@@ -44,6 +44,7 @@
 #include <unistd.h>
 
 #include "binder.h"
+#include "props.h"
 
 // Private syscall numbers, far outside the Linux range (which ends around 463).
 // These are the graphics bridge: a guest ELF asks the runtime for the address
@@ -384,6 +385,11 @@ static const char *translate_one(const char *path, char *buf, size_t bufn)
     const char *input = lxrt_evdev_translate(path, buf, bufn);
     if (input)
         return input;
+    // /dev/__properties__ and /dev/socket/property_service: Android's
+    // system properties, served per root by the property service (props.c).
+    const char *props = lxrt_props_translate(path, buf, bufn);
+    if (props)
+        return props;
     // A bind mount from a (fake) bwrap plan shadows the root prefix.
     const char *m = lxrt_mounts_translate(path, buf, bufn);
     if (m)
@@ -2066,6 +2072,7 @@ static long do_fstat(int fd, uint64_t out)
     if (pf ? stat(pf, &d) != 0 : fstat(fd, &d) != 0)
         return LERR(errno);
     lxrt_evdev_fix_stat(pf, fd, &d);
+    lxrt_props_fix_stat(pf, fd, &d);
     stat_to_linux(&d, (struct linux_stat *)out);
     return 0;
 }
@@ -2101,6 +2108,7 @@ static long do_fstatat(int dirfd, const char *path, uint64_t out, int flags)
         return LERR(e);
     }
     lxrt_evdev_fix_stat(hp, -1, &d);
+    lxrt_props_fix_stat(hp, -1, &d);
     stat_to_linux(&d, (struct linux_stat *)out);
     return 0;
 }

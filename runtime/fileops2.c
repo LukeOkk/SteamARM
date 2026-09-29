@@ -26,6 +26,7 @@
 #include "lxrt.h"
 bool lxrt_trace_on(void);
 #include "fileops2.h"
+#include "props.h"
 
 #include <errno.h>
 #include <fcntl.h>
@@ -968,6 +969,9 @@ long lxrt_statx(int ldirfd, const char *tpath, int lflags, unsigned mask,
     }
     if (rc != 0)
         return LERR(errno);
+    // Android's property areas look root-owned, as bionic requires.
+    lxrt_props_fix_stat(tpath[0] ? tpath : NULL,
+                        tpath[0] ? -1 : lxrt_dirfd_to_darwin(ldirfd), &d);
 
     // AT_STATX_FORCE_SYNC (0x2000) and AT_STATX_DONT_SYNC (0x4000) ask a
     // network filesystem how hard to work for a fresh answer. Darwin's stat has
