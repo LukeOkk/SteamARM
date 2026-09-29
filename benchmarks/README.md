@@ -49,6 +49,7 @@ the Fedora VM that was deleted on 2026-09-27; they are history, and
 | 23 | `stage23-runtime-fixes.txt` | 09-29 | the W/X livelock of 4 KiB sub-pages (stores from a split page into itself are emulated) and a relative `/proc/self/exe`; `tests/elf/run.sh` 55/0 with 2 xfail → 63/0 with 0 xfail |
 | 23 | `stage23-frame-root.txt` | 09-29 | the native arm64 client on the Steam Frame root (`scripts/mkframeroot.sh`): indirect GLX through the X server, a resolv.conf, the client's own steamdeck_stable branch; the login window 5 of 5 runs, 5-7 s later than on the Fedora root |
 | 24 | `stage24-holo-vs-frame.txt` | 09-29 | `holo-core-aarch64-preview` (`mash-20251118.3`) against the Frame 0.3.0 root, package by package, with no guest: 81 of 887 shared names at the same version (Holo newer for 764), so the Frame is not built from it; Holo has no GTK 2, which the client's `steamui.so` needs; `steamframe-image.py compare` gains pacman's vercmp and PROVIDES/REPLACES counterparts |
+| 24 | `stage24-fex-game-boundary.txt` | 09-29 | the native arm64 client's compatibility tool for x86 Proton through FEX (`docs/FEX_GAME_BOUNDARY.md`): D3D11/D3D12 probes at ~160 fps through x86 Proton Experimental and SLR 4, as on the x86 client's path, invoked the way the client invokes a tool, on both ARM64 roots; both clients register it before a sign-in; 10 of 29 launches did not exit (Xalia; 1 of 10 on the x86 path); Proton 10.0 with sniper does not start under FEX on either path |
 
 ## After stage 21 (no stage file)
 

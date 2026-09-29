@@ -169,7 +169,8 @@ unsupported. It is never answered by proposing or starting a VM.
   current trick (FEX's HideHypervisorBit) only works while the client runs
   under FEX. The ARM64 client needs another way to run x86 Proton through FEX
   for game payloads: a compatibility-tool shim, or a patched ARM64 Proton
-  (Madeira-style, stage19 §2).
+  (Madeira-style, stage19 §2). Stage 24 built the first:
+  `docs/FEX_GAME_BOUNDARY.md` (experimental; probes measured, not games).
 - **ISA of scripts.** `steam.sh`, AppImage `AppRun` and Heroic's wrapper only
   reveal their ISA through the ELF they exec. Today such an entry stays
   x86_64 unless its definition says otherwise.

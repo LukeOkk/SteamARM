@@ -1,0 +1,13 @@
+"compatibilitytools"
+{
+  "compat_tools"
+  {
+    "steamarm-fex-proton"
+    {
+      "install_path" "."
+      "display_name" "SteamARM: Proton x86 via FEX (experimental)"
+      "from_oslist" "windows"
+      "to_oslist" "linux"
+    }
+  }
+}

@@ -1,0 +1,284 @@
+Stage 24 -- the FEX game boundary: x86 Proton for the native arm64 client (2026-09-29)
+=====================================================================================
+
+ZERO-VM. Host: Mac mini M4 (Mac16,10), 16 GB, macOS 27.0; X on :2 (the
+native XQuartz build, running since 05:44 that day, not restarted during
+these runs); FEXServer already running (lxrun, LXRT_ROOT=/tmp/lxrt-root,
+started 05:44 by scripts/run-fex.sh); PulseAudio running (scripts/audio.sh).
+Code: 611d71d (release 0.3.5) plus this record's changes: the compatibility
+tool tools/steamarm-fex-proton, scripts/install-fex-proton-tool.sh,
+tests/win/run_fex_boundary.sh, d3d11/d3d12 and overrides in
+tests/win/run_steam_path.sh, tests/launcher/fex_proton_tool.sh.
+build/lxrun built from that tree (make lxrt). Roots: /tmp/lxrt-armroot
+(Fedora armroot), /tmp/lxrt-arm64root (Steam Frame root), /tmp/lxrt-steamroot
+(x86 Steam root), /tmp/lxrt-root (FEX). Other sessions ran guests (Heroic,
+Prism, the launcher's ARM64 entries) on the same Mac during this stage.
+No Steam UI, no sign-in, no game. Labels: MEASURED, VERIFIED IN SOURCE,
+HYPOTHESIS, UNKNOWN. ~ is the owner's home.
+
+What was built (docs/FEX_GAME_BOUNDARY.md)
+------------------------------------------
+A compatibility tool in the arm64 client's
+<root>/tmp/armhome/.local/share/Steam/compatibilitytools.d/steamarm-fex-proton/:
+compatibilitytool.vdf ("SteamARM: Proton x86 via FEX (experimental)",
+windows -> linux), toolmanifest.vdf (commandline "/steamarm-fex-proton
+%verb%", no require_tool_appid), an aarch64 bash script and a .conf. The
+script, run in the ARM64 root, execs
+  /tmp/lxrt-root/usr/bin/FEX-gb /bin/bash <SLR>/_v2-entry-point --verb=<verb> -- <Proton>/proton <verb> <exe> ...
+with LXRT_ROOT=/tmp/lxrt-steamroot and LXRT_MOUNTS binding the client's
+paths (/tmp/armhome -> <ARM64 root>/tmp/armhome).
+
+1. The root switch and the bind (MEASURED, 1 s each)
+----------------------------------------------------
+Probe 1, from the armroot (scripts/run-native.sh /bin/bash <script>, a
+script in <armroot>/opt/apps/steamarm-fex-proton-tests):
+  root=/tmp/lxrt-armroot                   (LXRT_ROOT is in the guest's env)
+  proc-root=                               (readlink /proc/self/root: empty)
+  uid=501 arch=aarch64
+  proc entries: 12                         (/proc shows the guest's own processes only)
+  fexserver socket: present                (a child with LXRT_MOUNTS=/run/steamarm-fexsock -> /tmp/lxrt-abstract-501)
+  FEX-Emu / Proton - Experimental / Proton 10.0   (a child with /run/steamarm-x86 -> /tmp/lxrt-steamroot)
+The Fedora armroot has no grep (the tool uses bash built-ins and /usr/bin/test).
+Probe 2: the same shell exports LXRT_ROOT=/tmp/lxrt-steamroot FEX_ROOTFS=/
+HOME=/tmp/fexhome LXRT_MOUNTS=/tmp/armhome -> $LXRT_ROOT/tmp/armhome and
+execs /tmp/lxrt-root/usr/bin/FEX-gb /bin/bash -c ...:
+  arm side: aarch64 root=/tmp/lxrt-armroot home=/tmp/armhome
+  x86 side: x86_64 root=/tmp/lxrt-steamroot
+  crashhandler.so steamclient.so           (ls /tmp/armhome/.local/share/Steam/linux64, through the bind)
+  /tmp/fexhome/.local/share/Steam/steamapps/common/Proton 10.0/proton
+  /tmp/armhome                             (cd /tmp/armhome && pwd)
+file(1) on the host: <armroot>/tmp/armhome/.local/share/Steam/linux64/steamclient.so
+is "ELF 64-bit LSB shared object, x86-64".
+
+2. Probes through the tool (tests/win/run_fex_boundary.sh)
+----------------------------------------------------------
+Launch line, from an aarch64 bash under lxrun in the ARM64 root, working
+directory the probe's directory, environment STEAM_COMPAT_CLIENT_INSTALL_PATH,
+_DATA_PATH (compatdata/<APPID>), _INSTALL_PATH, _LIBRARY_PATHS,
+_SHADER_PATH, _APP_ID, SteamAppId, SteamGameId, SteamEnv=1, DISPLAY=:2,
+PULSE_SERVER=unix:/tmp/pulse/native, and the client's own LXRT_GUEST_PAGE=4096
+and LXRT_X18_ALL_TEXT=libcef.so:
+  /tmp/armhome/.local/share/Steam/steamrtarm64/reaper SteamLaunch AppId=<APPID> -- \
+    /tmp/armhome/.local/share/Steam/compatibilitytools.d/steamarm-fex-proton/steamarm-fex-proton \
+    waitforexitandrun /tmp/armhome/.local/share/Steam/steamapps/common/SteamARM-Probe/<probe>_clear.exe
+(NO_REAPER=1: without the reaper.) Result = the probe's probe-result.txt,
+which it writes in its working directory: it appeared in
+<ARM64 root>/tmp/armhome/.local/share/Steam/steamapps/common/SteamARM-Probe/.
+Durations are from the launch to the end of the whole chain (container
+start, Proton, the probe, the container's end).
+
+  #   time   root      Proton         reaper  app     probe  result                               exit
+  1   14:03  armroot   Experimental   no      999998  d3d11  160.7 fps                            56 s, rc 0 (new prefix)
+  2   14:06  armroot   Experimental   yes     999998  d3d11  159.8 fps                            55 s, rc 0
+  3   14:07  armroot   Experimental   yes     999998  d3d12  160.2 fps                            56 s, rc 0
+  4   14:22  arm64root Experimental   yes     999999  d3d11  160.3 fps                            56 s, rc 0 (new prefix)
+  5   14:23  arm64root Experimental   yes     999999  d3d12  161.3 fps                            54 s, rc 0
+  6   14:27  armroot   Experimental   yes     999999  d3d11  160.5 fps                            57 s, rc 0 (new prefix)
+  7   14:28  armroot   Experimental   yes     999999  d3d12  159.7 fps                            54 s, rc 0
+  8   14:30  armroot   Experimental   yes     999999  d3d11  160.8 fps                            54 s, rc 0
+  9   14:31  armroot   Experimental   yes     999999  d3d12  160.5 fps                            53 s, rc 0
+  10  14:32  armroot   Experimental   yes     999999  tone   stream reached PulseAudio            51 s, rc 0
+  11  14:36  armroot   Experimental   no      999999  d3d11  159.8 fps                            did not exit, stopped at 302 s
+  12  14:41  armroot   Experimental   no      999999  d3d12  160.0 fps                            did not exit, stopped at 302 s
+  13  14:48  arm64root Experimental   yes     999999  d3d11  159.8 fps                            did not exit, stopped at 302 s
+  14  14:53  arm64root Experimental   yes     999999  d3d12  152.6 fps                            did not exit, stopped at 302 s
+  15  14:59  armroot   Experimental   yes     999999  d3d11  160.2 fps                            did not exit, stopped at 202 s
+  16  15:03  armroot   Experimental   yes     999999  d3d11  160.2 fps  (PROTON_USE_XALIA=0)      52 s, rc 0
+  17  15:05  armroot   Experimental   yes     999999  d3d11  160.5 fps  (client path = x86 client's) 56 s, rc 0
+  18  15:06  armroot   Experimental   yes     999999  d3d11  160.4 fps  (control for 17)          55 s, rc 0
+  19  15:07  arm64root Experimental   yes     999999  d3d11  160.4 fps                            55 s, rc 0
+  20  15:08  arm64root Experimental   yes     999999  d3d12  160.7 fps                            54 s, rc 0
+  21  15:09  armroot   Experimental   yes     999999  d3d11  160.2 fps                            did not exit, stopped at 202 s
+  22  15:13  armroot   Experimental   yes     999999  d3d12  161.1 fps                            did not exit, stopped at 202 s
+  23  15:16  armroot   Experimental   yes     999999  tone   stream reached PulseAudio            did not exit, stopped at 202 s
+  --  15:21-15:24  armroot  4 launches (2 with PROTON_USE_XALIA=0)  killed from outside after 5-55 s, rc 137, no result
+  24  15:30  armroot   Experimental   yes     999999  d3d11  160.0 fps                            did not exit, stopped at 152 s
+  25  15:32  armroot   Experimental   yes     999999  d3d12  161.0 fps                            did not exit, stopped at 153 s
+  26  15:37  armroot   Experimental   yes     999999  d3d11  160.0 fps  (client path = x86 client's) 64 s, rc 0
+  27  15:38  armroot   Experimental   yes     999999  d3d11  158.4 fps                            63 s, rc 0
+  28  15:39  armroot   Experimental   yes     999999  d3d11  159.8 fps  (client path = x86 client's) 67 s, rc 0
+  29  15:40  armroot   Experimental   yes     999999  d3d11  159.7 fps                            64 s, rc 0
+  P1  13:59  armroot   Proton 10.0    no      999999  d3d11  no result                            did not exit, stopped at 303 s
+Start times are to about a minute. 24-25 are the final tool (its log line
+names the program and app: "steamarm-fex-proton: waitforexitandrun
+d3d11_clear.exe (app 999999) via x86 Proton - Experimental + ..."). 26-29
+alternate STEAM_COMPAT_CLIENT_INSTALL_PATH (a scratch copy of the harness's
+launch line, run by a bounded runner that stops only its own guests); `make
+test-launcher-core` ran at the same time as 26-27.
+Totals, launches not killed from outside: 29, all rendered (tone: played);
+19 exited in 51-67 s; 10 did not exit.
+
+Every probe run passes 600 frames. Runs 4-5 and 13-14 on the Steam Frame
+root; 19-20 with the final tool, which drops that root's
+.lxrt-guest-env names:
+  steamarm-fex-proton: not passing on the ARM64 root's own guest environment: __GLX_VENDOR_LIBRARY_NAME MESA_LOADER_DRIVER_OVERRIDE LIBGL_ALWAYS_INDIRECT
+Every run logs the tool's line, e.g.:
+  steamarm-fex-proton: waitforexitandrun via x86 Proton - Experimental + SteamLinuxRuntime_4 under FEX (root /tmp/lxrt-steamroot); client paths bound from /tmp/lxrt-armroot: /tmp/armhome
+The new prefixes were made in the arm64 client's library:
+  Proton: Upgrading prefix from None to 11.0-100 (/tmp/armhome/.local/share/Steam/steamapps/compatdata/999999/)
+Without the reaper (runs 11-12, and P1) pv-adverb printed
+  pv-adverb[...]: E: Process is not a subreaper
+when it was stopped; not with the reaper.
+
+Which images lxrun ran in run 6 (the "[lxrt] <path>: PIE" lines of its log):
+   2 /tmp/lxrt-armroot/bin/bash                      (the test's launch shell; the tool)
+   1 /tmp/lxrt-armroot/tmp/armhome/.local/share/Steam/steamrtarm64/reaper
+  24 /tmp/lxrt-root/usr/bin/FEX-gb                   (x86 programs outside the container)
+  29 ~/SteamARM-roots/steamroot/usr/lib/lxrt-emu/FEX (x86 programs inside it)
+The tool's check child (/bin/bash) runs with its trace discarded.
+
+The runs that did not exit. Run 15, 60 s after its probe-result.txt was
+written (15:00:04), this run's guests (by STEAMARM_RUN_ID): the reaper,
+pv-adverb, Proton's python3, wine-preloader, wineserver, and wine64 running
+services.exe, winedevice.exe (2), plugplay.exe, svchost.exe -k LocalService,
+explorer.exe /desktop, rpcss.exe, tabtip.exe and
+  ...\files\share\wine/../xalia/xalia.exe
+ps: xalia.exe %CPU 100.0 state Rs; wineserver 0.0 Ss. Runs 21-23 (the
+harness now lists them):
+  (still running:  4 d3d12_clear.exe 1 explorer.exe 1 plugplay.exe 1 rpcss.exe 1 services.exe 1 steam.exe 1 svchost.exe 1 tabtip.exe 2 winedevice.exe 1 xalia.exe )
+  (still running:  1 explorer.exe 1 plugplay.exe 1 rpcss.exe 1 services.exe 1 steam.exe 1 svchost.exe 1 tabtip.exe 4 tone_clear.exe 2 winedevice.exe 1 xalia.exe )
+("4 d3d12_clear.exe": the command lines naming it -- the reaper, pv-adverb,
+proton, steam.exe.) Runs 24-25 listed the same set (xalia.exe, steam.exe).
+Proton sets PROTON_USE_XALIA=1 unless the app id is in its noxalia list
+(VERIFIED IN SOURCE, "Proton - Experimental"/proton lines 1465-1475 and
+1979-1985). No controller was published in /tmp/lxrt-input at 15:00
+(MEASURED ls). The X server was not restarted (running since 05:44). Cause
+UNKNOWN: the tool's launches hung more often (10 of 29) than the x86 path's
+(1 of 10), in stretches of time, and neither the reaper nor the client
+install path (26-29) made the difference.
+
+Tool-only cost: scripts/run-native.sh <tool with a missing FEXBIN> (the
+script and its check child, no exec) 0.09 s, three times; /bin/true under
+scripts/run-native.sh 0.04 s, three times (/usr/bin/time -p, real).
+
+3. The x86 client's path (tests/win/run_steam_path.sh)
+------------------------------------------------------
+STEAMPATH_PROBE=/tmp/steamarm-fexboundary/probe
+STEAMPATH_PFX=/tmp/steamarm-fexboundary/compatdata-<proton> (a new
+directory in the x86 root's /tmp, owned by this stage). The launch line is
+the script's: run-fex.sh /bin/bash <SLR>/_v2-entry-point --verb=waitforexitandrun --
+<Proton>/proton waitforexitandrun <exe>, no reaper. The result file landed in
+the prefix's drive_c/windows ("Warning: could not find DOS drive for current
+working directory '<the checkout>', starting in the Windows directory.").
+
+  time   Proton         probe  result                   exit
+  14:09  Experimental   d3d11  160.3 fps                53 s, rc 0 (new prefix)
+  14:10  Experimental   d3d12  161.2 fps                51 s, rc 0
+  14:12  Proton 10.0    d3d11  no result                did not exit, stopped at 242 s
+  14:16  Proton 10.0    d3d11  no result (PROTON_NO_ESYNC=1)  did not exit, stopped at 242 s
+  14:33  Experimental   d3d11  160.2 fps                49 s, rc 0
+  14:34  Experimental   d3d12  160.5 fps                50 s, rc 0
+  14:35  Experimental   tone   a stream from the container reached PulseAudio
+  15:02  Experimental   d3d11  160.7 fps                49 s, rc 0
+  15:20  Experimental   d3d11, d3d12  killed from outside after 11 s and 2 s, rc 137
+  15:22  Experimental   d3d11  178.8 fps                48 s, rc 0
+  15:23  Experimental   d3d11  no result                did not exit, stopped at 152 s
+  15:35  Experimental   d3d11  160.4 fps                50 s, rc 0   (right after tool runs 24-25 had not exited)
+  15:36  Experimental   d3d12  159.6 fps                57 s, rc 0
+Totals (Experimental, not killed from outside): 10 launches, 9 exited in 48-57 s.
+The 15:23 run's log ends at
+  vkGetInstanceProcAddr: Unknown Vulkan function at address 0x7eff7faf8e14: vkCreateMetalSurfaceEXT
+  pv-adverb[67944]: E: Process is not a subreaper
+(the second line when it was stopped).
+
+4. Proton 10.0 and Steam Linux Runtime 3.0 (sniper): does not start
+-------------------------------------------------------------------
+Through the tool (P1 above) and on the x86 client's path (14:12, 14:16),
+the same: pressure-vessel builds the sniper container, pv-locale-gen runs,
+Proton runs, and then nothing more until the stop:
+  Proton: Upgrading prefix from None to 10.1000-105 (/tmp/armhome/.local/share/Steam/steamapps/compatdata/999999/)
+  preloader: Warning: failed to reserve range 00007ffffe000000-00007fffffff0000
+  esync: up and running.
+  E We don't support modifying FS selector in 64bit mode!     (FEX, repeated)
+With PROTON_NO_ESYNC=1 the same, with more Wine processes at the stop (13
+guests against 6). Proton 10.0's files/bin/wine is i386 (ELF machine 3),
+with a separate wine64; Proton Experimental's is x86-64 (file(1)). The FEX
+"FS selector" line appears in the working Experimental runs too. Cause
+UNKNOWN. The installer refuses Proton 10.0 without --unverified.
+
+5. Does the native client list the tool? (no sign-in)
+-----------------------------------------------------
+scripts/install-fex-proton-tool.sh [--root arm64root], then
+scripts/run-steam-arm64.sh --for 90 (ended after 92-93 s), compat_log.txt:
+Steam Frame root (ARMROOT=~/SteamARM-roots/arm64root ARMROOT_LINK=/tmp/lxrt-arm64root), 14:20:16:
+  [2026-09-29 14:20:19] Client version: 1788652215
+  [2026-09-29 14:20:19] Mapping AppID 0 to tool "proton-stable" with priority 75
+  [2026-09-29 14:20:19] Processing local tool list at /tmp/armhome/.local/share/Steam/steamrtarm64/../compatibilitytools.d/steamarm-fex-proton/compatibilitytool.vdf...
+  [2026-09-29 14:20:19] Registering tool steamarm-fex-proton, AppID 0
+  [2026-09-29 14:20:19] Loaded manifest for tool steamarm-fex-proton.
+  webhelper.txt: [2026-09-29 14:20:33] BrowserReady: handle:65536
+                 [2026-09-29 14:20:34] SP DesktopLoginWindow_uid0: Created window: size: 700,440 ...
+Fedora armroot (the first attempt at 14:20:03 was refused: "guests are
+running on ... armroot" -- another session's Prism), 14:26:01:
+  [2026-09-29 14:26:05] Client version: 1788652215
+  [2026-09-29 14:26:05] Mapping AppID 0 to tool "proton_experimental" with priority 75
+  [2026-09-29 14:26:05] Processing local tool list at /tmp/armhome/.local/share/Steam/steamrtarm64/../compatibilitytools.d/steamarm-fex-proton/compatibilitytool.vdf...
+  [2026-09-29 14:26:05] Registering tool steamarm-fex-proton, AppID 0
+  [2026-09-29 14:26:05] Loaded manifest for tool steamarm-fex-proton.
+  webhelper.txt: [2026-09-29 14:26:12] SP DesktopLoginWindow_uid0: Created window: size: 700,440 ...
+No "Ignoring tool %s as it's for a different target platform %s." line (a
+string of steamrtarm64/steamclient.so, VERIFIED IN SOURCE with strings(1)).
+Before this stage the Fedora client's compat_log.txt had only "Client
+version" and "Mapping AppID 0" lines. Listed in Settings > Compatibility,
+selectable per title, launching from the UI: UNKNOWN (needs a sign-in).
+
+5b. A signed-in client, read from its logs (not a run of this stage)
+-------------------------------------------------------------------
+A session outside this stage started the launcher's Steam Frame entry at
+15:20:35 (launcher log steam-arm64-frame-20260929-152035.log) with the tool
+installed in that root; the client passed sign-in ("Waiting for compat in
+post-logon took: 0.205749s"). This stage signed in to nothing and started
+no game; it read, afterwards, <arm64root>/tmp/armhome/.local/share/Steam/logs/compat_log.txt:
+  [2026-09-29 15:21:23] Posting queued tool registration callback 0 steamarm-fex-proton
+  [2026-09-29 15:21:23] Command prefix for tool 0 "SteamARM: Proton x86 via FEX (experimental)" set to: "'/tmp/armhome/.local/share/Steam/compatibilitytools.d/steamarm-fex-proton'/steamarm-fex-proton run ".
+  [2026-09-29 15:21:23] DEBUG: setting env var: STEAM_COMPAT_FEX_CONFIG =
+  [2026-09-29 15:21:24] Failed to load manifest for tool 4628740!
+  [2026-09-29 15:21:49] Unmapping AppID 3164500
+  [2026-09-29 15:21:49] Mapping AppID 3164500 to tool "steamarm-fex-proton" with priority 250
+  [2026-09-29 15:22:08] Shutting down: forcing platform override cache flush to disk.
+and the launcher log (lines 719-720 and 1303-1304 of 1389):
+  steamarm-fex-proton: not passing on the ARM64 root's own guest environment: __GLX_VENDOR_LIBRARY_NAME MESA_LOADER_DRIVER_OVERRIDE LIBGL_ALWAYS_INDIRECT
+  steamarm-fex-proton: run via x86 Proton - Experimental + SteamLinuxRuntime_4 under FEX (root /tmp/lxrt-steamroot); client paths bound from /tmp/lxrt-arm64root: /tmp/armhome
+each after "[lxrt] /tmp/lxrt-arm64root/bin/sh: PIE" and "/bin/bash: PIE"
+lines and followed by "/tmp/lxrt-root/usr/bin/FEX-gb: PIE"; then
+pressure-vessel-wrap, and
+  Proton: Upgrading prefix from None to 11.0-100 (/tmp/armhome/.local/share/Steam/steamapps/compatdata/0/)
+  [session] run-native.sh ended with status 137 signal 9
+The Frame root's library gained compatdata/0 and compatdata/3164500 (left
+as they are: not this stage's). What the "run" was for, and whether AppID
+3164500 was started, is UNKNOWN (the tool's line did not name the program
+yet).
+
+6. The tool's checks from the real ARM64 root (MEASURED)
+--------------------------------------------------------
+Copies of the tool with a broken .conf, in <armroot>/opt/apps/steamarm-fex-proton-tests:
+  FEXBIN=FEX-missing:  rc=4, 1 s
+    steamarm-fex-proton: no FEX at /tmp/lxrt-root/usr/bin/FEX-missing (scripts/setup.sh builds it)
+  RUNTIME=SteamLinuxRuntime_missing:  rc=4, 1 s
+    steamarm-fex-proton: SteamLinuxRuntime_missing is not installed in the x86 Steam root (/tmp/lxrt-steamroot: /tmp/fexhome/.local/share/Steam/steamapps/common/SteamLinuxRuntime_missing); Proton - Experimental requires it
+The "FEXServer is not running" refusal (exit 5) was not exercised: the
+shared FEXServer ran throughout (VERIFIED IN SOURCE only).
+
+7. What the runs left, and where
+--------------------------------
+ARM64 roots: the tool in both clients' compatibilitytools.d (kept);
+steamapps/common/SteamARM-Probe and steamapps/compatdata/999998, 999999
+(armroot) and 999999 (Frame root): removed at the end of the stage;
+<armroot>/opt/apps/steamarm-fex-proton-tests: removed. x86 root: the new
+directory /tmp/steamarm-fexboundary (probe and two prefixes): removed at the
+end; as with any x86 client launch, pressure-vessel's runtime copies in
+SteamLinuxRuntime_4/var/tmp-* and SteamLinuxRuntime_sniper/var/tmp-*, Wine's
+/tmp/.wine-501, FEX's telemetry files in /tmp/fexhome/.fex-emu/Telemetry and
+Proton's dist.lock (touched). Nothing else in the x86 root changed
+(find -newermt over tmp/, the runtimes' var/ and tmp/fexhome).
+
+8. Tests
+--------
+At the end of the stage, on the Mac, with this tree:
+  make lxrt                             build/lxrun and build/hello-linux (2.6 s; up to date at the end)
+  make test-launcher-core               exit 0: application core "all checks passed"; python unittest
+                                        Ran 20 tests OK; run_app_dispatch 32/0; session 32/0;
+                                        safeguard 10/0; guest_env 26/0; mkarmroot 25/0;
+                                        run_steam_arm64 10/0; fex_proton_tool 35/0
+  tests/elf/run.sh                      67 passed, 0 failed (21.6 s)
+  tests/launcher/fex_proton_tool.sh     35 passed, 0 failed (fake roots; in make test-launcher-core)

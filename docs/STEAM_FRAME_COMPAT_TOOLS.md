@@ -803,7 +803,12 @@ of steps 1 and 2; step 5 needs a sign-in, which was not attempted.
    `benchmarks/stage6-bwrap-plan.txt`. Look for `--unshare-*`, the
    emulator-directory bind and `/run/gfx/main`.
 8. Build the routing tool of §7.3 and map Windows titles to it. Stop Valve's
-   FEX from being used as the emulator.
+   FEX from being used as the emulator. Built in stage 24:
+   "SteamARM: Proton x86 via FEX (experimental)" (`docs/FEX_GAME_BOUNDARY.md`,
+   `benchmarks/stage24-fex-game-boundary.txt`). It removes
+   `STEAM_COMPAT_EMULATOR` and the other emulator variables before
+   pressure-vessel sees them. Mapping titles to it from the UI is the user's
+   step.
 9. Run `tests/x18_preserve/run.sh` on the M4 under macOS 27, and check
    `_ml_satisfies_x86_64_requirements` in the kernelcache
    (`benchmarks/stage19-steamframe-base-and-arm64-limits.txt` §3).
