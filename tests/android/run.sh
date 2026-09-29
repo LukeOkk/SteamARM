@@ -182,6 +182,23 @@ if [ -n "$ready" ] && [ -f "$STAGE/usr/include/linux/android/binder.h" ] && [ -n
 else
     echo "  skip  native binder service (no $STAGE sysroot, or servicemanager not ready)"
 fi
+# A real libbinder daemon: idmap2d publishes "idmap" (BinderService::publish)
+# and serves from libbinder's own thread pool (startThreadPool +
+# joinThreadPool); IIdmap2::getIdmapPath is transaction 1.
+if [ -n "$ready" ]; then
+    GENV="$BENV" DL=60 gbg /system/bin/idmap2d >/dev/null &
+    idpid=$!
+    for _ in $(seq 1 50); do
+        GENV="$BENV" DL=10 g /system/bin/service check idmap | grep -q 'found' && break
+        sleep 0.1
+    done
+    out=$(GENV="$BENV" DL=20 g /system/bin/service call idmap 1 s16 /product/overlay/Test.apk i32 0)
+    flat=$(tr -d '\n' <<<"$out" | sed "s/'[^']*'//g")
+    if grep -q '^Result: Parcel' <<<"$out" && grep -q '00000000 00000033' <<<"$flat"; then
+        ok "idmap2d (libbinder's thread pool) registered and answered getIdmapPath: a 51-character path"
+    else bad "idmap2d getIdmapPath" "$(head -3 <<<"$out")"; fi
+    kill "$idpid" 2>/dev/null; wait "$idpid" 2>/dev/null
+fi
 kill "$smpid" 2>/dev/null; wait "$smpid" 2>/dev/null
 
 # vndservicemanager, the vendor context (/dev/vndbinder), and its client.

@@ -18,7 +18,8 @@
 //
 //   binder_ipc            the test (exit 0 and "== binder ipc: ok")
 //   binder_ipc bench N    N sync round trips, timing only
-//   binder_ipc pool       the thread pool (see pool_test)
+//   binder_ipc pool [N]   the thread pool (see pool_test); N: also time N
+//                         round trips to a parked looper
 #define _GNU_SOURCE
 #include <errno.h>
 #include <fcntl.h>
@@ -753,6 +754,7 @@ static void *pool_client_call(void *arg)
     return NULL;
 }
 
+static int g_pool_bench;
 static int pool_test(void)
 {
     printf("== binder pool (pid %d)\n", getpid());
@@ -787,6 +789,17 @@ static int pool_test(void)
               "two client threads, two calls in flight: BLOCK (held) released by RELEASE");
         CHECK(a.ans[0] != b.ans[0] && a.ans[0] && b.ans[0],
               "served by two different server threads (tids %d and %d)", a.ans[0], b.ans[0]);
+        if (g_pool_bench > 0) {
+            // Round trips to a looper parked in BINDER_WRITE_READ (the
+            // libbinder thread-pool path: no doorbell, no poll).
+            struct pcall x = { .code = P_RELEASE };
+            for (int i = 0; i < 200; i++) pool_client_call(&x);
+            double t0 = now_s();
+            for (int i = 0; i < g_pool_bench; i++) pool_client_call(&x);
+            double t1 = now_s();
+            printf("bench: %d sync round trips to a parked looper, %.1f us each\n",
+                   g_pool_bench, (t1 - t0) / g_pool_bench * 1e6);
+        }
         // One DONE per server looper: each leaves after answering one.
         struct pcall d = { .code = P_DONE }, e = { .code = P_DONE };
         pool_client_call(&d);
@@ -821,6 +834,7 @@ int main(int argc, char **argv)
 {
     if (argc > 1 && !strcmp(argv[1], "pool")) {
         setvbuf(stdout, NULL, _IOLBF, 0);
+        g_pool_bench = argc > 2 ? atoi(argv[2]) : 0;
         return pool_test();
     }
     bool bench = argc > 1 && !strcmp(argv[1], "bench");

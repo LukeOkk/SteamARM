@@ -93,8 +93,9 @@ guides, and nothing in them is ready for players yet. Start with the plan,
   [STEAM_FRAME_COMPAT_TOOLS.md](docs/STEAM_FRAME_COMPAT_TOOLS.md),
   [STEAM_RUNTIME_4_ARM64.md](docs/STEAM_RUNTIME_4_ARM64.md),
   [LEPTON_REUSE_ANALYSIS.md](docs/LEPTON_REUSE_ANALYSIS.md).
-- Android userspace without a VM (bionic programs run; ART's heap does not
-  fit macOS yet):
+- Android userspace without a VM (bionic programs run; binder works in
+  userspace, with Android's own servicemanager; ART's heap does not fit
+  macOS yet):
   [ANDROID_RUNTIME_ARCHITECTURE.md](docs/ANDROID_RUNTIME_ARCHITECTURE.md).
 
 ## Build from source
