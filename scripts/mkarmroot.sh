@@ -9,6 +9,8 @@
 #
 #   scripts/mkarmroot.sh [out-dir]      default $STEAMARM_STATE/armroot
 #   scripts/mkarmroot.sh --stage-only   refresh RPM lock/stage, preserve live root
+# A rebuild keeps <out-dir>/tmp (the client's home, tmp/armhome) and
+# <out-dir>/opt/apps.
 set -euo pipefail
 cd "$(dirname "$0")/.." || exit 1
 BUILD="${STEAMARM_BUILD:-$HOME/SteamARM-build}"
@@ -25,20 +27,42 @@ SONAMES="libasound.so.2 libasyncns.so.0 libatk-1.0.so.0 libatk-bridge-2.0.so.0 l
  libsystemd.so.0 libudev.so.1 libva.so.2 libvdpau.so.1 libXcomposite.so.1 libXdamage.so.1
  libXfixes.so.3 libXi.so.6 libXinerama.so.1 libxkbcommon.so.0 libXrandr.so.2 libXrender.so.1
  libXtst.so.6 libGL.so.1 libvulkan.so.1 libdrm.so.2 libgbm.so.1 libxcb.so.1 libX11-xcb.so.1"
+# Data and dlopen-only libraries no soname pulls in:
+#   libX11-common    /usr/share/X11/locale. Without it Xlib supports no locale:
+#                    XwcTextListToTextProperty returns -2 and leaves its
+#                    XTextProperty unwritten, and vgui2_s.so (which ignores the
+#                    return) hands that stack garbage to XFree -> "free():
+#                    invalid pointer" (benchmarks/stage22-native-arm64-bringup.txt).
+#   glibc-common     C.UTF-8; glibc-langpack-en: en_US.UTF-8, which the client
+#                    asks setlocale() for.
+#   SDL3             sdl2-compat (libSDL2) dlopens libSDL3.so.0 and aborts
+#                    gldriverquery without it.
 SEEDS="glibc libgcc libstdc++ bash coreutils-single util-linux-core ca-certificates nss-softokn nss-softokn-freebl p11-kit-trust
  fontconfig dejavu-sans-fonts dejavu-sans-mono-fonts xkeyboard-config mesa-dri-drivers
- mesa-vulkan-drivers openssl mesa-libGL mesa-libEGL pciutils"
+ mesa-vulkan-drivers openssl mesa-libGL mesa-libEGL pciutils
+ libX11-common glibc-common glibc-langpack-en SDL3"
 for s in $SONAMES; do SEEDS="$SEEDS so:$s"; done
 SEEDS=$(echo $SEEDS)                  # one line: mkroot-rpm reads a single line
 STAGE="$BUILD/armstage-f43"
-MKROOT_SEEDS="$SEEDS" MKROOT_LOCK="$PWD/scripts/mkarmroot.lock" MKROOT_STAGE="$STAGE" \
-    MKROOT_STAGE_ONLY=1 scripts/mkroot-rpm.sh $([ -f scripts/mkarmroot.lock ] || echo --relock) "$BUILD/armroot-unused"
+LOCK="$PWD/scripts/mkarmroot.lock"
+# Relock (today's repodata) only when the seeds changed: otherwise the lock is
+# the input and the root is reproduced package for package.
+RELOCK=
+if [ ! -f "$LOCK" ] || [ "$(sed -n 's/^# root seeds: \(.*\) + their shared-library closure$/\1/p' "$LOCK")" != "$SEEDS" ]; then
+    RELOCK=--relock
+fi
+MKROOT_SEEDS="$SEEDS" MKROOT_LOCK="$LOCK" MKROOT_STAGE="$STAGE" \
+    MKROOT_STAGE_ONLY=1 scripts/mkroot-rpm.sh $RELOCK "$BUILD/armroot-unused"
 if [ "$STAGE_ONLY" -eq 1 ]; then echo "armroot stage ready: $STAGE"; exit 0; fi
 # The root is the stage (APFS clones: no extra space) plus what a booted
 # system would have written.
 if [ -e "$OUT" ] && [ ! -f "$OUT/.lxrt-armroot" ]; then
     echo "refusing: $OUT exists and was not made by this script" >&2; exit 1
 fi
+# Built beside the old root and swapped in at the end, so a failed build
+# leaves the old one (and the client's downloads in it) untouched.
+FINAL="$OUT"
+OUT="$FINAL.new"
 rm -rf "$OUT"
 cp -Rc "$STAGE" "$OUT"
 touch "$OUT/.lxrt-armroot"
@@ -69,4 +93,20 @@ done
 [ -e "$OUT/etc/machine-id" ] || uuidgen | tr -d '-' | tr 'A-Z' 'a-z' > "$OUT/etc/machine-id"
 # The runtime's Vulkan shim (MoltenVK) as the system libvulkan.
 [ -f build/libvulkan.so.1 ] && cp build/libvulkan.so.1 "$OUT/usr/lib64/libvulkan.so.1"
+# NSS's builtin root-CA module. Fedora's p11-kit-trust installs it as the
+# libnssckbi.so alternative (a scriptlet, not run here); libcef dlopens it by
+# that name.
+[ -e "$OUT/usr/lib64/libnssckbi.so" ] || ln -s pkcs11/p11-kit-trust.so "$OUT/usr/lib64/libnssckbi.so"
+# Runtime state survives a rebuild: tmp/ holds the client's home (tmp/armhome,
+# ~1 GB of client plus whatever it downloaded), opt/apps what was installed there.
+for keep in tmp opt/apps; do
+    if [ -e "$FINAL/$keep" ]; then
+        mkdir -p "$(dirname "$OUT/$keep")"
+        rm -rf "${OUT:?}/$keep"
+        mv "$FINAL/$keep" "$OUT/$keep"
+    fi
+done
+rm -rf "$FINAL"
+mv "$OUT" "$FINAL"
+OUT="$FINAL"
 echo "armroot ready: $OUT ($(du -sh "$OUT" | cut -f1))"
