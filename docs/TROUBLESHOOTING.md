@@ -87,9 +87,18 @@ the full mode if you changed it, and **Sistema → esync/fsync** off.
 
 ## Memory
 
-**Programs stopped with "memory limit"**
-The memory guard stopped them before the Mac ran out of memory. Close other
-apps, or raise **Sistema → DRAM** (at most the maximum the list offers).
+**"Steam terminó con la señal 9" / "El guardián de memoria detuvo Steam"**
+The memory guard (`scripts/safeguard.sh`) stopped the Linux programs before
+the Mac ran out of memory. The launcher now says so and gives the reason;
+`~/SteamARM-roots/logs/safeguard.log` has a `STOP` or `KILL` line with it.
+It acts only when macOS reports critical memory pressure, or when free
+memory stays under 12 % for 3 s, and then it stops the largest program
+first (usually the game), and the rest only if the pressure lasts 5 s more.
+Up to 0.3.4 it stopped everything as soon as free memory read under 35 %,
+which on a 16 GB Mac happened with Steam alone and other apps open. Close
+other apps, or raise **Sistema → DRAM** (at most the maximum the list
+offers). A signal 9 without such a line in `safeguard.log` came from
+elsewhere.
 
 ## Sound
 

@@ -143,6 +143,7 @@ test-launcher-core:
 	build/application-core-tests
 	tests/launcher/run_app_dispatch.sh
 	tests/launcher/session.sh
+	tests/launcher/safeguard.sh
 
 .PHONY: launcher
 launcher: $(LAUNCHER_BIN) launcher/Info.plist.in

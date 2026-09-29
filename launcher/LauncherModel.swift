@@ -352,7 +352,11 @@ final class LauncherModel: ObservableObject {
         }
         let logAt = logPath ?? Paths.logs.path
         if !stopped, let name = running?.name {
-            if let s = status, s != 0 {
+            if bySignal == 9, let reason = Self.recentGuardStop() {
+                alert = "El guardián de memoria detuvo \(name): \(reason). "
+                    + "Cierra otras apps o cambia el límite en Configuración → Sistema → DRAM. "
+                    + "Registro: \(logAt)."
+            } else if let s = status, s != 0 {
                 let how = bySignal.map { "la señal \($0)" } ?? "el código \(s)"
                 alert = "\(name) terminó con \(how). Revisa el registro en \(logAt)."
             } else if status == nil, quick {
@@ -362,5 +366,16 @@ final class LauncherModel: ObservableObject {
         running = nil
         phase = .idle
         openedScreenSharing = false
+    }
+
+    /// scripts/safeguard.sh writes "<epoch> <reason>" to logs/safeguard.last
+    /// whenever it kills guests. A SIGKILL within a minute of that is its doing.
+    static func recentGuardStop(now: Date = Date()) -> String? {
+        guard let s = try? String(contentsOf: Paths.logs.appendingPathComponent("safeguard.last"),
+                                  encoding: .utf8) else { return nil }
+        let parts = s.trimmingCharacters(in: .whitespacesAndNewlines).split(separator: " ", maxSplits: 1)
+        guard parts.count == 2, let t = TimeInterval(parts[0]),
+              abs(now.timeIntervalSince1970 - t) < 60 else { return nil }
+        return String(parts[1])
     }
 }

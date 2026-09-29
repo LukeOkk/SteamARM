@@ -59,7 +59,13 @@ La ventana de configuración sigue el diseño de Ryujinx:
 16 GB, a 12; con 64 GB, a 60. **Automático** usa ese máximo.
 
 - La DRAM es el tope de todo lo que ejecuta SteamARM. El vigilante de
-  memoria detiene los programas antes de que el Mac se quede sin memoria.
+  memoria detiene los programas antes de que el Mac se quede sin memoria:
+  solo con presión de memoria crítica de macOS, o con menos del 12 % libre
+  durante 3 s. Primero detiene el programa más grande (normalmente el
+  juego); el resto solo si la presión sigue 5 s después. El launcher dice
+  que fue él y por qué, en lugar de "terminó con la señal 9". Hasta la
+  0.3.4 lo detenía todo con menos del 35 % libre, y cerraba Steam en Macs
+  de 16 GB con otras apps abiertas.
 - La VRAM es la memoria de vídeo que ven los juegos.
 
 ## Mandos
