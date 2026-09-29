@@ -3,6 +3,7 @@
 // Usage: lxrun [--trace] [--dry-run] <elf> [args...]
 
 #include "lxrt.h"
+#include <dlfcn.h>
 #include <libproc.h>
 #include <mach/mach.h>
 #include <mach/mach_vm.h>
@@ -86,7 +87,7 @@ static void fault_report(int sig, siginfo_t *info, void *uap)
                      : sig == SIGBUS ? "SIGBUS" : sig == SIGSYS ? "SIGSYS (a live svc: x8/x16 below)"
                      : "SIGSEGV";
 
-    char buf[512];
+    char buf[2048];
     int n = snprintf(buf, sizeof buf, "\n[lxrt] %s at pc 0x%llx", name,
                      (unsigned long long)pc);
     // Which address, and the thread's sp and lr: a fault inside a host
@@ -130,6 +131,41 @@ static void fault_report(int sig, siginfo_t *info, void *uap)
                           fname[0] ? " " : "", fname);
         }
     }
+    // A trap or fault inside host code (a libsystem routine the runtime
+    // called: a SIGTRAP in pthread_jit_write_protect_np once, 1 of 5 x86
+    // Steam starts, stage 23): name it and the runtime frames that led
+    // there. dladdr is not async-signal-safe; the process is dying anyway.
+    if (!g_img || pc < (uint64_t)g_img->base || pc >= (uint64_t)g_img->base + g_img->span) {
+        Dl_info di;
+        uint64_t lr = uc->uc_mcontext->__ss.__lr, fp = uc->uc_mcontext->__ss.__fp;
+        if (dladdr((void *)(uintptr_t)pc, &di) && di.dli_sname)
+            n += snprintf(buf + n, sizeof buf - n, "\n[lxrt]   pc %s+%llu", di.dli_sname,
+                          (unsigned long long)(pc - (uint64_t)(uintptr_t)di.dli_saddr));
+        uint64_t frames[8] = { lr };
+        int nf = 1;
+        for (; nf < 8 && fp && !(fp & 7); nf++) {
+            mach_vm_size_t got = 0;
+            uint64_t pair[2];
+            if (mach_vm_read_overwrite(mach_task_self(), fp, sizeof pair,
+                                       (mach_vm_address_t)(uintptr_t)pair, &got) != KERN_SUCCESS ||
+                got != sizeof pair)
+                break;
+            frames[nf] = pair[1];
+            if (pair[0] <= fp) break;
+            fp = pair[0];
+        }
+        for (int k = 0; k < nf && n < (int)sizeof buf - 160; k++) {
+            if (dladdr((void *)(uintptr_t)frames[k], &di) && di.dli_sname)
+                n += snprintf(buf + n, sizeof buf - n, "\n[lxrt]   %s %s+%llu", k ? "from" : "lr",
+                              di.dli_sname,
+                              (unsigned long long)(frames[k] - (uint64_t)(uintptr_t)di.dli_saddr));
+            else
+                n += snprintf(buf + n, sizeof buf - n, "\n[lxrt]   %s 0x%llx", k ? "from" : "lr",
+                              (unsigned long long)frames[k]);
+        }
+    }
+    if (n > (int)sizeof buf - 256)      // snprintf returns what it wanted to write
+        n = (int)sizeof buf - 256;
     if (sig == SIGSYS)
         n += snprintf(buf + n, sizeof buf - n, ", x8=0x%llx x16=0x%llx x30=0x%llx",
                       (unsigned long long)uc->uc_mcontext->__ss.__x[8],
