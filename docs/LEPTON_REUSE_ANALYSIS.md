@@ -14,7 +14,18 @@ rows follow main's runtime changes. The research ran nothing on a Mac; the
 MEASURED facts come from the repository's record. stage21 facts are MEASURED
 on the owner's Mac (M4, macOS 27). The Lepton app entry, and how the client
 offers tools, are in `docs/STEAM_FRAME_COMPAT_TOOLS.md`; this page does not
-repeat them. The session could not reach these hosts:
+repeat them.
+
+Updated again 2026-09-29 for stage 25 (`benchmarks/stage25-android-research.txt`):
+from the owner's Mac, Valve's GitLab answered, so the upstream repository
+and the image submodules were cloned and read directly. Section 0 has what
+that adds: the mirror checked against upstream, what the Android 11 image
+is built from, how it starts, how binder is provided, the graphics path,
+and what SteamARM can reuse. Sections 1-8 are kept as written, except
+where section 0 says a statement is superseded. The Android bring-up plan
+that uses this is `docs/ANDROID_ZERO_VM_FEASIBILITY.md`; Play Store is
+`docs/PLAY_STORE_RESEARCH.md`. The first session (a cloud session) could
+not reach these hosts:
 
 - `gitlab.steamos.cloud` (Valve's upstream for Lepton);
 - `partner.steamgames.com`, `store.steampowered.com` and `steamdb.info`;
@@ -53,6 +64,175 @@ repeat them. The session could not reach these hosts:
   at that commit.
 - SteamARM: paths in https://github.com/LukeOkk/SteamARM at commit `4c5efd5`,
   with line numbers re-checked at `dfab6e2`.
+- Stage 25 (section 0): Valve's upstream
+  `https://gitlab.steamos.cloud/frame-public/lepton` at `0ea2492` (tag
+  v3.0.3, 2026-09-25), and the submodules it pins, cloned from
+  `gitlab.steamos.cloud/frame-public/` and `github.com/waydroid/`. Paths in
+  section 0 are relative to the Lepton tree at `6135b53` unless another
+  repository is named.
+
+## 0. Stage 25: the upstream, `image/` and `compat_tool/` read directly
+
+### 0.1 Upstream and mirror
+
+| fact | label | source |
+|---|---|---|
+| `git ls-remote https://gitlab.steamos.cloud/frame-public/lepton.git` from the Mac: `main` and `HEAD` at `0ea2492`, tags v3.0.0 (`4a592d2`), v3.0.1 (`552b188`), v3.0.2 (`f64fb91`), v3.0.3 (`0ea2492`). The clone succeeded. | MEASURED | stage 25 record |
+| The mirror's commit `6135b53` is an ancestor of upstream `main`, with the same tree (`090bc68`). Upstream has 45 commits; 27 are after `6135b53`, up to 2026-09-25. So the mirror is a faithful copy of upstream at that commit. This supersedes "Mirror integrity against GitLab was not verified" (section 8). | MEASURED | `git merge-base --is-ancestor`; `git rev-parse` |
+| The 27 later commits: public submodule URLs (`2f89a06`, `2c09919`), public Vulkan headers, test fixes for Android 14, shellcheck fixes, a systemd slice fix and an Android 11 ANGLE patch (`image/android_vendor_valve/waydroid-patches/base-patches-30/frameworks/native/1008-lepton-Make-angle-work-with-android-11.patch`). None changes how the container starts. | VERIFIED IN SOURCE | `git log 6135b53..0ea2492` |
+| Upstream's `.gitmodules` points `image/android_device_waydroid_waydroid` and both `android_hardware_waydroid` at `gitlab.steamos.cloud/frame-public/`, and `android_vendor_waydroid` at `github.com/waydroid/`. All three were cloned. Pins: device tree `589fd9f` (2026-09-10), hardware `896f652` (2026-05-20) for `image/` and `6f95629` for `image-14/`, Waydroid vendor `e2619850` (2026-04-02). | MEASURED (clone); VERIFIED IN SOURCE (pins, `git ls-tree`) | upstream `.gitmodules` |
+
+### 0.2 What the Android 11 image is built from (`image/`)
+
+VERIFIED IN SOURCE:
+
+- The build runs in a podman container from
+  `image/builder_image/Containerfile` (`FROM ubuntu:22.04`, x86-64) and
+  refuses to run outside one (`image/.buildscripts/update_repositories.sh`).
+- `repo init -u https://github.com/LineageOS/android.git -b lineage-18.1`
+  (`update_repositories.sh`), then local manifests: Waydroid's for SDK 30
+  (from `android_vendor_waydroid`) and Valve's
+  (`image/android_vendor_valve/manifest_scripts/manifests-30/`):
+  - `10-valve-remotes.xml`: the `gitlab.steamos.cloud` remote;
+  - `11-removes.xml`: about 90 projects removed (car, TV, telephony,
+    contacts, calendar, download and other providers, most LineageOS apps,
+    Waydroid's updater, Waydroid's own device/hardware/vendor trees);
+  - `12-valve-replacements.xml`: the device tree, `hardware/waydroid`,
+    `vendor/extra` = `android_vendor_waydroid` at `e2619850`, and Vulkan 1.3
+    headers;
+  - `13-additions.xml`: `system/memory/libdmabufheap` from AOSP
+    `android-12.0.0_r31`.
+- `copy_vendored_projects.sh` rsyncs the device tree to
+  `device/waydroid/waydroid`, `hardware/waydroid`, and Valve's
+  `android_vendor_valve` over `vendor/extra`, so Valve's patches land in
+  the same `waydroid-patches/base-patches-30/` tree as Waydroid's.
+  `apply-waydroid-patches` (Waydroid's `vendorsetup.sh`) then applies both:
+  Waydroid's 177 base patches (`e2619850`) and Valve's 101 at `6135b53` (102 at
+  `0ea2492`). Valve's are numbered 1000 and up; many revert Waydroid
+  features Lepton does not use: host hwbinder HALs (`system/libhidl/100x`,
+  `system/libhwbinder/100x`), the Waydroid clipboard and power services
+  (`frameworks/base/1000-1004`, `lineage-sdk/100x`).
+- `build_image.sh`: `lunch lineage_lepton_arm64_only-userdebug`,
+  `make systemimage vendorimage`, a `NOTICE.txt` titled "Lepton Android
+  Licenses", `simg2img` to raw images, and a `symbols.tar.zst`.
+- The device tree (`android_device_waydroid_waydroid` `589fd9f`):
+  - `BoardConfig.mk`: 64-bit binder, flattened APEX, no kernel, no
+    bootloader, HWC2, gralloc 4, Mesa with `-Dallow-kcmp=enabled`, libgbm
+    and the zink gallium driver, squashfs system (1.5 GB partition) and
+    vendor, `MALLOC_SVELTE := true` (no Scudo);
+  - `lepton_arm64_only/BoardConfig.mk`: arm64 only, `armv8-2a`,
+    `cortex-a76`, no second arch, no Mesa Vulkan driver ("We inject vulkan
+    drivers from elsewhere");
+  - `lepton_arm64_only/lineage_lepton_arm64_only.mk`: inherits
+    `core_64_bit_only.mk`; brand `lepton`, model "Lepton arm64 only Device";
+  - `device.mk`: inherits `full_base.mk` and `product_launched_with_p.mk`
+    and LineageOS's Wi-Fi-only tablet config; audio HAL
+    `audio.primary.waydroid` with the ALSA pulse plugin; camera over V4L2;
+    composer 2.1 and allocator services, `hwcomposer.waydroid`, minigbm,
+    gbm and Qualcomm gralloc; software gatekeeper, keymaster 4.0 service,
+    health, memtrack; `vndservicemanager`; SwiftShader EGL/GLES,
+    `vulkan.pastel` and ANGLE libraries; `mediaswcodec`; DocumentsUI;
+  - `system.prop`: SurfaceFlinger "running without sync framework",
+    `debug.sf.latch_unsignaled=1`, Dalvik heap sizes, RescueParty off,
+    lmkd levels.
+
+### 0.3 How it starts Android
+
+VERIFIED IN SOURCE:
+
+1. `compat_tool/lepton` takes the lock and computes a context per app
+   (`docs/STEAM_FRAME_COMPAT_TOOLS.md`, section 3.1 here).
+2. `properties.sh` writes `lepton.prop`: memfd instead of ashmem,
+   `bpf.progs_loaded=1`, `ro.cold_boot_done=true` (no ueventd),
+   `dalvik.vm.usejit=true`, graphics driver selection, Waydroid's host
+   properties (`waydroid.host.uid=1000`, the XDG and PulseAudio paths,
+   stub sensors), headless or flat-screen
+   (`compat_tool/liblepton/properties.sh:19-137`).
+3. `start_container` runs `podman run --read-only --init=false
+   --userns=keep-id:uid=0,gid=0 --user 0:0 ... --rootfs <rootfs>:O /init`
+   (`compat_tool/liblepton/liblepton.sh:174-228`): Android's `/init` is
+   PID 1 in a rootless container.
+4. Init runs Waydroid's container first stage (no mounts of `/dev`,
+   `/proc`, `/sys`, no SELinux, straight to second stage:
+   `android_vendor_waydroid` `waydroid-patches/base-patches-30/system/core/0001`)
+   and the `.rc` files of the image plus Lepton's overlay:
+   `binder.rc` (0.4), `network.rc` (remount `/proc/sys` read-write),
+   `z_audio.rc` (the audio HAL as root, which maps to the host user),
+   `lepton_onboot.rc` (writes `/data/lepton-onboot` on
+   `sys.boot_completed=1`), `lepton_volume.rc`, `perfetto.rc`
+   (`compat_tool/images/rootfs_overlay/`).
+5. `/data` is the pre-booted "sysbake" `/data` as a lower layer; a missing
+   sysbake means "verify the files of Lepton"
+   (`compat_tool/liblepton/baking.sh:62-71`).
+
+### 0.4 How binder is provided
+
+VERIFIED IN SOURCE:
+
+- The image's init mounts binderfs itself on `early-init`, then renames
+  `anbox-binder`, `anbox-hwbinder` and `anbox-vndbinder` to `binder`,
+  `hwbinder` and `vndbinder`
+  (`compat_tool/images/rootfs_overlay/system/etc/init/binder.rc`). AOSP's
+  `init.rc` then links `/dev/binder`, `/dev/hwbinder` and `/dev/vndbinder`
+  to `/dev/binderfs/*` (LineageOS `android_system_core` `9242067`
+  `rootdir/init.rc:175-189`).
+- A binderfs mount creates the devices named in the kernel's
+  `binder.devices` parameter (`torvalds/linux` `6f8319e`
+  `drivers/android/binderfs.c:672-685`). So the Frame's kernel must list
+  the `anbox-*` names. This settles half of the HYPOTHESIS in section 3.6:
+  the names come from the kernel parameter; whether the Frame's kernel
+  sets them is still UNKNOWN.
+- Waydroid's host tool does it from outside instead: it loads
+  `binder_linux` with `devices=anbox-binder,...` or creates the devices
+  with `BINDER_CTL_ADD` on `/dev/binderfs/binder-control`
+  (`waydroid/waydroid` `c78a305` `tools/helpers/drivers.py:15-99`).
+- Userspace is stock libbinder, libhwbinder and the three service
+  managers with Waydroid's and Halium's SELinux removals
+  (`frameworks/native/0001-0003` in Waydroid's set) and Valve's uid in the
+  transaction flags (`frameworks/native/1004`, `system/libhwbinder/1000`).
+  Valve reverts Waydroid's "host hwbinder" support: Lepton has no HALs on
+  the host side.
+
+### 0.5 Graphics, display, input and audio path (API 30)
+
+VERIFIED IN SOURCE (`android_hardware_waydroid` `896f652` unless noted):
+
+- `hwcomposer.waydroid` is an HWC1 module (it composes `hwc_layer_1_t`)
+  run behind the composer 2.1 service; Waydroid patches the HWC2-on-1
+  adapter (`hardware/interfaces/0001-hwc2on1-Fixup-HWC_IS_CURSOR_LAYER-flag.patch`).
+- It is a Wayland client (Lepton points it at gamescope's socket,
+  section 4.2). A gbm or minigbm buffer is passed to the compositor as a
+  `zwp_linux_dmabuf_v1` buffer (`hwcomposer/gralloc_handler.cpp:175-195`);
+  a buffer of any other gralloc, including `default` (ashmem), is copied
+  into a memfd-backed `wl_shm` buffer (`:80-110`, choice at `:404-414`).
+  The gralloc type comes from `ro.hardware.gralloc`
+  (`hwcomposer/wayland-hwc.cpp:1963-1977`).
+- GLES and SurfaceFlinger's own rendering: Zink over the injected Turnip
+  by default; SwiftShader (API 30) or ANGLE plus `vulkan.pastel` in
+  Lepton's software mode (`compat_tool/liblepton/properties.sh:47-78`).
+- Input: the composer creates FIFOs `/dev/input/wl_touch_events`,
+  `wl_keyboard_events`, `wl_pointer_events` and `wl_tablet_events` and
+  writes `struct input_event` records into them
+  (`hwcomposer/wayland-hwc.h:75-79`, `wayland-hwc.cpp:1334-1365, 1853`);
+  Waydroid's EventHub patches treat those FIFOs as input devices
+  (`frameworks/native/0004`, `0006`, `0012` in Waydroid's set).
+- Audio: `audio.primary.waydroid` opens ALSA's `pulse` PCM
+  (`audio/audio_hw.c:164`), through the ALSA pulse plugin to the host's
+  PulseAudio socket.
+
+### 0.6 What SteamARM can reuse
+
+| item | licence | reuse | how (HYPOTHESIS unless marked) |
+|---|---|---|---|
+| `compat_tool/` (bash, `.rc` overlay, property list, seccomp profile, APK extractor) | MIT, Valve (`LICENSES/compat_tool.md`) | reference; port the logic | an lxrun "Android mode" launcher does what podman and this tool do: build `/dev`, write the properties, start services, bake `/data`, run `am start` (`docs/ANDROID_ZERO_VM_FEASIBILITY.md` §3.7). Keep Valve's MIT notice if code is copied. |
+| `lepton.seccomp.json`'s answers (success for chown, setuid, setgid, setgroups and friends) | MIT | port into lxrun's syscall table for Android guests | `docs/ANDROID_ZERO_VM_FEASIBILITY.md` §3.8 |
+| Waydroid's `hwcomposer` | Apache-2.0 (`android_hardware_waydroid`) | reference | an X11 or CAMetalLayer composer keeps its HWC1 structure, window modes and input FIFOs, and replaces Wayland |
+| Waydroid's audio HAL and ALSA pulse plugin | Apache-2.0 / LGPL (alsa) | reuse as is | SteamARM's PulseAudio socket in the guest root |
+| Waydroid's and Valve's Android patches | the licence of each patched component (mostly Apache-2.0) | reuse when building an image | only on a Linux build host (below) |
+| The GPL-3.0 Lepton image | GPL-3.0 as a combined work, per Valve (`LICENSES/image.md`) | possible Android root, if built by or for the owner from source | AOSP builds need "a 64-bit x86 system", 400 GB of disk and 64 GB of RAM, and macOS has not been supported since 2021-06-22 (UPSTREAM DOCUMENTED, https://source.android.com/docs/setup/start/requirements). Lepton's own build is an x86-64 Ubuntu container. So it cannot be built on the owner's M4 without a VM; it needs a Linux x86-64 machine or CI, with the corresponding source published if the build is distributed. |
+| Waydroid's prebuilt VANILLA images | LineageOS/AOSP component licences; published by Waydroid | the practical root for bring-up | already downloaded on the owner's Mac by another session (state under `~/SteamARM-roots/android/`, not repo); `docs/ANDROID_ZERO_VM_FEASIBILITY.md` §6 |
+| Valve's `rootfs.tar.zst`, `sysbake.*` from the Steam depot | PROPRIETARY_DO_NOT_REDISTRIBUTE (this repo's policy) | never shipped; read in place only if the owner's Steam installed it | |
+| `/usr/share/guestos/android`, androidarm64 Steam libraries, `vrclient.so` | PROPRIETARY_DO_NOT_REDISTRIBUTE | never shipped | |
 
 ## 1. What Lepton is and where its source is
 
@@ -75,7 +255,7 @@ repeat them. The session could not reach these hosts:
 
 | fact | label | source |
 |---|---|---|
-| The upstream is Valve's GitLab, `gitlab.steamos.cloud/frame-public/lepton`. It returned EGRESS_BLOCKED from the shell and from server-side WebFetch. It was not read. | UNKNOWN (upstream contents) | https://gitlab.steamos.cloud/frame-public/lepton |
+| The upstream is Valve's GitLab, `gitlab.steamos.cloud/frame-public/lepton`. It returned EGRESS_BLOCKED from the shell and from server-side WebFetch. It was not read. (Superseded in stage 25: cloned from the Mac, section 0.1.) | UNKNOWN (upstream contents); MEASURED in stage 25 | https://gitlab.steamos.cloud/frame-public/lepton |
 | Only a GitHub mirror could be read. Its description is "Mirror of https://gitlab.steamos.cloud/frame-public/lepton". | VERIFIED IN SOURCE | https://github.com/xXJSONDeruloXx/lepton |
 | Pinned commit: `6135b53dcfe6111ca8fc310a3b35e0fec9e65b9b`, dated 2026-09-16. | VERIFIED IN SOURCE | https://github.com/xXJSONDeruloXx/lepton/commits/main |
 | `git describe --tags 6135b53` gives `v3.0.1-11-g6135b53`: 11 commits past v3.0.1, 8 of them non-merge. | VERIFIED IN SOURCE | https://github.com/xXJSONDeruloXx/lepton/commits/main |
@@ -539,13 +719,17 @@ these sit among the other ARM64 work: `docs/ARM64_FIRST_MIGRATION.md`.
 - `https://gitlab.steamos.cloud/frame-public/lepton`: EGRESS_BLOCKED for both
   the shell and WebFetch. The upstream README, LICENSE, releases and GitLab
   project page were not seen directly. Mirror integrity against GitLab was
-  not verified.
+  not verified. Superseded in stage 25: from the owner's Mac the
+  repository was cloned and the mirror checked against it (section 0.1);
+  the GitLab project page and releases were still not viewed.
 - `https://partner.steamgames.com/doc/steamhardware/steamframe/adb_lepton`,
   `apk_upload`, `compat`, `compatibility` and `engines/*`: EGRESS_BLOCKED.
   Only search-engine excerpts were used.
 - The submodule repos `gitlab.steamos.cloud/frame-public/android_hardware_waydroid`,
   `android_device_waydroid_waydroid` and `android-vulkan-headers` were not
   fetched. The Waydroid hwcomposer and gralloc display source was not read.
+  Superseded in stage 25 for the first two: cloned and read (sections
+  0.2-0.5). `android-vulkan-headers` was still not fetched.
 - `steamdb.info` (app 3029110): EGRESS_BLOCKED.
 - `store.steampowered.com` (apps 3029110 and 3056000): EGRESS_BLOCKED. Only
   search listings were seen.
