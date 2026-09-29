@@ -292,7 +292,7 @@ This is VERIFIED IN SOURCE; details in `docs/APPLICATION_MANAGER.md`.
 | `SteamARMApp`, `HomeView`, `Settings*`, `Hotkeys`, `Controllers*`, `SDLShim.h`, `Info.plist.in`, tests | KEEP | NOT_APPLICABLE | |
 | `LauncherModel.swift` | KEEP | TEMPORARY_X86_DEPENDENCY | Adopts a running Steam by the ps substring `ubuntu12_32/steam ` (`:290`). `needsSetup` checks for the x86 `steam.sh`. |
 | `Models.swift` | KEEP | TEMPORARY_X86_DEPENDENCY | Has a stale copy of Steam's definition in `AppEntry.steam` (`:76-79`), which `run-app.sh` never reads. `Paths.guestRoot` = `/tmp/lxrt-steamroot` for every app. |
-| `Installers.swift` | KEEP | REPLACE_WITH_ARM64 | Heroic and Prism deliberately pick x86-64 assets. Whether usable aarch64 builds exist is UNKNOWN. |
+| `Installers.swift` | KEEP | REPLACE_WITH_ARM64 | Heroic and Prism deliberately pick x86-64 assets. Whether usable aarch64 builds exist is UNKNOWN. Since stage 24: Heroic installs its linux-arm64 build (native, the Fedora ARM64 root; `docs/HEROIC_INTEGRATION.md`); Prism still picks x86-64. |
 | `AddAppView.swift` | KEEP | TEMPORARY_X86_DEPENDENCY | Since `748bc97` it records the ISA from `e_machine` (`ELFInspector`). It still installs into `Paths.appsRoot`, inside the x86 Steam root. |
 | `ApplicationCore.swift` (new) | KEEP | NOT_APPLICABLE | Holds `LinuxBaseEnvironment`, `LaunchPlanner` and `SessionMachine`. |
 | `SPEC.md` | KEEP | TEMPORARY_X86_DEPENDENCY | Its launch description (every app through `run-fex.sh`) predates `748bc97`; `docs/APPLICATION_MANAGER.md` is the current one. |

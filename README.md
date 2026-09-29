@@ -133,6 +133,12 @@ Experimental (measured, not ready for players):
   [docs/STEAM_ARM64_BRINGUP.md](docs/STEAM_ARM64_BRINGUP.md)). Sign-in was
   not attempted; the library, downloads and games under it are not
   verified. Its root and client are not set up by the installer.
+- Heroic Games Launcher as a native linux-arm64 program (no FEX), installed
+  by the launcher into the ARM64 root: its window, pages and a clean close
+  and reopen are measured (`benchmarks/stage24-heroic.txt`,
+  [docs/HEROIC_INTEGRATION.md](docs/HEROIC_INTEGRATION.md)); store sign-in,
+  downloads and games are not verified, Amazon Games does not run, and V8's
+  optimizing tier is off.
 - KosmicKrisp (Mesa's Vulkan driver for Metal) in place of MoltenVK:
   D3D11/D3D12 probes at 158/154 fps (`benchmarks/stage22-kosmickrisp.txt`);
   not tried through Steam's launch path or with games.

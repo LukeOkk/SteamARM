@@ -58,8 +58,13 @@ post-merge check in `benchmarks/README.md`).
 | Backends, session mode and capabilities | `ApplicationCore.swift`: `PresentationMode` (native windows / VNC) is separate from `ExecutionBackend` (lxrun / Lightning JIT / Apple Hypervisor). `ApplicationBackendPreset` maps the four presets onto them. `SessionVirtualizationMode` is `VM — Apple Hypervisor` only for that backend, and no fallback ever returns it. `RuntimeCapabilities.current` states what exists today, with its evidence: native windows ready; VNC experimental; lxrun ready; Lightning JIT and Apple Hypervisor unavailable (neither exists in the tree); esync experimental; fsync unsupported (no `futex_waitv`); MSync unavailable; MoltenVK ready; KosmicKrisp unavailable and WineD3D/OpenGL unsupported. `RuntimeCapabilities.detect(from:)` refines that table with what `scripts/compat-status.py` finds on the Mac: KosmicKrisp becomes experimental when it is installed, on macOS 26 or later, loads as an ICD and the installed shim reads `STEAMARM_VK_ICD`; esync is experimental only with an esync Proton (`1de9fd1`) | done, tested; the Settings window and its read-only Runtime page read it, and disabled options show their reason (`774f590`) |
 | One process group and an exit status per session | `scripts/session.py run` (started by `run-app.sh`) puts the program and what it forks in a group of its own (`running.pgid`). A process that starts its own session (setsid: wineserver, daemons) leaves that group; `--stop`'s `kill -9` of leftover guests still catches it. How the program ended goes to `running.status`: `N` for an exit code, `N signal S` for a signal. Leftovers get 5 s, then SIGTERM, then SIGKILL. `--stop` signals the group first (`session.py stop`). FEXServer and `safeguard.sh` start in their own sessions (`session.py detach`), so a stop never takes them down. The program gets the caller's environment and signal dispositions, not Python's: no coerced `LC_CTYPE`, default SIGPIPE, and nohup's ignored SIGHUP kept. The launcher reports the status ("terminó con el código N / la señal S") and keeps the 15 s guess only for a run it adopted without a wrapper | done; `tests/launcher/session.sh` 24/24 on Linux; macOS CI 23/23 + 1 skip (`benchmarks/stage20-ci-macos-runner.txt`) |
 
-Steam, Heroic and Prism are marked `x86_64`, so they behave exactly as
-before. Steam's entry is labelled TRANSITIONAL_COMPATIBILITY.
+Steam and Prism are marked `x86_64`, so they behave exactly as before.
+Steam's entry is labelled TRANSITIONAL_COMPATIBILITY. Since stage 24 the
+known installer for Heroic installs its linux-arm64 build into the Fedora
+ARM64 root and writes an `aarch64`, experimental entry
+(`HeroicARM64` in `launcher/ApplicationCore.swift`,
+`docs/HEROIC_INTEGRATION.md`); an older x64 Heroic entry keeps working
+through FEX until it is deleted.
 
 Tests (they build and run on Linux too):
 

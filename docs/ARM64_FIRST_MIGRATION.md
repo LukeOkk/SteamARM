@@ -68,6 +68,14 @@ otherwise.
 
 Independent of that order:
 
+- **Apps other than Steam: Heroic Games Launcher.** PARTLY DONE (stage 24):
+  its linux-arm64 build runs natively in the Fedora ARM64 root and the
+  launcher installs it that way instead of the x64 build under FEX; window,
+  Settings, clean close and reopen in 7 of 7 cycles (MEASURED,
+  `benchmarks/stage24-heroic.txt`). OPEN: store sign-in, downloads and games;
+  Amazon's nile (non-PIE); V8's TurboFan under lxrun
+  (`docs/HEROIC_INTEGRATION.md`).
+
 - **Graphics: KosmicKrisp.** PARTLY DONE. The shim loads it in ICD mode
   when `STEAMARM_VK_ICD=kosmickrisp` (`4ccb914`), and the launcher sets that
   variable when **Gráficos → Motor** is KosmicKrisp, which it offers only
