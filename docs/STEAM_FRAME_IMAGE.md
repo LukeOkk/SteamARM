@@ -108,6 +108,21 @@ output for them before sharing it.
   - the page size the image's kernel was built for, from its config or its
     `Image` header: 4 KiB for the 0.3.0 image (MEASURED).
 
+## Comparing with a package repository
+
+`compare` sets the image's packages against pacman repository databases:
+
+```sh
+scripts/steamframe-image.py compare /Volumes/SteamFrameRoot/rootfs core.db extra.db --md F --json F
+```
+
+It orders versions the way pacman's `vercmp` does, marks pkgrel-only
+rebuilds, links packages renamed on one side through PROVIDES/REPLACES, and
+records each database's sha256. It prints a URL source the way `inventory`
+prints mirrors, so a private one is redacted
+(`tests/steamframe_image/compare.sh`). The 0.3.0 image against
+`holo-core-aarch64-preview` is in `docs/HOLO_CORE_VS_STEAM_FRAME.md`.
+
 ## Licence
 
 The image contains proprietary Valve software: the Steam client, and

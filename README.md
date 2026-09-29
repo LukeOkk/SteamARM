@@ -81,6 +81,8 @@ guides, and nothing in them is ready for players yet. Start with the plan,
   [STEAM_FRAME_ROOTFS_AUDIT.md](docs/STEAM_FRAME_ROOTFS_AUDIT.md),
   [STEAM_FRAME_REFERENCE.md](docs/STEAM_FRAME_REFERENCE.md),
   [HOLO_CORE_ARM64_AUDIT.md](docs/HOLO_CORE_ARM64_AUDIT.md),
+  [HOLO_CORE_VS_STEAM_FRAME.md](docs/HOLO_CORE_VS_STEAM_FRAME.md) (package
+  comparison and the choice of base),
   [STEAM_FRAME_SNAPSHOT_2026-09-29.md](docs/STEAM_FRAME_SNAPSHOT_2026-09-29.md)
   (web research on Frame releases and Holo Core, checked against the Mac's
   records).
@@ -102,6 +104,7 @@ Tests: `tests/elf/run.sh`, `tests/elf/run_i386.sh`,
 `tests/elf/run_vk_device.sh`, `tests/win/run.sh`,
 `tests/win/run_steam_path.sh`, `tests/x18_preserve/run.sh`,
 `tests/steamframe_image/run.sh` (Linux), `tests/steamframe_image/redact.sh`,
+`tests/steamframe_image/compare.sh`,
 `tests/audio/run.sh`, `tests/launcher/safeguard.sh`, `make test-launcher-core`,
 `make test-arm64`, `python3 -m unittest tests/test_docs_records.py` (the
 benchmark index and the docs against the records and the x18 planner).

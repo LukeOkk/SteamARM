@@ -48,6 +48,7 @@ the Fedora VM that was deleted on 2026-09-27; they are history, and
 | 23 | `stage23-native-arm64-jit.txt` | 09-29 | V8's JIT in the native arm64 client: RWX pages split W^X per page and scanned before they execute, the host SIGSEGV/SIGBUS handler kept under a guest SIG_DFL; the login window with the JIT on, also from the launcher |
 | 23 | `stage23-runtime-fixes.txt` | 09-29 | the W/X livelock of 4 KiB sub-pages (stores from a split page into itself are emulated) and a relative `/proc/self/exe`; `tests/elf/run.sh` 55/0 with 2 xfail → 63/0 with 0 xfail |
 | 23 | `stage23-frame-root.txt` | 09-29 | the native arm64 client on the Steam Frame root (`scripts/mkframeroot.sh`): indirect GLX through the X server, a resolv.conf, the client's own steamdeck_stable branch; the login window 5 of 5 runs, 5-7 s later than on the Fedora root |
+| 24 | `stage24-holo-vs-frame.txt` | 09-29 | `holo-core-aarch64-preview` (`mash-20251118.3`) against the Frame 0.3.0 root, package by package, with no guest: 81 of 887 shared names at the same version (Holo newer for 764), so the Frame is not built from it; Holo has no GTK 2, which the client's `steamui.so` needs; `steamframe-image.py compare` gains pacman's vercmp and PROVIDES/REPLACES counterparts |
 
 ## After stage 21 (no stage file)
 
