@@ -170,6 +170,14 @@ out=$(x 60 /system/bin/sh -c 'echo $((6*7)); x=$(echo sub); echo $x; toybox seq 
 if [ "$rc" -eq 0 ] && [ "$(tr '\n' ' ' <<<"$out")" = "42 sub 100 " ]; then
     ok "x86_64 sh -c: arithmetic, \$(...) fork, a toybox pipe"
 else bad "x86_64 sh -c" "rc=$rc $(tr '\n' ' ' <<<"$out")"; fi
+# A command substitution that runs a program: mksh waits for the child's
+# SIGCHLD in rt_sigsuspend, and FEX defers a signal that lands in one of its
+# own critical sections (patches/fex-lxrt-interrupt-page.patch: without it
+# this never returned).
+out=$(x 30 /system/bin/sh -c 'x=$(toybox echo x); y=$(toybox seq 3 | toybox wc -l); echo got $x $y'); rc=$?
+if [ "$rc" -eq 0 ] && [ "$out" = "got x 3" ]; then
+    ok "x86_64 sh: \$(toybox ...) returns (SIGCHLD during rt_sigsuspend)"
+else bad "x86_64 sh \$(toybox ...)" "rc=$rc '$out' (a lost SIGCHLD hangs here until the deadline)"; fi
 want=$(shasum -a 256 "$X86_ROOT/system/framework/framework.jar" | awk '{print $1}')
 out=$(x 60 /system/bin/toybox sha256sum /system/framework/framework.jar); rc=$?
 if [ "$rc" -eq 0 ] && [ "${out%% *}" = "$want" ]; then

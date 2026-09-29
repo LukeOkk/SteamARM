@@ -1,0 +1,47 @@
+FEX: a 16 KiB interrupt fault page, so deferred signals are delivered (SteamARM, Darwin host)
+
+FEX defers an asynchronous signal that arrives inside a signal-deferring
+section, and makes the thread's InterruptFaultPage PROT_NONE so that the
+store at the end of the section faults and delivers it. The page was
+FEX_PAGE_SIZE (4 KiB) and 4 KiB-aligned. Under the runtime a host page is
+16 KiB and carries the union of the protections of its 4 KiB pages
+(runtime/subpage.c): the fault page's host page stayed read-write, the
+store never faulted, and the deferred signal was never delivered. MEASURED
+with x86-64 Android's mksh under FEX: a command substitution that runs a
+program slept in rt_sigsuspend forever, 4 runs of 4, its child's SIGCHLD
+deferred (trace: mprotect(0x...c03000, 0x1000, PROT_NONE), no SIGSEGV after
+it); SIGTERM and SIGALRM did not end it either. The page is now 16 KiB and
+16 KiB-aligned (the JIT's store offset stays within its immediate range; the
+static_assert below checks it). SteamARM benchmarks/stage25-art-x86-fex.txt.
+
+diff --git a/FEXCore/include/FEXCore/Debug/InternalThreadState.h b/FEXCore/include/FEXCore/Debug/InternalThreadState.h
+--- a/FEXCore/include/FEXCore/Debug/InternalThreadState.h
++++ b/FEXCore/include/FEXCore/Debug/InternalThreadState.h
+@@ -87,7 +87,17 @@
+   uint8_t Size;
+ };
+ 
+-struct alignas(FEXCore::Utils::FEX_PAGE_SIZE) InternalThreadState : public FEXCore::Allocator::FEXAllocOperators {
++// The interrupt fault page below is a whole 16 KiB page, not FEX_PAGE_SIZE:
++// on a 16 KiB-page host (Darwin, under the SteamARM runtime) a 4 KiB
++// PROT_NONE page shares its host page with read-write neighbours, the host
++// page stays read-write and the store that should fault never does. A signal
++// deferred in a signal-deferring section then waited for a fault that never
++// came: mksh under FEX slept in rt_sigsuspend forever after its child's
++// SIGCHLD (MEASURED, SteamARM benchmarks/stage25-art-x86-fex.txt), and so did
++// anything else that got a signal while FEX deferred it.
++inline constexpr size_t INTERRUPT_FAULT_PAGE_SIZE = 0x4000;
++
++struct alignas(INTERRUPT_FAULT_PAGE_SIZE) InternalThreadState : public FEXCore::Allocator::FEXAllocOperators {
+   FEXCore::Core::CpuStateFrame* const CurrentFrame = &BaseFrameState;
+ 
+   FEXCore::Context::Context* const CTX;
+@@ -128,7 +138,7 @@
+   FEXCore::Core::CpuStateFrame BaseFrameState {};
+ 
+   // Can be reprotected as RO to trigger an interrupt at generated code block entrypoints
+-  alignas(FEXCore::Utils::FEX_PAGE_SIZE) uint8_t InterruptFaultPage[FEXCore::Utils::FEX_PAGE_SIZE];
++  alignas(INTERRUPT_FAULT_PAGE_SIZE) uint8_t InterruptFaultPage[INTERRUPT_FAULT_PAGE_SIZE];
+ };
+ static_assert(std::is_standard_layout_v<FEXCore::Core::InternalThreadState>);
+ // Maximum unsigned-offset store range for fault page.
