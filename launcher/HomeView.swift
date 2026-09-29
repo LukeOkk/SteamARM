@@ -6,6 +6,9 @@ struct HomeView: View {
     @State private var showAdd = false
     @State private var editing: AppEntry?
     @State private var deleting: AppEntry?
+    @State private var builtInInfo: AppEntry?
+    @State private var query = ""
+    @State private var filter: LibraryFilter = .all
 
     private let columns = [GridItem(.adaptive(minimum: 170, maximum: 210), spacing: 20)]
 
@@ -19,11 +22,21 @@ struct HomeView: View {
                 if model.needsSetup { SetupBanner() }
                 ScrollView {
                     LazyVGrid(columns: columns, spacing: 20) {
-                        ForEach(model.allApps) { app in
+                        ForEach(model.visibleApps(query: query, filter: filter)) { app in
                             AppCard(app: app) { model.launch(app) }
                                 .contextMenu {
+                                    Button("Abrir") { model.launch(app) }
+                                        .disabled(!model.canLaunch || model.unavailableReason(app) != nil)
+                                    Button("Ajustes…") {
+                                        if app.isBuiltIn { builtInInfo = app } else { editing = app }
+                                    }
+                                    Button("Abrir carpeta") { model.openFolder(app) }
+                                    Button("Abrir registros") { model.openLogs(app) }
+                                    Button(model.isFavorite(app) ? "Quitar de favoritas" : "Añadir a favoritas") {
+                                        model.toggleFavorite(app)
+                                    }
                                     if !app.isBuiltIn {
-                                        Button("Editar") { editing = app }
+                                        Divider()
                                         Button("Eliminar", role: .destructive) { deleting = app }
                                     }
                                 }
@@ -31,12 +44,19 @@ struct HomeView: View {
                         AddCard { showAdd = true }
                     }
                     .padding(24)
+                    if model.visibleApps(query: query, filter: filter).isEmpty {
+                        Text(query.isEmpty ? "No hay apps en «\(filter.label)»." : "Ninguna app coincide con la búsqueda.")
+                            .foregroundStyle(.secondary)
+                            .frame(maxWidth: .infinity)
+                            .padding(.top, 28)
+                    }
                 }
             }
         }
         .background(Theme.background)
         .sheet(isPresented: $showAdd) { AddAppView().environmentObject(model) }
         .sheet(item: $editing) { app in EditAppView(app: app).environmentObject(model) }
+        .sheet(item: $builtInInfo) { app in BuiltInInfoView(app: app).environmentObject(model) }
         .confirmationDialog("¿Eliminar \(deleting?.name ?? "")?",
                             isPresented: Binding(get: { deleting != nil },
                                                  set: { if !$0 { deleting = nil } }),
@@ -63,20 +83,32 @@ struct HomeView: View {
     }
 
     private var header: some View {
-        HStack(spacing: 14) {
-            Image(systemName: "cpu").font(.title2).foregroundStyle(Theme.accent)
-            VStack(alignment: .leading, spacing: 2) {
-                Text("SteamARM").font(.title2.bold())
-                Text("Apps de Linux en tu Mac, sin máquina virtual")
-                    .font(.caption).foregroundStyle(.secondary)
+        VStack(alignment: .leading, spacing: 12) {
+            HStack(spacing: 14) {
+                Image(systemName: "cpu").font(.title2).foregroundStyle(Theme.accent)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("SteamARM").font(.title2.bold())
+                    Text("Apps de Linux en tu Mac, sin máquina virtual")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
+                Spacer()
+                Button { showAdd = true } label: {
+                    Label("Añadir app", systemImage: "plus")
+                }
+                .disabled(!model.canLaunch)
+                SettingsLink {
+                    Label("Ajustes", systemImage: "gearshape")
+                }
             }
-            Spacer()
-            Button { showAdd = true } label: {
-                Label("Añadir app", systemImage: "plus")
-            }
-            .disabled(model.phase != .idle)
-            SettingsLink {
-                Label("Ajustes", systemImage: "gearshape")
+            HStack {
+                TextField("Buscar", text: $query)
+                    .textFieldStyle(.roundedBorder)
+                    .frame(width: 180)
+                Picker("Filtro", selection: $filter) {
+                    ForEach(LibraryFilter.allCases) { item in Text(item.label).tag(item) }
+                }
+                .labelsHidden()
+                .pickerStyle(.segmented)
             }
         }
         .padding(.horizontal, 24)
@@ -91,10 +123,21 @@ struct AppCard: View {
     let action: () -> Void
     @State private var hover = false
 
+    private var reason: String? { model.unavailableReason(app) }
+    private var platform: String {
+        if app.isWindows { return "Windows" }
+        switch GuestArchitecture.of(app.architecture) {
+        case .aarch64: return "ARM64"
+        case .x86_64: return "x86-64"
+        case .i386: return "i386"
+        case nil: return app.architecture ?? "Desconocida"
+        }
+    }
+
     var body: some View {
         Button(action: action) {
-            VStack(spacing: 12) {
-                AppIconView(app: app, size: 96)
+            VStack(spacing: 8) {
+                AppIconView(app: app, size: 80)
                     .frame(maxWidth: .infinity)
                     .padding(.top, 18)
                 Text(app.name)
@@ -102,9 +145,27 @@ struct AppCard: View {
                     .lineLimit(2)
                     .multilineTextAlignment(.center)
                     .padding(.horizontal, 8)
-                    .padding(.bottom, 16)
+                Text(Library.subtitle(model.stats[app.id]))
+                    .font(.caption).foregroundStyle(.secondary)
+                    .lineLimit(2).multilineTextAlignment(.center)
+                HStack(spacing: 5) {
+                    Text(platform).padding(.horizontal, 7).padding(.vertical, 3)
+                        .background(.gray.opacity(0.3), in: Capsule())
+                    if app.isExperimental {
+                        Text("Experimental").padding(.horizontal, 7).padding(.vertical, 3)
+                            .background(.orange.opacity(0.3), in: Capsule())
+                    }
+                    if model.isFavorite(app) { Image(systemName: "star.fill").foregroundStyle(.yellow) }
+                }
+                .font(.caption2)
+                if let reason {
+                    Text(reason.prefix(1).uppercased() + reason.dropFirst())
+                        .font(.caption2).foregroundStyle(.orange)
+                        .lineLimit(3).multilineTextAlignment(.center)
+                }
             }
-            .frame(height: 190)
+            .padding(.horizontal, 8)
+            .frame(height: 300)
             .background(RoundedRectangle(cornerRadius: 14).fill(Theme.card))
             .overlay(RoundedRectangle(cornerRadius: 14)
                 .stroke(hover ? Theme.accent : .clear, lineWidth: 2))
@@ -113,8 +174,8 @@ struct AppCard: View {
         }
         .buttonStyle(.plain)
         .onHover { hover = $0 }
-        .disabled(model.phase != .idle)
-        .help("Abrir \(app.name)")
+        .disabled(!model.canLaunch || reason != nil)
+        .help(reason ?? "Abrir \(app.name)")
     }
 }
 
@@ -130,7 +191,7 @@ struct AddCard: View {
             }
             .foregroundStyle(.secondary)
             .frame(maxWidth: .infinity)
-            .frame(height: 190)
+            .frame(height: 300)
             .background(RoundedRectangle(cornerRadius: 14)
                 .strokeBorder(style: StrokeStyle(lineWidth: 2, dash: [7]))
                 .foregroundStyle(hover ? Theme.accent : .gray.opacity(0.4)))
@@ -160,6 +221,19 @@ struct RunningView: View {
                      : "La app se abre en ventanas nativas de macOS.")
                     .foregroundStyle(.secondary)
             }
+            VStack(alignment: .leading, spacing: 7) {
+                LabeledContent("Arquitectura", value: architectureLabel)
+                LabeledContent("Entorno base", value: environmentLabel)
+                LabeledContent("Modo de sesión", value: sessionMode)
+                    .help("Sin máquina virtual: lxrun ejecuta el programa directamente (aarch64) o con FEX (x86).")
+                TimelineView(.periodic(from: .now, by: 1)) { context in
+                    LabeledContent("Tiempo") {
+                        Text(elapsed(at: context.date)).monospacedDigit()
+                    }
+                }
+            }
+            .frame(maxWidth: 460)
+            .foregroundStyle(.secondary)
             HStack(spacing: 14) {
                 Button(role: .destructive) { model.stop() } label: {
                     Label("Detener", systemImage: "stop.fill").frame(minWidth: 120)
@@ -191,6 +265,84 @@ struct RunningView: View {
         case .starting: return "Iniciando \(app.name)"
         default: return "Ejecutando \(app.name)"
         }
+    }
+
+    private var architectureLabel: String {
+        if let actual = model.runningArch, let arch = actual.architecture {
+            return "\(arch.rawValue) · \(actual.translator == "FEX" ? "FEX" : "sin traductor")"
+        }
+        if let plan = try? LaunchPlanner.plan(architecture: app.architecture) {
+            return "\(plan.architecture.rawValue) · \(plan.runner == .fex ? "FEX" : "sin traductor") (según la entrada)"
+        }
+        return "\(app.architecture ?? "x86_64") (según la entrada)"
+    }
+
+    private var environmentLabel: String {
+        guard let env = model.environment(of: app) else { return app.root }
+        return env.name + (env.transitional ? " (transicional)" : "")
+    }
+
+    private var sessionMode: String {
+        let plan = try? LaunchPlanner.plan(architecture: app.architecture)
+        return SessionVirtualizationMode(plan?.usesVirtualMachine == true ? .appleHypervisorLegacy : .auto).label
+    }
+
+    private func elapsed(at date: Date) -> String {
+        let seconds = max(0, Int(date.timeIntervalSince(model.session.startedAt ?? date)))
+        let time = String(format: "%d:%02d:%02d", seconds / 3600, (seconds / 60) % 60, seconds % 60)
+        return time + (model.runtimeUnknown ? " (desde que el launcher la encontró)" : "")
+    }
+}
+
+/// Read-only details of a bundled app.
+struct BuiltInInfoView: View {
+    @EnvironmentObject var model: LauncherModel
+    @Environment(\.dismiss) private var dismiss
+    let app: AppEntry
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text(app.name).font(.title2.bold())
+            Form {
+                LabeledContent("Nombre", value: app.name)
+                LabeledContent("Estado", value: app.isExperimental ? "Experimental" : "Listo")
+                LabeledContent("Arquitectura", value: app.architecture ?? "x86_64")
+                LabeledContent("Traductor", value: GuestArchitecture.of(app.architecture)?.needsTranslator == false ? "ninguno" : "FEX")
+                LabeledContent("Entorno base", value: environmentLabel)
+                LabeledContent("Raíz", value: app.root)
+                LabeledContent("Orden") {
+                    Text(app.command.joined(separator: " ")).font(.system(.body, design: .monospaced))
+                        .textSelection(.enabled)
+                }
+                LabeledContent("Variables") {
+                    Text(app.env.isEmpty ? "Ninguna" : app.env.sorted { $0.key < $1.key }
+                        .map { "\($0.key)=\($0.value)" }.joined(separator: "\n"))
+                        .font(.system(.body, design: .monospaced)).textSelection(.enabled)
+                }
+                LabeledContent("Modo de sesión", value: "ZERO-VM")
+                if app.id == "steam-arm64" {
+                    Text("El cliente ARM64 nativo arranca, se actualiza y carga su interfaz, pero todavía no llega a su ventana (benchmarks/stage21). Vive en la raíz ARM64 de scripts/mkarmroot.sh, que se borra al reconstruirla.")
+                        .font(.caption).foregroundStyle(.secondary)
+                } else if app.id == "steam" {
+                    Text("El cliente x86 bajo FEX: la ruta que funciona hoy (compatibilidad transicional).")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
+                Text("Los ajustes por app no se aplican a las entradas integradas: usan la configuración global.")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+            .formStyle(.grouped)
+            HStack {
+                Spacer()
+                Button("Cerrar") { dismiss() }.keyboardShortcut(.defaultAction)
+            }
+        }
+        .padding(20)
+        .frame(width: 520)
+    }
+
+    private var environmentLabel: String {
+        guard let env = model.environment(of: app) else { return app.root }
+        return env.name + (env.transitional ? " (transicional)" : "")
     }
 }
 
@@ -241,6 +393,43 @@ struct EditAppView: View {
                         .font(.system(.body, design: .monospaced))
                         .frame(height: 70)
                 }
+                Section("Ajustes de esta app") {
+                    Picker("Pantalla", selection: overrideBinding("display")) {
+                        Text("Global (\(model.settings.display == .vnc ? "VNC" : "Ventanas nativas"))").tag("")
+                        Text("Ventanas nativas").tag("native")
+                        Text("VNC (Compartir Pantalla)").tag("vnc")
+                            .disabled(!Paths.isX86Root(app.root))
+                            .help("VNC solo sirve a programas de la raíz x86 de Steam")
+                    }
+                    Picker("Sincronización vertical", selection: overrideBinding("vsync")) {
+                        Text("Global (\(vsyncLabel(model.settings.vsync)))").tag("")
+                        Text("AUTO (según el juego)").tag("game")
+                        Text("ON (activada)").tag("on")
+                        Text("OFF (desactivada)").tag("off")
+                    }
+                    Picker("Sincronización", selection: overrideBinding("synchronization")) {
+                        Text("Global (\(model.settings.synchronizationBackend.label))").tag("")
+                        ForEach(SynchronizationBackend.allCases, id: \.self) { backend in
+                            let status = model.capabilities.synchronization[backend]
+                            Text(backend.label + (backend == .auto || status?.state == .ready ? "" : " · \(status?.state.label ?? "No disponible")"))
+                                .tag(backend.rawValue)
+                                .disabled(backend != .auto && status?.usable != true)
+                                .help(status?.reason ?? "Sin datos")
+                        }
+                    }
+                    Picker("Gráficos", selection: overrideBinding("graphicsBackend")) {
+                        Text("Global (\(model.settings.graphics.label))").tag("")
+                        ForEach(graphicsOrder, id: \.self) { backend in
+                            let status = model.capabilities.graphics[backend]
+                            Text(backend.label + (backend == .auto || status?.state == .ready ? "" : " · \(status?.state.label ?? "No disponible")"))
+                                .tag(backend.rawValue)
+                                .disabled(backend != .auto && status?.usable != true)
+                                .help(status?.reason ?? "Sin datos")
+                        }
+                    }
+                    Text("Se aplican solo a esta app, por encima de la configuración global. Los juegos que abre Steam usan la de Steam.")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
             }
             .formStyle(.grouped)
             HStack {
@@ -263,6 +452,40 @@ struct EditAppView: View {
 
     private var commandLines: [String] {
         commandText.split(separator: "\n").map { String($0) }.filter { !$0.isEmpty }
+    }
+
+    private var graphicsOrder: [GraphicsBackend] {
+        [.auto, .vulkanMoltenVK, .vulkanKosmicKrisp, .openGLWineD3D]
+    }
+
+    private func vsyncLabel(_ value: String) -> String {
+        switch value {
+        case "on": return "ON (activada)"
+        case "off": return "OFF (desactivada)"
+        default: return "AUTO (según el juego)"
+        }
+    }
+
+    private func overrideBinding(_ key: String) -> Binding<String> {
+        Binding(get: { app.overrides?[key] ?? "" }, set: { value in
+            if key == "display" && value == "vnc" && !Paths.isX86Root(app.root) { return }
+            if key == "synchronization", let backend = SynchronizationBackend(rawValue: value),
+               backend != .auto && model.capabilities.synchronization[backend]?.usable != true { return }
+            if key == "graphicsBackend", let backend = GraphicsBackend(rawValue: value),
+               backend != .auto && model.capabilities.graphics[backend]?.usable != true { return }
+            let valid: Bool
+            switch key {
+            case "display": valid = ["", "native", "vnc"].contains(value)
+            case "vsync": valid = ["", "game", "on", "off"].contains(value)
+            case "synchronization": valid = value.isEmpty || SynchronizationBackend(rawValue: value) != nil
+            case "graphicsBackend": valid = value.isEmpty || GraphicsBackend(rawValue: value) != nil
+            default: valid = false
+            }
+            guard valid else { return }
+            var values = app.overrides ?? [:]
+            if value.isEmpty { values.removeValue(forKey: key) } else { values[key] = value }
+            app.overrides = values.isEmpty ? nil : values
+        })
     }
 
     private func save() {
