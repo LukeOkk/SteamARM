@@ -242,3 +242,120 @@ struct SessionMachine {
                              duration: startedAt.map { now.timeIntervalSince($0) } ?? 0)
     }
 }
+
+// MARK: - Backends, session mode and capabilities
+
+/// How a session reaches the screen. Separate from how its code executes:
+/// the launcher's presets combine the two.
+enum PresentationMode: String, Codable, CaseIterable {
+    case nativeWindows      // X windows as macOS windows (scripts/run-x11-native.sh)
+    case vncScreenSharing   // Xvnc + Screen Sharing (display mode "vnc")
+}
+
+/// How a session's code executes. Only `appleHypervisorLegacy` may run a
+/// virtual machine; every other backend is ZERO-VM by definition.
+enum ExecutionBackend: String, Codable, CaseIterable {
+    case auto                   // lxrun: aarch64 directly, x86 through FEX
+    case lightningJIT
+    case appleHypervisorLegacy
+
+    var usesVirtualMachine: Bool { self == .appleHypervisorLegacy }
+}
+
+enum SessionVirtualizationMode: String, Codable {
+    case zeroVM
+    case vmAppleHypervisor
+
+    init(_ execution: ExecutionBackend) {
+        self = execution.usesVirtualMachine ? .vmAppleHypervisor : .zeroVM
+    }
+    var label: String { self == .zeroVM ? "ZERO-VM" : "VM — Apple Hypervisor" }
+}
+
+/// The four presets the launcher can show, each a presentation + execution pair.
+enum ApplicationBackendPreset: String, Codable, CaseIterable {
+    case nativeWindows, vncScreenSharing, lightningJIT, appleHypervisor
+
+    var execution: ExecutionBackend {
+        switch self {
+        case .nativeWindows, .vncScreenSharing: return .auto
+        case .lightningJIT: return .lightningJIT
+        case .appleHypervisor: return .appleHypervisorLegacy
+        }
+    }
+    func presentation(default d: PresentationMode = .nativeWindows) -> PresentationMode {
+        self == .vncScreenSharing ? .vncScreenSharing : (self == .nativeWindows ? .nativeWindows : d)
+    }
+}
+
+enum SynchronizationBackend: String, Codable, CaseIterable {
+    case auto, wineserver, msync, fsync, esync
+}
+
+enum GraphicsBackend: String, Codable, CaseIterable {
+    case auto, openGLWineD3D, vulkanMoltenVK, vulkanKosmicKrisp
+}
+
+/// What a capability is today, from this repository and its measurements --
+/// never from what it is meant to become.
+struct CapabilityStatus: Equatable {
+    enum State: String { case ready, experimental, unsupported, unavailable }
+    var state: State
+    var reason: String
+    var usable: Bool { state == .ready || state == .experimental }
+}
+
+/// The launcher's source of truth for which options exist, and why the rest
+/// do not (docs/APPLICATION_MANAGER.md). The UI shows `unavailable` and
+/// `unsupported` options disabled with their reason, or hides them.
+struct RuntimeCapabilities {
+    var presentation: [PresentationMode: CapabilityStatus]
+    var execution: [ExecutionBackend: CapabilityStatus]
+    var synchronization: [SynchronizationBackend: CapabilityStatus]
+    var graphics: [GraphicsBackend: CapabilityStatus]
+
+    /// The state of the tree as of 0.3.4. Each reason names its evidence.
+    static let current = RuntimeCapabilities(
+        presentation: [
+            .nativeWindows: .init(state: .ready, reason: "cross-process Metal layer in native X windows (benchmarks/stage12)"),
+            .vncScreenSharing: .init(state: .experimental, reason: "cannot show the Metal layer, so games cannot present through it (stage12)"),
+        ],
+        execution: [
+            .auto: .init(state: .ready, reason: "lxrun: aarch64 directly, x86/i386 through FEX; no VM"),
+            .lightningJIT: .init(state: .unavailable, reason: "no Lightning JIT exists in this repository"),
+            .appleHypervisorLegacy: .init(state: .unavailable, reason: "the VM path was removed on 2026-09-27 (docs/history)"),
+        ],
+        synchronization: [
+            .wineserver: .init(state: .ready, reason: "Wine's default, no fast path"),
+            .esync: .init(state: .experimental, reason: "eventfd is implemented in lxrun (runtime/epoll_eventfd.c); not measured with games"),
+            .fsync: .init(state: .unsupported, reason: "lxrun has no futex_waitv (syscall 449)"),
+            .msync: .init(state: .unavailable, reason: "no MSync-capable Wine is integrated"),
+        ],
+        graphics: [
+            .vulkanMoltenVK: .init(state: .ready, reason: "D3D9/11/12 probes through DXVK/VKD3D-Proton (benchmarks/stage14, stage16)"),
+            .vulkanKosmicKrisp: .init(state: .unavailable, reason: "not integrated; the shim loads MoltenVK by path, no ICD selection yet"),
+            .openGLWineD3D: .init(state: .unavailable, reason: "no host OpenGL path for guest GL (no GL thunk target on macOS)"),
+        ])
+
+    /// AUTO resolved to a concrete synchronization backend: the fastest one
+    /// that is usable, else Wine's default.
+    func effectiveSynchronization(_ requested: SynchronizationBackend) -> SynchronizationBackend {
+        if requested != .auto { return synchronization[requested]?.usable == true ? requested : .wineserver }
+        for b in [SynchronizationBackend.msync, .fsync, .esync] where synchronization[b]?.state == .ready { return b }
+        return .wineserver
+    }
+
+    /// The next graphics backend to try after `failed`, when fallback is
+    /// allowed. KosmicKrisp -> MoltenVK -> WineD3D; never a VM.
+    func graphicsFallback(after failed: GraphicsBackend) -> GraphicsBackend? {
+        let order: [GraphicsBackend] = [.vulkanKosmicKrisp, .vulkanMoltenVK, .openGLWineD3D]
+        guard let i = order.firstIndex(of: failed) else { return order.first { graphics[$0]?.usable == true } }
+        return order[(i + 1)...].first { graphics[$0]?.usable == true }
+    }
+
+    /// Execution fallback after a ZERO-VM failure. Apple Hypervisor is never
+    /// an automatic fallback: it needs the user's explicit choice.
+    func executionFallback(after failed: ExecutionBackend) -> ExecutionBackend? {
+        failed == .lightningJIT && execution[.auto]?.usable == true ? .auto : nil
+    }
+}

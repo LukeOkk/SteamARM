@@ -124,6 +124,34 @@ struct ApplicationCoreTests {
         do { try s.ended(status: 0); check(false, "ended while idle") } catch {}
         do { try s.requestStop(); check(false, "stop while idle") } catch {}
 
+        // Backends: only Apple Hypervisor may use a VM, and nothing falls back to it.
+        for e in ExecutionBackend.allCases {
+            check(e.usesVirtualMachine == (e == .appleHypervisorLegacy), "VM flag of \(e)")
+            check((SessionVirtualizationMode(e) == .vmAppleHypervisor) == (e == .appleHypervisorLegacy), "session mode of \(e)")
+        }
+        check(SessionVirtualizationMode(.auto).label == "ZERO-VM", "ZERO-VM label")
+        for p in ApplicationBackendPreset.allCases {
+            check(p.execution.usesVirtualMachine == (p == .appleHypervisor), "preset \(p) VM flag")
+        }
+        check(ApplicationBackendPreset.vncScreenSharing.presentation() == .vncScreenSharing, "VNC preset presents through VNC")
+        check(ApplicationBackendPreset.lightningJIT.presentation(default: .vncScreenSharing) == .vncScreenSharing, "JIT preset keeps chosen presentation")
+        let caps = RuntimeCapabilities.current
+        for e in ExecutionBackend.allCases {
+            check(caps.executionFallback(after: e) != .appleHypervisorLegacy, "no silent fallback to a VM after \(e)")
+        }
+        check(caps.execution[.appleHypervisorLegacy]?.usable == false, "no VM path in this tree")
+        check(caps.execution[.lightningJIT]?.usable == false, "no Lightning JIT in this tree")
+        // Sync: fsync needs futex_waitv, which lxrun lacks; AUTO never picks an unusable one.
+        check(caps.synchronization[.fsync]?.state == .unsupported, "fsync unsupported")
+        check(caps.effectiveSynchronization(.fsync) == .wineserver, "requested fsync falls back to wineserver")
+        check(caps.effectiveSynchronization(.esync) == .esync, "esync usable (experimental)")
+        check(caps.effectiveSynchronization(.auto) == .wineserver, "AUTO picks only a ready fast path: none yet")
+        // Graphics: KosmicKrisp and WineD3D are not integrated, so fallback lands on MoltenVK or nothing.
+        check(caps.graphicsFallback(after: .vulkanKosmicKrisp) == .vulkanMoltenVK, "KosmicKrisp falls back to MoltenVK")
+        check(caps.graphicsFallback(after: .auto) == .vulkanMoltenVK, "AUTO starts at MoltenVK today")
+        check(caps.graphicsFallback(after: .vulkanMoltenVK) == nil, "no WineD3D fallback yet")
+        for (k, v) in caps.graphics { check(!v.reason.isEmpty, "\(k) has a reason") }
+
         print(failures == 0 ? "application core: all checks passed" : "application core: \(failures) FAILED")
         exit(failures == 0 ? 0 : 1)
     }
