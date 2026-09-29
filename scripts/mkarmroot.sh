@@ -37,10 +37,13 @@ SONAMES="libasound.so.2 libasyncns.so.0 libatk-1.0.so.0 libatk-bridge-2.0.so.0 l
 #                    asks setlocale() for.
 #   SDL3             sdl2-compat (libSDL2) dlopens libSDL3.so.0 and aborts
 #                    gldriverquery without it.
+#   lsof             the client runs lsof (/usr/bin, /bin, ... or PATH) to see
+#                    which process opened a WebUI transport connection; without
+#                    it every connection from the webhelper is "rejected".
 SEEDS="glibc libgcc libstdc++ bash coreutils-single util-linux-core ca-certificates nss-softokn nss-softokn-freebl p11-kit-trust
  fontconfig dejavu-sans-fonts dejavu-sans-mono-fonts xkeyboard-config mesa-dri-drivers
  mesa-vulkan-drivers openssl mesa-libGL mesa-libEGL pciutils
- libX11-common glibc-common glibc-langpack-en SDL3"
+ libX11-common glibc-common glibc-langpack-en SDL3 lsof"
 for s in $SONAMES; do SEEDS="$SEEDS so:$s"; done
 SEEDS=$(echo $SEEDS)                  # one line: mkroot-rpm reads a single line
 STAGE="$BUILD/armstage-f43"
