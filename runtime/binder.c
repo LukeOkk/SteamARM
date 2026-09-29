@@ -71,6 +71,7 @@ struct bfile {
     bool closed;                // the guest closed its last descriptor
     uint64_t drained;           // doorbells read so far
     pthread_mutex_t lock;       // process-channel writes, doorbell reads
+    pthread_mutex_t map_lock;   // the mapping: fd fixups against munmap
     uint64_t map_base, map_len, map_host_len;
     uint8_t *alias;             // our read-write view of the receive buffer
 };
@@ -148,6 +149,7 @@ static void file_put(struct bfile *f)
     if (!last) return;
     if (f->chan >= 0) close(f->chan);
     pthread_mutex_destroy(&f->lock);
+    pthread_mutex_destroy(&f->map_lock);
     free(f);
 }
 
@@ -442,6 +444,7 @@ long lxrt_binder_open(int context, int lflags)
     f->naliases = 1;
     f->refs = 1;
     pthread_mutex_init(&f->lock, NULL);
+    pthread_mutex_init(&f->map_lock, NULL);
     // Linux flags: O_CLOEXEC 0x80000, O_NONBLOCK 0x800.
     if (lflags & 0x80000) fcntl(s, F_SETFD, FD_CLOEXEC);
     if (lflags & 0x800) fcntl(s, F_SETFL, fcntl(s, F_GETFL) | O_NONBLOCK);
@@ -780,7 +783,10 @@ static long write_read(struct tchan *tc, uint64_t ubwr, int guest_fd)
     if (rc < 0)
         return rc;
     // Descriptors for the receive buffer: installed here, numbered here.
+    // Under the map lock: another thread's munmap must not pull the view
+    // out from under these writes.
     struct bfile *f = tc->f;
+    pthread_mutex_lock(&f->map_lock);
     for (uint32_t i = 0; i < res.r.nfixups; i++) {
         uint64_t off = res.fix[i];
         int fd = res.fds[i];
@@ -791,6 +797,7 @@ static long write_read(struct tchan *tc, uint64_t ubwr, int guest_fd)
             close(fd);
         }
     }
+    pthread_mutex_unlock(&f->map_lock);
     if (res.r.read_len)
         if (!gcopy((void *)(uintptr_t)(bwr.read_buffer + bwr.read_consumed), res.rd, res.r.read_len)) {
             result_done(&res);
@@ -897,6 +904,10 @@ long lxrt_binder_mmap(uint64_t addr, uint64_t len, int prot, int lflags, int fd,
     if (prot & PROT_WRITE) { ret = LERR(EPERM); goto out; }   // FORBIDDEN_MMAP_FLAGS
     if (f->map_base) { ret = LERR(EBUSY); goto out; }
     if (!len) { ret = LERR(EINVAL); goto out; }
+    if (atomic_load(&g_nmapped) >= (int)(sizeof g_mapped / sizeof g_mapped[0])) {
+        ret = LERR(ENOMEM);         // more receive buffers than any process has
+        goto out;
+    }
     (void)off;
     uint64_t size = len > SZ_4M ? SZ_4M : len;
     uint64_t hlen = LXRT_ALIGN_UP(size, LXRT_HOST_PAGE);
@@ -946,7 +957,8 @@ long lxrt_binder_mmap(uint64_t addr, uint64_t len, int prot, int lflags, int fd,
     f->alias = alias;
     f->refs++;                      // the mapping keeps the file (vm_file)
     int nm = atomic_load(&g_nmapped);
-    if (nm < 16) { g_mapped[nm] = f; atomic_store(&g_nmapped, nm + 1); }
+    g_mapped[nm] = f;               // room checked above; one mmap per file
+    atomic_store(&g_nmapped, nm + 1);
     pthread_mutex_unlock(&g_lock);
     ret = (long)(uintptr_t)view;
     if (lxrt_trace_on())
@@ -977,6 +989,22 @@ bool lxrt_binder_munmap(uint64_t addr, uint64_t len, long *ret)
     }
     pthread_mutex_unlock(&g_lock);
     if (!hit) return false;
+    // binder_vma_close: from here on the hub allocates nothing more in this
+    // proc's buffer (a transaction to it gets BR_DEAD_REPLY, as on Linux),
+    // so nothing can be handed to the guest at an address it gave up.
+    if (!hit->forked && !hit->closed) {
+        long err = 0;
+        struct tchan *tc = tchan_get(hit, &err);
+        if (tc && !tc->busy) {
+            tc->busy = true;
+            struct bh_ioctl io = { .cmd = BH_IOCTL_UNMAPPED };
+            struct result res = { 0 };
+            if (roundtrip(tc, BH_IOCTL, &io, sizeof io, NULL, 0, &res) == 0)
+                result_done(&res);
+            tc->busy = false;
+        }
+    }
+    pthread_mutex_lock(&hit->map_lock);
     munmap((void *)(uintptr_t)hit->map_base, hit->map_host_len);
     munmap(hit->alias, hit->map_host_len);
     pthread_mutex_lock(&g_lock);
@@ -984,6 +1012,7 @@ bool lxrt_binder_munmap(uint64_t addr, uint64_t len, long *ret)
     hit->alias = NULL;
     bool release = hit->naliases == 0;
     pthread_mutex_unlock(&g_lock);
+    pthread_mutex_unlock(&hit->map_lock);
     if (release)
         file_release_proc(hit);
     file_put(hit);
@@ -995,7 +1024,9 @@ bool lxrt_binder_munmap(uint64_t addr, uint64_t len, long *ret)
 
 void lxrt_binder_close(int fd)
 {
-    if (fd < 0 || fd >= B_FDS) return;
+    // Every close() of the guest comes here: stay off the lock unless this
+    // process ever had a binder descriptor.
+    if (fd < 0 || fd >= B_FDS || atomic_load(&g_nopened) == 0) return;
     pthread_mutex_lock(&g_lock);
     struct bfile *f = g_files[fd];
     g_files[fd] = NULL;
@@ -1025,7 +1056,9 @@ static void file_release_proc(struct bfile *f)
 
 void lxrt_binder_dup(int oldfd, int newfd)
 {
-    if (oldfd < 0 || oldfd >= B_FDS || newfd < 0 || newfd >= B_FDS || oldfd == newfd) return;
+    if (oldfd < 0 || oldfd >= B_FDS || newfd < 0 || newfd >= B_FDS || oldfd == newfd ||
+        atomic_load(&g_nopened) == 0)
+        return;
     pthread_mutex_lock(&g_lock);
     struct bfile *f = g_files[oldfd];
     if (f && !g_files[newfd]) {
@@ -1062,6 +1095,7 @@ static void binder_after_fork_child(void)
         if (!f || f->forked) continue;
         f->forked = true;
         pthread_mutex_init(&f->lock, NULL);
+        pthread_mutex_init(&f->map_lock, NULL);
         if (f->chan >= 0) { close(f->chan); f->chan = -1; }
         f->map_base = 0;
         f->alias = NULL;

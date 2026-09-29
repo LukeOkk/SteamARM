@@ -44,7 +44,7 @@ static int g_fail;
                            else { printf("  MAL   " __VA_ARGS__); printf("   (%s:%d, errno %d)\n", __FILE__, __LINE__, errno); g_fail++; } \
                            fflush(stdout); } while (0)
 
-enum { C_PING = 1, C_FD, C_REGISTER, C_CALLBACK, C_ONEWAY, C_COUNT, C_SG, C_QUIT = 99, C_CB = 10 };
+enum { C_PING = 1, C_FD, C_REGISTER, C_CALLBACK, C_ONEWAY, C_COUNT, C_SG, C_CLEAR, C_QUIT = 99, C_CB = 10 };
 #define CLIENT_PTR    0x1000
 #define CLIENT_COOKIE 0x2000
 #define DEATH_COOKIE  0xdead
@@ -330,10 +330,26 @@ static int client(int ready_rd, bool bench, int bench_n)
     CHECK(r == 0 && rn >= 3 && !memcmp(rep, "ok", 2),
           "scatter-gather: parent fixup and FDA (server says: %.*s)", (int)rn, (char *)rep);
 
+    // TF_CLEAR_BUF: the driver zeroes the buffer when the receiver frees it.
+    char secret[32] = "a buffer to be cleared on free";
+    rn = sizeof rep;
+    r = transact(0, C_CLEAR, TF_CLEAR_BUF, secret, sizeof secret, NULL, 0, 0, rep, &rn);
+    CHECK(r == 0 && rn >= 8 && rep[0] == 1 && rep[4] == 1,
+          "TF_CLEAR_BUF: the server saw the data, and zeroes after BC_FREE_BUFFER");
+
     // Errors: an invalid handle.
     rn = sizeof rep;
     r = transact(77, C_PING, 0, &v, 4, NULL, 0, 0, rep, &rn);
     CHECK(r == BR_FAILED_REPLY, "transaction to invalid handle 77: BR_FAILED_REPLY");
+
+    // Unmapping the receive buffer is binder_vma_close: nothing more can be
+    // delivered here, so the server's reply to a new call fails and we get
+    // BR_DEAD_REPLY (binder_alloc_new_buf: -ESRCH, "no vma").
+    munmap(m, MAP_SZ);
+    v = 1;
+    rn = sizeof rep;
+    r = transact(0, C_PING, 0, &v, 4, NULL, 0, 0, rep, &rn);
+    CHECK(r == BR_DEAD_REPLY, "after munmap of the receive buffer, a reply cannot be delivered: BR_DEAD_REPLY");
 
     // Leave; the server should see our node die.
     return g_fail ? 1 : 0;
@@ -571,6 +587,21 @@ static int server(int ready_wr, pid_t child, bool bench)
                 fda_fds[0] = f0;
                 fda_fds[1] = f1;
                 fda_buf = t.data.ptr.buffer;
+                break;
+            }
+            case C_CLEAR: {
+                // Free now, then look at the (still mapped) buffer again.
+                const char *d = (const char *)data;
+                int32_t saw = t.data_size >= 8 && !memcmp(d, "a buffer", 8);
+                struct wb f2 = { .n = 0 };
+                w32(&f2, BC_FREE_BUFFER); w64(&f2, t.data.ptr.buffer);
+                wr(fd, f2.b, f2.n, NULL, 0, NULL);
+                free_now = false;
+                int32_t zero = 1;
+                for (uint64_t i = 0; i < t.data_size; i++) if (d[i]) zero = 0;
+                memcpy(reply, &saw, 4);
+                memcpy(reply + 4, &zero, 4);
+                rn = 8;
                 break;
             }
             case C_QUIT:

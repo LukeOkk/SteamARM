@@ -144,7 +144,7 @@ struct buffer {
     struct list entry;              // proc->buffers, ascending off
     uint64_t off, size;
     uint64_t data_size, offsets_size, extra_size;
-    bool allow_user_free, async;
+    bool allow_user_free, async, clear_on_free;
     struct transaction *transaction;
     struct node *target_node;
 };
@@ -199,6 +199,7 @@ struct proc {
     int max_threads, requested_threads, requested_threads_started;
     bool is_dead;
     uint8_t *map;                   // the receive buffer (hub's view)
+    bool unmapped;                  // the guest unmapped it: allocate nothing more
     uint64_t map_size, map_host_size, user_base;
     int64_t free_async;
     struct list buffers;
@@ -513,7 +514,11 @@ static int update_ref_for_handle(struct proc *p, uint32_t desc, bool increment, 
 
 static struct buffer *alloc_buf(struct proc *p, uint64_t size, bool async, int *err)
 {
-    if (!p->map) { *err = -L_ESRCH; return NULL; }
+    if (!p->map || p->unmapped) {       // binder_alloc_new_buf_locked: "no vma"
+        user_error("%d: binder_alloc_buf, no vma", p->pid);
+        *err = -L_ESRCH;
+        return NULL;
+    }
     size = ALIGN8(size < 8 ? 8 : size);
     if (async && p->free_async < (int64_t)(size + 64)) {
         user_error("%d: no async space left", p->pid);
@@ -970,6 +975,7 @@ static void transaction(struct thread *th, const struct binder_transaction_data 
     b->extra_size = extra_buffers_size;
     b->transaction = t;
     b->target_node = target_node;
+    b->clear_on_free = (t->flags & TF_CLEAR_BUF) != 0;
     t->buffer = b;
     uint8_t *base = target_proc->map + b->off;
     uint64_t user = target_proc->user_base + b->off;
@@ -1150,6 +1156,10 @@ static void transaction(struct thread *th, const struct binder_transaction_data 
     }
 
     t->work.type = W_TRANSACTION;
+    debug("%d:%d %s %u -> pid %d: code %u flags 0x%x, %llu data, %llu offsets, %llu sg, %d fds",
+          proc->pid, th->tid, reply ? "reply" : "transaction", t->debug_id, target_proc->pid,
+          t->code, t->flags, (unsigned long long)tr->data_size,
+          (unsigned long long)tr->offsets_size, (unsigned long long)extra_buffers_size, t->nfix);
     if (reply) {
         enqueue_thread_work(th, tcomplete);
         if (target_thread->is_dead) {
@@ -1253,6 +1263,8 @@ static void free_buf(struct proc *p, struct thread *th, struct buffer *b)
             enqueue_work(w, &p->todo);  // the next oneway call to this node
     }
     buffer_release(p, th, b, 0, false);
+    if (b->clear_on_free && p->map)     // TF_CLEAR_BUF (Linux 5.11)
+        memset(p->map + b->off, 0, b->size);
     free_buf_mem(p, b);
 }
 
@@ -2055,6 +2067,10 @@ static void handle_ioctl(struct thread *th, const struct bh_hdr *h, const uint8_
     case BINDER_THREAD_EXIT:
         // The runtime closes the channel after this result; the channel's
         // end is where the thread is released.
+        simple_result(th, h->seq, 0, NULL, 0);
+        return;
+    case BH_IOCTL_UNMAPPED:
+        p->unmapped = true;
         simple_result(th, h->seq, 0, NULL, 0);
         return;
     case BINDER_GET_NODE_DEBUG_INFO: {

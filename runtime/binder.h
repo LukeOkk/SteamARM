@@ -268,8 +268,11 @@ struct bh_txn_att {
     uint64_t offsets_size;
     uint64_t sg_size;
 };
+// Not a Linux ioctl: the runtime telling the hub the guest unmapped its
+// receive buffer (Linux: binder_vma_close).
+#define BH_IOCTL_UNMAPPED 0xb1d0001u
 struct bh_ioctl {
-    uint32_t cmd;             // the Linux ioctl number
+    uint32_t cmd;             // the Linux ioctl number, or BH_IOCTL_UNMAPPED
     uint32_t pad;
     uint8_t  arg[64];
 };

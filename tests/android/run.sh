@@ -163,6 +163,11 @@ if [ -n "$ready" ] && [ -f "$STAGE/usr/include/linux/android/binder.h" ] && [ -n
     out=$(GENV="$BENV" DL=20 g /system/bin/service call steamarm.test 2 fd /system/etc/hosts)
     grep -q "Result: Parcel(00000000 $want" <<<"$out" && ok "service call ... fd /system/etc/hosts: the service read it through the passed descriptor ($want)" \
         || bad "service call fd" "want $want: $out"
+    # dumpsys lists only when there is more than one service (dumpsys.cpp,
+    # "if (N > 1)"), each checked with checkService.
+    out=$(GENV="$BENV" DL=20 g /system/bin/dumpsys -l)
+    grep -q '^  steamarm.test' <<<"$out" && grep -q '^  manager' <<<"$out" &&
+        ok "dumpsys -l: $(tr '\n' ' ' <<<"$out")" || bad "dumpsys -l" "$(tr '\n' ' ' <<<"$out")"
     out=$(GENV="$BENV" DL=20 g /system/bin/service call steamarm.test 3)
     wait "$svcpid" 2>/dev/null
     gone=""

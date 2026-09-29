@@ -3673,16 +3673,23 @@ restart:
     }
     case LNR_dup3:
         // (oldfd, newfd, flags). Linux errors if old == new, unlike dup2.
-        if ((int)a0 == (int)a1) {
+        if ((int)a0 == (int)a1 || (a2 & ~0x80000ull)) {     // only O_CLOEXEC is a flag
             ret = LERR(EINVAL);
+        } else if (fcntl((int)a0, F_GETFD) < 0) {
+            // A bad oldfd leaves newfd alone: its module state must survive.
+            ret = LERR(EBADF);
         } else {
             // dup2 closes newfd implicitly: whatever it used to be must be
             // released exactly as an explicit close() would, or a dead epoll
             // registration or eventfd survives on the recycled number.
             forget_fd((int)a1);
             ret = ret_of(dup2((int)a0, (int)a1));
-            if (ret >= 0)
+            if (ret >= 0) {
                 alias_fd((int)a0, (int)a1);
+                // Linux dup3(O_CLOEXEC); Darwin's dup2 always clears it.
+                if (a2 & 0x80000)
+                    fcntl((int)a1, F_SETFD, FD_CLOEXEC);
+            }
         }
         break;
     case LNR_futex:
