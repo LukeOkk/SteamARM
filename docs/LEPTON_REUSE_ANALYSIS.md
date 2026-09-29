@@ -506,7 +506,11 @@ these sit among the other ARM64 work: `docs/ARM64_FIRST_MIGRATION.md`.
    `benchmarks/`.
 2. Start one bionic program under lxrun:
    `LXRT_ROOT=<android root> LXRT_GUEST_PAGE=4096 LXRT_REPORT_ENOSYS=1 build/lxrun <android root>/system/bin/toybox true`.
-   Record `elf.c` refusals and the missing syscalls it names.
+   Record `elf.c` refusals and the missing syscalls it names. Done for the
+   Waydroid LineageOS 18.1 image, the base of Lepton's legacy `image/`
+   (MEASURED, `benchmarks/stage25-android-userspace.txt`): linker64,
+   toybox and mksh run after seven runtime fixes; ART cannot map its heap
+   below 4 GiB on macOS (`docs/ANDROID_RUNTIME_ARCHITECTURE.md`).
 3. `elf.c` no longer refuses 4 KiB-aligned executables (stage21). If
    `linker64` is 4 KiB-aligned, measure the cost of `subpage.c` for it, and
    compare with an `image-14` build with 16 KiB segments.

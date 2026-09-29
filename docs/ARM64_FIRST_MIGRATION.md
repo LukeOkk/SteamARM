@@ -100,8 +100,13 @@ Independent of that order:
 - **x18 on the M4.** `tests/x18_preserve/run.sh` under macOS 27
   (`docs/X18_VIRTUALIZATION.md`). OPEN.
 - **Android (Lepton).** `docs/LEPTON_REUSE_ANALYSIS.md` steps 1-3
-  (alignment, one bionic program under lxrun). OPEN. The Frame root has
-  `usr/share/guestos/android` (57 MB) and podman 5.5.2 (MEASURED).
+  (alignment, one bionic program under lxrun). Steps 1-2 done on a
+  Waydroid LineageOS 18.1 root (stage 25, MEASURED): 4 KiB-aligned, and
+  bionic's linker, toybox and mksh run. ART does not: its heap must be
+  mapped below 4 GiB, which macOS forbids
+  (`docs/ANDROID_RUNTIME_ARCHITECTURE.md`); binder is the other open layer.
+  The Frame root has `usr/share/guestos/android` (57 MB) and podman 5.5.2
+  (MEASURED).
 
 ## Blockers
 
