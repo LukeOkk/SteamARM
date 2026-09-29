@@ -373,6 +373,8 @@ static size_t count_sites(uint64_t start, uint64_t end,
             break;
         case SITE_TLS_READ:
             rep->tls_read_found++;
+            if (lxrt_tlskeep_contains((uint64_t)&w[i]))
+                break;              // left in place (tls.c, kept ranges)
             bytes += (size_t)lxrt_tlsrd_size;
             break;
         case SITE_TLS_WRITE:
@@ -412,6 +414,7 @@ static void report_add(struct lxrt_rewrite_report *dst,
     dst->tls_write_found += r->tls_write_found;
     dst->tls_rewritten += r->tls_rewritten;
     dst->tls_unreachable += r->tls_unreachable;
+    dst->tls_kept += r->tls_kept;
     dst->ctr_found += r->ctr_found;
     dst->ctr_rewritten += r->ctr_rewritten;
     dst->sysreg_found += r->sysreg_found;
@@ -433,6 +436,7 @@ static void accumulate(const struct lxrt_rewrite_report *r)
     g_totals.tls_write_found += r->tls_write_found;
     g_totals.tls_rewritten += r->tls_rewritten;
     g_totals.tls_unreachable += r->tls_unreachable;
+    g_totals.tls_kept += r->tls_kept;
     g_totals.ctr_found += r->ctr_found;
     g_totals.ctr_rewritten += r->ctr_rewritten;
     g_totals.sysreg_found += r->sysreg_found;
@@ -464,6 +468,8 @@ size_t lxrt_rewrite_count(uint64_t start, uint64_t end)
             continue;
         if ((k == SITE_TLS_READ || k == SITE_TLS_WRITE) && !lxrt_tls_ready())
             continue;               // rewrite_chunk_code leaves these alone too
+        if (k == SITE_TLS_READ && lxrt_tlskeep_contains((uint64_t)(uintptr_t)&w[i]))
+            continue;               // and these (kept ranges, tls.c)
         n++;
     }
     return n;
@@ -551,6 +557,14 @@ static int rewrite_chunk_code(uint64_t start, uint64_t end,
         enum site_kind kind = classify(w[i], &rt);
         if (kind == SITE_NONE)
             continue;
+        if (kind == SITE_TLS_READ && lxrt_tlskeep_contains(site)) {
+            // A program that hashes its own code (BoringSSL's FIPS module):
+            // the read stays, and tls.c gives the hardware register the
+            // guest's thread pointer when a load through Darwin's value
+            // faults (lxrt_tlskeep_fixup).
+            rep->tls_kept++;
+            continue;
+        }
         if ((kind == SITE_TLS_READ || kind == SITE_TLS_WRITE) && !lxrt_tls_ready()) {
             // No TSD slot: leave the instruction alone. That is wrong -- the
             // guest will lose its thread pointer on the first context switch --

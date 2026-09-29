@@ -322,6 +322,58 @@ static void register_functions(int fd, const struct elf64_ehdr_ *eh, const struc
     free(names);
 }
 
+// BoringSSL's FIPS module hashes its own code between the dynamic symbols
+// BORINGSSL_bcm_text_start and BORINGSSL_bcm_text_end at load time (Android's
+// libcrypto.so). When both lie inside the exec section [sec_lo, sec_hi) (in
+// vaddrs) and inside the mapped window, register the range with tls.c so its
+// thread-pointer reads stay byte-for-byte (tls.c, "Kept TLS reads").
+static void register_fips(int fd, const struct elf64_ehdr_ *eh, const struct elf64_shdr_ *sh,
+                          uint64_t sec_lo, uint64_t sec_hi, uint64_t win_lo, uint64_t win_hi,
+                          int64_t delta)
+{
+    if (!lxrt_tlskeep_enabled())
+        return;
+    for (unsigned i = 0; i < eh->e_shnum; i++) {
+        if (sh[i].sh_type != 11 /* SHT_DYNSYM */ || sh[i].sh_entsize != 24 ||
+            sh[i].sh_link >= eh->e_shnum || sh[i].sh_size == 0 || sh[i].sh_size > (64u << 20))
+            continue;
+        const struct elf64_shdr_ *str = &sh[sh[i].sh_link];
+        if (str->sh_size == 0 || str->sh_size > (64u << 20))
+            return;
+        // The names first: nearly every library lacks them, and a search of
+        // .dynstr is cheaper than walking .dynsym (libcef's is large).
+        char *names = malloc(str->sh_size + 1);
+        if (!names || !read_all(fd, str->sh_offset, names, str->sh_size) ||
+            !memmem(names, str->sh_size, "BORINGSSL_bcm_text_", 19)) {
+            free(names);
+            return;
+        }
+        names[str->sh_size] = '\0';
+        uint8_t *syms = malloc(sh[i].sh_size);
+        uint64_t lo = 0, hi = 0;
+        if (syms && read_all(fd, sh[i].sh_offset, syms, sh[i].sh_size)) {
+            for (uint64_t k = 0; k + 24 <= sh[i].sh_size; k += 24) {
+                uint32_t nm;
+                uint64_t val;
+                memcpy(&nm, syms + k, 4);
+                memcpy(&val, syms + k + 8, 8);
+                if (nm >= str->sh_size || !val)
+                    continue;
+                if (!strcmp(names + nm, "BORINGSSL_bcm_text_start")) lo = val;
+                else if (!strcmp(names + nm, "BORINGSSL_bcm_text_end")) hi = val;
+            }
+        }
+        free(syms);
+        free(names);
+        if (lo && hi > lo && lo >= sec_lo && hi <= sec_hi) {
+            uint64_t s = lo + (uint64_t)delta, e = hi + (uint64_t)delta;
+            if (s >= win_lo && e <= win_hi)
+                lxrt_tlskeep_add(s, e, "BoringSSL FIPS module");
+        }
+        return;
+    }
+}
+
 // Executable-section windows of the aarch64 ELF open on `fd`, restricted to
 // the file range [file_off, file_off+len) that was mapped at `map_base`.
 // Returns the number of windows written (0 for a non-ELF, a non-aarch64 ELF,
@@ -370,6 +422,9 @@ int lxrt_elf_exec_sections(int fd, uint64_t file_off, uint64_t len,
                 out[k].start == map_base + ((sh[i].sh_offset > file_off ? sh[i].sh_offset : file_off) - file_off)) {
                 register_functions(fd, &eh, sh, out[k].start, out[k].end,
                                    (int64_t)(map_base + sh[i].sh_offset - file_off) - (int64_t)sh[i].sh_addr);
+                register_fips(fd, &eh, sh, sh[i].sh_addr, sh[i].sh_addr + sh[i].sh_size,
+                              out[k].start, out[k].end,
+                              (int64_t)(map_base + sh[i].sh_offset - file_off) - (int64_t)sh[i].sh_addr);
                 break;
             }
     free(sh);
@@ -399,6 +454,8 @@ int lxrt_elf_exec_sections_path(const char *path, uint64_t load_bias,
                 out[n].start = load_bias + sh[i].sh_addr;
                 out[n].end = load_bias + sh[i].sh_addr + sh[i].sh_size;
                 register_functions(fd, &eh, sh, out[n].start, out[n].end, (int64_t)load_bias);
+                register_fips(fd, &eh, sh, sh[i].sh_addr, sh[i].sh_addr + sh[i].sh_size,
+                              out[n].start, out[n].end, (int64_t)load_bias);
                 n++;
             }
         }

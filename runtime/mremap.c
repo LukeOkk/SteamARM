@@ -59,6 +59,41 @@ static void *staging(uint64_t len, bool fixed, uint64_t target)
     return result;
 }
 
+int lxrt_mremap_copy_out(void *dst, uint64_t src, uint64_t len)
+{
+    if (!len)
+        return 0;
+    // A private copy-on-write alias of the enclosing host pages, made
+    // readable: the source may be PROT_NONE or execute-only to the guest.
+    uint64_t hs = LXRT_ALIGN_DOWN(src, LXRT_HOST_PAGE);
+    uint64_t he = LXRT_ALIGN_UP(src + len, LXRT_HOST_PAGE);
+    mach_vm_address_t snap = 0;
+    vm_prot_t cur, max;
+    if (mach_vm_remap(mach_task_self(), &snap, he - hs, 0, VM_FLAGS_ANYWHERE,
+                      mach_task_self(), hs, TRUE, &cur, &max, VM_INHERIT_NONE) != KERN_SUCCESS)
+        return -1;
+    int rc = -1;
+    if (mprotect((void *)snap, he - hs, PROT_READ) == 0) {
+        memcpy(dst, (void *)(snap + (src - hs)), len);
+        rc = 0;
+    }
+    mach_vm_deallocate(mach_task_self(), snap, he - hs);
+    return rc;
+}
+
+int lxrt_mremap_host_prot(uint64_t addr, bool *shared)
+{
+    vm_region_basic_info_data_64_t info;
+    uint64_t end;
+    if (!region(addr, &end, &info))
+        return -1;
+    if (shared)
+        *shared = info.shared;
+    return (info.protection & VM_PROT_READ ? PROT_READ : 0)
+         | (info.protection & VM_PROT_WRITE ? PROT_WRITE : 0)
+         | (info.protection & VM_PROT_EXECUTE ? PROT_EXEC : 0);
+}
+
 long lxrt_mremap(uint64_t old_addr, uint64_t old_len,
                  uint64_t new_len, int lflags, uint64_t new_addr)
 {

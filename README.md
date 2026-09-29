@@ -100,6 +100,9 @@ guides, and nothing in them is ready for players yet. Start with the plan,
   needs, and why SteamARM never ships Google's apps).
 - Android apps: [APK_SUPPORT.md](docs/APK_SUPPORT.md) (APKs are read,
   installed and listed; nothing Android runs yet).
+- Android userspace without a VM (bionic programs run; ART's heap does not
+  fit macOS yet):
+  [ANDROID_RUNTIME_ARCHITECTURE.md](docs/ANDROID_RUNTIME_ARCHITECTURE.md).
 
 ## Build from source
 
@@ -117,6 +120,7 @@ Tests: `tests/elf/run.sh`, `tests/elf/run_i386.sh`,
 `tests/steamframe_image/run.sh` (Linux), `tests/steamframe_image/redact.sh`,
 `tests/steamframe_image/compare.sh`,
 `tests/audio/run.sh`, `tests/launcher/safeguard.sh`, `make test-launcher-core`,
+`tests/android/run.sh` (needs `scripts/mkandroidroot.sh`),
 `make test-arm64`, `python3 -m unittest tests/test_docs_records.py` (the
 benchmark index and the docs against the records and the x18 planner).
 

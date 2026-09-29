@@ -1,0 +1,377 @@
+Stage 25 -- Android 11 userspace under lxrun: bionic programs, and where ART stops (2026-09-29)
+==============================================================================================
+
+ZERO-VM. No virtual machine, no guest kernel, no FEX. Host: Mac mini M4,
+16 GB, macOS 27.0 (26A428). Base commit 53432eb. Every guest below is an
+unmodified Android 11 arm64 binary from Waydroid's LineageOS 18.1 image,
+run by lxrun as a macOS process. Nothing was signed in to, no Google
+component was downloaded, no Steam client was started. Other agents ran
+guests on the same Mac (a FEXServer started by another session was running
+throughout); every process below was started and stopped by this session
+only, by its own PID. Home paths are written as ~.
+Labels: MEASURED, VERIFIED IN SOURCE, UPSTREAM DOCUMENTED, HYPOTHESIS, UNKNOWN.
+
+Result
+------
+MEASURED:
+1. bionic runs under lxrun. linker64 (as a program and as PT_INTERP),
+   toybox (ls, echo, uname, id, cat, grep, seq, paste, date, wc,
+   sha256sum, md5sum), mksh (arithmetic, loops, $(...) with fork, pipes),
+   getprop and ART's dexdump run from the Android root and give the right
+   output; toybox's sha256sum of framework.jar equals the Mac's shasum.
+   Start-up: toybox true 53-58 ms median, mksh -c true 40 ms.
+2. That took seven runtime changes (R1-R7 below): sub-page mremap (bionic's
+   CFI shadow), PR_SET_TAGGED_ADDR_CTRL refused (bionic's tagged heap),
+   BoringSSL FIPS module's TPIDR_EL0 reads kept byte-for-byte (its
+   integrity self-test), msync, rt_tgsigqueueinfo, clone TLS inheritance
+   and refusing a thread without CLONE_FILES.
+3. ART cannot start, with or without the JIT: its heap must be mapped below
+   4 GiB (32-bit compressed references), and macOS maps nothing below 4 GiB
+   in an arm64 process. dalvikvm64 and dex2oat64 both abort with
+   "Could not find contiguous low-memory space." / heap.cc:493
+   "Check failed: non_moving_space_mem_map.IsValid() ... Out of memory".
+   So Hello.dex (built on the Mac with D8) was never executed by ART, and
+   -Xint against JIT, wall time and the CPU loop's correctness on ART could
+   not be measured. This wall is below binder: no Java process of Android
+   (zygote, system_server, any app, the Play Store) can start under the
+   in-process design until ART's heap can live above 4 GiB
+   (docs/ANDROID_RUNTIME_ARCHITECTURE.md, "The ART heap wall").
+
+Downloads (Waydroid's official image host; sha256 computed here)
+----------------------------------------------------------------
+Index: https://ota.waydro.id/system/lineage/waydroid_arm64/VANILLA.json and
+https://ota.waydro.id/vendor/waydroid_arm64/MAINLINE.json, fetched
+2026-09-29T19:00Z. They list 20.0 (Android 13) builds first; the last 18.1
+(Android 11) entries are 2025-06-28. Each entry's "id" is the zip's sha256
+(what waydroid's own tool checks), and it matched:
+- system: lineage-18.1-20250628-VANILLA-waydroid_arm64-system.zip
+  https://sourceforge.net/projects/waydroid/files/images/system/lineage/waydroid_arm64/lineage-18.1-20250628-VANILLA-waydroid_arm64-system.zip/download
+  796,742,550 bytes, sha256 2700a68255c234f04453da15bfdaed0b0d30343f3af968cf39a096657d88a625
+- vendor: lineage-18.1-20250628-MAINLINE-waydroid_arm64-vendor.zip
+  https://sourceforge.net/projects/waydroid/files/images/vendor/waydroid_arm64/lineage-18.1-20250628-MAINLINE-waydroid_arm64-vendor.zip/download
+  133,661,506 bytes, sha256 e3b81b0c7f86d316350081a5d43622dd5dc2f9e028f10a715422133853ba886c
+Licence: LineageOS 18.1 / AOSP, Apache-2.0 for most of it, with the GPL and
+other licences of its components listed in /system/etc/NOTICE.xml.gz and
+/vendor/etc/NOTICE.xml.gz inside the images. VANILLA: no Google apps; the
+root has no GMS, Phonesky or Vending package (ls system/priv-app). Build:
+ro.lineage.version=18.1-20250627-VANILLA-waydroid_arm64,
+ro.build.display.id "lineage_waydroid_arm64-userdebug 11 RQ3A.211001.001
+150 test-keys", security patch 2024-02-05. Stored in
+~/SteamARM-roots/android/images/ (zips and the two OTA indexes, mode 0444),
+never in the repository.
+- R8/D8 9.4.27 (com.android.tools:r8, Google Maven,
+  https://dl.google.com/dl/android/maven2/com/android/tools/r8/9.4.27/r8-9.4.27.jar),
+  20,600,288 bytes, sha256 6646aacebba0e8d13b2309b3b9191d08a2dbd187b648fdc4f78a684bcddade18
+  (sha1 01042bdf... equals Maven's .sha1). Its POM lists BSD-3-Clause first,
+  then the licences of what it bundles (Apache-2.0, MIT, BSD, ...). No SDK
+  licence was accepted. In ~/SteamARM-roots/android/tools/.
+- Host JDK: the Mac's Temurin 17.0.20 (javac 17.0.20), already installed.
+- Extraction tools: Homebrew e2fsprogs 1.47.4 (debugfs), already installed.
+
+The root (scripts/mkandroidroot.sh)
+-----------------------------------
+- Both images are raw ext4 (magic 0xEF53 at 1080), not sparse: unzipped to
+  ~/SteamARM-roots/android/images/extracted/{system,vendor}.img (1.77 GB,
+  358 MB, mode 0444).
+- system.img is system-as-root: its / has init, system/, apex/ (empty),
+  linkerconfig/ (empty), bin -> /system/bin...
+- ~/SteamARM-roots/android.sparsebundle, "Case-sensitive APFS", 24 GB
+  maximum, attached with -nobrowse at /Volumes/SteamARMAndroid. The root is
+  /Volumes/SteamARMAndroid/root: `debugfs -R "rdump / <root>"` of system.img,
+  then of vendor.img into <root>/vendor. 2.2 GB, 5,946 files, 581 links.
+  rdump cannot chown as a user (its only messages); modes are kept.
+- APEXes are already flattened directories in /system/apex (19); each is
+  copied with APFS clones (cp -cR) to /apex/<name from apex_manifest.pb>:
+  com.android.art.release -> com.android.art, com.android.vndk.current ->
+  com.android.vndk.v30, the rest by their own names. Copies, not links:
+  bionic's linker compares a library's real path with its namespace's
+  permitted paths (HYPOTHESIS for this root: no linker config is in use,
+  see below).
+- /data/dalvik-cache/arm64, /data/local/tmp, /data/misc, /data/system and
+  /dev/socket are created; /data survives `--rebuild`.
+- `scripts/mkandroidroot.sh --rebuild`: 7.5 s wall from the extracted
+  images (MEASURED); `--verify` checks the two sha256; without arguments on
+  an existing root it only says so.
+
+Inventory (scripts/androidroot.py inventory; x18 by `lxrun --dry-run`)
+-----------------------------------------------------------------------
+Under system/, vendor/ and apex/ (apex/ repeats system/apex), 5,934 regular files:
+  ELF64 aarch64 2,241; ELF32 arm 1,684 (/system/lib, /vendor/lib:
+  armeabi-v7a, which Apple silicon cannot execute); ELF64 e_machine 247
+  (eBPF) 4.
+  aarch64: 2,022 ET_DYN libraries, 216 PIE executables (ET_DYN with
+  PT_INTERP /system/bin/linker64), 3 ET_EXEC: system/bin/linkerconfig,
+  gdbserver64, mdnsd (lxrun refuses them: they link inside __PAGEZERO).
+  Smallest PT_LOAD p_align: 0x1000 for 2,163 files, 0x10000 for 78 (all in
+  system/system_ext, the VNDK v28/v29 prebuilts). So the platform is
+  4 KiB-aligned: linker64, libc.so, toybox, sh, libart.so are p_align
+  0x1000 (runtime/subpage.c serves them, LXRT_GUEST_PAGE=4096).
+  PT_TLS in 232 files.
+x18 over the 1,699 aarch64 files with executable segments: 70 files, 21,167
+sites, all rewritten, 0 unsupported, 0 unreachable. 21,139 of them are in the
+VNDK v28 prebuilts (libRSCpuRef 7,372, libblas 2,997, libjpeg 1,962,
+libopus 1,572, libcrypto 1,539, ...), code built when x18 was still an
+ordinary register for them. Everything else: 18 files, 28 sites (libc.so 4,
+libandroid_runtime 4, linker64 1, libart 1, boot-framework.oat 2, the
+shadow-call-stack users libunwindstack/libbacktrace/libfdtrack/heapprofd 1
+each, three .odex 1 each).
+Rewrite counts of what toybox maps (LXRT_TRACE): libc.so svc 216, x18 4,
+TLS 796; libcrypto.so TLS 635, of which 119 kept (the FIPS module, R3) and
+516 rewritten; linker64 svc 215, TLS 592, x18 1.
+
+lxrun builds used
+-----------------
+- worktree `make lxrt LXRT_KEEP_X18=1` (rm -f build/lxrun first):
+  LC_BUILD_VERSION minos 12.0 sdk 12.3. Used for every run below unless
+  said otherwise.
+- HEAD's runtime (53432eb), same flag, built from `git archive` in the
+  session's scratch directory: the "before" column.
+- the final runtime built the default way (sdk 27.0): tests/android/run.sh
+  at the end.
+Guest environment for every run: env -i, HOME=/data/local/tmp,
+PATH=/system/bin:/system/xbin, LXRT_ROOT=/Volumes/SteamARMAndroid/root,
+LXRT_GUEST_PAGE=4096; for ART also init.environ.rc's ANDROID_ROOT=/system,
+ANDROID_DATA=/data, ANDROID_ART_ROOT, ANDROID_I18N_ROOT,
+ANDROID_TZDATA_ROOT, BOOTCLASSPATH, DEX2OATBOOTCLASSPATH.
+
+Runs (MEASURED; wall clock of the whole command)
+------------------------------------------------
+B1  HEAD: toybox uname -a                                      rc=127, 0.15 s
+      [lxrt] mremap: sub-page mapping not supported yet
+      bionic/linker/linker_cfi.cpp:77: ~ShadowWrite CHECK 'res != MAP_FAILED' failed
+    bionic's linker builds its CFI shadow before main(): ShadowWrite fills a
+    private copy and moves it with mremap(MREMAP_MAYMOVE|MREMAP_FIXED) over
+    a 4 KiB-aligned slice of the reserved shadow. runtime/mremap.c refused
+    sub-page ranges. -> R1.
+B2  with R1: toybox uname -a                                   rc=127, 0.40 s
+      FIPS integrity test failed.
+      Expected: 10e65bfd796b31b6c80b513dfd0f194d8950324a5ecf682f892bc942f4d84194
+      Calculated: 00fb5595be3186cd96eb3758578fa375ca45e32366946a73db04bb83edcf3310
+    toybox links libcrypto.so, whose BoringSSL FIPS module HMACs its own
+    text [BORINGSSL_bcm_text_start, BORINGSSL_bcm_text_end) in a constructor.
+    The module has 119 `mrs Xn, TPIDR_EL0` (bionic's stack protector reads
+    its guard at [TP, #0x28]: 112 feed that load directly, 7 spill Xn first)
+    and no svc, x18 or system-register site; rewriting the 119 changed the
+    bytes. -> R3.
+B3  with R1: sh /data/local/tmp/sh1.sh (mksh)                   rc=0, 0.05 s, NO output
+    Trace: prctl(0x37 PR_SET_TAGGED_ADDR_CTRL, 1) -> 0 (the runtime's
+    default for an unknown prctl), then read(10, 0xb4007efffe220ce0, 0x200)
+    -> -14 EFAULT. bionic tags heap pointers (top byte 0xb4) when the kernel
+    accepts the tagged address ABI; loads and stores through them work (the
+    CPU ignores the top byte), Darwin's read(2) does not. -> R2.
+B4  with R1-R3 (final runtime):
+      sh /data/local/tmp/sh1.sh   -> "hello from mksh", 42, i=1..3,
+                                     "command substitution: sub", "pid N ppid M"  rc=0
+      toybox uname -a             -> "Linux lxrt 6.6.0-lxrt #1 SMP lxrt aarch64"  rc=0
+      linker64 /system/bin/toybox ls /system -> addon.d ... xbin (17 entries)     rc=0
+      sh tb1.sh: toybox ls / (36 entries); echo; uname; `id` -> "id: bad uid 501"
+        (the Mac's uid is not an Android uid; Lepton fakes getuid,
+        docs/LEPTON_REUSE_ANALYSIS.md 3.3); build.prop grep -> ro.build.version.sdk=30,
+        release=11, ro.product.cpu.abilist=arm64-v8a,armeabi-v7a,armeabi;
+        sha256sum framework.jar = 25746a9b...d487a8 = the Mac's shasum -a 256;
+        md5sum = 559c3682...712439a = the Mac's md5; seq|paste -> 1+2+3+4+5;
+        date +%Y -> 2026.
+      getprop ro.build.version.sdk -> "" rc=0: /dev/__properties__ is absent
+        (fstatat ENOENT), bionic's property reads return empty and nothing
+        aborts. The property service (init) is not there; see the doc.
+B5  Without LXRT_GUEST_PAGE=4096 (AT_PAGESZ 16384): toybox getconf PAGESIZE
+      <jemalloc>: Unsupported system page size
+      libc: malloc(48) failed: returning null pointer
+    Android 11's jemalloc is built for 4 KiB pages. With LXRT_GUEST_PAGE=4096:
+    "4096". So Android guests need LXRT_GUEST_PAGE=4096.
+B6  Kept-TLS fault counts (LXRT_TLS_KEEP_LOG=1): toybox true 557 faults
+    fixed per process (the FIPS module's power-on self tests); toybox
+    sha256sum of 27 MB, 557 (the SHA-256 assembly has no stack protector).
+    Cost about 11 us of system time per fault (tests/elf below: 100,001
+    faults, 1.06 s sys).
+B7  Timings, 10 runs each, median (min-max):
+      toybox true                         0.058 s (0.056-0.080)
+      linker64 /system/bin/toybox true    0.059 s (0.055-0.062)
+      sh -c true (mksh)                   0.041 s (0.039-0.046)
+      sh -c 'x=$(toybox echo x)'          0.090 s (0.087-0.095)  fork + exec
+      toybox sha256sum framework.jar      0.074 s (0.071-0.079)  27,447,682 bytes
+      dexdump -d hello.dex                0.054 s (0.051-0.061)
+    (Before R3's last change, which stopped writing TPIDR_EL0 (R3b), the
+    same list was 0.053/0.053/0.040/0.082/0.070/0.055.)
+B8  servicemanager, the first binder process (for the next layer):
+      ProcessState: Binder driver /dev/binder is unavailable. Using /dev/binder instead.
+      ProcessState: Opening '/dev/binder' failed: No such file or directory
+      ProcessState: Binder driver '/dev/binder' could not be opened.  Terminating.
+    (logd stand-in, below). Its abort then went: rt_tgsigqueueinfo ENOSYS
+    -> _exit(127) (-> R5); with R5, bionic's crash handler cloned a
+    "pseudothread" without CLONE_SETTLS and without CLONE_FILES: TLS 0 ->
+    SIGSEGV at 0x28 in a loop (-> R6), then that thread closed descriptors
+    0-2 of the whole process (-> R7). Final: "libc: Fatal signal 6
+    (SIGABRT) ... failed to spawn debuggerd dispatch thread: Invalid
+    argument", exit status 1. `service list` the same.
+
+ART (MEASURED unless labelled)
+------------------------------
+Hello.dex: tests/android/java/Hello.java and Loop.java, javac --release 8
+(17.0.20), D8 9.4.27 `--min-api 30 --release`: classes.dex, 2,592 bytes,
+"dex\n039". The Mac's JVM (Temurin 17.0.20), reference values:
+  Hello: "Hello from Java on ART, no VM"
+  Loop 20000000 5: result=6336216350770228723 each round, 69.6-73.5 ms;
+  seeds1-8 xor=-6707810063849728606; LOOP OK
+  -Xint Loop 2000000 2: result=-6435145747647352456, 49.5-51.8 ms
+A1  dexdump -d /data/local/tmp/hello.dex under lxrun: "Opened
+    '/data/local/tmp/hello.dex', DEX version '039'", classes LHello; and
+    LLoop;, their bytecode. rc=0, 0.054 s. (ART's libdexfile works.)
+A2  dalvikvm64 -cp /data/local/tmp/hello.dex Hello, before msync existed:
+    no end within 60 s. Trace: msync(0x32640000.., 4096, 0) -> ENOSYS, one
+    call per 4 KiB page from 64 KiB up (1,992,217 calls in 10 s traced).
+    ART's MemMap::MapInternalArtLow4GBAllocator probes for free low memory
+    with msync (VERIFIED IN SOURCE, below). -> R4 (msync). With msync
+    answering ENOMEM for the low 4 GiB, ART then tried a 64 MiB mapping at
+    each free-looking 4 KiB step; each landed above 4 GiB and was unmapped
+    again: still no end. msync now reports the low 4 GiB as reserved (it
+    is: __PAGEZERO).
+A3  dalvikvm64 -cp /data/local/tmp/hello.dex Hello (final runtime), log via
+    tests/android/logd.py:                                  rc=127, 6.03 s
+      W dalvikvm64: Could not reserve sentinel fault page
+      E dalvikvm64: Could not create image space with image file
+        '/apex/com.android.art/javalib/boot.art:/system/framework/boot-framework.art!/system/etc/boot-image.prof'.
+        Attempting to fall back to imageless running. Error was: Failed to mmap at expected address, mapped at 0x158000000
+      E dalvikvm64: Could not find contiguous low-memory space.
+      F dalvikvm64: heap.cc:493] Check failed: non_moving_space_mem_map.IsValid()
+        Failed anonymous mmap(0x0, 67108864, 0x3, 0x22, -1, 0): Out of memory.
+      F dalvikvm64: runtime.cc:655] Runtime aborting...
+A4  dalvikvm64 -Xint, same                                   rc=127, 6.57 s, same messages
+A5  dex2oat64 --dex-file=... --oat-file=/data/local/tmp/hello.odex
+    --instruction-set=arm64 --boot-image=/apex/com.android.art/javalib/boot.art
+                                                              rc=127, 5.64 s
+      E dex2oat64: Could not create image space ... Failed to mmap at expected
+        address, mapped at 0x109584000 instead of 0x70000000
+      E dex2oat64: Could not find contiguous low-memory space.
+      F dex2oat64: heap.cc:493] Check failed: non_moving_space_mem_map.IsValid() ...
+    (Without --boot-image: "Could not open boot oat file for extracting boot
+    class path", rc=2, before the heap.) dex2oat has the same heap, so no
+    boot image or odex can be generated here either.
+    With the final runtime the three abort with rc 1 instead of 127 (R5-R7).
+A6  The platform limit, from a plain Mach-O (scratch low4g.c), linked
+    against the 12.3 SDK like the KEEP_X18 lxrun:
+      mmap MAP_FIXED 0x10000 / 0x70000000 / 0xfc000000 -> ENOMEM
+      mmap hint at the same addresses -> 0x1023cc000 (above 4 GiB)
+      mach_vm_allocate VM_FLAGS_FIXED at the same -> kr=1 (invalid address)
+      mmap MAP_FIXED 0x200000000 -> ok
+      -pagezero_size 0x10000 -> killed at exec, rc 137
+    (the same as benchmarks/stage2-pagezero.txt with the current SDK).
+A7  VERIFIED IN SOURCE, LineageOS/android_art branch lineage-18.1 (the ART
+    in this image), commit 7f2b48980eaa3e9ebeb3fe2df55ae4beb96f8248:
+    - runtime/mirror/object_reference.h:39-47 PtrCompression::Compress is
+      static_cast<uint32_t>(reinterpret_cast<uintptr_t>(ptr)) and
+      Decompress the reverse (zero extension); line 104: uint32_t reference_.
+    - runtime/gc/heap.cc:757-769 MapAnonymousPreferredAddress maps every
+      heap space with /*low_4gb=*/ true; heap.cc:493 is the CHECK in A3.
+    - libartbase/base/mem_map.cc:1036-1118 MapInternalArtLow4GBAllocator:
+      msync(ptr, kPageSize, 0) per page from LOW_MEM_START (64 KiB), then
+      "Could not find contiguous low-memory space."
+    - runtime/gc/space/image_space.cc:1174,1185: the boot image is mapped
+      with low_4gb=true at ART_BASE_ADDRESS (0x70000000) plus a delta.
+    - Heap poisoning hooks exist at every reference load/store in the arm64
+      back end (compiler/utils/arm64/assembler_arm64.cc:161-183
+      Poison/UnpoisonHeapReference, neg on a W register; the assembly
+      macros POISON_HEAP_REF/UNPOISON_HEAP_REF in
+      runtime/arch/arm64/asm_support_arm64.S:73-84 and mterp main.S), off
+      in this build (kPoisonHeapReferences false).
+So ART's -Xint/JIT comparison, wall time and the CPU loop could not be
+measured; neither could ART's JIT code cache against runtime/wxsplit.c or
+MAP_JIT. Hello.dex never ran.
+
+Runtime changes (all in this stage's commits; tests below)
+-----------------------------------------------------------
+R1  runtime/dispatch.c do_mremap_subpage: mremap of 4 KiB guest pages that do
+    not fill their host pages (addresses not 16 KiB-aligned, or ranges
+    runtime/subpage.c tracks): a private anonymous mapping through do_mmap,
+    the bytes copied (a copy-on-write alias, so any protection reads), the
+    protection through do_mprotect, the source unmapped through do_munmap.
+    Shared sources are refused (ENOMEM). runtime/mremap.c gains the copy
+    and host-protection helpers, runtime/subpage.c lxrt_subpage_prot_at.
+R2  prctl(PR_SET_TAGGED_ADDR_CTRL / PR_GET_...) -> EINVAL.
+R3  runtime/tls.c "kept TLS reads": elfsect.c finds BoringSSL's
+    BORINGSSL_bcm_text_start/end in .dynsym (after a memmem of .dynstr) when
+    a library is mapped; rewrite.c leaves the TLS reads there as they are
+    (only reads; every other site kind is still rewritten); a load or store
+    in that range whose base register holds a value Darwin leaves in
+    TPIDR_EL0 (below 4 GiB or at/above 2^48) is fixed in the fault path by
+    putting the guest's thread pointer in that register. LXRT_TLS_KEEP=0
+    turns it off. The self-test is not bypassed: it hashes the module's
+    original bytes and passes on them.
+R3b The first version also wrote the guest's pointer into TPIDR_EL0 so that
+    the next reads would not fault. With an lxrun built against the current
+    SDK (sdk 27.0) toybox then crashed inside the runtime's own malloc
+    (sample(1): lxrt_proc_translate -> materialise -> _xzm_malloc_large_huge
+    -> xzm_segment_group_alloc_chunk -> _sigtramp -> host_handler, delivered
+    to bionic's crash handler, then a hang in its futex); the 12.3-SDK build
+    ran. Without the write: 7 of 7 with both builds. A plain Mach-O that
+    puts a pointer in TPIDR_EL0 and makes 20,000 mallocs did not crash with
+    either SDK, so the mechanism is UNKNOWN (HYPOTHESIS: Darwin's allocator
+    or signal path reads TPIDR_EL0 under the conditions of a guest thread).
+    Also measured (scratch tpidr_check.c): a TPIDR_EL0 written by a process
+    is lost after usleep and 1,567-1,592 times in a 1.5 s busy loop, with
+    the 12.3 SDK as with the current one: the x18 compatibility does not
+    extend to it.
+R4  msync: Linux flags and alignment checks, ENOMEM for an unmapped page,
+    0 for the low 4 GiB (reserved), MS_SYNC written back through Darwin.
+R5  rt_tgsigqueueinfo (240) and rt_sigqueueinfo (138), sent like tgkill and
+    kill (the caller's siginfo payload is not carried): bionic's abort()
+    raises SIGABRT this way.
+R6  clone of a thread without CLONE_SETTLS starts with the parent's thread
+    pointer (Linux copies TPIDR_EL0).
+R7  clone of a thread without CLONE_FILES -> EINVAL: a Darwin thread cannot
+    own a descriptor table. glibc's and bionic's pthread_create always pass
+    CLONE_FILES.
+Diagnostics: LXRT_FAULT_LOG=1 (a fault that goes on to the guest, with its
+registers, without a syscall trace), LXRT_TLS_KEEP_LOG=1, and
+tests/android/logd.py, a host stand-in for logd's write socket
+(<root>/dev/socket/logdw): Android's error messages go to logd, not stderr.
+
+Tests
+-----
+T1  tests/elf/android_bionic_rt.c (new), glibc static-pie with
+    --export-dynamic:
+    - final runtime, host pages and LXRT_GUEST_PAGE=4096: 20 checks ok each
+      (prctl x2, msync x6, mremap FIXED into a reservation + neighbours +
+      protection + source gone, shrink, move, clone TLS, clone without
+      CLONE_FILES, rt_tgsigqueueinfo)
+    - HEAD's runtime: prctl 2 MAL, msync 6 MAL (ENOSYS), mremap FIXED MAL,
+      then SIGBUS at image+0x4cdd0 writing the page the mremap did not move.
+    - tlskeep: word at BORINGSSL_bcm_text_start 0xd53bd049 (mrs x9,
+      tpidr_el0) untouched, 5 threads x 20,000 loads with usleep/sched_yield,
+      0 mismatches against a rewritten read, 100,001 faults fixed, 0.34 s.
+      With 200,000 per thread: 1,000,001 faults, 3.69 s. LXRT_TLS_KEEP=0:
+      the word is rewritten (0x1581beb4), the check fails as it should.
+T2  tests/android/run.sh (new; skips without the root):
+      final runtime, KEEP_X18 build:  7 passed, 0 failed, 1 expected failure (dalvikvm64)
+      final runtime, default build:   7 passed, 0 failed, 1 expected failure
+      HEAD's runtime:                 0 passed, 8 failed (every program: the CFI CHECK)
+T3  tests/elf/run.sh, KEEP_X18 build: 74 passed, 0 failed (28.2 s), the 4
+    new rows included; tests/elf/run_i386.sh: 18 passed, 0 failed
+    (smc_subpage expected failure as before). Final numbers with the
+    default build are at the end of this record.
+
+What was not done
+-----------------
+- ART never executed Java (the heap wall); no JIT, no boot image, no odex.
+- No property service, no init, no logd (tests/android/logd.py stands in for
+  its socket), no binder, no servicemanager, no zygote.
+- linkerconfig is ET_EXEC and cannot run; the linker ran with no
+  ld.config.txt (default namespace, /system/lib64 and /vendor/lib64 search
+  paths), which is enough for toybox, mksh and ART's tools.
+- The 1,684 32-bit arm files cannot run on Apple silicon (no AArch32).
+- Crash dumps (crash_dump64 needs ptrace and a thread with its own
+  descriptor table): an abort exits with status 1.
+
+Final checks (MEASURED, at 5b4f363 plus this record, default build)
+-------------------------------------------------------------------
+rm -f build/lxrun; make lxrt launcher: rc 0, 31.9 s (lxrun sdk 27.0;
+  built build/SteamARM.app; the one warning is the existing SDL2 dylib
+  "built for newer version 27.0").
+make test-launcher-core: rc 0, 62.4 s -- application core: all checks
+  passed; 37/0; 32/0; 10/0; guest_env 26/0; mkarmroot 25/0;
+  run_steam_arm64 10/0; 35/0.
+tests/elf/run.sh: 74 passed, 0 failed (27.0 s), vulkaninfo skipped (no
+  vulkaninfo in /tmp/lxrt-root), as with the KEEP_X18 build (74/0, 28.2 s).
+tests/android/run.sh: 7 passed, 0 failed, 1 expected failure (dalvikvm64,
+  the heap wall), 6.8 s.
+python3 -m unittest tests/test_docs_records.py: OK (6 tests).
