@@ -1,0 +1,213 @@
+Stage 25 (Android research) -- Android with no VM, Play Store, Lepton's image read directly (2026-09-29)
+====================================================================================================
+
+ZERO-VM. Research and feasibility only: no Android program, image or APK
+was started, no lxrun guest was run for Android, no Steam client was
+started, scripts/run-app.sh was not used, no account was signed into (no
+Google, no Steam), no password was typed or viewed, and no Google
+proprietary software (GMS, GSF, Play Store, GApps packages or GAPPS images)
+was downloaded. The only guests run were the repository's own test suite
+(tests/elf/run.sh) at the end. Host: Mac mini M4, 16 GB, macOS 27.0
+(26A428). Base commit 53432eb. Downloads (source repositories, metadata,
+web pages) went to the session's scratch directory, not the repository and
+not ~/SteamARM-roots. ~/SteamARM-roots/android/images was listed (another
+session's Waydroid VANILLA lineage-18.1 system/vendor zips and OTA JSON
+files) and not read or changed.
+Labels: MEASURED, VERIFIED IN SOURCE, UPSTREAM DOCUMENTED, COMMUNITY
+REFERENCE, HYPOTHESIS, UNKNOWN.
+
+Documents written from these runs: docs/ANDROID_ZERO_VM_FEASIBILITY.md
+(new), docs/PLAY_STORE_RESEARCH.md (new), docs/LEPTON_REUSE_ANALYSIS.md
+(section 0 added). Probe added: benchmarks/dual_view_jit.c.
+
+Result
+------
+MEASURED:
+1. Valve's GitLab answers from the Mac: frame-public/lepton cloned; the
+   GitHub mirror's 6135b53 is an ancestor of upstream main (0ea2492, v3.0.3)
+   with the same tree. The earlier analysis could not reach it.
+2. Darwin refuses PROT_EXEC on a mapping of an unsigned, unlinked temporary
+   file (MAP_SHARED and MAP_PRIVATE: EPERM), which is what lxrun's memfd
+   is; an anonymous region aliased with mach_vm_remap can be read-execute
+   while the original is read-write, and code written through the original
+   runs through the alias, including after a rewrite. Same result as linked
+   and when signed with resources/lxrt.entitlements like build/lxrun.
+   That is the shape of ART's dual-view JIT code cache.
+3. Waydroid's OTA channel: 129 arm64 GAPPS and 153 VANILLA system builds,
+   all on SourceForge; the uncertified-device page redirects to Google
+   sign-in.
+4. Build and tests on the Mac: make lxrt launcher rc 0; make
+   test-launcher-core all passed; tests/elf/run.sh 70 passed, 0 failed.
+
+R1  Lepton upstream
+-------------------
+$ git ls-remote https://gitlab.steamos.cloud/frame-public/lepton.git
+  0ea2492b1981fa2943972f68ed9cbdcb259f01dc  HEAD
+  0ea2492b1981fa2943972f68ed9cbdcb259f01dc  refs/heads/main
+  4a592d24cd22a4a664cf558ccd11bf6faf07e44e  refs/tags/v3.0.0
+  552b1882a2c6cb7fb2ed575caf3c0aaac8254294  refs/tags/v3.0.1
+  f64fb918f8fb0430b5ff7a074b5998c217dd9a04  refs/tags/v3.0.2
+  0ea2492b1981fa2943972f68ed9cbdcb259f01dc  refs/tags/v3.0.3
+$ git clone https://gitlab.steamos.cloud/frame-public/lepton.git   -> ok
+$ git clone https://github.com/xXJSONDeruloXx/lepton.git; checkout 6135b53  -> ok, 11 MB
+  main: 0ea2492, 2026-09-25 16:09 +0000
+  git merge-base --is-ancestor 6135b53 HEAD  -> true
+  6135b53^{tree} = 090bc688e6c9... in both clones
+  git rev-list --count HEAD = 45; 6135b53..HEAD = 27
+  git diff --stat 6135b53 HEAD: 43 files, 678 insertions, 576 deletions
+  (tests, shellcheck, public submodule URLs, public Vulkan headers, an
+  Android 11 ANGLE patch frameworks/native/1008; API 30 patch count 101 -> 102)
+Submodules (pins from git ls-tree HEAD, upstream .gitmodules):
+  gitlab.steamos.cloud/frame-public/android_hardware_waydroid     -> cloned; 896f652 (image/) and
+      6f95629 (image-14/) both present (git cat-file -t: commit); branches
+      lineage-18.1, lineage-18.1-new, android-14, sabae/audio_testing
+  gitlab.steamos.cloud/frame-public/android_device_waydroid_waydroid -> cloned; 589fd9f present
+  github.com/waydroid/android_vendor_waydroid                       -> cloned; e2619850 checked out
+Counts read: Waydroid base-patches-30: 177 files; Valve base-patches-30:
+101 at 6135b53, 102 at 0ea2492; Valve 11-removes.xml ~90 remove-project.
+
+R2  Upstream Android sources (read-only fetches)
+------------------------------------------------
+curl https://android.googlesource.com/platform/system/core/+/refs/tags/android-11.0.0_r48/rootdir/init.rc?format=TEXT
+  -> HTTP 503 (Service Unavailable). AOSP was then read from LineageOS's
+  GitHub mirrors, branch lineage-18.1 (what Lepton's image/ builds):
+  51 files in three batches (25, 18 and 8; the second includes LLVM's
+  AArch64TargetParser.cpp), plus Linux's binderfs.c, binder.h and
+  binder.c, every one HTTP 200 (curl -K config files and single curls). Branch heads (GitHub API, Accept:
+  application/vnd.github.sha):
+    android_system_core        92420679ffbd50b79d76525085b21278f8497037
+    android_art                7f2b48980eaa3e9ebeb3fe2df55ae4beb96f8248
+    android_bionic             b67b03356ceb6171bd0cfdb88c3ee9413c476935
+    android_frameworks_base    8d14a16b5d75cd471925b45b96a05ee417248673
+    android_frameworks_native  103c04dc9ff92585765f9076959be684351064c3
+    android_build_soong        91bbda1f3319dc1c61fea4f4715f4217d5537841
+    llvm/llvm-project main     fce53c80f985d3447963322a82ae807fd06f4094
+    torvalds/linux master      6f8319e3e9a44dd537d17f41565a8453c560a581
+    waydroid/waydroid main     c78a305a38a9ee6ce052ce524648a8156c2e225b
+  (llvm-project's clang/docs/ShadowCallStack.rst on main: 404, not used.)
+  Linux master drivers/android/binder.c: 7186 lines.
+
+R3  Native probe: ART's dual-view JIT shape on Darwin
+-----------------------------------------------------
+First version in the scratch directory (the same checks, no MAP_PRIVATE
+line in its first build), ad-hoc linker signature, 3 + 3 runs: file RX
+view "Operation not permitted" every time; anonymous alias 99 ok, then
+(second build) rewrite 5 ok, 3 of 3.
+Committed version, benchmarks/dual_view_jit.c:
+$ clang -O1 -Wall -o build/dual_view_jit benchmarks/dual_view_jit.c
+$ ./build/dual_view_jit        (3 runs, identical output, rc 0)
+  file: RW MAP_SHARED view mapped, RX MAP_SHARED view Operation not permitted
+  file: RX MAP_PRIVATE mapping Operation not permitted (information only)
+  anon: mach_vm_remap (os/kern) successful (cur 3, max 7)
+  anon: alias made RX: ok
+  anon: written via RW, run via RX alias       returned 99 (ok)
+  anon: rewritten via RW, run again            returned 5 (ok)
+  RESULT file dual view NOT AVAILABLE; anonymous alias dual view works
+$ codesign -f -s - --entitlements resources/lxrt.entitlements build/dual_view_jit
+  (codesign -dv: flags=0x2(adhoc), [Key] com.apple.security.cs.allow-jit --
+   the same as build/lxrun's signature)
+$ ./build/dual_view_jit        (3 runs, output identical to the above, rc 0)
+Source reading that makes this matter (VERIFIED IN SOURCE):
+  art jit_memory_region.cc:60-110, 175-215 (memfd "jit-cache", RX view
+  plus a separate writable view); runtime/dispatch.c:1064-1079 (lxrun
+  forces an executable MAP_SHARED mapping to MAP_PRIVATE, writable, for
+  the rewriter); art libartbase/base/memfd.cc:57-66 (uname "Linux" >= 3.17)
+  against runtime/dispatch.c:2077-2079 ("6.6.0-lxrt").
+
+R4  Waydroid OTA metadata (JSON only; no image downloaded)
+----------------------------------------------------------
+https://ota.waydro.id/system/lineage/waydroid_arm64/GAPPS.json    200, 62,860 bytes
+https://ota.waydro.id/system/lineage/waydroid_arm64/VANILLA.json  200, 75,449 bytes
+https://ota.waydro.id/system/lineage/waydroid_arm64/FOSS.json     200, 23 bytes (empty list)
+https://ota.waydro.id/vendor/waydroid_arm64/MAINLINE.json         200, 72,227 bytes
+  GAPPS   129 entries: 17.1 x5 (20211019..20220723), 18.1 x113 (20221030..20250628),
+          20.0 x11 (20250705..20260403); host of every URL: sourceforge.net
+  VANILLA 153 entries: 17.1 x20, 18.1 x122, 20.0 x11; all sourceforge.net
+  vendor  148 entries; all sourceforge.net; last lineage-20.0-20260403-MAINLINE (147,648,350 bytes)
+  last GAPPS   lineage-20.0-20260403-GAPPS-waydroid_arm64-system.zip   1,326,285,880 bytes
+  last VANILLA lineage-20.0-20260403-VANILLA-waydroid_arm64-system.zip   904,855,273 bytes
+  last 18.1    GAPPS 884,683,409 / VANILLA 796,742,550 bytes (20250628)
+Waydroid tool (github raw, main c78a305): tools/config/__init__.py
+(channels), tools/helpers/drivers.py (binder devices), tools/helpers/lxc.py,
+data/configs/config_base -- 200 each.
+
+R5  GApps projects (metadata and licence files only)
+----------------------------------------------------
+gitlab.com/api/v4/projects/MindTheGapps%2Fvendor_gapps   200: created
+  2018-08-08, default branch baklava, "baklava and newer branches moved to
+  https://github.com/MindTheGapps/vendor_gapps"; branches pi, qoppa, rho,
+  sigma, tau, upsilon, vic, baklava, cinnamonbun, luk/dcp
+gitlab raw tau/LICENSE, tau/README.md, rho/proprietary-files-common.txt,
+  rho/proprietary-files-arm64.txt, rho/extract-files.sh -> read
+gh api repos/MindTheGapps/11.0.0-arm64: license null; latest release
+  MindTheGapps-11.0.0-arm64-20230922_081122: zip 194,494,611 bytes +
+  release.x509.pem (not downloaded)
+wiki.lineageos.org/gapps/: WebFetch 403; curl with a browser user agent 200
+  (13,060 bytes); MindTheGapps links for LineageOS 18.1 to 23
+opengapps.org 200 (Android 4.4..11.0 selectable); api.github.com
+  repos/opengapps/opengapps: not archived, pushed 2026-08-12, licence
+  NOASSERTION (GPLv3 + "installable zip exception")
+api.github.com repos/litegapps/litegapps: MIT, pushed 2026-09-27
+api.github.com repos/microg/GmsCore: Apache-2.0, pushed 2026-09-29
+
+R6  Web pages (WebFetch unless noted)
+-------------------------------------
+https://www.google.com/android/uncertified/  -> 302 to accounts.google.com/ServiceLogin
+    (not followed: signing in is excluded)
+https://docs.waydro.id/faq/google-play-certification  -> the sqlite3 query, register, wait, restart
+https://support.google.com/android/answer/7165974      -> "aren't licensed and aren't real Google apps"
+https://developer.android.com/google/play/integrity/verdicts -> the four verdict definitions
+https://developer.android.com/privacy-and-security/safetynet/deprecation-timeline -> turndown January 2025
+https://developer.android.com/studio/terms              -> SDK licence 1.1, 3.1, 3.2, 3.4
+https://www.android.com/gms/                            -> "only available through a license with Google"
+https://source.android.com/docs/setup/start/requirements -> x86-64 Linux, 400 GB, 64 GB RAM, macOS unsupported since 2021-06-22
+https://source.android.com/docs/security/test/shadow-call-stack -> x18 reserved in system libraries
+https://docs.kernel.org/admin-guide/binderfs.html       -> binder-control, BINDER_CTL_ADD, user namespaces
+https://www.xda-developers.com/google-blocks-gapps-uncertified-devices-custom-rom-whitelist/ -> 2018 block and registration
+https://github.com/YogSottot/waydroid_stuff/.../lineage-20.0/README.md -> community GAPPS build recipe
+gitlab.com/android_translation_layer/android_translation_layer: WebFetch
+    gave no text; curl of README.md, doc/Architecture.md, doc/Build.md and
+    LICENSE.txt (GPL-3.0) -> read
+Search results used as COMMUNITY REFERENCE only (not opened): the 100-device
+    registration limit and its removal (customrombay.org, xdaforums.com),
+    MADA/EU case summaries (ec.europa.eu, curia.europa.eu), androidauthority.
+
+R7  Build
+---------
+$ time make lxrt launcher
+  rc 0, 28.98 s wall. One linker warning: libSDL2-2.0.0.dylib (sdl2-compat)
+  built for macOS 27.0 while the launcher targets 14.0 (existing, not from
+  this change).
+
+R8  make test-launcher-core (first run, before the new docs existed)
+--------------------------------------------------------------------
+  application core: all checks passed
+  python3 -m unittest tests/test_settings_env.py tests/test_compat_status.py
+      tests/test_docs_records.py: Ran 20 tests, OK
+  tests/launcher/run_app_dispatch.sh: 37 passed, 0 failed
+  tests/launcher/session.sh: 32 passed, 0 failed (1 skip: no setsid on macOS)
+  tests/launcher/safeguard.sh: 10 passed, 0 failed
+  tests/launcher/guest_env.sh: 26 passed, 0 failed
+  tests/launcher/mkarmroot.sh: 25 passed, 0 failed
+  tests/launcher/run_steam_arm64.sh: 10 passed, 0 failed
+  tests/launcher/fex_proton_tool.sh: 35 passed, 0 failed
+  60.8 s wall, rc 0
+Re-run after the docs, this record and the benchmark index were written
+(so tests/test_docs_records.py checked them): the same counts, every one
+(20 tests OK; 37, 32 + 1 skip, 10, 26, 25, 10, 35 passed, 0 failed),
+61.6 s wall, rc 0. python3 -m unittest tests/test_docs_records.py alone:
+6 tests, OK.
+
+R9  tests/elf/run.sh (default lxrun build, not LXRT_KEEP_X18)
+-------------------------------------------------------------
+  == 70 passed, 0 failed      25.8 s wall, rc 0
+
+Not done here, and why
+----------------------
+- No Android code under lxrun (bionic, ART, binder): the next stage
+  (docs/ANDROID_ZERO_VM_FEASIBILITY.md section 7, stage 1).
+- p_align and ELF type of the VANILLA image's binaries: the image belongs
+  to another session's work; stage 1 measures it.
+- The uncertified-device page's text: behind a Google sign-in.
+- Which GApps tree Waydroid's official GAPPS builds carry: not in the
+  sources read.

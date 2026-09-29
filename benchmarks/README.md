@@ -52,6 +52,7 @@ the Fedora VM that was deleted on 2026-09-27; they are history, and
 | 24 | `stage24-fex-game-boundary.txt` | 09-29 | the native arm64 client's compatibility tool for x86 Proton through FEX (`docs/FEX_GAME_BOUNDARY.md`): D3D11/D3D12 probes at ~160 fps through x86 Proton Experimental and SLR 4, as on the x86 client's path, invoked the way the client invokes a tool, on both ARM64 roots; both clients register it before a sign-in; 10 of 29 launches did not exit (Xalia; 1 of 10 on the x86 path); Proton 10.0 with sniper does not start under FEX on either path |
 | 24 | `stage24-heroic.txt` | 09-29 | Heroic Games Launcher as a native linux-arm64 program (Electron 43, assembled from official release files, identical to an arm64 build of its source tag) in the Fedora ARM64 root: window, Settings, clean close and reopen in 7 of 7 cycles; six runtime fixes (prlimit EFAULT, partial-page mprotect, deferred SysV IPC_RMID, execve ENOENT, epoll dup, SOCK_SEQPACKET end of file); V8's TurboFan crashes under lxrun (off with `--no-opt`, cause unknown); Amazon's nile is non-PIE |
 | 24 | `stage24-minecraft-prism.txt` | 09-29 | Prism Launcher's aarch64 build and a Temurin aarch64 JRE natively under lxrun (window 1 s, Java detected, clean close/reopen); Linux HotSpot's C1/C2 and llvmpipe use x18, which macOS zeroes: wrong results with the default lxrun, correct with the opt-in `LXRT_KEEP_X18=1` build (SDK 12.3 link: the kernel keeps x18 on this M4, macOS 27); no GL 3.2 core path to an X window; runtime fixes for inotify FIONREAD and eventfd across fork. The Prism launcher integration was not merged (Minecraft set aside by the owner) |
+| 25 | `stage25-android-research.txt` | 09-29 | research for Android with no VM (`docs/ANDROID_ZERO_VM_FEASIBILITY.md`, `docs/PLAY_STORE_RESEARCH.md`, `docs/LEPTON_REUSE_ANALYSIS.md` §0); no Android code was run: Valve's Lepton GitLab reachable from the Mac and the GitHub mirror `6135b53` confirmed as its ancestor; Darwin refuses `PROT_EXEC` on an unsigned file mapping but runs code through a `mach_vm_remap` read-execute alias of read-write memory (ART's dual-view JIT shape, `dual_view_jit.c`); Waydroid's GAPPS/VANILLA channel metadata; the uncertified-device page needs a Google sign-in (not done) |
 
 ## After stage 21 (no stage file)
 
@@ -166,6 +167,22 @@ codesign -s - --entitlements resources/lxrt.entitlements build/wx_in_handler
 Result (`stage5-jit.txt`): a flip made inside a handler holds for the
 handler's own stores, but not past its return. So the guest asks for each
 flip itself (private syscall `0x4C580020`; `tests/elf/jit_wx.c`).
+
+**Stage 25, a dual-view JIT code cache on Darwin:**
+
+```
+clang -O1 -Wall -o build/dual_view_jit benchmarks/dual_view_jit.c
+./build/dual_view_jit
+codesign -f -s - --entitlements resources/lxrt.entitlements build/dual_view_jit
+./build/dual_view_jit
+```
+
+Result (`stage25-android-research.txt`): an unlinked temporary file (what
+lxrun's memfd is) cannot be mapped executable, shared or private
+(`EPERM`); anonymous memory aliased with `mach_vm_remap` can be
+read-execute in one view and read-write in the other, and code written
+through the second runs through the first. The shape Android's ART JIT
+needs (`docs/ANDROID_ZERO_VM_FEASIBILITY.md` §3.2).
 
 **Deleted with the VM (2026-09-27):** the VM app's frame-time trace
 (`STEAMARM_TRACE`), `frametimes.py`, `capture.sh`, the `runs/vm-baseline-*`

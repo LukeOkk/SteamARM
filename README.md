@@ -93,6 +93,11 @@ guides, and nothing in them is ready for players yet. Start with the plan,
   [STEAM_FRAME_COMPAT_TOOLS.md](docs/STEAM_FRAME_COMPAT_TOOLS.md),
   [STEAM_RUNTIME_4_ARM64.md](docs/STEAM_RUNTIME_4_ARM64.md),
   [LEPTON_REUSE_ANALYSIS.md](docs/LEPTON_REUSE_ANALYSIS.md).
+- Android apps with no VM (research only; nothing Android runs yet):
+  [ANDROID_ZERO_VM_FEASIBILITY.md](docs/ANDROID_ZERO_VM_FEASIBILITY.md)
+  (component by component, and a staged plan),
+  [PLAY_STORE_RESEARCH.md](docs/PLAY_STORE_RESEARCH.md) (what Play Store
+  needs, and why SteamARM never ships Google's apps).
 
 ## Build from source
 

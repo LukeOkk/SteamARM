@@ -102,6 +102,9 @@ Independent of that order:
 - **Android (Lepton).** `docs/LEPTON_REUSE_ANALYSIS.md` steps 1-3
   (alignment, one bionic program under lxrun). OPEN. The Frame root has
   `usr/share/guestos/android` (57 MB) and podman 5.5.2 (MEASURED).
+  The component-by-component plan and its six stages are in
+  `docs/ANDROID_ZERO_VM_FEASIBILITY.md`; Play Store in
+  `docs/PLAY_STORE_RESEARCH.md` (stage 25, research only).
 
 ## Blockers
 
