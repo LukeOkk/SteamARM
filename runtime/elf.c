@@ -135,6 +135,7 @@ int lxrt_load_elf(const char *path, struct lxrt_image *out, char **err)
 
     uint64_t lo = UINT64_MAX, hi = 0;
     int loads = 0;
+    bool subpage = false;
     for (int i = 0; i < eh->e_phnum; i++) {
         if (ph[i].p_type != PT_LOAD)
             continue;
@@ -143,10 +144,17 @@ int lxrt_load_elf(const char *path, struct lxrt_image *out, char **err)
             lo = ph[i].p_vaddr;
         if (ph[i].p_vaddr + ph[i].p_memsz > hi)
             hi = ph[i].p_vaddr + ph[i].p_memsz;
-        if (ph[i].p_align % LXRT_HOST_PAGE != 0)
-            return fail(err, "%s: PT_LOAD %d has p_align 0x%llx, not a multiple "
-                             "of the %d-byte host page -- segments would straddle",
-                        path, i, (unsigned long long)ph[i].p_align, LXRT_HOST_PAGE);
+        // 4 KiB-aligned images (Valve's native arm64 Steam client) put the
+        // end of the code and the start of the data in one 16 KiB host page.
+        // Their contents are copied, not mapped, so only the protections need
+        // care: they are kept per 4 KiB by subpage.c, which flips a page
+        // wanted both writable and executable between the two on faults.
+        if (ph[i].p_align % LXRT_HOST_PAGE != 0) {
+            if (ph[i].p_align % 4096 != 0)
+                return fail(err, "%s: PT_LOAD %d has p_align 0x%llx, not a multiple of 4 KiB",
+                            path, i, (unsigned long long)ph[i].p_align);
+            subpage = true;
+        }
     }
     if (!loads)
         return fail(err, "%s: no PT_LOAD segments", path);
@@ -198,6 +206,23 @@ int lxrt_load_elf(const char *path, struct lxrt_image *out, char **err)
         // macOS enforces W^X on arm64, so the intermediate state cannot be RWX
         // -- mprotect returns EACCES for it.
         int prot = prot_of(ph[i].p_flags);
+        if (subpage) {
+            uint64_t s4 = LXRT_ALIGN_DOWN(ph[i].p_vaddr + bias, 4096);
+            uint64_t e4 = LXRT_ALIGN_UP(ph[i].p_vaddr + bias + ph[i].p_memsz, 4096);
+            if (prot & PROT_EXEC) {
+                if (out->nexec < (int)(sizeof(out->exec) / sizeof(out->exec[0]))) {
+                    out->exec[out->nexec].start = ph[i].p_vaddr + bias;
+                    out->exec[out->nexec].end = ph[i].p_vaddr + bias + ph[i].p_filesz;
+                    out->nexec++;
+                }
+                prot = (prot & ~PROT_EXEC) | PROT_WRITE;   // sealed by main.c
+            }
+            long rc = lxrt_subpage_mprotect(s4, e4 - s4, prot);
+            if (rc != 0)
+                return fail(err, "subpage mprotect 0x%llx+0x%llx: %ld",
+                            (unsigned long long)s4, (unsigned long long)(e4 - s4), rc);
+            continue;
+        }
         if (prot & PROT_EXEC) {
             prot = (prot & ~PROT_EXEC) | PROT_WRITE;
             if (out->nexec < (int)(sizeof(out->exec) / sizeof(out->exec[0]))) {
@@ -220,6 +245,7 @@ int lxrt_load_elf(const char *path, struct lxrt_image *out, char **err)
     out->span = span;
     out->brk = hi_page + bias;
     out->is_pie = is_pie;
+    out->subpage = subpage;
 
     // AT_PHDR must point at the program headers *as mapped*, which is only
     // true if some PT_LOAD covers e_phoff. It normally does.

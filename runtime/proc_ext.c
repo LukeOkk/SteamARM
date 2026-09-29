@@ -109,7 +109,8 @@
 // worse than the divergence it announced.
 static uint64_t guest_page_bytes(void)
 {
-    return (uint64_t)LXRT_HOST_PAGE;
+    extern uint64_t lxrt_guest_page(void);
+    return lxrt_guest_page();
 }
 
 static uint64_t host_page_bytes(void)

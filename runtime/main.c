@@ -3,6 +3,9 @@
 // Usage: lxrun [--trace] [--dry-run] <elf> [args...]
 
 #include "lxrt.h"
+#include <libproc.h>
+#include <mach/mach.h>
+#include <mach/mach_vm.h>
 
 #include <pthread.h>
 #include <errno.h>
@@ -99,6 +102,25 @@ static void fault_report(int sig, siginfo_t *info, void *uap)
         if (pc >= base && pc + 4 <= base + g_img->span)
             n += snprintf(buf + n, sizeof buf - n, ", insn 0x%08x",
                           *(uint32_t *)pc);
+    }
+    {
+        // Which file the pc is in: the region that contains it, by name
+        // (proc_regionfilename answers for the region AT the address given,
+        // so ask with the region's own start).
+        mach_vm_address_t ra = pc;
+        mach_vm_size_t rs = 0;
+        vm_region_basic_info_data_64_t ri;
+        mach_msg_type_number_t cnt = VM_REGION_BASIC_INFO_COUNT_64;
+        mach_port_t obj = MACH_PORT_NULL;
+        char fname[512] = "";
+        if (mach_vm_region(mach_task_self(), &ra, &rs, VM_REGION_BASIC_INFO_64,
+                           (vm_region_info_t)&ri, &cnt, &obj) == KERN_SUCCESS && ra <= pc) {
+            if (proc_regionfilename(getpid(), ra, fname, sizeof fname) <= 0)
+                fname[0] = 0;
+            n += snprintf(buf + n, sizeof buf - n, " [region 0x%llx+0x%llx%s%s]",
+                          (unsigned long long)ra, (unsigned long long)rs,
+                          fname[0] ? " " : "", fname);
+        }
     }
     if (sig == SIGSYS)
         n += snprintf(buf + n, sizeof buf - n, ", x8=0x%llx x16=0x%llx x30=0x%llx",
@@ -201,6 +223,14 @@ static int rewrite_and_seal_image(struct lxrt_image *img, const char *what)
     // Seal the executable segments: they were left writable only so the
     // rewriting pass could patch them.
     for (int s = 0; s < img->nexec; s++) {
+        if (img->subpage) {
+            uint64_t s4 = LXRT_ALIGN_DOWN(img->exec[s].start, 4096);
+            uint64_t e4 = LXRT_ALIGN_UP(img->exec[s].end, 4096);
+            if (lxrt_subpage_mprotect(s4, e4 - s4, PROT_READ | PROT_EXEC) != 0)
+                fprintf(lxrt_trace_stream(), "[lxrt] warning: could not seal 0x%llx read-execute\n",
+                        (unsigned long long)s4);
+            continue;
+        }
         uint64_t start = LXRT_ALIGN_DOWN(img->exec[s].start, LXRT_HOST_PAGE);
         uint64_t end = LXRT_ALIGN_UP(img->exec[s].end, LXRT_HOST_PAGE);
         if (mprotect((void *)start, (size_t)(end - start),

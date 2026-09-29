@@ -103,6 +103,7 @@ step_roots() {
 step_steam() {
     log "Steam client and graphics in the Steam root"
     scripts/install-steam.sh
+    scripts/install-fex-host.sh
     LXRT_ROOT=/tmp/lxrt-root scripts/build-fex-thunks.sh install
     scripts/install-steamroot-gfx.sh
 }

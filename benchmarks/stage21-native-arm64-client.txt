@@ -1,0 +1,65 @@
+Stage 21 -- Valve's native arm64 Steam client under lxrun (2026-09-27..29)
+==========================================================================
+
+ZERO-VM status: NOT complete. The native arm64 client starts, updates itself
+and loads its UI libraries under lxrun on macOS, but does not yet reach its
+window. The working route is still the x86 client under FEX (stage 8, 16,
+18), re-verified after this stage's runtime changes.
+
+Goal
+----
+Run Valve's aarch64 Linux Steam client natively (no FEX for the client), so
+that Steam itself manages its ARM64 tools -- Proton ARM64, FEX-Emu, Steam
+Linux Runtime 4.0 arm64 -- as it does on Steam Frame. SteamARM's job is the
+client and the graphics path; the tools come from Steam's own updates.
+
+Setup (MEASURED)
+----------------
+- Client: manifest https://client-update.steamstatic.com/steam_client_linuxarm64
+  (version 1788652215, 35 zips, ~1.0 GB). Zip entry names use backslashes;
+  they are extracted with separators normalised. Entry point
+  steamrtarm64/steam (aarch64 PIE, needs only glibc).
+- Root: scripts/mkarmroot.sh -- Fedora 43 aarch64, the shared-library closure
+  of what the client links (GTK 2, NSS with softokn/freebl, X11, Mesa GLX/EGL,
+  audio, SDL2...), 153 packages, ~570 MB, TLS roots from the Ubuntu rootfs.
+  Kept apart from the x86 Steam root; the client's home is <armroot>/tmp/armhome.
+- Run: LXRT_ROOT=<armroot> LXRT_GUEST_PAGE=4096 HOME=/tmp/armhome DISPLAY=:2
+  build/lxrun /tmp/armhome/.local/share/Steam/steamrtarm64/steam
+
+Runtime changes this required
+-----------------------------
+1. 4 KiB-aligned ELF images (runtime/elf.c): code and data share a 16 KiB
+   page; permissions kept per 4 KiB by subpage.c, which flips W/X on faults.
+2. LXRT_GUEST_PAGE=4096 (runtime/stack.c, proc_ext.c): AT_PAGESZ 4096 so
+   glibc dlopens the client's 4 KiB-aligned libraries (steamui.so) instead
+   of "ELF load command address/offset not page-aligned".
+3. x18 pass limited to .eh_frame function ranges (runtime/elfsect.c): the
+   client's static OpenSSL keeps round constants in .text; rewriting them
+   broke every TLS handshake ("http error 0"). With the filter: manifest,
+   659 MB self-update, extraction and verification all succeed.
+4. x18 load/store at large sp offsets (runtime/x18.c): stp x18, x17,
+   [sp, #0x1f8] had no room to compensate the 7-bit immediate and was left
+   unrewritten; now addressed through a scratch copy of sp
+   (isolated test: x18=1234 x17=5678 OK).
+5. (local codex session) trampoline pools split per reachable range for
+   libcef.so's ~162 MiB of code; blr x18 rewritten; libcef mapped from file
+   instead of copied (webhelper start 2.52 s -> 1.49 s); x18 rewriting over
+   all of libcef's executable text (it has x18 uses outside its FDEs).
+6. Diagnostics: fault reports name the memory region of the pc.
+
+Where it stops (MEASURED, 2026-09-29)
+-------------------------------------
+- steamui.so and steamclient.so load; the UI process tree starts
+  (steamwebhelper, Chromium BrowserReady was reached in an earlier run).
+- The main client process then aborts: "free(): invalid pointer" (SIGABRT,
+  logs/native-arm64-steam-nss-20260929.log). Not yet diagnosed.
+- steam-runtime-launcher-service is not found in the root (non-fatal).
+- Proton ARM64 itself is a separate problem: an ARM64 Wine needs the low
+  4 GiB (__PAGEZERO) and the x18 TEB register (stage 18 notes).
+
+Regression check of the x86 route after these changes (MEASURED, 2026-09-29)
+---------------------------------------------------------------------------
+tests/elf 37/37, launcher core 17/17, x18 self-test PASS, audio 10/10,
+tests/win 11/11 (D3D9/11/12 64- and 32-bit ~158-161 fps probes),
+tests/win/run_steam_path.sh 2/2 (sound, XInput), x86 Steam login window
+85 s after start.

@@ -98,6 +98,10 @@ Working (measured, see `benchmarks/`):
 Not done yet:
 
 - **Games are not verified.**
+- Valve's native arm64 Steam client starts, self-updates and loads its UI
+  libraries under lxrun, but does not reach its window yet
+  (`benchmarks/stage21-native-arm64-client.txt`). Proton ARM64 does not run
+  on macOS yet. The working route is the x86 client with x86 Proton.
 - Controllers were tested with scripted input, not a physical pad.
 - Some Vulkan extensions are missing from the 32-bit thunks.
 - MoltenVK gaps are worked around, not solved: geometry shaders and

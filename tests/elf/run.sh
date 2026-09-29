@@ -22,6 +22,18 @@ build_guest() {
 
 echo "== tests/elf"
 
+if err=$(build_guest x18_branch); then
+    out=$(./build/lxrun --dry-run build/x18_branch 2>&1)
+    if grep -q 'x18 6 found in .*6 rewritten, 0 unsupported, 0 unreachable' <<<"$out" &&
+       ./build/lxrun build/x18_branch >/dev/null 2>&1; then
+        ok "x18 indirect call, branch and return preserve guest control flow"
+    else
+        bad "x18 indirect branch execution" "$out"
+    fi
+else
+    bad "build x18_branch" "$err"
+fi
+
 # 1. The toolchain can still emit a Linux aarch64 PIE from macOS.
 if err=$(build_guest hello); then ok "build hello-linux"; else bad "build hello-linux" "$err"; fi
 if file build/hello 2>/dev/null | grep -q "ELF 64-bit LSB.*ARM aarch64"; then
