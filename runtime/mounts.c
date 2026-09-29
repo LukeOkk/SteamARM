@@ -435,9 +435,20 @@ long lxrt_bwrap_exec(char *const argv0[], char *const envp[],
         }
         if (!strcmp(o, "--chdir")) { NEED(1); snprintf(chdir_to, sizeof chdir_to, "%s", v[i + 1]); i += 1; continue; }
         if (!strcmp(o, "--perms")) { NEED(1); perms = (mode_t)strtol(v[i + 1], NULL, 8); i += 1; continue; }
+        if (!strcmp(o, "--chmod")) {
+            // bwrap: --chmod OCTAL PATH (two arguments), on a path the plan
+            // already made. Only what the plan created in the sandbox is
+            // changed: a bind's placeholder is, its host source is not.
+            NEED(2);
+            char in_root[PATH_MAX];
+            snprintf(in_root, sizeof in_root, "%s%s", sandbox, v[i + 2]);
+            if (chmod(in_root, (mode_t)strtol(v[i + 1], NULL, 8)) != 0)
+                fprintf(lxrt_trace_stream(), "[lxrt] bwrap: --chmod %s %s: %s\n", v[i + 1], v[i + 2], strerror(errno));
+            i += 2; continue;
+        }
         if (!strcmp(o, "--sync-fd") || !strcmp(o, "--info-fd") || !strcmp(o, "--json-status-fd") ||
             !strcmp(o, "--block-fd") || !strcmp(o, "--userns-block-fd") || !strcmp(o, "--lock-file") ||
-            !strcmp(o, "--remount-ro") || !strcmp(o, "--chmod") || !strcmp(o, "--exec-label") ||
+            !strcmp(o, "--remount-ro") || !strcmp(o, "--exec-label") ||
             !strcmp(o, "--file-label") || !strcmp(o, "--hostname") || !strcmp(o, "--argv0")) {
             // fds that bwrap would hold or signal on: nothing to hold here.
             NEED(1); i += 1; continue;
