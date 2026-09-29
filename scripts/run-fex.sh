@@ -81,7 +81,7 @@ if ! pgrep -f 'lxrun .*FEXServer' >/dev/null 2>&1; then
     # Always the same root: FEXServer hands ITS root to every client (see above);
     # FEX_SERVER_LXRT_ROOT overrides it only for an isolated smoke test.
     ( TMPDIR=/tmp LXRT_ROOT="${FEX_SERVER_LXRT_ROOT:-/tmp/lxrt-root}" FEX_ROOTFS="$FEX_SERVER_ROOTFS" \
-        nohup /usr/bin/python3 scripts/session.py detach \
+        nohup env PYTHONCOERCECLOCALE=0 STEAMARM_SESSION_PY=1 /usr/bin/python3 scripts/session.py detach \
         ./build/lxrun "$FEXDIR"/FEXServer --foreground --persistent=0 >"$FEXSERVER_LOG" 2>&1 & )
     ready=0
     for ((i=0; i<80; i++)); do

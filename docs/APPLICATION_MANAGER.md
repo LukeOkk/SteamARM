@@ -10,8 +10,8 @@ and Steam as one application among others.
 - **The launch primitive.** `LauncherModel.launch` runs
   `scripts/run-app.sh <id>` (`launcher/LauncherModel.swift:190-224`). The app
   never spawns a Linux process itself. "Detener" runs the same script with
-  `--stop`, which does `kill -9` on every guest `lxrun`
-  (`scripts/run-app.sh`, `stop_guests`).
+  `--stop`. Until the session wrapper below, that was `kill -9` on every guest
+  `lxrun` (`scripts/run-app.sh`, `stop_guests`).
 - **`run-app.sh`.** It resolves the entry: Steam from a dict inside the
   script, everything else from `$STATE/launcher/apps.json`. It merges the
   entry's env with `settings-env.py`, starts the X server, PulseAudio and
@@ -48,7 +48,7 @@ and Steam as one application among others.
 | Runner per ISA | `run-app.sh` sends aarch64 entries to the new `scripts/run-native.sh` (`build/lxrun <program>`, no `FEX_*` variables). It writes `running.arch` = `<arch> <translator>`, and refuses an aarch64 entry in the x86 root or an x86 entry in the ARM64 base, as `LaunchPlanner` does | done, dry-run tested |
 | Session state machine | `SessionMachine`: `idle → starting → running → stopping → cleanup → idle`, `starting → failed → cleanup → idle`, `running → crashed / exited → cleanup → idle`. The lock is taken before any process exists | model done, tested; `LauncherModel` still uses its own `Phase` |
 | Backends, session mode and capabilities | `ApplicationCore.swift`: `PresentationMode` (native windows / VNC) is separate from `ExecutionBackend` (lxrun / Lightning JIT / Apple Hypervisor). `ApplicationBackendPreset` maps the four presets onto them. `SessionVirtualizationMode` is `VM — Apple Hypervisor` only for that backend, and no fallback ever returns it. `RuntimeCapabilities.current` states what exists today, with its evidence: native windows ready; VNC experimental; lxrun ready; Lightning JIT and Apple Hypervisor unavailable (neither exists in the tree); esync experimental; fsync unsupported (no `futex_waitv`); MSync unavailable; MoltenVK ready; KosmicKrisp and WineD3D/OpenGL unavailable | model done, tested; no UI reads it yet |
-| One process group and an exit status per session | `scripts/session.py run` (started by `run-app.sh`): the program and everything it forks in a group of its own (`running.pgid`); its exit status, or 128 + signal, in `running.status`; leftovers get 5 s, then SIGTERM, then SIGKILL. `--stop` signals the group first (`session.py stop`). FEXServer and `safeguard.sh` start in their own sessions (`session.py detach`), so a stop never takes them down. The launcher reports the status ("terminó con el código N / la señal S") and keeps the 15 s guess only for a run it adopted without a wrapper | done; `tests/launcher/session.sh` 18/18 on Linux, not yet run on the Mac |
+| One process group and an exit status per session | `scripts/session.py run` (started by `run-app.sh`) puts the program and what it forks in a group of its own (`running.pgid`). A process that starts its own session (setsid: wineserver, daemons) leaves that group; `--stop`'s `kill -9` of leftover guests still catches it. How the program ended goes to `running.status`: `N` for an exit code, `N signal S` for a signal. Leftovers get 5 s, then SIGTERM, then SIGKILL. `--stop` signals the group first (`session.py stop`). FEXServer and `safeguard.sh` start in their own sessions (`session.py detach`), so a stop never takes them down. The program gets the caller's environment and signal dispositions, not Python's: no coerced `LC_CTYPE`, default SIGPIPE, and nohup's ignored SIGHUP kept. The launcher reports the status ("terminó con el código N / la señal S") and keeps the 15 s guess only for a run it adopted without a wrapper | done; `tests/launcher/session.sh` 24/24 on Linux; macOS CI run (before the review fixes) 17/17 + 1 skip |
 
 Steam, Heroic and Prism are marked `x86_64`, so they behave exactly as
 before. Steam's entry is labelled TRANSITIONAL_COMPATIBILITY.
@@ -59,12 +59,17 @@ Tests (they build and run on Linux too):
 make test-launcher-core
 ```
 
-It runs two tests:
+It runs three tests:
 
 - `launcher/tests/ApplicationCoreTests.swift`: ELF detection, launch plans,
-  session transitions;
+  session transitions, backends and capabilities;
 - `tests/launcher/run_app_dispatch.sh`: `run-app.sh --dry-run` for
-  aarch64/x86_64/i386/Steam/invalid entries.
+  aarch64/x86_64/i386/Steam/invalid entries and the root rule;
+- `tests/launcher/session.sh`: `scripts/session.py` with real processes
+  (about 20 s).
+
+The same three run on every PR in `.github/workflows/macos.yml`, on a macOS
+runner, after `make all`.
 
 ## Next steps, in order (all need the Mac)
 
