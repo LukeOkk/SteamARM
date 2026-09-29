@@ -1,0 +1,226 @@
+Stage 22 -- native arm64 Steam client: from abort to the login window (2026-09-29)
+================================================================================
+
+ZERO-VM. No FEX for the client. Host: Mac mini M4, 16 GB, macOS 27.0, X on
+display :2 (scripts/run-x11-native.sh, rootless XQuartz build).
+Client: steamrtarm64/steam, version 1788652215 (unchanged all session; the
+156 files of steamrtarm64/ have the same sha256 before and after, MEASURED).
+
+Result (MEASURED, run E18 below): with this stage's root and runtime changes
+and the --jitless workaround, Valve's native arm64 client reaches BrowserReady
+8 s after start and maps its "Sign in to Steam" window (700x440, class
+steamwebhelper) on :2 at 10 s; it stays up (150 s run, 1 webhelper launch, 0
+restarts, no FATAL in cef_log.txt). A screen capture of the region shows the
+complete login page (account/password form and a live sign-in QR code, i.e.
+the webhelper's network process reaches Valve's servers). Login itself was not
+attempted.
+
+Remaining blocker (MEASURED + VERIFIED IN SOURCE): without --jitless every
+webhelper renderer dies on its first JIT'd call -- V8 asks for
+read-write-execute code pages and runtime/dispatch.c (do_mprotect_inner, "RWX
+outside MAP_JIT: granted as RW") gives it read-write; the renderer then
+executes a non-executable page (SIGBUS, KERN_PROTECTION_FAILURE, pc == fault
+address). 1137 renderer launches in 90 s, no window (E17).
+
+How to reproduce
+----------------
+  make lxrt
+  scripts/mkarmroot.sh                      # keeps <root>/tmp (the client home)
+  scripts/run-steam-arm64.sh --jitless      # --for SECONDS to stop by itself
+The client must already be in ~/SteamARM-roots/armroot/tmp/armhome (stage 21).
+
+Root changes (scripts/mkarmroot.sh, scripts/mkarmroot.lock)
+-----------------------------------------------------------
+Seeds added; the lock grew by exactly these packages, same repodata revisions
+(releases 1761190638, updates 1790641463):
+  libX11-common-1.8.13-1.fc43     /usr/share/X11/locale (65 locale dirs)
+  glibc-common-2.42-16.fc43       C.UTF-8 (/usr/lib/locale/C.utf8)
+  glibc-langpack-en-2.42-16.fc43  en_US.UTF-8, which the client asks for
+  SDL3-3.4.16-1.fc43              sdl2-compat dlopens libSDL3.so.0
+  lsof-4.98.0-8.fc43 (+ libtirpc-1.3.7-1.rc1.fc43)
+                                  the client runs lsof to vet WebUI transport
+                                  connections (E13)
+plus usr/lib64/libnssckbi.so -> pkcs11/p11-kit-trust.so (Fedora's
+alternatives scriptlet, not run by the stage builder).
+Rebuilds now happen beside the old root (<root>.new) and are swapped in at the
+end; <root>/tmp and <root>/opt/apps are carried over. The lock is re-resolved
+only when the seeds differ from the ones it records.
+  Rebuild 1 (5 seeds): 19.9 s wall (relock 7 s, fetch 8 s, stage 4 s),
+    154 root + 5 build packages, root 632 MB.   MEASURED
+  Rebuild 2 (+lsof):  17.06 s wall, 156 root + 5 build packages.   MEASURED
+  Both times the ~8 GB client home was moved aside first as a safety net and
+  a marker home put in its place: the markers in tmp/armhome and opt/apps
+  survived the rebuild; the real home was moved back and the steamrtarm64
+  checksums compared equal.   MEASURED
+
+Runtime changes (separate commits, each measured)
+-------------------------------------------------
+1. x18: "mrs x18, nzcv" / "msr nzcv, x18" rewritten instead of poisoned
+   (runtime/x18.c). libcef.so keeps a carry in x18 at text vaddr 0x63cf638 /
+   0x63cf684 (VERIFIED IN SOURCE, llvm-objdump). The trampoline's
+   stp/mrs tpidrro_el0/and/ldr ... str/ldp do not touch NZCV.
+2. x18: LDAR/STLR (ordered, no exclusive monitor) on x18 rewritten instead of
+   refused as "exclusive" (runtime/x18.c). libcef.so: ldar w18, [x18] at
+   0x2e05a84 and 0x3b1037c, ldar w18, [x16] at 0x3b1c5f8. LDXR/STXR/LDAXR/
+   STLXR and an SP base stay refused.
+3. mmap of a file at an offset on a 4 KiB guest page but not a 16 KiB host
+   page, without MAP_FIXED (runtime/dispatch.c do_mmap): mapped from the host
+   page below, the guest gets the address of its offset. Darwin returned
+   EINVAL before.
+Tests: build/x18_check --self-test PASS (the new NZCV cases fail against the
+old x18.c with 4 failures, the LDAR cases against the NZCV-only x18.c with 3).
+tests/elf/run.sh with the final build: 37 passed, 0 failed (8.2 s).
+The x86 route (FEX Steam) was NOT re-run with this build: UNKNOWN.
+
+Runs (all started by scripts/run-steam-arm64.sh unless noted; env always
+LXRT_ROOT=/tmp/lxrt-armroot LXRT_GUEST_PAGE=4096 HOME=/tmp/armhome DISPLAY=:2
+LXRT_X18_ALL_TEXT=libcef.so TMPDIR=/tmp OBJC_DISABLE_INITIALIZE_FORK_SAFETY=YES;
+logs: ~/SteamARM-roots/logs/native-arm64-steam-<date>.log, client logs in
+<root>/tmp/armhome/.local/share/Steam/logs)
+-----------------------------------------------------------------------------
+E1  06:06  probe (XSupportsLocale + XwcTextListToTextProperty, XUTF8StringStyle,
+           tp.value preset to 0x4141414141414141), old root, LANG=es_MX.UTF-8:
+             setlocale("en_US.UTF-8") = NULL, XSupportsLocale = 0,
+             XwcTextListToTextProperty = -2, tp.value = 0x4141414141414141
+           => the audit's mechanism for "free(): invalid pointer": vgui2_s.so
+              passes that untouched value to XFree.      MEASURED
+E1b 06:06  same, XLOCALEDIR=<libX11-common's locale dir>: XSupportsLocale = 1,
+           return 0, tp.value = 0x700000b530, nitems 5.   MEASURED
+E1c 06:08  same probe, rebuilt root, no XLOCALEDIR: setlocale("en_US.UTF-8") =
+           en_US.UTF-8, setlocale("C.UTF-8") = C.UTF-8, XSupportsLocale = 1,
+           return 0.   MEASURED
+E2  06:10:58, 282 s, rebuilt root, lxrun at dbd1657:
+           27 webhelper launches, 27 BrowserReady, 26 "Restart webhelper
+           process"; 66 GPU-process launches; 1 FATAL ("GPU process isn't
+           usable. Goodbye.", one instance). No "Timed out waiting for
+           webhelper init", no "free(): invalid pointer", no SIGABRT of
+           gldriverquery (was "Failed loading SDL3 library." + abort), no
+           setlocale warning. Still printed: "XOpenIM() failed, LANG =
+           es_MX.UTF-8". X windows: "steam" 10x10, "Chromium clipboard".
+           Note: the RescueDialog path (where the free() abort happened) was
+           not reached again in any run, because the webhelper now initialises;
+           the free() fix is shown by E1/E1b, not by a client run.
+E4  06:16:17, 53 s, LXRT_TRACE_MATCH=steamwebhelper (32 MB trace):
+           "[lxrt]    x18 site 0x7efff8f3f638 (d53b4212) unsupported: sysreg"
+           then "[lxrt] pid 71276 host_handler: darwin 5 -> linux 5 (pc
+           0x7efff8f3f638: d4200020 ab010123 ...)": the browser process runs
+           into the poison (brk #1) on mrs x18, nzcv, 3-4 s after start.
+           libcef's text at 0x7efff4f1f000 (file off 0x239f000, base
+           0x7efff2b70000) had 76048 x18 sites, 5 refused (3 "exclusive",
+           2 "sysreg").   MEASURED
+E5  06:19:59, 180 s, + runtime change 1: 1 webhelper launch, 0 restarts,
+           BrowserReady once, "Disabling GPU acceleration due to runtime
+           detect", 0 FATAL. No further UI (no GetDesiredSteamUIWindows).
+E6  06:23:28, 153 s, + <Steam>/.cef-enable-remote-debugging (scripts/cdp.py):
+           the SharedJSContext page's target turns into "error"/http://error/,
+           Runtime.evaluate -> "Target crashed"; 4069 "Failed to adjust OOM
+           score of renderer" lines = renderer launches.
+E7  06:26, 40 s, LXRT_TRACE_MATCH=--type=zygote (92 MB): 500 of 500 renderer
+           deaths are "darwin 5 -> linux 5 (pc 0x7efff668c5f8: d4200020 ...)",
+           the poisoned "ldar w18, [x16]" (88dffe12, "unsupported: exclusive").
+E8  06:28:22, stopped at ~70 s, + runtime change 2: the page reaches its
+           <title> "SharedJSContext" but reloads (performance.now() = 57 ms
+           when read); renderer launches still climbing (234, then 439).
+E9  06:29, 45 s, zygote trace (133 MB): no brk traps left; the zygote
+           SIGKILLs 394 renderers, each ~70 ms after forking it, on the
+           browser's 16-byte GetTerminationStatus request.
+E10 06:32, 110 s, CDP watch 60 s: 750 x (context created ->
+           Inspector.targetCrashed -> targetReloadedAfterCrash), no console
+           output, no exception.
+E11 06:34, 35 s, LXRT_TRACE_MATCH=-nocrashdialog (browser tree, 246 MB): the
+           browser's IO thread reads EOF on the renderer's channel just before
+           asking the zygote. macOS crash reports of those renderers
+           (lxrun-*.ips): EXC_BAD_ACCESS / SIGBUS, KERN_PROTECTION_FAILURE,
+           pc = far = 0x7eff768c1720, esr 0x8200000f (instruction abort),
+           inside a 126 MB region rw-/rwx (V8's code range); lr in the r-x
+           region above it (embedded builtins). No lxrun report precedes it.
+           => V8 JIT code executed from a page lxrun left read-write:
+              do_mprotect_inner grants RWX as RW (comment there: "A native
+              aarch64 guest executing such a page would fault").
+              MEASURED + VERIFIED IN SOURCE
+E12 06:39:15, 42 s, steamwebhelper.sh edited to add --js-flags=--jitless: the
+           client's start-up check "BVerifyInstalledFiles:
+           steamrtarm64/steamwebhelper.sh is 419 bytes, expected 398",
+           re-extracted its package and exited; the original file came back
+           (checksums equal).   MEASURED
+E12b 06:42:25, 130 s, same edit + -noverifyfiles: 0 renderer crashes in a
+           45 s CDP watch, 5 renderer launches in total; the page's JS runs
+           ("Storing new config params", "setting locale: en") but its
+           websockets to ws://localhost:56080 and :56081/transportsocket/ get
+           403; transport_steamui.txt: "TCP connection request" ->
+           "Connection rejected".
+E13 06:44, 60 s, LXRT_TRACE_MATCH=-noverifyfiles (client tree, 40 MB): per
+           connection the client forks and fstatat()s lsof in /bin, /sbin,
+           /usr/bin, /usr/sbin and every directory of the Mac's PATH (ENOENT
+           each), then answers 403. 36 rejections logged.   MEASURED
+           steamui.so carries "/usr/sbin/lsof" ... "/bin/lsof" (VERIFIED IN
+           SOURCE, strings); the x86 root has /usr/bin/lsof.
+E14 06:47:59, 180 s, + lsof in the root: no rejection; the client now does
+           "GetDesiredSteamUIWindows" and the webhelper logs "CreatingPopup
+           name:SP DesktopLoginWindow_uid0 ... 700.00x440.0", "Created window
+           ... System window: 0x180001e", then "Fatal IO error 22 (Invalid
+           argument) on X server :2" and restarts: 18 launches, 17 restarts,
+           16 login windows created and lost.
+E15 06:50, 40 s, browser-tree trace (41 MB): just before the loss the browser
+           grows a shared-memory file 64 KiB at a time and maps each piece at
+           the old size: ftruncate(fd, 0x15f2000); mmap(NULL, 0x10000, RW, ...,
+           fd, 0x15e2000) = -EINVAL (2128 mmap EINVALs in the trace); the last
+           write on the X socket is writev(fd, iov, 3) = -EFAULT. Xlib prints
+           the errno left over (EINVAL).   MEASURED
+E16 06:54:00, 180 s, + runtime change 3 (still jitless via the edited file):
+           "Sign in to Steam" mapped (IsViewable, 700x440 at 610,305) from
+           06:54:09 to the end; 1 webhelper launch, 0 restarts, 0 new fatal
+           IO errors, 0 FATAL; 8-9 lxrun processes, 2.34-2.38 GB resident in
+           total. screencapture of the window region: full login page.
+E17 06:57:25, 90 s, control: same build and root, Valve's unmodified
+           steamwebhelper.sh: no window, 1137 renderer launches.
+E18 07:00:29, 150 s, scripts/run-steam-arm64.sh --for 150 --jitless (final
+           helper): BrowserReady 07:00:37, login window 07:00:39,
+           "PopupHTMLWindow ... BrowserReady: handle:131073" 07:00:41, window
+           present at every 15 s sample to 150 s; 1 webhelper launch, 0
+           restarts, 0 FATAL. steamwebhelper.sh sha1 afterwards
+           7bcd9e1a8783c8639d27716d1066e998d46469d3 = the original.
+           0 of this checkout's lxrun processes left after any run since the
+           PID-tracking stop (16 runs).
+
+Steam Frame 0.3.0 root (holo, BUILD_ID 20260922.5152327) -- E19
+----------------------------------------------------------------
+~/SteamARM-roots/arm64root -> /Volumes/SteamFrameRoot/arm64root (the APFS
+clone; rootfs/ untouched), /tmp/lxrt-arm64root -> it. Client home copied with
+rsync -a excluding steamapps/common (4.0 GB). DT_NEEDED closure of steam,
+steamui.so, steamclient.so, vgui2_s.so, chromehtml.so, steamwebhelper and
+libcef.so inside it: 127 objects, none missing. It already has X locale data,
+glibc locales, libnssckbi.so, lsof, SDL2 2.30 (not sdl2-compat), GTK 2.
+E19 07:05:02, 150 s, ARMROOT=~/SteamARM-roots/arm64root
+ARMROOT_LINK=/tmp/lxrt-arm64root scripts/run-steam-arm64.sh --for 150 --jitless:
+  "Client beta changed from '' to 'steamdeck_stable'", "Client version: 0",
+  steamsysinfo "CVulkanTopology: failed to get physical device count", then
+  "src/vgui2/src/surface_linux.cpp (1958) : glXChooseVisual failed" ->
+  "Fatal assert; application exiting" 2 s after start. No window.  MEASURED
+  Its Mesa (libgallium-26.3.0-devel) ships hardware DRI drivers and
+  zink_dri.so but no swrast_dri.so (MEASURED, ls); the Fedora root's GLX
+  works through swrast. HYPOTHESIS: a software DRI driver (or Fedora's Mesa)
+  is what the holo root lacks for GLX on XQuartz. Not tried.
+So the Fedora root gets further (login window) than the Steam Frame root
+(client exits at the first GLX visual) today.
+
+Still open
+----------
+- V8 JIT (the blocker above). Direction (HYPOTHESIS, not built): for native
+  aarch64 guests, give an mprotect(RWX) range MAP_JIT semantics driven by
+  jit.c, as anonymous RWX mmaps already get; under FEX the RW grant must stay
+  (x86 code is never executed by the host). Until then --jitless.
+- XOpenIM() still fails with LANG=es_MX.UTF-8 (no es_MX glibc locale in the
+  root; HYPOTHESIS: harmless, no input method needed for the login page).
+- steam-runtime-launcher-service not found (client logs "possible problem,
+  disabling"; non-fatal).
+- "[lxrt] mremap: file-backed range ...: not supported yet" 1-2 times per run
+  in the webhelper; effect UNKNOWN.
+- The GPU process cannot initialise GL on XQuartz (ANGLE: "Cannot create an
+  OpenGL ES platform on GLX without the GLX_ARB_create_context extension");
+  the webhelper falls back to software compositing ("Disabling GPU
+  acceleration due to runtime detect").
+- The head of a host page mapped by runtime change 3 stays mapped until the
+  whole host page is unmapped (by design of the change; leak size <= 12 KiB
+  per such mapping).
+- Proton ARM64 itself: unchanged from stage 21 (not attempted).
