@@ -19,9 +19,12 @@
 # Settings ($STATE/launcher/settings.json): "display" as above; "resolution"
 # is the Xvnc geometry (vnc only), applied when Xvnc is (re)started with no app
 # running; "metalHud" exports MTL_HUD_ENABLED=1; "extraEnv" goes to every app.
-# The PID of the launched program goes to $STATE/launcher/running.pid (its id
-# to running.id, its display mode to running.display, "<arch> <translator>" to
-# running.arch) and its output to $STATE/logs/<id>-<time>.log.
+# Every app runs in a process group of its own (scripts/session.py): the PID
+# of that group's leader goes to $STATE/launcher/running.pid (its id to
+# running.id, its display mode to running.display, "<arch> <translator>" to
+# running.arch, the group to running.pgid), the program's exit status to
+# running.status when it ends, and its output to $STATE/logs/<id>-<time>.log.
+# --stop signals that group first; leftover guest processes are killed after.
 set -u
 cd "$(dirname "$0")/.." || exit 1
 ROOT=/tmp/lxrt-steamroot
@@ -32,6 +35,8 @@ PIDFILE="$LDIR/running.pid"
 IDFILE="$LDIR/running.id"
 MODEFILE="$LDIR/running.display"
 ARCHFILE="$LDIR/running.arch"
+PGIDFILE="$LDIR/running.pgid"
+STATUSFILE="$LDIR/running.status"   # read and removed by the launcher, not here
 X11_BUNDLE_ID=org.steamarm.X11
 STEAM_PATTERN='build/lxrun .*ubuntu12_32/steam '
 
@@ -50,8 +55,11 @@ guest_pids() {
 }
 
 stop_guests() {
+    # The session's group first (SIGTERM, then SIGKILL after 3 s); anything
+    # else that is a guest program afterwards, as before.
+    /usr/bin/python3 scripts/session.py stop "$LDIR" 3
     for p in $(guest_pids); do kill -9 "$p" 2>/dev/null; done
-    rm -f "$ROOT/tmp/fexhome/.steam/steam.pid" "$PIDFILE" "$IDFILE" "$MODEFILE" "$ARCHFILE"
+    rm -f "$ROOT/tmp/fexhome/.steam/steam.pid" "$PIDFILE" "$IDFILE" "$MODEFILE" "$ARCHFILE" "$PGIDFILE"
 }
 
 # Prints shell assignments (APP_NAME, APP_ARCH, APP_ROOT, APP_FEXROOTFS, GEOMETRY, DMODE
@@ -305,16 +313,22 @@ VOL="$(/usr/bin/python3 scripts/settings-env.py --volume "$LDIR/settings.json")"
 # Controllers (scripts/input.sh): the launcher's Entrada page, as /dev/input.
 scripts/input.sh start >/dev/null || echo "run-app: no controllers for games (scripts/input.sh)" >&2
 
+# The memory guard, before the session exists: started here it stays outside
+# the app's process group, and a stop does not take it down.
+scripts/safeguard.sh start >/dev/null
+
 L="$LOGS/$ID-$(date +%Y%m%d-%H%M%S).log"
 echo "$L" > "$LOGS/current"
-# env execs nohup, which execs the runner, which execs build/lxrun: $! ends up
-# being the runtime process of the program itself.
+rm -f "$STATUSFILE" "$PGIDFILE"
+# env execs nohup, which execs session.py: $! is the session's group leader,
+# alive exactly as long as the program (the runner execs build/lxrun under it).
+SESSION=(/usr/bin/python3 scripts/session.py run "$LDIR" "$RUNNER")
 if [ "$APP_ARCH" = aarch64 ]; then
     env ${APP_ENV[@]+"${APP_ENV[@]}"} DISPLAY=$DISP LXRT_ROOT="$APP_ROOT" \
-        nohup "$RUNNER" "${APP_CMD[@]}" > "$L" 2>&1 < /dev/null &
+        nohup "${SESSION[@]}" "${APP_CMD[@]}" > "$L" 2>&1 < /dev/null &
 else
     env ${APP_ENV[@]+"${APP_ENV[@]}"} DISPLAY=$DISP LXRT_ROOT="$APP_ROOT" FEX_ROOTFS="$APP_FEXROOTFS" \
-        nohup "$RUNNER" "${APP_CMD[@]}" > "$L" 2>&1 < /dev/null &
+        nohup "${SESSION[@]}" "${APP_CMD[@]}" > "$L" 2>&1 < /dev/null &
 fi
 echo $! > "$PIDFILE"
 echo "$ID" > "$IDFILE"

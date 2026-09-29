@@ -141,6 +141,7 @@ test-launcher-core:
 	    launcher/tests/ApplicationCoreTests.swift -o build/application-core-tests
 	build/application-core-tests
 	tests/launcher/run_app_dispatch.sh
+	tests/launcher/session.sh
 
 .PHONY: launcher
 launcher: $(LAUNCHER_BIN) launcher/Info.plist.in

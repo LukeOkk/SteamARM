@@ -37,7 +37,9 @@ running() { [ -f "$PIDF" ] && kill -0 "$(cat "$PIDF")" 2>/dev/null; }
 case "${1:-}" in
     start)
         if running; then echo "safeguard running (pid $(cat "$PIDF"))"; exit 0; fi
-        nohup "$0" run </dev/null >>"$LOG" 2>&1 &
+        # Its own session (scripts/session.py detach): started from an app's
+        # launch, it must outlive that app's process group.
+        nohup /usr/bin/python3 "$(dirname "$0")/session.py" detach "$0" run </dev/null >>"$LOG" 2>&1 &
         echo $! > "$PIDF"
         disown 2>/dev/null
         echo "safeguard started (pid $!), log $LOG"

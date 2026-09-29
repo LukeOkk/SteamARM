@@ -20,9 +20,9 @@ and Steam as one application among others.
 - **Tracking.**
   - A pidfile, polled every 2 s (`kill(pid,0)` or a `ps` line containing
     `build/lxrun`).
-  - There is no process group, no `waitpid` and no exit status.
-  - "It crashed" is inferred from "it disappeared less than 15 s after
-    starting".
+  - Until the session wrapper below: no process group, no `waitpid` and no
+    exit status; "it crashed" was inferred from "it disappeared less than
+    15 s after starting".
 - **One app at a time.** Enforced twice: the Swift phase guard, and
   `run-app.sh` exiting 3 while any guest process exists.
 - **`AppEntry` (`launcher/Models.swift`) is today's ApplicationDefinition.**
@@ -47,6 +47,7 @@ and Steam as one application among others.
 | ARM64-first launch plan | `LaunchPlanner`: aarch64 runs natively only, never through FEX; x86_64/i386 run through FEX only; `usesVirtualMachine` is always false | done, tested |
 | Runner per ISA | `run-app.sh` sends aarch64 entries to the new `scripts/run-native.sh` (`build/lxrun <program>`, no `FEX_*` variables). It writes `running.arch` = `<arch> <translator>`, and refuses an aarch64 entry in the x86 root or an x86 entry in the ARM64 base, as `LaunchPlanner` does | done, dry-run tested |
 | Session state machine | `SessionMachine`: `idle → starting → running → stopping → cleanup → idle`, `starting → failed → cleanup → idle`, `running → crashed / exited → cleanup → idle`. The lock is taken before any process exists | model done, tested; `LauncherModel` still uses its own `Phase` |
+| One process group and an exit status per session | `scripts/session.py run` (started by `run-app.sh`): the program and everything it forks in a group of its own (`running.pgid`); its exit status, or 128 + signal, in `running.status`; leftovers get 5 s, then SIGTERM, then SIGKILL. `--stop` signals the group first (`session.py stop`). FEXServer and `safeguard.sh` start in their own sessions (`session.py detach`), so a stop never takes them down. The launcher reports the status ("terminó con el código N / la señal S") and keeps the 15 s guess only for a run it adopted without a wrapper | done; `tests/launcher/session.sh` 18/18 on Linux, not yet run on the Mac |
 
 Steam, Heroic and Prism are marked `x86_64`, so they behave exactly as
 before. Steam's entry is labelled TRANSITIONAL_COMPATIBILITY.
@@ -77,17 +78,15 @@ It runs two tests:
    `scripts/env-links.sh` (done: it links `~/SteamARM-roots/arm64root` when
    that exists). Until then, the launcher
    must show aarch64 entries as unavailable, not failing.
-3. **Exit status and a process group per session.** `run-app.sh` should start
-   the program under a small wrapper. The wrapper creates a new session
-   (`setsid` through python3 or perl; macOS has no `setsid` command) and
-   writes `running.status` when the tree ends. Then:
-   - "Detener" signals that group instead of every `lxrun`;
-   - `safeguard.sh` can target it;
-   - `SessionMachine.ended(status:)` gets a real value instead of the 15 s
-     guess.
+3. **Exit status and a process group per session.** Done in
+   `scripts/session.py` (see the table above). Still to do on the Mac: run
+   `tests/launcher/session.sh` there, and check that a Steam stop through the
+   group leaves no `steamwebhelper` behind (the wrapper's SIGTERM/SIGKILL
+   steps should show in the log). `safeguard.sh` could later kill the
+   recorded group before every `lxrun`.
 4. **Wire `SessionMachine` into `LauncherModel`.** It replaces `Phase`. Take
    the lock in `launch` before running the script, and release it only after
-   cleanup. `RunningView` shows the architecture and translator from
+   cleanup; `ended(status:)` takes the value from `running.status`. `RunningView` shows the architecture and translator from
    `running.arch`, and `Session Mode: ZERO-VM`.
 5. **"Añadir app" per ISA.** Today every added program is copied under the
    Steam root (`Paths.appsRoot`) before its ISA is read, and its entry gets

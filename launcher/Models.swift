@@ -21,6 +21,8 @@ enum Paths {
     static var idFile: URL { launcherDir.appendingPathComponent("running.id") }
     static var displayFile: URL { launcherDir.appendingPathComponent("running.display") }
     static var archFile: URL { launcherDir.appendingPathComponent("running.arch") }   // "<arch> <translator>"
+    static var pgidFile: URL { launcherDir.appendingPathComponent("running.pgid") }   // the session's process group
+    static var statusFile: URL { launcherDir.appendingPathComponent("running.status") } // exit status, or 128 + signal
     static var vncPasswordFile: URL { state.appendingPathComponent("vncpasswd.txt") }
 
     /// Host directory of the x86-64 Steam root (guest "/").

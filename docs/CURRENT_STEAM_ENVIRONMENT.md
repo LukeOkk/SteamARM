@@ -173,12 +173,12 @@ This is VERIFIED IN SOURCE; details in `docs/APPLICATION_MANAGER.md`.
 
 - The launcher runs `scripts/run-app.sh <id>`. The script starts X, PulseAudio
   and inputd, then starts the program with `nohup`.
-- Tracking is weak:
-  - a pidfile, polled every 2 s;
-  - plus "some `build/lxrun` process still exists";
-  - no process group, no exit status;
-  - a crash is guessed as "gone within 15 s".
-- "Detener" is `kill -9` on every guest `lxrun`.
+- Tracking: a pidfile polled every 2 s, plus "some `build/lxrun` process
+  still exists". Since `scripts/session.py`, the pidfile names the leader of
+  the app's own process group, and the program's exit status lands in
+  `running.status`; before it, a crash was guessed as "gone within 15 s".
+- "Detener" signals that group (SIGTERM, then SIGKILL), then does `kill -9`
+  on any guest `lxrun` still there.
 - Only one app runs at a time.
 - Since `748bc97`, entries marked `aarch64` go to `scripts/run-native.sh`
   (lxrun, no FEX). Steam, Heroic and Prism are still marked `x86_64`, so in
