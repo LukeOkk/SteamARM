@@ -18,6 +18,10 @@ if [ "${1:-}" = "--trace" ]; then TRACE="--trace"; shift; fi
 [ $# -ge 1 ] || { echo "usage: $0 [--trace] <program> [args...]" >&2; exit 2; }
 export LXRT_ROOT="${LXRT_ROOT:-/tmp/lxrt-arm64root}"
 [ -d "$LXRT_ROOT" ] || { echo "run-native: no ARM64 root at $LXRT_ROOT" >&2; exit 1; }
+# The environment the root names for its guests (the Steam Frame root's
+# indirect GLX, scripts/mkframeroot.sh); the app's own env and the caller win.
+. scripts/guest-env.sh
+guest_env_from_root "$LXRT_ROOT"
 # As run-fex.sh: macOS's per-user TMPDIR and LD_LIBRARY_PATH must not leak in.
 export TMPDIR=/tmp
 unset LD_LIBRARY_PATH

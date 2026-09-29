@@ -7,7 +7,9 @@
 #   scripts/run-steam-arm64.sh [--for SECONDS] [--jitless] [steam args...]
 #
 # Root: scripts/mkarmroot.sh ($STEAMARM_STATE/armroot, seen by the runtime as
-# /tmp/lxrt-armroot; ARMROOT=<dir> ARMROOT_LINK=/tmp/<name> for another root);
+# /tmp/lxrt-armroot; ARMROOT=<dir> ARMROOT_LINK=/tmp/<name> for another root,
+# e.g. the Steam Frame root of scripts/mkframeroot.sh:
+#   ARMROOT=$STEAMARM_STATE/arm64root ARMROOT_LINK=/tmp/lxrt-arm64root);
 # the client lives in its tmp/armhome (HOME=/tmp/armhome in the guest).
 # X: the native X server on :2 (scripts/run-x11-native.sh), started if needed.
 # Log (runtime + client stdout/stderr):
@@ -72,6 +74,10 @@ unset LD_LIBRARY_PATH FEX_ROOTFS FEX_GUESTBASE
 export OBJC_DISABLE_INITIALIZE_FORK_SAFETY=YES
 export LXRT_ROOT="$LINK" LXRT_GUEST_PAGE=4096 HOME=/tmp/armhome
 export LXRT_X18_ALL_TEXT="${LXRT_X18_ALL_TEXT-libcef.so}"
+# The environment the root names for its guests (the Steam Frame root's
+# indirect GLX, scripts/mkframeroot.sh); a variable the caller set wins.
+. scripts/guest-env.sh
+guest_env_from_root "$ARMROOT"
 echo "log: $LOG"
 LXRUN="$PWD/build/lxrun"
 "$LXRUN" /tmp/armhome/.local/share/Steam/steamrtarm64/steam "$@" >"$LOG" 2>&1 &
