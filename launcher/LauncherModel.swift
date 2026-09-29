@@ -257,16 +257,21 @@ final class LauncherModel: ObservableObject {
         let host = Paths.hostRoot(forGuestRoot: app.root)
         let shown = (host.path as NSString).abbreviatingWithTildeInPath
         guard FileManager.default.fileExists(atPath: host.path) else {
-            return app.root == LinuxBaseEnvironment.armroot.guestRoot
-                ? "falta la raíz ARM64 (\(shown)); se crea con scripts/mkarmroot.sh"
-                : "falta la raíz \(app.root) (\(shown))"
+            if app.root == LinuxBaseEnvironment.armroot.guestRoot {
+                return "falta la raíz ARM64 (\(shown)); se crea con scripts/mkarmroot.sh"
+            }
+            if app.root == LinuxBaseEnvironment.arm64.guestRoot {
+                return "falta la raíz de Steam Frame (\(shown)); se crea con scripts/mkframeroot.sh "
+                    + "a partir de la imagen de recuperación (docs/STEAM_FRAME_IMAGE.md)"
+            }
+            return "falta la raíz \(app.root) (\(shown))"
         }
         guard let program = app.command.first, program.hasPrefix("/") else { return nil }
         // lstat: a guest symlink may point at a guest path the host cannot follow.
         let path = host.appendingPathComponent(String(program.dropFirst())).path
         guard (try? FileManager.default.attributesOfItem(atPath: path)) != nil else {
-            return app.id == "steam-arm64"
-                ? "falta el cliente ARM64 de Steam en la raíz ARM64 (\(program)); benchmarks/stage21 explica cómo se descargó"
+            return app.id.hasPrefix("steam-arm64")
+                ? "falta el cliente ARM64 de Steam en \(app.root) (\(program)); benchmarks/stage21 explica cómo se descargó"
                 : "falta el programa \(program) en la raíz \(app.root)"
         }
         return nil
@@ -413,10 +418,10 @@ final class LauncherModel: ObservableObject {
     private func confirmExperimental(_ app: AppEntry) -> Bool {
         let a = NSAlert()
         a.messageText = "\(app.name) es experimental"
-        a.informativeText = app.id == "steam-arm64"
-            ? "El cliente ARM64 nativo de Steam arranca, se actualiza y carga su interfaz, pero todavía "
-                + "no llega a su ventana: el proceso principal termina con «free(): invalid pointer» "
-                + "(benchmarks/stage21). Se ejecuta sin máquina virtual en la raíz ARM64. Para jugar, usa Steam."
+        a.informativeText = app.id.hasPrefix("steam-arm64")
+            ? "El cliente ARM64 nativo de Steam llega a su ventana de inicio de sesión sin emulación y sin "
+                + "máquina virtual (benchmarks/stage22 y stage23), pero el inicio de sesión, la biblioteca y "
+                + "Proton ARM64 todavía no están verificados. Para jugar, usa Steam."
             : "Esta app está marcada como experimental: puede no funcionar todavía."
         a.addButton(withTitle: "Abrir de todos modos")
         a.addButton(withTitle: "Cancelar")

@@ -8,7 +8,7 @@
 #   scripts/run-app.sh <app-id>            start (or re-show) an app from
 #                                          $STATE/launcher/apps.json;
 #                                          scripts/builtin-apps.json defines "steam"
-#                                          (x86) and "steam-arm64" (experimental)
+#                                          (x86), "steam-arm64" and "steam-arm64-frame" (experimental)
 #   scripts/run-app.sh --stop              stop the guest processes (X keeps running)
 #   scripts/run-app.sh --dry-run <app-id>  print what would run; start nothing
 #   scripts/run-app.sh --help

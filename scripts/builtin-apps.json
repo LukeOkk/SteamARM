@@ -31,5 +31,23 @@
       "LXRT_X18_ALL_TEXT": "libcef.so"
     },
     "architecture": "aarch64"
+  },
+  {
+    "id": "steam-arm64-frame",
+    "name": "Steam ARM64 · Steam Frame (experimental)",
+    "kind": "steam",
+    "builtIn": true,
+    "readiness": "experimental",
+    "command": [
+      "/tmp/armhome/.local/share/Steam/steamrtarm64/steam"
+    ],
+    "root": "/tmp/lxrt-arm64root",
+    "fexRootfs": null,
+    "env": {
+      "HOME_IN_GUEST": "/tmp/armhome",
+      "LXRT_GUEST_PAGE": "4096",
+      "LXRT_X18_ALL_TEXT": "libcef.so"
+    },
+    "architecture": "aarch64"
   }
 ]

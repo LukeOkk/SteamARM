@@ -321,7 +321,10 @@ struct BuiltInInfoView: View {
                 }
                 LabeledContent("Modo de sesión", value: "ZERO-VM")
                 if app.id == "steam-arm64" {
-                    Text("El cliente ARM64 nativo arranca, se actualiza y carga su interfaz, pero todavía no llega a su ventana (benchmarks/stage21). Vive en la raíz ARM64 de scripts/mkarmroot.sh, que se borra al reconstruirla.")
+                    Text("El cliente ARM64 nativo, sin FEX: llega a su ventana de inicio de sesión (benchmarks/stage22-23); lo demás aún no está verificado. Vive en la raíz ARM64 transicional de scripts/mkarmroot.sh (Fedora); reconstruirla conserva tmp/ y opt/apps.")
+                        .font(.caption).foregroundStyle(.secondary)
+                } else if app.id == "steam-arm64-frame" {
+                    Text("El mismo cliente ARM64 sobre la base oficial de Steam Frame (SteamOS holo), derivada de tu imagen de recuperación con scripts/mkframeroot.sh: la base que busca la migración ARM64. Llega a su ventana de inicio de sesión (benchmarks/stage23-frame-root).")
                         .font(.caption).foregroundStyle(.secondary)
                 } else if app.id == "steam" {
                     Text("El cliente x86 bajo FEX: la ruta que funciona hoy (compatibilidad transicional).")
