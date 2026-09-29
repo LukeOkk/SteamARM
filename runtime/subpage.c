@@ -24,8 +24,10 @@
 //     to the hardware and is what a 16 KiB kernel would do too.
 
 #include "lxrt.h"
+#include "storemu.h"
 
 #include <errno.h>
+#include <libkern/OSCacheControl.h>
 #include <mach/mach.h>
 #include <mach/mach_vm.h>
 #include <pthread.h>
@@ -37,6 +39,7 @@
 #include <sys/mman.h>
 #include <sys/param.h>
 #include <sys/stat.h>
+#include <sys/ucontext.h>
 #include <libproc.h>
 #include <unistd.h>
 
@@ -592,11 +595,168 @@ static int apply_prot(uint64_t hpage, int prefer)
     return mprotect((void *)hpage, LXRT_HOST_PAGE, want);
 }
 
+// The protection the guest gave the 4 KiB page at g (0 when nothing is
+// mapped there). Only meaningful in a tracked host page. Caller holds g_lock.
+static int slot_prot(uint64_t g)
+{
+    int p = 0;
+    for (int i = 0; i < g_nsubs; i++)
+        if (g_subs[i].start < g + GUEST_PAGE && g_subs[i].end > g)
+            p |= g_subs[i].prot;
+    return p;
+}
+
+// LXRT_SUBPAGE_LOG=<n>: report the first n split events of this process
+// (flips, emulated stores).
+static bool subpage_log_one(void)
+{
+    static int logmax = -1;
+    static _Atomic int logged;
+    if (logmax < 0) { const char *e = getenv("LXRT_SUBPAGE_LOG"); logmax = e ? atoi(e) : 0; }
+    return logged < logmax && atomic_fetch_add(&logged, 1) < logmax;
+}
+
+// Code written into an executable guest page is scanned again before it can
+// run, as mapped code is (dispatch.c) and JIT output is (jit.c): a `svc` that
+// is not rewritten runs an arbitrary Darwin syscall. LXRT_NO_RESCAN=1 turns
+// this off, as it does for JIT output (a diagnostic knob, and the negative
+// control of the tests).
+bool lxrt_dispatch_rewrite_mapped(void);
+static bool rescan_enabled(void)
+{
+    static int no = -1;
+    if (no < 0) no = getenv("LXRT_NO_RESCAN") ? 1 : 0;
+    return !no && lxrt_dispatch_rewrite_mapped();
+}
+
+// Rewrite every guest page in [lo, hi) the guest mapped executable. The host
+// pages must be readable (a split page always is: read-write or read-execute);
+// they are made writable here, and only when there is something to rewrite.
+// Returns how many were scanned. Caller holds g_lock.
+static int rescan_exec_slots(uint64_t lo, uint64_t hi)
+{
+    int n = 0;
+    for (uint64_t g = LXRT_ALIGN_DOWN(lo, GUEST_PAGE); g < hi; g += GUEST_PAGE) {
+        if (!(slot_prot(g) & PROT_EXEC))
+            continue;
+        n++;
+        if (!lxrt_rewrite_has_candidates(g, g + GUEST_PAGE))
+            continue;                   // nothing a rewrite could change
+        if (mprotect((void *)LXRT_ALIGN_DOWN(g, LXRT_HOST_PAGE), LXRT_HOST_PAGE,
+                     PROT_READ | PROT_WRITE) != 0)
+            continue;
+        struct lxrt_rewrite_report rep;
+        char *err = NULL;
+        if (lxrt_rewrite_range(g, g + GUEST_PAGE, &rep, &err) == 0 &&
+            (rep.sites_found || rep.tls_read_found || rep.tls_write_found ||
+             rep.ctr_found || rep.sysreg_found))
+            fprintf(lxrt_trace_stream(), "[lxrt] sub-page code written at run time 0x%llx: %zu svc "
+                    "rewritten, %zu poisoned, %zu tls, %zu ctr/sysreg\n", (unsigned long long)g,
+                    rep.sites_rewritten, rep.sites_unreachable + rep.tls_unreachable,
+                    rep.tls_rewritten, rep.ctr_rewritten + rep.sysreg_rewritten);
+    }
+    return n;
+}
+
+enum { EMU_PASS, EMU_DONE, EMU_FAULT };
+
+// A store executed from a W/X-split host page into that same page: the page
+// can never be writable and executable at once, so the store never completes
+// natively (the flip below just alternated write and exec at the same pc,
+// forever). Perform it here instead (storemu.c) and resume after it:
+//
+//   EMU_DONE  -- stored, pc advanced;
+//   EMU_FAULT -- the guest page it writes is not writable in guest terms:
+//                a real fault, exactly where Linux would raise it;
+//   EMU_PASS  -- not this case, or not an instruction storemu.c performs:
+//                the caller keeps the old flip.
+//
+// The page is opened for writing only while this thread is parked here with
+// g_lock held; any other thread that runs into it waits on the lock in its
+// own fault handler and finds it executable again. Caller holds g_lock.
+static int emulate_store_locked(uint64_t pc, uint64_t ph, void *uap)
+{
+    uint32_t insn = *(const uint32_t *)(uintptr_t)pc;   // executing: readable
+    struct lxrt_storemu m;
+    const char *why = NULL;
+    if (lxrt_storemu_decode(insn, pc, uap, &m, &why) != 0) {
+        static _Atomic int said;
+        if (atomic_fetch_add(&said, 1) < 8)
+            fprintf(lxrt_trace_stream(), "[lxrt] subpage: store at pc 0x%llx (insn %08x) shares its "
+                    "host page with its target and cannot be emulated (%s): W/X flip\n",
+                    (unsigned long long)pc, insn, why ? why : "?");
+        return EMU_PASS;
+    }
+    uint64_t lo = m.addr, hi = m.addr + m.len;
+    if (hi <= lo || hi <= ph || lo >= ph + LXRT_HOST_PAGE)
+        return EMU_PASS;                    // does not touch the page it runs from
+
+    // Guest permission, 4 KiB page by 4 KiB page.
+    for (uint64_t g = LXRT_ALIGN_DOWN(lo, GUEST_PAGE); g < hi; g += GUEST_PAGE) {
+        uint64_t hp = LXRT_ALIGN_DOWN(g, LXRT_HOST_PAGE);
+        if (page_tracked(hp)) {
+            if (!(slot_prot(g) & PROT_WRITE))
+                return EMU_FAULT;
+            continue;
+        }
+        mach_vm_address_t ra = g;
+        mach_vm_size_t rs = 0;
+        vm_region_basic_info_data_64_t ri;
+        mach_msg_type_number_t rc = VM_REGION_BASIC_INFO_COUNT_64;
+        mach_port_t obj = MACH_PORT_NULL;
+        if (mach_vm_region(mach_task_self(), &ra, &rs, VM_REGION_BASIC_INFO_64,
+                           (vm_region_info_t)&ri, &rc, &obj) != KERN_SUCCESS || ra > g)
+            return EMU_FAULT;               // unmapped
+        if (!(ri.protection & VM_PROT_WRITE))
+            return EMU_PASS;                // someone else's (copy-on-write, JIT): not ours
+    }
+
+    // Open every split host page the store touches (at most three: DC ZVA
+    // blocks are at most 2 KiB).
+    uint64_t opened[3];
+    int nopen = 0;
+    bool code = false;
+    for (uint64_t hp = LXRT_ALIGN_DOWN(lo, LXRT_HOST_PAGE); hp < hi && nopen < 3; hp += LXRT_HOST_PAGE) {
+        if (!page_tracked(hp) || !needs_wx_split(hp))
+            continue;
+        if (mprotect((void *)hp, LXRT_HOST_PAGE, PROT_READ | PROT_WRITE) != 0) {
+            for (int i = 0; i < nopen; i++)
+                apply_prot(opened[i], opened[i] == ph ? PROT_EXEC : PROT_WRITE);
+            return EMU_PASS;
+        }
+        opened[nopen++] = hp;
+    }
+    for (uint64_t g = LXRT_ALIGN_DOWN(lo, GUEST_PAGE); g < hi; g += GUEST_PAGE)
+        if (page_tracked(LXRT_ALIGN_DOWN(g, LXRT_HOST_PAGE)) && (slot_prot(g) & PROT_EXEC))
+            code = true;
+
+    g_in_subpage = true;                    // a fault in here is ours: report it
+    lxrt_storemu_perform(&m, uap);
+    if (code) {
+        // A store into an executable guest page (one the guest made writable
+        // too, or the check above would have refused it): rescan that page
+        // before it runs again.
+        if (rescan_enabled())
+            rescan_exec_slots(lo, hi);
+        sys_icache_invalidate((void *)(uintptr_t)lo, (size_t)(hi - lo));
+    }
+    g_in_subpage = false;
+    for (int i = 0; i < nopen; i++)
+        apply_prot(opened[i], opened[i] == ph ? PROT_EXEC : PROT_WRITE);
+
+    if (subpage_log_one())
+        fprintf(lxrt_trace_stream(), "[lxrt] subpage emulate pid %d: pc 0x%llx insn %08x addr 0x%llx+%u%s\n",
+                (int)getpid(), (unsigned long long)pc, insn, (unsigned long long)lo, m.len,
+                code ? " (executable page: rescanned)" : "");
+    return EMU_DONE;
+}
+
 // The fault-driven half of the W^X split, mirroring what jit.c does for
 // MAP_JIT. A store to a page currently read-execute flips it to read-write; an
 // instruction fetch from a page currently read-write flips it back. Returns
-// true when the faulting instruction should simply be retried.
-bool lxrt_subpage_handle_fault(uint64_t pc, uint64_t fault_addr)
+// true when the faulting instruction should simply be retried (or, for a
+// store performed here, resumed after).
+bool lxrt_subpage_handle_fault(uint64_t pc, uint64_t fault_addr, void *uap)
 {
     if (!fault_addr)
         return false;
@@ -606,23 +766,52 @@ bool lxrt_subpage_handle_fault(uint64_t pc, uint64_t fault_addr)
     if (g_in_subpage)
         return false;
     uint64_t hpage = LXRT_ALIGN_DOWN(fault_addr, LXRT_HOST_PAGE);
+    // Instruction abort or data abort, from the syndrome; without a context,
+    // pc == fault_addr means the fault was the fetch itself. Only a write
+    // (WnR, ESR bit 6: stores, atomics, DC ZVA) can be a store to perform.
+    bool fetch = pc == fault_addr, store = false;
+    if (uap) {
+        uint32_t esr = ((ucontext_t *)uap)->uc_mcontext->__es.__esr, ec = esr >> 26;
+        if (ec == 0x20 || ec == 0x21) {
+            fetch = true;
+        } else if (ec == 0x24 || ec == 0x25) {
+            fetch = false;
+            store = (esr >> 6) & 1;
+        }
+    }
 
     pthread_mutex_lock(&g_lock);
+    if (store) {
+        uint64_t ph = LXRT_ALIGN_DOWN(pc, LXRT_HOST_PAGE);
+        if (needs_wx_split(ph)) {
+            int r = emulate_store_locked(pc, ph, uap);
+            if (r != EMU_PASS) {
+                pthread_mutex_unlock(&g_lock);
+                return r == EMU_DONE;
+            }
+        }
+    }
     if (!needs_wx_split(hpage)) {
         pthread_mutex_unlock(&g_lock);
         return false;               // nothing withheld here; a real fault
     }
-    // pc == fault_addr means the fault was the fetch itself.
-    int prefer = (pc == fault_addr) ? PROT_EXEC : PROT_WRITE;
+    int prefer = fetch ? PROT_EXEC : PROT_WRITE;
+    // Going back to execute: the page was writable, so anything may have been
+    // stored into its executable guest pages. Rescan them first (a scan of
+    // unchanged code finds nothing and changes nothing).
+    int rescanned = 0;
+    if (prefer == PROT_EXEC && rescan_enabled()) {
+        g_in_subpage = true;
+        rescanned = rescan_exec_slots(hpage, hpage + LXRT_HOST_PAGE);
+        g_in_subpage = false;
+    }
     // LXRT_SUBPAGE_LOG=<n>: report the first n split flips of this process
     // with the guest ranges that make the host page want write and execute.
-    static int logmax = -1;
-    static _Atomic int logged;
-    if (logmax < 0) { const char *e = getenv("LXRT_SUBPAGE_LOG"); logmax = e ? atoi(e) : 0; }
-    if (logged < logmax && atomic_fetch_add(&logged, 1) < logmax) {
-        fprintf(lxrt_trace_stream(), "[lxrt] subpage flip pid %d: pc 0x%llx addr 0x%llx -> %s (subs %d):",
-                (int)getpid(), (unsigned long long)pc, (unsigned long long)fault_addr,
-                prefer == PROT_EXEC ? "exec" : "write", g_nsubs);
+    if (subpage_log_one()) {
+        fprintf(lxrt_trace_stream(), "[lxrt] subpage flip pid %d: pc 0x%llx addr 0x%llx -> %s (subs %d, "
+                "rescanned %d):", (int)getpid(), (unsigned long long)pc,
+                (unsigned long long)fault_addr, prefer == PROT_EXEC ? "exec" : "write", g_nsubs,
+                rescanned);
         for (int i = 0; i < g_nsubs; i++)
             if (g_subs[i].start < hpage + LXRT_HOST_PAGE && g_subs[i].end > hpage)
                 fprintf(lxrt_trace_stream(), " [0x%llx-0x%llx %d]", (unsigned long long)g_subs[i].start,

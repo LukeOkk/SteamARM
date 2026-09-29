@@ -78,7 +78,7 @@ static void fault_report(int sig, siginfo_t *info, void *uap)
         if (lxrt_jit_handle_fault(pc, faddr, uap) ||
             lxrt_privmap_handle_fault(faddr, write) ||
             lxrt_lowptr_fixup(uap, faddr) ||
-            lxrt_subpage_handle_fault(pc, faddr))
+            lxrt_subpage_handle_fault(pc, faddr, uap))
             return;
     }
     const char *name = sig == SIGILL ? "SIGILL" : sig == SIGTRAP ? "SIGTRAP"

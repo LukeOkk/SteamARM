@@ -138,6 +138,9 @@ static bool g_trace;
 static bool g_rewrite_mapped;
 
 void lxrt_dispatch_set_rewrite_mapped(bool on) { g_rewrite_mapped = on; }
+// Whether code the guest maps (or writes) is rewritten: subpage.c asks before
+// rescanning code stored into an executable 4 KiB page.
+bool lxrt_dispatch_rewrite_mapped(void) { return g_rewrite_mapped; }
 
 // ------------------------------------------------- guest filesystem root
 //

@@ -538,7 +538,7 @@ static void host_handler(int dsig, siginfo_t *dinfo, void *uap)
             return;
         // Ordinary pages get the same treatment when a 16 KiB host page holds
         // both a writable and an executable guest page.
-        if (lxrt_subpage_handle_fault(fpc, faddr))
+        if (lxrt_subpage_handle_fault(fpc, faddr, uap))
             return;
     }
 
