@@ -29,9 +29,21 @@ follows the layout of the [Ryujinx](https://ryujinx.app) emulator's.
   override display, V-Sync, synchronization and the graphics engine; the
   built-in entries show theirs read-only), open its folder or logs, mark
   it as a favourite, or delete it (added apps only).
+- **+ → Añadir APK (Android)** reads an Android `.apk` (name, icon, package,
+  version, SDK levels, native code, permissions, signing schemes) and
+  installs it into `~/SteamARM-roots/android/` (`scripts/android-pm.py`). An
+  update keeps the app's data and is refused when the new APK is signed by
+  another certificate or is an older version. The card cannot be opened
+  yet: SteamARM has no Android runtime, and the card says so. arm64-v8a
+  code is preferred; an app with only 32-bit ARM code cannot run on Apple
+  Silicon, and one with only x86 code would need FEX (not supported).
+  XAPK, APKS, APKM and AAB bundles are refused for now. Right-click an
+  Android card for **Información…**, **Abrir carpeta de datos** and
+  **Desinstalar…** (with or without its data). Details:
+  [APK_SUPPORT.md](APK_SUPPORT.md).
 - The library has a search field and the filters Todas, Favoritas,
-  Recientes, ARM64, x86 and Windows; each card shows its last launch, how
-  many times it ran and for how long.
+  Recientes, ARM64, x86, Windows and Android; each card shows its last
+  launch, how many times it ran and for how long.
 - Only one program runs at a time. Stopping it stops all its Linux
   processes. When a program ends with an error, the launcher shows its exit
   code or signal, or the memory guard's reason (see

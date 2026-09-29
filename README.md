@@ -93,6 +93,8 @@ guides, and nothing in them is ready for players yet. Start with the plan,
   [STEAM_FRAME_COMPAT_TOOLS.md](docs/STEAM_FRAME_COMPAT_TOOLS.md),
   [STEAM_RUNTIME_4_ARM64.md](docs/STEAM_RUNTIME_4_ARM64.md),
   [LEPTON_REUSE_ANALYSIS.md](docs/LEPTON_REUSE_ANALYSIS.md).
+- Android apps: [APK_SUPPORT.md](docs/APK_SUPPORT.md) (APKs are read,
+  installed and listed; nothing Android runs yet).
 
 ## Build from source
 

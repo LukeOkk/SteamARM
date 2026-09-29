@@ -52,6 +52,19 @@ páginas y el cierre están medidos; el inicio de sesión en las tiendas, las
 descargas y los juegos no están verificados, y Amazon Games aún no funciona
 (`docs/HEROIC_INTEGRATION.md`).
 
+Con **+ → Añadir APK (Android)** eliges un `.apk`: SteamARM muestra su
+icono, nombre, paquete, versión, SDK, código nativo, permisos y firmas, y lo
+instala en `~/SteamARM-roots/android/`. Una actualización conserva los datos
+de la app y se rechaza si el APK nuevo está firmado con otro certificado o
+es una versión anterior. La tarjeta Android **todavía no se puede abrir**:
+el entorno Android de SteamARM aún no ejecuta apps, y la tarjeta lo dice.
+Se prefiere el código arm64-v8a; una app que solo trae código ARM de 32 bits
+no puede ejecutarse en Apple Silicon, y una que solo trae código x86
+necesitaría FEX (no se admite). Los paquetes XAPK, APKS, APKM y AAB aún no
+se admiten. Con clic derecho en la tarjeta: **Información…**, **Abrir
+carpeta de datos** y **Desinstalar…** (conservando o borrando sus datos).
+Detalles: `docs/APK_SUPPORT.md`.
+
 ## Configuración
 
 La ventana de configuración sigue el diseño de Ryujinx:

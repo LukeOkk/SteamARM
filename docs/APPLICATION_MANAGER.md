@@ -66,6 +66,14 @@ ARM64 root and writes an `aarch64`, experimental entry
 `docs/HEROIC_INTEGRATION.md`); an older x64 Heroic entry keeps working
 through FEX until it is deleted.
 
+Since stage 25 there is a third kind of entry, `kind: "android"`: an APK
+installed by `scripts/android-pm.py` (`docs/APK_SUPPORT.md`). Such an entry
+has no command. Its `architecture` is that of its native code
+(`AndroidABI`), and its details are in the Optional field
+`AppEntry.android`. There is no Android runtime, so it never starts:
+`LauncherModel.unavailableReason` disables the card with the reason, and
+`run-app.sh` refuses it (exit 2) before anything exists.
+
 Tests (they build and run on Linux too):
 
 ```sh
