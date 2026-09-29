@@ -35,8 +35,10 @@ struct SettingsTests {
         // Run from the checkout: scripts/builtin-apps.json is read from the current directory.
         let builtIns = try decoder.decode([AppEntry].self, from: Data(contentsOf: URL(fileURLWithPath:
             FileManager.default.currentDirectoryPath).appendingPathComponent("scripts/builtin-apps.json")))
-        precondition(builtIns.map(\.id) == ["steam", "steam-arm64"] && builtIns.allSatisfy(\.isBuiltIn))
-        precondition(builtIns[1].isExperimental && builtIns[1].architecture == "aarch64" && builtIns[1].fexRootfs == nil)
+        precondition(builtIns.map(\.id) == ["steam", "steam-arm64", "steam-arm64-frame"] && builtIns.allSatisfy(\.isBuiltIn))
+        for arm in builtIns.dropFirst() {
+            precondition(arm.isExperimental && arm.architecture == "aarch64" && arm.fexRootfs == nil)
+        }
         var withOverrides = oldApps[0]
         withOverrides.overrides = ["display": "vnc"]
         let reread = try decoder.decode(AppEntry.self, from: JSONEncoder().encode(withOverrides))
