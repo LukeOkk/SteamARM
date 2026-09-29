@@ -1234,6 +1234,20 @@ static long do_mmap(uint64_t addr, uint64_t len, long prot, long lflags,
                         "destroyed\n", (unsigned long long)addr,
                 (unsigned long long)len);
 
+    // A file offset on a 4 KiB guest page (LXRT_GUEST_PAGE=4096) but not on a
+    // 16 KiB host page is EINVAL for Darwin's mmap. Without MAP_FIXED any
+    // address will do: map from the host page below and return the address
+    // of the offset asked for (the native arm64 webhelper's shared-memory
+    // pool, grown 64 KiB at a time: its window never drew, stage22). The
+    // head of that first host page stays mapped until the page goes.
+    uint64_t head = (uint64_t)off % LXRT_HOST_PAGE;
+    if (head && fd >= 0 && !(flags & MAP_FIXED) && !exec_map) {
+        void *hp = mmap(NULL, (size_t)(len + head), use_prot, flags, (int)fd, (off_t)(off - head));
+        if (hp == MAP_FAILED)
+            return LERR(errno);
+        return (long)((uintptr_t)hp + head);
+    }
+
     void *p = MAP_FAILED;
     // A hint Linux cannot honour (something is mapped there) is not searched
     // upward from, as Darwin does, but ignored: the mapping goes top-down like

@@ -95,6 +95,9 @@ static void selftest(void) {
     CHECK(q.words[3] == 0xf940fc20 && q.words[5] == 0xf900fc20);
     q = plan(0x88dffe12); /* ldar w18, [x16] */
     CHECK(q.verdict == X18_OK && q.words[4] == 0x88dffe00);
+    q = plan(0x889ffe12); /* stlr w18, [x16]: found in the native client (stage 22) */
+    CHECK(q.verdict == X18_OK && q.words[4] == 0x889ffe00);
+    unsupported(0xc85ffc12, "exclusive"); /* ldaxr x18, [x0] */
     q = plan(0xc89ffff2); /* stlr x18, [sp]: original SP through S2 */
     CHECK(q.verdict == X18_OK && q.words[4] == 0x910043e1 && q.words[5] == 0xc89ffc20);
     /* NZCV/FPCR/FPSR are plain EL0 state; other system registers are not. */
