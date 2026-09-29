@@ -142,12 +142,40 @@ macOS 13 (VERIFIED IN SOURCE of xnu, `benchmarks/stage19-steamframe-base-and-arm
   `tests/x18_preserve/run.sh` shows x18 zeroed for an SDK 15.5 build and
   preserved across preemption, a signal, `sched_yield` and `usleep` for an
   SDK 12.3 build (`benchmarks/stage20-ci-macos-runner.txt` §3).
-- On the M4 under macOS 27: UNKNOWN. Measure with
-  `tests/x18_preserve/run.sh`.
-- If it holds there, linking lxrun against a pre-13 SDK would keep guest x18
-  and make the rewriter optional (HYPOTHESIS). It would also remove one of
-  the two ARM64 Proton blockers (the Windows TEB lives in x18); the
-  `0x7ffe0000` low-address one stays (stage 19 §2).
+- MEASURED on the M4 under macOS 27.0 (26A428), stage 24
+  (`benchmarks/stage24-minecraft-prism.txt`): the same. The SDK 27.0 build
+  sees x18 changed by preemption in all 8 threads and zeroed after a signal
+  handler, `sched_yield` and `usleep`; the SDK 12.3 build ("LC_BUILD_VERSION
+  sdk 12.3") keeps `0x5a18c0de12345678` through 36,000-42,000 preemption
+  loops per thread, the signal handler, `sched_yield` and `usleep`.
+- `make lxrt LXRT_KEEP_X18=1` links lxrun that way (opt-in, `Makefile`).
+  MEASURED with it: `tests/elf/run.sh` 69/0, its two `LXRT_NO_X18` controls
+  now see x18 survive without the rewriter (they check the build and expect
+  that); and the JIT code this runtime never rewrites becomes correct: Linux
+  HotSpot's C1/C2 (0 wrong of 800 in 9 runs, against 474-741 wrong and
+  crashes with the default build) and llvmpipe's LLVM JIT (5 of 5 runs of
+  3000 frames, against 0 of 10). Not measured with it yet: the x86 Steam
+  client, Proton and the Windows probes, Vulkan presentation, the native
+  arm64 Steam client. So it is not the default.
+- With it the rewriter would become optional (HYPOTHESIS until the paths
+  above are measured). It would also remove one of the two ARM64 Proton
+  blockers (the Windows TEB lives in x18); the `0x7ffe0000` low-address one
+  stays (stage 19 §2).
+
+## JIT output
+
+The rewriter works on images as they are loaded, and code generated at run
+time is only scanned for `svc`, TPIDR_EL0 and the trapped system registers
+when it becomes executable (`runtime/jit.c`, `runtime/wxsplit.c`), never for
+x18. JITs that avoid x18 are safe: FEX (patched), V8 (x18 is not
+allocatable: stage 23). JITs that allocate it are not, with the default
+build: Linux aarch64 HotSpot (`R18_RESERVED` is defined only for macOS and
+Windows builds, UPSTREAM DOCUMENTED in openjdk/jdk21u) and Mesa's llvmpipe
+(LLVM's aarch64-linux target). MEASURED in stage 24: HotSpot computed wrong
+results and died at `ldr w4, [x18, #256]` with x18 = 0; llvmpipe died at
+`stp xzr, xzr, [x18]` with x18 = 0 (the fault report prints the
+instruction and x18 for code outside the image since stage 24). Both are
+correct with `LXRT_KEEP_X18=1` (above).
 
 ## Diagnostics
 

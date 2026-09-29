@@ -1,0 +1,489 @@
+Stage 24 (Minecraft) -- Prism Launcher and Java, native aarch64, under lxrun (2026-09-29)
+======================================================================================
+
+ZERO-VM. No FEX in any Prism, Java or GL run (only the i386 regression
+tests at the end use FEX). Host: Mac mini M4, 16 GB, macOS 27.0,
+X on display :2 (scripts/run-x11-native.sh; XQuartz 21.1.24 with +iglx,
+quartz-wm). Base commit 611d71d (0.3.5). Root: the Fedora 43 aarch64 armroot
+(scripts/mkarmroot.sh, /tmp/lxrt-armroot -> ~/SteamARM-roots/armroot), Mesa
+25.3.6, LLVM 21.1.8, glibc 2.42. Other agents ran guests on the same Mac and
+the same :2 during every run (a native arm64 Steam client, FEX Proton tests,
+steamarm-inputd); nothing here stopped them, and every process below was
+stopped by its own PID or its own process group.
+Minecraft itself was not started, and no account was signed into (no
+Microsoft, Mojang or other login; Prism's "Add Microsoft account" button was
+never pressed).
+Labels: MEASURED, VERIFIED IN SOURCE, UPSTREAM DOCUMENTED, HYPOTHESIS, UNKNOWN.
+
+Result
+------
+MEASURED:
+1. Prism Launcher 11.1.1 (the upstream Linux-aarch64-Qt6-Portable build) runs
+   natively under lxrun in the armroot: its first window (Quick Setup) is
+   mapped 1.03-1.05 s after the start in each of the 11 timed starts after
+   the inotify fix below (P3, P4, A2-A6, F1-F4; A1, an experiment with TMPDIR
+   moved, had none), the main window follows "Finish" at once, the Settings dialog
+   opens, Java page -> Detect finds the aarch64 Temurin JRE ("21.0.12.1"
+   "aarch64" "/opt/apps/prism/java/bin/java"), Test Settings reports
+   success, and prismlauncher.cfg gets JavaPath=/opt/apps/prism/java/bin/java.
+   SIGTERM to Prism's PID ends it at once (status -15); 0 processes left in
+   its group, 0 Prism windows. Starting it again brings the window again
+   (A4-A6, F2-F4: 6 of 6). Resident size of the Prism process: 139-157 MB.
+2. Eclipse Temurin 21.0.12.1 (aarch64 JRE) runs under lxrun: `java -version`
+   in 1.01 s; HotSpot's JIT is active (C2 compiles the loop, level 4; 33.7 ms
+   against 264.3 ms interpreted for the same 50M-iteration loop, 7.8x).
+   BUT with the default runtime its compiled code is not correct: HotSpot's
+   Linux C1/C2 allocate x18, and Darwin zeroes x18 on every exception. A
+   register-heavy loop gives 664 wrong results of 800 with the JIT (0 of 80
+   interpreted, 0 of 800 on the Mac's own JVM) and a one-thread run died in
+   C1 code at `ldr w4, [x18, #256]` with si_addr 0x100 (x18 read as 0).
+   On this M4 under macOS 27 the kernel keeps x18 for a binary built against
+   the macOS 12.3 SDK (tests/x18_preserve/run.sh), and an lxrun linked that
+   way (new opt-in `make lxrt LXRT_KEEP_X18=1`) makes the same code correct:
+   0 wrong of 800 in 9 runs, llvmpipe clean too (K1-K9 below).
+3. OpenGL for Minecraft 1.17+ (3.2 core): GLX on this X server gives no 3.2
+   core context (indirect GLX only). Through EGL the root's Mesa gives it:
+   llvmpipe "4.5 (Core Profile)" (correct pixels, but its LLVM JIT code dies
+   on x18 too: 10 of 10 runs of 3000 frames at `stp xzr, xzr, [x18]`), and
+   Zink over SteamARM's Vulkan shim "3.2 (Core Profile) ... zink Vulkan
+   1.4(Apple M4 (MOLTENVK))" (correct pixels and texture sampling, 5 of 5
+   runs of 3000 frames). No path shows a 3.2 core frame in an X window yet:
+   Zink's X11 present pipeline fails to compile in MoltenVK, and llvmpipe's
+   EGL/X11 frames do not reach the window.
+So: Prism works, Java starts and Prism detects it, and Minecraft cannot run
+correctly yet: Java's JIT needs the opt-in x18 build (not yet validated for
+the rest of SteamARM), and no 3.2 core path presents to a window. Details
+and the ways forward: docs/MINECRAFT_INTEGRATION.md.
+
+Two runtime defects stood in the way of Prism, both fixed, and one
+diagnostic was added (MEASURED):
+- inotify FIONREAD answered with the readiness pipe's byte count (1), not the
+  size of the queued events. Qt reads exactly FIONREAD bytes from its blocking
+  inotify descriptor; the window stayed blank and sample(1) showed the GUI
+  thread in lxrt_inotify_read -> poll (P2). Fix: runtime/inotify.c
+  lxrt_inotify_pending, runtime/ioctl_tty.c. Test: tests/elf/inotify_fionread.c
+  (before: "FIONREAD after one create: 1", "read(fd, buf, 1) = -1 errno
+  Invalid argument"; after: 32, "read(fd, buf, 32) = 32").
+- An eventfd was two objects after fork(): the counter lived in process
+  memory and only the token pipe was shared. Qt's QProcess (forkfd) parks the
+  child in eventfd_read until the parent writes 42 and closes; the child saw 0
+  with a readable pipe and spun at 99-100% CPU for ever (sample: 661 of 669
+  samples in lxrt_eventfd_read), so Prism's QProcess never started anything
+  ("Failed to start updater after 5 seconds. reason: QProcess::Timedout").
+  Fix: runtime/epoll_eventfd.c, the counter and token flag in a MAP_SHARED
+  page per eventfd, forks counted in the parent before fork. Test:
+  tests/elf/eventfd_fork.c (HEAD's runtime: "child exit 142 after 5.00 s",
+  4 FAIL; fixed: 10 OK, "20 x write-then-close in the parent: every child
+  reads 42"). A first version counted the fork in the child and still hung
+  Prism's child (P6: the parent closed before the child ran); the test's
+  write-then-close case was added for that.
+- (diagnostics) A guest fault outside the image now prints the instruction
+  word and the hardware x18 (runtime/main.c fault_report): that is how the
+  llvmpipe crashes below were read.
+
+Downloads (official upstream release URLs; sha256 computed here)
+------------------------------------------------------------------
+- Prism Launcher 11.1.1, GPL-3.0-only:
+  https://github.com/PrismLauncher/PrismLauncher/releases/download/11.1.1/PrismLauncher-Linux-aarch64-Qt6-Portable-11.1.1.tar.gz
+  62,833,681 bytes, sha256 d115b5699bba71e74512bd6c8ed7e2682ba189939d1e59b405a5b7b46360720a
+  (= the digest GitHub publishes for the asset, `gh api repos/PrismLauncher/
+  PrismLauncher/releases/latest`).
+- Eclipse Temurin 21.0.12.1+1 JRE, aarch64 Linux, GPL-2.0 with the Classpath
+  Exception (Adoptium API v3, latest/21/hotspot, architecture=aarch64,
+  image_type=jre, os=linux, vendor=eclipse):
+  https://github.com/adoptium/temurin21-binaries/releases/download/jdk-21.0.12.1%2B1/OpenJDK21U-jre_aarch64_linux_hotspot_21.0.12.1_1.tar.gz
+  51,149,460 bytes, sha256 14be1f35ebdbd1f6e8d57eb911a3ffb74d6d9aa255abc5daf2b1302002cf2cf2
+  (= Adoptium's published checksum).
+Installed into ~/SteamARM-roots/armroot/opt/apps/prism (Prism; java/ = the JRE;
+320 MB), data in opt/apps/.prism-home (both kept by a rebuild of the armroot,
+scripts/roots.sh). Nothing was added to the root's system directories; no
+mkarmroot.sh seed was needed: the bundle carries its own glibc 2.39, Qt 6.10.2
+and X/xcb libraries, and the JRE needs only the root's glibc.
+
+The bundle, and why it is not run as shipped (MEASURED)
+--------------------------------------------------------
+- `PrismLauncher` (a bash script) execs bin/prismlauncher = sharun
+  (github.com/VHSgunzo/sharun): "ELF 64-bit LSB executable, ARM aarch64,
+  statically linked", `llvm-readelf -l`: Type EXEC, LOAD at 0x400000. lxrun
+  refuses ET_EXEC (runtime/elf.c: the low 4 GiB belong to macOS).
+- Everything else is ET_DYN aligned at 64 KiB (survey of the install: 200
+  DYN with LOAD align 0x10000, the 3 EXEC are sharun's hard links), so no
+  LXRT_GUEST_PAGE=4096 is needed. The JRE likewise (libjvm.so, bin/java).
+- sharun's job (VERIFIED IN SOURCE, sharun src/main.rs): run
+  shared/lib/ld-linux-aarch64.so.1 --library-path <lib.path with + =
+  shared/lib, then /usr/lib:/lib:/usr/lib64:/lib64...> --argv0 ... on
+  shared/bin/<name>, after a userland exec that keeps /proc/self/exe on the
+  sharun binary. scripts/guest/sharun-run.sh does the same with an ordinary
+  exec.
+- Consequence: /proc/self/exe is the loader, so Qt's applicationDirPath is
+  shared/lib and Prism's root path is shared/ ("Binary path :
+  /opt/apps/prism/shared/lib", "Application root path : /opt/apps/prism/shared"
+  in its log). Prism looks for JavaCheck.jar in <root>/share/PrismLauncher
+  (VERIFIED IN SOURCE, launcher/Application.cpp getJarPath, 11.1.1): the
+  install adds shared/share -> ../share.
+- The self-updater (shared/bin/prismlauncher_updater) is started by Prism as
+  a plain ELF, without the bundle's library path: "Updater exited with
+  unknown code 127" and an "Unknown Update Error" dialog (P7). The install
+  removes it; SteamARM's installer decides versions.
+- A data directory under the guest's /tmp made Prism warn on every start
+  ("Your instance folder is in a temporary folder: '/tmp'!", MainWindow.cpp:
+  pathfoldername.startsWith(QDir::tempPath())). Moving TMPDIR is not an
+  option: lxrun itself uses TMPDIR as a host path for its /proc (A1 below).
+  So HOME_IN_GUEST=/opt/apps/.prism-home.
+- Every start without a signed-in Microsoft account opens the Quick Setup's
+  "Add Microsoft account" page first (VERIFIED IN SOURCE, Application.cpp
+  createSetupWizard: login = !anyAccountIsValid && SupportsMSA); "Finish"
+  skips it. A fresh data directory adds the Language and Appearance pages.
+
+How the runs were driven
+------------------------
+Guests: scripts/run-native.sh with LXRT_ROOT=/tmp/lxrt-armroot, DISPLAY=:2
+and the entry's environment (HOME_IN_GUEST, LANG=C.UTF-8,
+PRISMLAUNCHER_DISABLE_GLVULKAN=1, PRISMLAUNCHER_JAVA_PATHS=
+/opt/apps/prism/java/bin/java), started in a new session by a Python harness
+that samples `xwininfo -root -tree` on :2 every second and, after the hold,
+sends SIGTERM to the program's PID only, waits, lists what is left in its
+process group, and SIGKILLs that group only if something is. Clicks: this X
+server has no XTEST, so synthetic ButtonPress/ButtonRelease with XSendEvent
+(Homebrew libX11 through ctypes) at fixed window coordinates; Qt accepts
+them. Screenshots: XGetImage of the guest's X window only. (One early region
+capture with screencapture(1) caught an unrelated macOS system dialog over
+the window; it was deleted and not used again.) Scripts and logs stayed in
+the session's scratch directory; the probes that matter are in the tree:
+tests/arm64/minecraft_probes.sh, tests/arm64/gl_core_probe.c,
+tests/arm64/java/*.java, tests/elf/inotify_fionread.c, tests/elf/eventfd_fork.c.
+Durations are wall clock of the whole command.
+
+JVM runs (Temurin 21.0.12.1 JRE in the root; test classes built on the Mac
+with javac --release 17 into <armroot>/tmp)
+-------------------------------------------------------------------------
+J1  run-native.sh /opt/apps/prism/java/bin/java -version        1.01 s, rc 0
+      [lxrt] PT_INTERP /lib/ld-linux-aarch64.so.1 -> /tmp/lxrt-armroot/lib/ld-linux-aarch64.so.1
+      openjdk version "21.0.12.1" 2026-08-18 LTS
+      OpenJDK Runtime Environment Temurin-21.0.12.1+1 (build 21.0.12.1+1-LTS)
+      OpenJDK 64-Bit Server VM Temurin-21.0.12.1+1 (build 21.0.12.1+1-LTS, mixed mode, sharing)
+H1  (the Mac's own Temurin 17, reference) JitSmoke 50000000 3 4:
+      round 0: n=50000000 result=1207309569780555283 ms=34.5
+J2  java -cp /tmp/prismhome/jitsmoke JitSmoke 50000000 5 4       0.41 s, rc 0
+      vm=OpenJDK 64-Bit Server VM info=mixed mode, sharing arch=aarch64 cpus=10
+      round 0: n=50000000 result=1207309569780555283 ms=34.6
+      round 4: n=50000000 result=1207309569780555283 ms=33.7
+      threads=4 each n~50000000 sum=5803155524965548398 ms=40.4
+      jit=HotSpot 64-Bit Tiered Compilers totalCompilationTimeMs=27
+      JITSMOKE OK            (same results as the Mac's JVM)
+J3  java -Xint ... JitSmoke 50000000 3 4                         1.35 s, rc 0
+      vm=OpenJDK 64-Bit Server VM info=interpreted mode, sharing arch=aarch64 cpus=10
+      round 0: n=50000000 result=1207309569780555283 ms=264.3
+      threads=4 each n~50000000 sum=5803155524965548398 ms=338.7
+      jit=none
+J4  LXRT_WX_STATS=1 java -XX:+PrintCompilation ... JitSmoke        0.47 s, rc 0
+      26  159 %     4       JitSmoke::work @ 5 (35 bytes)
+      73  237       4       JitSmoke::work (35 bytes)
+      (C2, level 4, compiled the loop. No wxsplit line, so the code cache
+      never went through mprotect(RWX). HYPOTHESIS: HotSpot commits it with
+      an anonymous mmap(RWX), which lxrun serves as MAP_JIT (runtime/jit.c;
+      that mmap path VERIFIED IN SOURCE, runtime/dispatch.c).)
+J5  java ... RegPressure 20 40 2000000                            0.83 s, rc 0
+      MISMATCH thread 0 round 0 seed 1 got -1200875766157753168 expected -3099187120763100208
+      threads=20 rounds=40 n=2000000 computations=800 mismatches=664 ms=496
+      REGPRESSURE FAIL       (the Mac's JVM, H1: mismatches=0, and seeds 3, 5, 8
+                             of the "expected" values differ from the Mac's too)
+J6  java -Xint ... RegPressure 20 4 200000                        0.41 s, rc 0
+      threads=20 rounds=4 n=200000 computations=80 mismatches=0 ms=147
+      REGPRESSURE OK         (all 8 seeds identical to the Mac's JVM)
+J7  java -XX:TieredStopAtLevel=1 (C1 only) ... RegPressure 20 40 2000000   1.25 s
+      computations=800 mismatches=474
+J8  java -XX:-TieredCompilation (C2 only) ... RegPressure 20 40 2000000   0.70 s
+      computations=800 mismatches=646
+J9  java ... RegPressure 1 40 2000000                              0.24 s, rc 134
+      #  SIGSEGV (0xb) at pc=0x00007effdb512a94, pid=11277, tid=112970001
+      # J 10% c1 RegPressure.mix(JJ)J (419 bytes) @ 0x00007effdb512a94 [0x00007effdb512840+0x0000000000000254]
+      siginfo: si_signo: 11 (SIGSEGV), si_code: 2 (SEGV_ACCERR), si_addr: 0x0000000000000100
+      hs_err "Instructions", disassembled (llvm-mc):
+        mov  x18, #4616 ; movk x18, #39488, lsl #16 ; movk x18, #32511, lsl #32
+        str  x4, [sp, #408]
+        ldr  w4, [x18, #256]      <- faults at 0x100: x18 was 0
+      (C1's profiling counter: a pointer built in x18 and read 2 instructions
+      later.) tests/arm64/minecraft_probes.sh later: "computations=800
+      mismatches=741" and, in another run, the same C1 fault at si_addr 0x100.
+Why (UPSTREAM DOCUMENTED, openjdk/jdk21u): R18_RESERVED is defined only for
+__APPLE__ and _WIN64 (src/hotspot/cpu/aarch64/globalDefinitions_aarch64.hpp;
+make/hotspot/gensrc/GensrcAdlc.gmk passes -DR18_RESERVED to ADLC for macOS
+and Windows only); without it aarch64.ad leaves R18 out of the non-allocatable
+classes and c1_FrameMap_aarch64.cpp maps r18 as a caller-saved register. So a
+Linux JVM's compiled code uses x18 freely, and lxrun rewrites x18 only in
+images it loads (runtime/x18.c), not in JIT output. HotSpot's stubs exclude
+r18_tls explicitly (stubGenerator_aarch64.cpp) and the interpreter was
+correct in every run here.
+
+Prism runs
+----------
+P1  first start, HOME_IN_GUEST=/tmp/prismhome (fresh), before the fixes
+      [1.06 s] window up: 'Prism Launcher Quick Setup — Prism Launcher 11.1.1' 620x660, viewable
+      SIGTERM at 9.7 s: exited status -15, 0 left in the group
+      Log: "Binary path : /opt/apps/prism/shared/lib", "Application root path :
+      /opt/apps/prism/shared", "Translations loaded.", then nothing.
+P2  the same, held: the window stayed blank (XGetImage: all white)
+      sample(1), Prism's GUI thread: lxrt_dispatch -> lxrt_inotify_read -> poll
+      (798 of 798 samples); vmmap + llvm-symbolizer on the guest frames:
+      QSocketNotifier::activated <- QCoreApplication::notifyInternal2 <-
+      QEventDispatcherGlib::processEvents <- QEventLoop::exec.
+      -> inotify FIONREAD fix; tests/elf/inotify_fionread.c.
+P3/P4  after the FIONREAD fix: window at 1.05 / 1.04 s; screenshot of the
+      window: the Quick Setup's "Add Microsoft account" page, fully drawn
+      (99.7 % non-white pixels).
+P5  held, clicked Finish (568,637): main window 800x600 (toolbar Add
+      Instance, Folders, Settings, Help, Update; news "Prism Launcher Release
+      11.1.1, now available" fetched from the network), a warning dialog
+      "Your instance folder is in a temporary folder: '/tmp'!". ~60 s later:
+        61.121 Debug: Auto update Timer fired
+        66.123 Debug: Failed to start updater after 5 seconds. reason: QProcess::Timedout "Process operation timed out"
+      A forked child of Prism at 99.1-100 % CPU, still the Prism image
+      (no exec); sample(1): 661 of 669 samples in lxrt_eventfd_read.
+      SIGTERM to Prism: it exited; the orphaned child ignored SIGTERM
+      (spinning in runtime code) and was stopped with SIGKILL by its PID.
+      -> eventfd-across-fork fix.
+P6  a second start while P5 still ran: exited at once, status 0,
+      "QLocalSocket::setServerName() called while not in unconnected state"
+      (Prism hands its arguments to the running instance: single-instance
+      behaviour). Restarted after P5 ended: the child still spun -- the
+      first fix counted the fork in the child (see above); SIGKILL by PID.
+P7  with the final eventfd fix, HOME /tmp/prismhome:
+        15.972 Debug: Updater exited with unknown code 127
+      (QProcess works now; the updater cannot) -> "Unknown Update Error" dialog,
+      OK. Settings -> Java -> Detect:
+        60.722 Debug: Running java checker: "java" "-jar /opt/apps/prism/shared/share/PrismLauncher/JavaCheck.jar"
+        60.868 Warning: STDERR "lxrun: open : No such file or directory\n"
+        60.913 Debug: STDOUT "os.arch=aarch64\njava.version=21.0.12.1\njava.vendor=Eclipse Adoptium\n"
+        60.913 Debug: Java checker succeeded.
+        60.914 Debug:   "21.0.12.1" "aarch64" "/opt/apps/prism/java/bin/java"
+      ("java" on PATH does not exist in the root: that probe fails, as on
+      Linux without a system Java.) Select -> OK; Test Settings ->
+      "Java test succeeded! Platform reported: aarch64 / Java version reported:
+      21.0.12.1 / Java vendor reported: Eclipse Adoptium", with lxrun's own
+      stderr lines listed under "Warnings" (cosmetic: the runtime prints its
+      load lines on stderr). Settings OK -> prismlauncher.cfg
+      "JavaPath=/opt/apps/prism/java/bin/java". SIGTERM at 14:16:22: exited
+      within 0.1 s, 0 in the group, 0 Prism windows.
+A1  HOME /tmp/prismhome, TMPDIR moved to /tmp/prismhome/tmp (an attempt to
+      silence the /tmp warning): no window in 90 s; log "Binary path :
+      /opt/apps/prism", "Application root path : /opt/apps", "Java checker
+      library could not be found". lxrun uses TMPDIR as a host path for its
+      /proc directory and gives up on /proc when it cannot create it there
+      (VERIFIED IN SOURCE, runtime/procfs.c lxrt_proc_init; that path does
+      not exist on the Mac). Qt then takes its directory from argv[0]
+      (qcoreapplication.cpp, v6.10.2), and the wrapper's --argv0
+      /opt/apps/prism/prismlauncher matches the logged "Binary path".
+      Reverted; scripts/run-native.sh now says why TMPDIR stays /tmp.
+A2  HOME_IN_GUEST=/opt/apps/.prism-home, fresh: window at 1.04 s; 3 wizard
+      pages (Language, Appearance, Add Microsoft account), Next/Next/Finish;
+      main window; 3 s later only the main window (no /tmp warning).
+      SIGTERM: status -15, 0 left.
+A3  Settings -> Java -> Detect -> OK -> Test Settings -> OK -> OK, scripted:
+        8.354 Debug: Found the following valid Java installations:   (Prism's own start-up probe: none)
+        11.022 Debug: STDOUT "os.arch=aarch64\njava.version=21.0.12.1\njava.vendor=Eclipse Adoptium\n"
+        11.023 Debug:   "21.0.12.1" "aarch64" "/opt/apps/prism/java/bin/java"
+      test result window 'Java test success', prismlauncher.cfg
+      ['JavaPath=/opt/apps/prism/java/bin/java']; SIGTERM: -15, 0 left.
+A4-A6  relaunch cycles: window at 1.03-1.05 s, main window after Finish,
+      SIGTERM -15, 0 left in the group, 0 Prism windows, each.
+I1  the launcher's own installer code (Installer.installPrismARM64, driven
+      by a command-line harness built from launcher/Installers.swift,
+      Models.swift and ApplicationCore.swift) against a scratch state, then
+      against ~/SteamARM-roots: 4.2 s / 2.9 s (reinstall) / 3.2 s:
+        ENTRY id=prismlauncher name=Minecraft (Prism Launcher) arch=aarch64 root=/tmp/lxrt-armroot
+        ENTRY command=/bin/bash /opt/apps/prism/steamarm-sharun-run.sh /opt/apps/prism prismlauncher
+        ENTRY env=HOME_IN_GUEST=/opt/apps/.prism-home LANG=C.UTF-8 PRISMLAUNCHER_DISABLE_GLVULKAN=1 PRISMLAUNCHER_JAVA_PATHS=/opt/apps/prism/java/bin/java
+        ENTRY installDir=$HOME/SteamARM-roots/armroot/opt/apps/prism readiness=experimental icon=.../share/icons/hicolor/256x256/apps/org.prismlauncher.PrismLauncher.png
+      (both digests verified; STEAMARM-INSTALL.txt written into the app
+      directory with the URLs, sha256 and licences above.)
+F1  on the installer-made tree: A3's sequence again, same result
+      ("21.0.12.1" "aarch64" "/opt/apps/prism/java/bin/java", 'Java test
+      success', JavaPath saved); SIGTERM -15, 0 left.
+F2-F4  relaunch cycles on it: window at 1.03-1.04 s, main window, -15, 0 left.
+Leftovers other than processes: lxrun's per-process /proc directories
+(/tmp/lxrt-proc-<pid>) of a guest ended by a signal stay until a later lxrun
+start sweeps dead ones, at most once a minute (VERIFIED IN SOURCE,
+runtime/procfs.c sweep_dead; MEASURED: the A4 one was gone after later
+starts, the last two were still there at the check).
+
+GL runs (tests/arm64/gl_core_probe.c, built against the root's libGL,
+libEGL and libX11: 3.2 core context, GLSL 1.50 triangle into 854x480, two
+readbacks per frame; from G17 on also a 2x2 texture sampled over the window)
+--------------------------------------------------------------------------
+Minecraft Java 1.17 and later renders with OpenGL 3.2 core profile
+(UPSTREAM DOCUMENTED: minecraft.wiki "Java Edition 1.17", raw page fetched
+2026-09-29: "Rendering is now using OpenGL 3.2 core profile.") and
+takes its context from GLFW, which uses GLX on X11 unless the program asks
+for EGL (UPSTREAM DOCUMENTED, GLFW's GLFW_CONTEXT_CREATION_API default).
+The fps figures are loop rates of this probe (a triangle), not game
+performance.
+G1  gl_core_probe glx 60 (no GL variables)                         0.68 s, rc 1
+      No matching fbConfigs or visuals found
+      glx: failed to create drisw screen
+      X Error of failed request:  GLXBadFBConfig
+      GLX_ARB_create_context_profile: no
+      fbconfigs matching RGBA8/D24/double: 16
+    Mesa's software screen finds no GLX config of this server it can match,
+    and falls back to indirect GLX through the X server, which has no
+    GLX_ARB_create_context_profile (stage 23 frame_glx: indirect GL 1.4,
+    "2.1 Metal"). Which config attribute fails to match: UNKNOWN (HYPOTHESIS:
+    XQuartz's fbconfigs carry accumulation buffers Mesa's drivers do not).
+G2  LIBGL_ALWAYS_SOFTWARE=1: the same lines (0.71 s). G2b with
+    LIBGL_DEBUG=verbose adds "Disabling server's aux buffer support".
+G3  gl_core_probe egl-surfaceless 120 (llvmpipe)                   0.81 s, rc 139
+      [lxrt] SIGSEGV at pc 0x7effd9d1ca74 addr 0x0 ... = outside the guest image [region 0x7effd9d1c000+0x4000]
+G3b GALLIVM_DEBUG=asm, 20 frames                                   0.78 s, rc 0
+      GL_RENDERER: llvmpipe (LLVM 21.1.8, 128 bits)
+      GL_VERSION: 4.5 (Core Profile) Mesa 25.3.6
+      GL_SHADING_LANGUAGE_VERSION: 4.50
+      profile mask: 0x1 (core) ; GLSL 1.50 program: linked ; wrong frames: 0
+G4  6 x 120 frames: 5 ok (5308.9-5808.9 fps), 1 SIGSEGV at ...a74 addr 0x0
+G5  10 x 120 frames (runtime with the new fault report): 10 ok
+G6  10 x 3000 frames: 10 of 10 died, every one:
+      [lxrt] SIGSEGV at pc 0x7effe1da8a74 addr 0x0 ... [region 0x7effe1da8000+0x4000], insn 0xa9007e5f, x18 0x0
+      llvm-mc: 0xa9007e5f = stp xzr, xzr, [x18]
+G18 3 x 60 frames with the texture check: 2 ok ("texture sampling: ok"),
+    1 SIGSEGV addr 0x10, insn 0x3ca06a57 = str q23, [x18, x0], x18 0x0.
+    llvmpipe's JIT (LLVM, aarch64-linux target: x18 allocatable) has the
+    HotSpot problem. Mesa offers no switch for LLVM target features here
+    (strings of libgallium: GALLIVM_DEBUG, GALLIVM_PERF, LP_* only).
+G7  egl-x11 (llvmpipe to a window on :2), 3 x 120 frames: 2 ok
+    (2393.6-3112.0 fps), 1 SIGSEGV (x18).
+G8/G9 egl-x11 6000 frames: SIGSEGV (x18) before the 1.5 s screenshot.
+G10 egl-x11 60 frames, window held 4 s: probe ok (readbacks right), but the
+    X window's own contents stayed white (XGetImage): the frames do not
+    reach the X server. Cause UNKNOWN (HYPOTHESIS: Mesa's software present
+    uses MIT-SHM segments of lxrun's SysV emulation that the X server cannot
+    attach; Qt's shared-memory backing store does reach it).
+G11 MESA_LOADER_DRIVER_OVERRIDE=zink GALLIUM_DRIVER=zink egl-surfaceless 60
+      WARNING: Some incorrect rendering might occur because the selected Vulkan device (Apple M4) doesn't support base Zink requirements: feats.features.logicOp have_EXT_custom_border_color
+      GL_RENDERER: zink Vulkan 1.4(Apple M4 (MOLTENVK))
+      GL_VERSION: 3.2 (Core Profile) Mesa 25.3.6
+      GL_SHADING_LANGUAGE_VERSION: 1.50
+      first frame: 128.0 ms ; frames: 60 in 0.16 s = 376.5 fps ; wrong frames: 0
+    The root's libvulkan.so.1 is SteamARM's shim (cmp: identical to `make
+    shim`; mkarmroot.sh copies build/libvulkan.so.1 over the Fedora loader's
+    file), so Zink runs on MoltenVK on the M4's GPU.
+G12 Zink, 5 x 3000 frames: 5 ok, 1549.1-2289.1 fps, 0 wrong frames.
+G17 Zink with the texture check, 3 x 600 frames: 3 ok, "texture sampling:
+    ok", 1826.7-1930.8 fps.
+G13 Zink through GLX: "DRI3 not available" (twice), "fbconfigs matching
+    RGBA8/D24/double: 0", rc 1. The X server has no DRI3 (xdpyinfo: 21
+    extensions, no DRI3).
+G14/G16 Zink, egl-x11 (a window): rc 139
+      [mvk-error] VK_ERROR_INITIALIZATION_FAILED: Shader library compile failed (Error code 3):
+      program_source:21:5: error: must use 'struct' tag to refer to type 'sampler' in this scope
+      [mvk-error] VK_ERROR_INITIALIZATION_FAILED: Fragment shader function could not be compiled into pipeline. See previous logged error.
+      MESA: error: ZINK: vkCreateGraphicsPipelines failed (VK_ERROR_INITIALIZATION_FAILED)
+      [lxrt] SIGSEGV ... [lxrt]   pc _ZN26MVKCmdBindGraphicsPipeline22isTessellationPipelineEv+4
+    (Zink then binds the pipeline that failed; MoltenVK dereferences it.) The
+    probe's own shaders, texture sampling included, compile (G17): the
+    failing one is Zink's own for the X11 path.
+G15 Zink over KosmicKrisp (STEAMARM_VK_ICD=kosmickrisp), surfaceless:
+      Failed to create MTLLibrary: program_source:5:23: error: type 'float3' (vector of 3 'float' values) is not valid for attribute 'position'
+      MESA: error: ZINK: vkCreateGraphicsPipelines failed (VK_ERROR_INVALID_SHADER_NV)
+    then SIGSEGV; KosmicKrisp is not a way around it today.
+Prism's own LWJGL for aarch64 Linux (UPSTREAM DOCUMENTED,
+meta.prismlauncher.org/v1/org.lwjgl3/3.3.3.json): a "3.3.3-lwjgl.1" variant
+with natives-linux-arm64 jars from build.lwjgl.org for os "linux-arm64", so
+the native libraries a Minecraft instance would need exist for this root.
+
+tests/arm64/minecraft_probes.sh (the runs above as one script, on the final
+install)                                                              6.3 s
+  ok    java -version: Temurin-21.0.12.1+1, mixed mode, sharing
+  ok    JIT on: 50M-iteration loop 37.9 ms with the JIT, 271.5 ms interpreted; threads ok
+  ok    interpreted: computations=80 mismatches=0
+  xfail RegPressure with the JIT: computations=800 mismatches=741 -- HotSpot's Linux C1/C2 allocate x18 ...
+  xfail GLX 3.2 core: GLX_ARB_create_context_profile: no  -- GLX on this X server is indirect ...
+  ok    Zink over the Vulkan shim: GL_VERSION: 3.2 (Core Profile) Mesa 25.3.6, zink Vulkan 1.4(Apple M4 (MOLTENVK)), texture sampling ok, 1795.3 fps
+  xfail llvmpipe 3000 frames: SIGSEGV at pc 0x7effd9d1ca74 addr 0x0, insn 0xa9007e5f, x18 0x0 -- ...
+  xfail Zink in an X window: vkCreateGraphicsPipelines failed (VK_ERROR_INITIALIZATION_FAILED) -- ...
+  == minecraft_probes: 4 passed, 0 failed, 4 expected failures, 0 unexpected passes, 0 skipped
+
+x18 kept by the kernel: an lxrun linked against the macOS 12.3 SDK
+------------------------------------------------------------------
+X1  tests/x18_preserve/run.sh (docs/X18_VIRTUALIZATION.md; UNKNOWN on the M4
+    until now)                                                      4.7 s
+      macOS 27.0 (26A428), Apple M4
+      build/x18_preserve_cur  (LC_BUILD_VERSION sdk 27.0)
+        preemption, thread 0 (58 loops)    x18 = 0x000000016f47ab70  CHANGED   (all 8 threads)
+        after SIGALRM handler              x18 = 000000000000000000  ZEROED
+        after 1000 sched_yield             x18 = 000000000000000000  ZEROED
+        after usleep(300 ms)               x18 = 000000000000000000  ZEROED
+        => x18 is NOT preserved for this binary
+      build/x18_preserve_sdk12  (LC_BUILD_VERSION sdk 12.3)
+        preemption, thread 0 (37841 loops) x18 = 0x5a18c0de12345678  PRESERVED (all 8 threads, 36642-42169 loops)
+        after SIGALRM handler              x18 = 0x5a18c0de12345678  PRESERVED
+        after 1000 sched_yield             x18 = 0x5a18c0de12345678  PRESERVED
+        after usleep(300 ms)               x18 = 0x5a18c0de12345678  PRESERVED
+        => x18 is preserved for this binary
+K0  lxrun built from this tree's sources with -Wl,-platform_version,macos,
+    12.0,12.3 (otool: minos 12.0, sdk 12.3), same entitlements. Since then the
+    Makefile has it as `make lxrt LXRT_KEEP_X18=1` (adds
+    -mmacosx-version-min=12.0 -Wno-unguarded-availability-new; mkfifoat is
+    the one newer call). Everything below with that lxrun:
+K1  RegPressure 20 40 2000000 (tiered)        1.59 s: computations=800 mismatches=0, REGPRESSURE OK
+K2  RegPressure 1 40 2000000 (the J9 case)    0.43 s: REGPRESSURE OK
+K3  5 x RegPressure 20 40 2000000: 5 of 5 "mismatches=0" (486-516 ms); the 8
+    seed values identical to the Mac's JVM (diff of the "seed" lines: none)
+K4  2 x C1 only (-XX:TieredStopAtLevel=1): mismatches=0 (956-957 ms)
+K5  2 x C2 only (-XX:-TieredCompilation): mismatches=0 (479-491 ms)
+K6  5 x llvmpipe egl-surfaceless 3000 frames: 5 of 5 ok, "texture sampling:
+    ok", 6488.2-6883.6 fps (G6 with the default lxrun: 0 of 10)
+K7  llvmpipe egl-x11 600 frames, window held: probe ok, window still white
+    (the presentation problem does not depend on x18)
+K8  Prism with it (build/lxrun swapped for this one): A3's sequence, window
+    at 1.04 s, "21.0.12.1" "aarch64" found, 'Java test success', JavaPath
+    saved, SIGTERM -15, 0 left. K9: 2 relaunch cycles, window at 1.03-1.04 s,
+    0 left.
+T3  tests/elf/run.sh with it, before the controls knew the build: 67 passed,
+    2 failed, and the 2 were the negative controls:
+      FAIL  LXRT_NO_X18 control for x18_forms: expected a failure, got rc=0
+      FAIL  LXRT_NO_X18 control: expected failures without the pass, saw none
+    i.e. x18 survives in guest code even with the rewriter off. The controls
+    now read the build's LC_BUILD_VERSION and expect exactly that for sdk < 13.
+T4  tests/elf/run.sh with `make lxrt LXRT_KEEP_X18=1`: 69 passed, 0 failed
+    (21.6 s), including
+      ok    without the x18 pass the same program passes: the kernel keeps x18 (lxrun sdk 12.3)
+      ok    without the x18 pass the same binary keeps x18: the kernel keeps it (lxrun sdk 12.3)
+    tests/arm64/minecraft_probes.sh with it: 6 passed, 0 failed, 2 expected
+    failures (GLX 3.2 core; Zink in an X window):
+      ok    RegPressure with the JIT, computations=800 mismatches=0 (x18 kept)
+      ok    llvmpipe 3000 frames (x18 kept)
+Not measured with this build: the x86 Steam client, Proton and
+tests/win, tests/elf/run_i386.sh, Vulkan presentation
+(tests/elf/run_vk_device.sh), the native arm64 Steam client, the launcher.
+Hence opt-in. The default build (sdk 27.0) was rebuilt and re-measured
+afterwards (T5 below).
+
+Tests at the end of this stage
+------------------------------
+With the default build (LC_BUILD_VERSION sdk 27.0), on the final tree:
+- make lxrt launcher: built (the SDL2 "built for newer version 27.0" link
+  warning is the existing one).
+- T7 tests/elf/run.sh: 69 passed, 0 failed, 0 expected failures (21.6 s),
+  including "inotify FIONREAD: the queued events' size (32 B for one), Qt's
+  read of exactly that", "eventfd across fork: the child reads the parent's
+  write (after 0.10 s), and back" and the two LXRT_NO_X18 controls failing
+  as they should ("rc=139", "1 failures"). The evdev test did not run
+  (another session's steamarm-inputd was up: the script leaves it out then)
+  and the vulkaninfo test skipped (no vulkaninfo in lxrt-root). 0.3.5's
+  68 had evdev; so 67 + the 2 new ones.
+- T6 make test-launcher-core: passes (application core: all checks passed,
+  including the new PrismARM64 checks; tests/launcher/run_app_dispatch.sh
+  37 passed, 0 failed, 5 of them the Prism ARM64 entry; the docs tests 20
+  OK; session 32/0; safeguard 10/0; guest_env 26/0; mkarmroot 25/0;
+  run_steam_arm64 10/0).
+- tests/arm64/minecraft_probes.sh: 4 passed, 0 failed, 4 expected failures,
+  in each of its runs on this build; the JIT case gave "mismatches=741",
+  "mismatches=100" and, once, "SIGSEGV (0xb) at pc=... J 9 c1
+  RegPressure.mix" (the wrong-result count varies with scheduling).
+- T8 tests/elf/run_i386.sh (i386 probes through FEX: the eventfd and
+  inotify changes are in every guest process, FEX's too): 18 passed, 0
+  failed, plus i386_smc_subpage's existing expected failure (45.2 s).
+Not run: tests/win (it writes a Wine prefix and probes into the Steam root,
+which this task may not modify), tests/elf/run_vk_device.sh, make test-arm64,
+the x86 or native Steam clients. Those use the changed eventfd code too:
+Steam's process tree had 49 live eventfds in stage 6. What changes for them
+is that a forked child now shares its parent's counter, as on Linux.
