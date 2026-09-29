@@ -226,7 +226,7 @@ static mach_port_t host_port(void)
 // reported 0 instead of a stack leak into a guest-readable file. Measured on
 // this machine: the kernel returns the full 104, so nothing in use is
 // currently short.
-static bool vm_stats(vm_statistics64_data_t *out)
+static bool host_vm_stats(vm_statistics64_data_t *out)
 {
     memset(out, 0, sizeof *out);
     mach_msg_type_number_t count = HOST_VM_INFO64_COUNT;
@@ -476,7 +476,7 @@ static size_t gen_meminfo(char *b, size_t cap)
 {
     struct sb s = { b, cap, 0, false };
     vm_statistics64_data_t vm;
-    bool have = vm_stats(&vm);
+    bool have = host_vm_stats(&vm);
     // The vm_statistics64 counters are in the HOST granule; these figures are
     // emitted in bytes, so the host unit is the right one throughout.
     uint64_t ps = host_page_bytes();
@@ -728,7 +728,7 @@ static size_t gen_vmstat(char *b, size_t cap)
 {
     struct sb s = { b, cap, 0, false };
     vm_statistics64_data_t vm;
-    vm_stats(&vm);                      // zeroes the struct on failure too
+    host_vm_stats(&vm);                 // zeroes the struct on failure too
     uint64_t ps = host_page_bytes();
 
     // nr_* are page counts that the guest converts with sysconf(_SC_PAGESIZE),
