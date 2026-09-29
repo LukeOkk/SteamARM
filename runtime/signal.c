@@ -389,6 +389,148 @@ static void sigstats_note(int dsig)
 static _Thread_local struct { int sig; uint64_t pc, x0, ns; } g_lastsig[4];
 static _Thread_local unsigned g_lastsig_n;
 
+// Was this SIGSEGV/SIGBUS/SIGTRAP raised by the instruction at pc (a fault,
+// which Linux force-delivers) rather than sent with kill/tgkill? Darwin's
+// si_code cannot say: a kill()ed SIGSEGV arrives as SEGV_ACCERR and a
+// pthread_kill()ed SIGBUS as BUS_ADRALN (MEASURED, macOS 27 arm64). The
+// exception state can: a sent signal carries the syndrome of the thread's
+// last trap into the kernel -- the sending syscall's svc (EC 0x15) when it
+// signalled itself -- and si_addr 0, where a data or instruction abort
+// carries its own EC and si_addr == FAR.
+static bool raised_by_instruction(int dsig, const siginfo_t *dinfo, void *uap)
+{
+    if (!dinfo || !uap)
+        return false;
+    const ucontext_t *u = (const ucontext_t *)uap;
+    uint32_t ec = u->uc_mcontext->__es.__esr >> 26;
+    uint64_t far = u->uc_mcontext->__es.__far;
+    switch (ec) {
+    case 0x20: case 0x21:                   // instruction abort
+    case 0x24: case 0x25:                   // data abort
+        return (dsig == SIGSEGV || dsig == SIGBUS) &&
+               (uint64_t)(uintptr_t)dinfo->si_addr == far;
+    case 0x22: case 0x26:                   // pc / sp alignment
+        return dsig == SIGBUS;
+    case 0x3c:                              // brk
+        return dsig == SIGTRAP;
+    default:
+        return false;
+    }
+}
+
+// The runtime's own synchronous faults, absorbed before anything is reported
+// or delivered: the x18 trampolines' sp-alignment faults, MAP_JIT and W^X
+// flips (jit.c, wxsplit.c, subpage.c), copy-on-write of private shared
+// memory (privmap.c), unbased low pointers (gbase.c). True: resume the thread.
+//
+// ONE chain, shared by host_handler and main.c's fault_report (the handler
+// until the guest installs its own action for the signal). They were two
+// copies, and fault_report's had lost the alignment filter: a misaligned
+// store-release into a W^X page, taken for a write flip, retried forever
+// (stage 23 review; tests/elf/wx_owner.c, "misaligned").
+bool lxrt_absorb_runtime_fault(int dsig, siginfo_t *dinfo, void *uap)
+{
+    // SP-alignment fault (EC 0x26) on the x18 trampolines' register save and
+    // restore: `stp Xa, Xb, [sp, #-16]!` / `ldp Xa, Xb, [sp], #16`. Code that
+    // keeps sp misaligned between accesses is legal (pixman's hand-written
+    // NEON did, under Xvnc); the trampoline's push through sp is what the
+    // hardware refuses. Emulate those two forms here and resume -- Linux
+    // would never execute them, only the rewriter emits them.
+    if (dsig == SIGBUS && uap) {
+        ucontext_t *u = (ucontext_t *)uap;
+        uint32_t esr = u->uc_mcontext->__es.__esr;
+        if ((esr >> 26) == 0x26) {
+            _STRUCT_ARM_THREAD_STATE64 *ts = &u->uc_mcontext->__ss;
+            uint32_t w = *(const uint32_t *)(uintptr_t)ts->__pc;
+            unsigned rt = w & 31, rn = (w >> 5) & 31, rt2 = (w >> 10) & 31;
+            int64_t imm = (int64_t)((int32_t)(((w >> 15) & 0x7f) << 25) >> 25) * 8;
+            uint64_t *x = ts->__x;   // x0..x28; x29 = fp, x30 = lr
+            #define REG(r) ((r) == 29 ? &ts->__fp : (r) == 30 ? &ts->__lr : &x[(r)])
+            if (rn == 31 && (w & 0xFFC00000u) == 0xA9800000u) {         // STP pre-index
+                uint64_t a = ts->__sp + (uint64_t)imm;
+                memcpy((void *)(uintptr_t)a, REG(rt), 8);
+                memcpy((void *)(uintptr_t)(a + 8), REG(rt2), 8);
+                ts->__sp = a;
+                ts->__pc += 4;
+                return true;
+            }
+            if (rn == 31 && (w & 0xFFC00000u) == 0xA8C00000u) {         // LDP post-index
+                uint64_t a = ts->__sp;
+                memcpy(REG(rt), (void *)(uintptr_t)a, 8);
+                memcpy(REG(rt2), (void *)(uintptr_t)(a + 8), 8);
+                ts->__sp = a + (uint64_t)imm;
+                ts->__pc += 4;
+                return true;
+            }
+            #undef REG
+        }
+    }
+
+    // An alignment fault (data abort, DFSC 0b100001) is never about page
+    // protection. It has to reach the guest untouched -- FEX backpatches
+    // unaligned atomics from SIGBUS -- so the protection handlers below must
+    // not see it: on a 16 KiB page whose guest pages union to RWX the sub-page
+    // handler "fixed" it with an mprotect and retried, forever (MEASURED: a
+    // steamwebhelper renderer at ~440k SIGBUS/s on one unaligned lock op in
+    // V8's code space, the Steam UI never loading).
+    bool align_fault = false;
+    if (dsig == SIGBUS && uap) {
+        uint32_t esr = ((ucontext_t *)uap)->uc_mcontext->__es.__esr;
+        uint32_t ec = esr >> 26;
+        align_fault = (ec == 0x24 || ec == 0x25) && (esr & 0x3f) == 0x21;
+    }
+    if ((dsig == SIGBUS || dsig == SIGSEGV) && dinfo && uap && !align_fault) {
+        ucontext_t *u = (ucontext_t *)uap;
+        uint64_t fpc = u->uc_mcontext->__ss.__pc;
+        uint64_t faddr = (uint64_t)(uintptr_t)dinfo->si_addr;
+        // A thread faulting on the same address and pc over and over is not
+        // making progress: say once who last changed that page (memlog.c).
+        static _Thread_local uint64_t last_fa, last_pc;
+        static _Thread_local unsigned repeats;
+        // SIGSEGV only: FEX emulates split-lock atomics from SIGBUS, and a
+        // guest spinning on one repeats the same pc/address legitimately.
+        if (dsig == SIGSEGV && faddr == last_fa && fpc == last_pc) {
+            if (++repeats == 1000) {
+                lxrt_memlog_dump(faddr, "fault repeating 1000x");
+                uint64_t ib = lxrt_main_image_base, ie = ib + lxrt_main_image_span;
+                uint64_t flr = u->uc_mcontext->__ss.__lr;
+                fprintf(lxrt_trace_stream(), "[lxrt]   faulting pc 0x%llx%s+0x%llx lr 0x%llx%s+0x%llx "
+                        "x0 0x%llx x1 0x%llx x2 0x%llx x19 0x%llx x28 0x%llx\n",
+                        (unsigned long long)fpc, fpc >= ib && fpc < ie ? " = image" : " (not image)",
+                        (unsigned long long)(fpc >= ib && fpc < ie ? fpc - ib : 0),
+                        (unsigned long long)flr, flr >= ib && flr < ie ? " = image" : " (not image)",
+                        (unsigned long long)(flr >= ib && flr < ie ? flr - ib : 0),
+                        (unsigned long long)u->uc_mcontext->__ss.__x[0], (unsigned long long)u->uc_mcontext->__ss.__x[1],
+                        (unsigned long long)u->uc_mcontext->__ss.__x[2], (unsigned long long)u->uc_mcontext->__ss.__x[19],
+                        (unsigned long long)u->uc_mcontext->__ss.__x[28]);
+            }
+        } else {
+            last_fa = faddr;
+            last_pc = fpc;
+            repeats = 0;
+        }
+        if (lxrt_jit_handle_fault(fpc, faddr, uap))
+            return true;
+        // A native guest's RWX page (V8's code range): the W^X flip.
+        if (lxrt_wx_handle_fault(fpc, faddr, u->uc_mcontext->__es.__esr))
+            return true;
+        lxrt_jit_report_freed(fpc, faddr, uap);
+        // A store into a copy-on-write page of a private shared-memory
+        // mapping (privmap.c). WnR, ESR bit 6, on a data abort.
+        uint32_t fesr = u->uc_mcontext->__es.__esr;
+        bool fwrite = ((fesr >> 26) == 0x24 || (fesr >> 26) == 0x25) && (fesr & (1u << 6));
+        if (lxrt_privmap_handle_fault(faddr, fwrite))
+            return true;
+        if (lxrt_lowptr_fixup(uap, faddr))
+            return true;
+        // Ordinary pages get the same treatment when a 16 KiB host page holds
+        // both a writable and an executable guest page.
+        if (lxrt_subpage_handle_fault(fpc, faddr, uap))
+            return true;
+    }
+    return false;
+}
+
 static void host_handler(int dsig, siginfo_t *dinfo, void *uap)
 {
     // The JIT execute-mode stub's brk (jit.c) is the runtime's own.
@@ -447,104 +589,9 @@ static void host_handler(int dsig, siginfo_t *dinfo, void *uap)
             return;
     }
 
-    // SP-alignment fault (EC 0x26) on the x18 trampolines' register save and
-    // restore: `stp Xa, Xb, [sp, #-16]!` / `ldp Xa, Xb, [sp], #16`. Code that
-    // keeps sp misaligned between accesses is legal (pixman's hand-written
-    // NEON did, under Xvnc); the trampoline's push through sp is what the
-    // hardware refuses. Emulate those two forms here and resume -- Linux
-    // would never execute them, only the rewriter emits them.
-    if (dsig == SIGBUS && uap) {
-        ucontext_t *u = (ucontext_t *)uap;
-        uint32_t esr = u->uc_mcontext->__es.__esr;
-        if ((esr >> 26) == 0x26) {
-            _STRUCT_ARM_THREAD_STATE64 *ts = &u->uc_mcontext->__ss;
-            uint32_t w = *(const uint32_t *)(uintptr_t)ts->__pc;
-            unsigned rt = w & 31, rn = (w >> 5) & 31, rt2 = (w >> 10) & 31;
-            int64_t imm = (int64_t)((int32_t)(((w >> 15) & 0x7f) << 25) >> 25) * 8;
-            uint64_t *x = ts->__x;   // x0..x28; x29 = fp, x30 = lr
-            #define REG(r) ((r) == 29 ? &ts->__fp : (r) == 30 ? &ts->__lr : &x[(r)])
-            if (rn == 31 && (w & 0xFFC00000u) == 0xA9800000u) {         // STP pre-index
-                uint64_t a = ts->__sp + (uint64_t)imm;
-                memcpy((void *)(uintptr_t)a, REG(rt), 8);
-                memcpy((void *)(uintptr_t)(a + 8), REG(rt2), 8);
-                ts->__sp = a;
-                ts->__pc += 4;
-                return;
-            }
-            if (rn == 31 && (w & 0xFFC00000u) == 0xA8C00000u) {         // LDP post-index
-                uint64_t a = ts->__sp;
-                memcpy(REG(rt), (void *)(uintptr_t)a, 8);
-                memcpy(REG(rt2), (void *)(uintptr_t)(a + 8), 8);
-                ts->__sp = a + (uint64_t)imm;
-                ts->__pc += 4;
-                return;
-            }
-            #undef REG
-        }
-    }
-
-    // An alignment fault (data abort, DFSC 0b100001) is never about page
-    // protection. It has to reach the guest untouched -- FEX backpatches
-    // unaligned atomics from SIGBUS -- so the protection handlers below must
-    // not see it: on a 16 KiB page whose guest pages union to RWX the sub-page
-    // handler "fixed" it with an mprotect and retried, forever (MEASURED: a
-    // steamwebhelper renderer at ~440k SIGBUS/s on one unaligned lock op in
-    // V8's code space, the Steam UI never loading).
-    bool align_fault = false;
-    if (dsig == SIGBUS && uap) {
-        uint32_t esr = ((ucontext_t *)uap)->uc_mcontext->__es.__esr;
-        uint32_t ec = esr >> 26;
-        align_fault = (ec == 0x24 || ec == 0x25) && (esr & 0x3f) == 0x21;
-    }
-    if ((dsig == SIGBUS || dsig == SIGSEGV) && dinfo && !align_fault) {
-        ucontext_t *u = (ucontext_t *)uap;
-        uint64_t fpc = u->uc_mcontext->__ss.__pc;
-        uint64_t faddr = (uint64_t)(uintptr_t)dinfo->si_addr;
-        // A thread faulting on the same address and pc over and over is not
-        // making progress: say once who last changed that page (memlog.c).
-        static _Thread_local uint64_t last_fa, last_pc;
-        static _Thread_local unsigned repeats;
-        // SIGSEGV only: FEX emulates split-lock atomics from SIGBUS, and a
-        // guest spinning on one repeats the same pc/address legitimately.
-        if (dsig == SIGSEGV && faddr == last_fa && fpc == last_pc) {
-            if (++repeats == 1000) {
-                lxrt_memlog_dump(faddr, "fault repeating 1000x");
-                uint64_t ib = lxrt_main_image_base, ie = ib + lxrt_main_image_span;
-                uint64_t flr = u->uc_mcontext->__ss.__lr;
-                fprintf(lxrt_trace_stream(), "[lxrt]   faulting pc 0x%llx%s+0x%llx lr 0x%llx%s+0x%llx "
-                        "x0 0x%llx x1 0x%llx x2 0x%llx x19 0x%llx x28 0x%llx\n",
-                        (unsigned long long)fpc, fpc >= ib && fpc < ie ? " = image" : " (not image)",
-                        (unsigned long long)(fpc >= ib && fpc < ie ? fpc - ib : 0),
-                        (unsigned long long)flr, flr >= ib && flr < ie ? " = image" : " (not image)",
-                        (unsigned long long)(flr >= ib && flr < ie ? flr - ib : 0),
-                        (unsigned long long)u->uc_mcontext->__ss.__x[0], (unsigned long long)u->uc_mcontext->__ss.__x[1],
-                        (unsigned long long)u->uc_mcontext->__ss.__x[2], (unsigned long long)u->uc_mcontext->__ss.__x[19],
-                        (unsigned long long)u->uc_mcontext->__ss.__x[28]);
-            }
-        } else {
-            last_fa = faddr;
-            last_pc = fpc;
-            repeats = 0;
-        }
-        if (lxrt_jit_handle_fault(fpc, faddr, uap))
-            return;
-        // A native guest's RWX page (V8's code range): the W^X flip.
-        if (lxrt_wx_handle_fault(fpc, faddr, u->uc_mcontext->__es.__esr))
-            return;
-        lxrt_jit_report_freed(fpc, faddr, uap);
-        // A store into a copy-on-write page of a private shared-memory
-        // mapping (privmap.c). WnR, ESR bit 6, on a data abort.
-        uint32_t fesr = u->uc_mcontext->__es.__esr;
-        bool fwrite = ((fesr >> 26) == 0x24 || (fesr >> 26) == 0x25) && (fesr & (1u << 6));
-        if (lxrt_privmap_handle_fault(faddr, fwrite))
-            return;
-        if (lxrt_lowptr_fixup(uap, faddr))
-            return;
-        // Ordinary pages get the same treatment when a 16 KiB host page holds
-        // both a writable and an executable guest page.
-        if (lxrt_subpage_handle_fault(fpc, faddr, uap))
-            return;
-    }
+    // The runtime's own faults first (shared with main.c's fault_report).
+    if (lxrt_absorb_runtime_fault(dsig, dinfo, uap))
+        return;
 
     int forced_code = -1;
     // An alignment fault (data abort, DFSC 0b100001) is a real SIGBUS/
@@ -582,6 +629,33 @@ static void host_handler(int dsig, siginfo_t *dinfo, void *uap)
     pthread_mutex_unlock(&g_actions_lock);
 
     if (act.handler == 0 || act.handler == 1) {
+        // Linux force_sig_fault: a SIGSEGV, SIGBUS or SIGTRAP raised by the
+        // faulting instruction itself cannot be ignored -- the ignored
+        // disposition is reset to SIG_DFL and the fault kills. Sent with
+        // kill() instead, the same signal is ignored as asked. (Before this
+        // host_handler was installed for SIG_IGN, the host ignored it too
+        // and the thread re-ran the instruction forever.)
+        bool forced = act.handler == 1 && (dsig == SIGSEGV || dsig == SIGBUS || dsig == SIGTRAP) &&
+                      raised_by_instruction(dsig, dinfo, uap);
+        if (forced) {
+            pthread_mutex_lock(&g_actions_lock);
+            if (g_actions[lsig].handler == 1)
+                g_actions[lsig].handler = 0;
+            pthread_mutex_unlock(&g_actions_lock);
+            if (lxrt_trace_on())
+                fprintf(lxrt_trace_stream(), "[lxrt] ignored guest fault forced: darwin %d addr %p\n",
+                        dsig, dinfo ? dinfo->si_addr : NULL);
+            if (dsig == SIGTRAP) {
+                signal(SIGTRAP, SIG_DFL);   // the brk re-executes under SIG_DFL
+                return;
+            }
+            int ds = lxrt_signo_to_darwin(lsig);   // SIGBUS reported as SIGSEGV: die of that
+            if (!ds)
+                ds = dsig;
+            signal(ds, SIG_DFL);
+            raise(ds);
+            return;
+        }
         // A fault the runtime did not absorb, on a signal the guest left at
         // its default: die of it, as Linux would. (SIGSEGV and SIGBUS keep
         // this handler even then -- see lxrt_rt_sigaction.)
@@ -605,7 +679,10 @@ static void host_handler(int dsig, siginfo_t *dinfo, void *uap)
             fprintf(lxrt_trace_stream(), "[lxrt] host_handler: signal %d has no guest handler "
                             "(disposition %llu)\n", lsig,
                     (unsigned long long)act.handler);
-        return;   // SIG_DFL / SIG_IGN: Darwin's own disposition already applied
+        // SIG_DFL / SIG_IGN: Darwin's own disposition already applied -- or,
+        // for SIGSEGV/SIGBUS/SIGTRAP under SIG_IGN (kept on this handler),
+        // a sent signal ignored here.
+        return;
     }
 
     // For the dispatcher's SA_RESTART decision (dispatch.c): one handler
@@ -1133,13 +1210,16 @@ long lxrt_rt_sigaction(int lsig, const void *uact, void *uoldact, size_t sigsets
 
     struct sigaction sa;
     memset(&sa, 0, sizeof sa);
-    if (g_actions[lsig].handler == 0 && dsig == SIGTRAP) {
+    // SIG_DFL or SIG_IGN, as the guest sees it.
+    bool no_handler = g_actions[lsig].handler == 0 || g_actions[lsig].handler == 1;
+    if (no_handler && dsig == SIGTRAP) {
         // The runtime's JIT execute-mode stub ends in brk (jit.c): keep a
-        // handler that recognises it; host_handler applies the default
-        // action to any other SIGTRAP.
+        // handler that recognises it; host_handler applies the guest's
+        // disposition to any other SIGTRAP. (Ignored on the host, the stub's
+        // brk would be dropped and re-executed forever.)
         sa.sa_sigaction = host_handler;
         sa.sa_flags = SA_SIGINFO | SA_ONSTACK | SA_NODEFER;
-    } else if (g_actions[lsig].handler == 0 && (dsig == SIGSEGV || dsig == SIGBUS)) {
+    } else if (no_handler && (dsig == SIGSEGV || dsig == SIGBUS)) {
         // The runtime's own faults arrive as SIGSEGV/SIGBUS whatever the
         // guest's disposition: MAP_JIT and W^X flips (jit.c, wxsplit.c,
         // subpage.c), copy-on-write of private shared memory (privmap.c).
@@ -1147,8 +1227,11 @@ long lxrt_rt_sigaction(int lsig, const void *uact, void *uoldact, size_t sigsets
         // every webhelper renderer (forked from the zygote, SIGBUS/SIGSEGV
         // at their default) died on its first JIT page, killed by the
         // kernel with no runtime report (stage 22 E11 "No lxrun report
-        // precedes it"; MEASURED again here). host_handler applies the
-        // default action itself to a fault none of them absorbs.
+        // precedes it"; MEASURED again here). With the host at SIG_IGN
+        // Darwin dropped each of them and the thread re-ran the faulting
+        // instruction forever (MEASURED: tests/elf/wx_owner.c, "sigign").
+        // host_handler applies the guest's disposition itself to a fault
+        // none of them absorbs.
         sa.sa_sigaction = host_handler;
         sa.sa_flags = SA_SIGINFO | SA_ONSTACK | SA_NODEFER;
     } else if (g_actions[lsig].handler == 0 &&
