@@ -37,7 +37,9 @@ bool lxrt_trace_on(void);
 #define INSN_SVC0  0xD4000001u  // svc #0
 #define INSN_HVC0  0xD4000002u  // hvc #0
 #define INSN_SMC0  0xD4000003u  // smc #0
-#define INSN_BRK1  0xD4000021u  // brk #1
+// brk #1 (0xD4200020). Up to 0.3.4 this was 0xD4000021, which is svc #1:
+// a poisoned site ran whatever Darwin syscall x16 named instead of trapping.
+#define INSN_BRK1  0xD4200020u
 
 // mrs Xt, TPIDR_EL0 / msr TPIDR_EL0, Xt -- Rt in bits [4:0].
 #define INSN_MRS_TPIDR 0xD53BD040u
