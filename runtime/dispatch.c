@@ -138,6 +138,9 @@ static bool g_trace;
 static bool g_rewrite_mapped;
 
 void lxrt_dispatch_set_rewrite_mapped(bool on) { g_rewrite_mapped = on; }
+// Whether code the guest maps (or writes) is rewritten: subpage.c asks before
+// rescanning code stored into an executable 4 KiB page.
+bool lxrt_dispatch_rewrite_mapped(void) { return g_rewrite_mapped; }
 
 // ------------------------------------------------- guest filesystem root
 //
@@ -2116,21 +2119,38 @@ restart:
     case LNR_readlinkat: {
         char tmp[2048];
         ssize_t n;
+        char self[MAXPATHLEN];
+        const char *looked = NULL;          // the host path whose link is read
         if (a1 && ((const char *)a1)[0] == '\0') {
             // Linux: an empty path reads the link the descriptor itself names
             // (an O_PATH|O_NOFOLLOW fd, opened here with O_SYMLINK).
-            char self[MAXPATHLEN];
             n = fcntl((int)a0, F_GETPATH, self) == 0 ? readlink(self, tmp, sizeof tmp) : -1;
             if (n < 0 && errno == EINVAL) errno = ENOENT;
+            if (n >= 0) looked = self;
         } else {
             const char *mp = at_through_mounts((int)a0, (const char *)a1);
-            n = readlinkat(mp ? AT_FDCWD : lxrt_dirfd_to_darwin((int)a0),
-                           mp ? mp : translate((const char *)a1), tmp, sizeof tmp);
+            looked = mp ? mp : translate((const char *)a1);
+            n = readlinkat(mp ? AT_FDCWD : lxrt_dirfd_to_darwin((int)a0), looked, tmp, sizeof tmp);
         }
         if (g_trace)
             fprintf(lxrt_trace_stream(), "[lxrt]    readlinkat %d \"%s\" -> %zd%s%.*s\n", (int)a0,
                     (const char *)a1, n, n > 0 ? " " : "", n > 0 ? (int)n : 0, tmp);
         if (n < 0) { ret = LERR(errno); break; }
+        {
+            // /proc/self/exe: the link points at the image's host path (open
+            // must reach the file); its reader gets the guest's name for it
+            // (main.c: absolute, in guest terms).
+            char ef[1100];
+            const char *exe = lxrt_proc_exe_path(), *file = lxrt_proc_exe_link_file(ef, sizeof ef);
+            if (exe && file && looked && looked[0] == '/' && !strcmp(looked, file)) {
+                size_t el = strlen(exe);
+                if (el > (size_t)a3)
+                    el = (size_t)a3;
+                memcpy((char *)a2, exe, el);
+                ret = (long)el;
+                break;
+            }
+        }
         // Undo symlinkat's rewrite: a target inside the guest root is shown
         // as the guest path it was created from.
         const char *out = tmp;

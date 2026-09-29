@@ -312,6 +312,23 @@ static enum site_kind classify(uint32_t insn, unsigned *rt)
     return SITE_NONE;
 }
 
+// True if any word in [start, end) could be a site classify() accepts (the
+// x18 pass aside, which needs code windows this caller does not have). Every
+// kind classify() knows is either `svc #0` or an MRS/MSR with op0 = 3, so the
+// test is those two patterns; it must stay a superset of classify(). A plain
+// loop the compiler vectorises: subpage.c runs it over the executable 4 KiB
+// pages of a host page at every write->execute flip, where a full scan of
+// unchanged code cost 5.4 us a flip (MEASURED, benchmarks/stage23).
+bool lxrt_rewrite_has_candidates(uint64_t start, uint64_t end)
+{
+    const uint32_t *w = (const uint32_t *)start;
+    size_t words = (size_t)(end - start) / 4;
+    unsigned hit = 0;
+    for (size_t i = 0; i < words; i++)
+        hit |= (w[i] == INSN_SVC0) | ((w[i] & 0xFFD00000u) == 0xD5100000u);
+    return hit != 0;
+}
+
 // Returns the total trampoline bytes the range needs.
 // Is this word inside one of the executable-section windows? The x18 pass
 // runs nowhere else: outside .text a word naming register 18 is data.

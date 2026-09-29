@@ -32,7 +32,8 @@
 static char g_dir[512];
 static void regenerate_fds(void);
 static void regenerate_tasks(void);
-static char g_exe[1024];
+static char g_exe[1024];        // the guest's name of its image
+static char g_exe_link[1024];   // what <procfs>/exe points at (a host path)
 static bool g_ready;
 
 // This procfs lives in real files, and every write is a filesystem event the
@@ -255,7 +256,7 @@ void lxrt_proc_cleanup(void)
         remove_tree(g_dir);
 }
 
-void lxrt_proc_init(const char *exe_path, int argc, char **argv)
+void lxrt_proc_init(const char *exe_path, const char *exe_link, int argc, char **argv)
 {
     const char *tmp = getenv("TMPDIR");
     if (!tmp || !*tmp)
@@ -286,10 +287,14 @@ void lxrt_proc_init(const char *exe_path, int argc, char **argv)
     }
 
     snprintf(g_exe, sizeof g_exe, "%s", exe_path ? exe_path : "/unknown");
+    // The link is followed by the host kernel (open) and read back through
+    // readlinkat's guest view (readlink): a host path serves both. A relative
+    // target would even be resolved against this directory, not the cwd.
+    snprintf(g_exe_link, sizeof g_exe_link, "%s", exe_link ? exe_link : g_exe);
     char link[1024];
     snprintf(link, sizeof link, "%s/exe", g_dir);
     unlink(link);
-    symlink(g_exe, link);
+    symlink(g_exe_link, link);
 
     char cmdline[4096];
     size_t n = 0;
@@ -417,7 +422,7 @@ void lxrt_proc_after_fork(void)
     char link[1024];
     snprintf(link, sizeof link, "%s/exe", g_dir);
     unlink(link);
-    symlink(g_exe, link);
+    symlink(g_exe_link, link);
     // cmdline: copy the parent's.
     FILE *in = fopen(cmdline_src, "rb");
     if (in) {
@@ -446,6 +451,15 @@ void lxrt_proc_set_cmdline(const char *args, size_t len)
 const char *lxrt_proc_exe_path(void)
 {
     return g_ready ? g_exe : NULL;
+}
+
+// The host path of this process's <procfs>/exe link file. readlink of it is
+// answered with lxrt_proc_exe_path(), not with the link's host target.
+const char *lxrt_proc_exe_link_file(char *out, size_t n)
+{
+    if (!g_ready || snprintf(out, n, "%s/exe", g_dir) >= (int)n)
+        return NULL;
+    return out;
 }
 
 // The reverse of lxrt_proc_translate, for readlink: a host path inside the

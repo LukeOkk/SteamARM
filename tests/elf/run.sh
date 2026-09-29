@@ -159,8 +159,10 @@ fi
 # A 4 KiB-aligned image (Valve's native arm64 client) through elf.c's
 # sub-page path: the end of the code and the start of the data share a
 # 16 KiB host page, flipped RW/RX on faults. The writer loop runs from
-# another host page. A store executed from the shared page itself never makes
-# progress (MEASURED: endless "jit fault" pairs) -- kept as a known failure.
+# another host page. A store executed from the shared page itself could never
+# complete (the page flipped RW/RX at the same pc forever, up to stage 22);
+# the runtime now performs that store itself (runtime/storemu.c), and code
+# stored into an executable 4 KiB page is rewritten before it runs.
 if err=$(clang -target aarch64-unknown-linux-gnu -nostdlib -static-pie -fPIE \
                -fuse-ld=$CROSS_LD -Wl,-e,_start -Wl,-z,max-page-size=4096 \
                -Wl,-z,common-page-size=4096 -Wl,-z,norelro \
@@ -188,17 +190,68 @@ if err=$(clang -target aarch64-unknown-linux-gnu -nostdlib -static-pie -fPIE \
         else
             bad "4 KiB ELF via subpage" "rc=$rc (exit code = failed check) $(grep 'svc' <<<"$out")"
         fi
-        deadline 5 ./build/lxrun build/subpage4k selfwrite >/dev/null 2>&1; rc=$?
-        if [ "$rc" -eq 142 ]; then
-            xfail "4 KiB ELF: a store executed from the host page it writes spins forever (W/X flip livelock)" "killed after 5 s"
-        elif [ "$rc" -eq 0 ]; then
-            ok "4 KiB ELF self-write (XPASS: the W/X livelock no longer reproduces)"
+        out=$(LXRT_SUBPAGE_LOG=100 deadline 10 ./build/lxrun build/subpage4k selfwrite 2>&1); rc=$?
+        if [ "$rc" -eq 0 ] && [ "$(grep -c 'subpage emulate' <<<"$out")" -eq 10 ]; then
+            ok "4 KiB ELF: 10 stores from the host page they write, each performed by the runtime (no W/X livelock)"
         else
-            bad "4 KiB ELF self-write" "rc=$rc"
+            bad "4 KiB ELF self-write" "rc=$rc (142: the W/X livelock; 4: wrong count) $(grep -c 'subpage emulate' <<<"$out") emulated"
         fi
+        # Negative control: a store from the shared page into its own
+        # read-execute code page is a fault on Linux, and must stay one.
+        out=$(deadline 10 ./build/lxrun build/subpage4k codewrite 2>&1); rc=$?
+        if [ "$rc" -eq 138 ] && grep -q 'SIGBUS at pc.*insn 0xb900001f' <<<"$out"; then
+            ok "4 KiB ELF: a store into the read-execute code page still faults (not emulated)"
+        else
+            bad "4 KiB ELF code-page store faults" "rc=$rc $(grep SIG <<<"$out")"
+        fi
+        # Code stored into an executable 4 KiB page (made RWX by the guest) is
+        # rescanned before it runs: `svc #0` then `udf`. Rewritten: exit(42).
+        # Live: Darwin getpid (x16 = 20), then SIGILL (132) -- which is what
+        # LXRT_NO_RESCAN=1, the negative control, must show.
+        for mode in patch far; do
+            deadline 10 ./build/lxrun build/subpage4k $mode >/dev/null 2>&1; rc=$?
+            LXRT_NO_RESCAN=1 deadline 10 ./build/lxrun build/subpage4k $mode >/dev/null 2>&1; nrc=$?
+            what="an emulated store"; [ $mode = far ] && what="a store from another page (W/X flip)"
+            if [ "$rc" -eq 42 ] && [ "$nrc" -eq 132 ]; then
+                ok "4 KiB ELF: svc written into an RWX 4 KiB page by $what is rewritten before it runs (control: live svc without the rescan)"
+            else
+                bad "4 KiB ELF: code written by $what rescanned" "rc=$rc (want 42), LXRT_NO_RESCAN rc=$nrc (want 132)"
+            fi
+        done
     fi
 else
     bad "build subpage4k" "$err"
+fi
+
+# Store forms executed from the host page they write (runtime/storemu.c):
+# the same routine runs against plain memory (the hardware) and against the
+# shared page (the runtime) and must leave identical bytes and registers --
+# base and SIMD&FP stores in every addressing mode, pairs, ST1-ST4, ordered
+# stores, LSE atomics, CAS/CASP, LL/SC loops (including ones whose body
+# overwrites the loaded register: the runtime runs the loop's retry), DC ZVA.
+if err=$(clang -target aarch64-unknown-linux-gnu -nostdlib -static-pie -fPIE \
+               -fuse-ld=$CROSS_LD -Wl,-e,_start -Wl,-z,max-page-size=4096 \
+               -Wl,-z,common-page-size=4096 -Wl,-z,norelro \
+               -o build/subpage_stores tests/elf/subpage_stores.S 2>&1); then
+    syms=$(/opt/homebrew/opt/llvm/bin/llvm-readelf -sW build/subpage_stores)
+    kit=$((16#$(awk '$8 == "kit" { print $2 }' <<<"$syms")))
+    kit_end=$((16#$(awk '$8 == "kit_end" { print $2 }' <<<"$syms")))
+    tgt=$((16#$(awk '$8 == "target" { print $2 }' <<<"$syms")))
+    tgt_end=$((16#$(awk '$8 == "target_end" { print $2 }' <<<"$syms")))
+    if [ $((kit >> 14)) -ne $((tgt >> 14)) ] || [ $((kit_end >> 14)) -ne $((tgt >> 14)) ] ||
+       [ $(((tgt_end - 1) >> 14)) -ne $((tgt >> 14)) ]; then
+        bad "store-forms precondition: kit and target in one 16 KiB page" "kit $kit-$kit_end target $tgt-$tgt_end"
+    else
+        out=$(LXRT_SUBPAGE_LOG=1000 deadline 30 ./build/lxrun build/subpage_stores 2>&1); rc=$?
+        n=$(grep -c 'subpage emulate' <<<"$out")
+        if [ "$rc" -eq 0 ] && [ "$n" -eq 87 ] && ! grep -q 'cannot be emulated' <<<"$out"; then
+            ok "4 KiB ELF: 87 store forms from the page they write match the hardware (bytes, results, flags)"
+        else
+            bad "4 KiB ELF store forms" "rc=$rc (3: memory differs, 4: registers differ) $n emulated $(grep 'cannot be emulated' <<<"$out" | head -2)"
+        fi
+    fi
+else
+    bad "build subpage_stores" "$err"
 fi
 if err=$(clang -target aarch64-unknown-linux-gnu -nostdlib -static-pie -fPIE \
                -fuse-ld=$CROSS_LD -Wl,-e,_start -Wl,-z,max-page-size=2048 \
@@ -759,20 +812,43 @@ if [ -f "$STAGE/usr/lib64/libc.a" ] && [ -n "$GCCDIR" ]; then
         else
             bad "ARM64_INITIAL_STACK_BOUNDS" "rc=$rc16/$rc4 $(grep FAIL <<<"$out16"; grep FAIL <<<"$out4")"
         fi
-        # procfs.c keeps the program path as given, so readlink(/proc/self/exe)
-        # is relative when lxrun got a relative path; Linux's is absolute and
-        # static glibc asserts on it (MEASURED: _dl_get_origin, SIGABRT).
+        # Started by a relative path: /proc/self/exe must still be absolute,
+        # or static glibc asserts at start-up (_dl_get_origin, SIGABRT, rc 134
+        # up to stage 22).
         out=$(deadline 30 ./build/lxrun build/stack_bounds 2>&1); rc=$?
-        if [ "$rc" -eq 134 ] && grep -q "_dl_get_origin" <<<"$out"; then
-            xfail "/proc/self/exe is relative when lxrun is given a relative path" "static glibc: _dl_get_origin assertion, rc=134"
-        elif [ "$rc" -eq 0 ]; then
-            ok "relative program path (XPASS: /proc/self/exe is absolute now)"
+        if [ "$rc" -eq 0 ] && grep -q '== stack bounds: ok' <<<"$out"; then
+            ok "static glibc started by a relative path (/proc/self/exe absolute; was _dl_get_origin abort)"
         else
             bad "relative program path" "rc=$rc $(grep -v '^\[lxrt\]' <<<"$out" | tail -3)"
         fi
     else bad "build stack_bounds" "$err"; fi
 else
     echo "  skip  ARM64_INITIAL_STACK_BOUNDS (no $STAGE)"
+fi
+
+# /proc/self/exe as Linux has it, however the program was named: absolute, in
+# guest terms, equal through readlink and realpath, and open()able. Relative,
+# with "..", absolute (the control: named as the host path already), and
+# under LXRT_ROOT by a relative and by an absolute guest path.
+if [ -f "$STAGE/usr/lib64/libc.a" ] && [ -n "$GCCDIR" ]; then
+    if err=$(glibc_cc -static-pie -O2 -o build/proc_self_exe tests/elf/proc_self_exe.c); then
+        EXE_ROOT="$PWD/build/exe-root"
+        mkdir -p "$EXE_ROOT/tmp" && cp build/proc_self_exe "$EXE_ROOT/tmp/"
+        here=$(pwd -P)
+        lx="$PWD/build/lxrun"
+        r1=$(deadline 20 ./build/lxrun build/proc_self_exe "$here/build/proc_self_exe" 2>&1); c1=$?
+        r2=$(deadline 20 ./build/lxrun ./build/../build/proc_self_exe "$here/build/proc_self_exe" 2>&1); c2=$?
+        r3=$(deadline 20 ./build/lxrun "$PWD/build/proc_self_exe" "$PWD/build/proc_self_exe" 2>&1); c3=$?
+        r4=$(cd "$EXE_ROOT/tmp" && LXRT_ROOT="$EXE_ROOT" deadline 20 "$lx" ./proc_self_exe /tmp/proc_self_exe 2>&1); c4=$?
+        r5=$(LXRT_ROOT="$EXE_ROOT" deadline 20 ./build/lxrun /tmp/proc_self_exe /tmp/proc_self_exe 2>&1); c5=$?
+        if [ "$c1$c2$c3$c4$c5" = 00000 ]; then
+            ok "/proc/self/exe: absolute in guest terms, readlink = realpath, openable (relative, '..', absolute, rooted relative, rooted absolute)"
+        else
+            bad "/proc/self/exe" "rc=$c1/$c2/$c3/$c4/$c5 $(grep -hE '^exe|FAIL|_dl_get_origin' <<<"$r1$r2$r3$r4$r5" | head -6)"
+        fi
+    else bad "build proc_self_exe" "$err"; fi
+else
+    echo "  skip  /proc/self/exe (no $STAGE)"
 fi
 
 # ARM64_AUXV_LAYOUT: a dynamic program checks every auxv pair against what
@@ -819,6 +895,33 @@ if [ -f "$STAGE/usr/lib64/libc.a" ] && [ -n "$GCCDIR" ] &&
                 ok "ARM64_AUXV_LAYOUT: auxv pairs, AT_PAGESZ 16384 and 4096 (LXRT_GUEST_PAGE), 4 KiB library refused at 16 KiB and loaded at 4 KiB"
             else bad "ARM64_AUXV_LAYOUT" "rc=$rc16/$rc4 $(grep FAIL <<<"$out16"; grep FAIL <<<"$out4")"; fi
         else bad "4 KiB DSO precondition" "$(grep LOAD <<<"$headers") counter=$counter"; fi
+        # A 4 KiB library whose code writes its own data from the host page
+        # that holds both (the W/X livelock up to stage 22), dlopened at
+        # LXRT_GUEST_PAGE=4096: plain stores, LL/SC loops as clang emits them
+        # (the loaded register reused) and LSE atomics, four threads racing
+        # on one counter through both. Precondition: the writers and the data
+        # share a 16 KiB page.
+        if err=$(glibc_cc -O2 -pthread -o "$AUX_ROOT/tmp/dlopen_self4k" tests/elf/dlopen_self4k.c) &&
+           err=$(glibc_cc -shared -fPIC -O2 -march=armv8-a -mno-outline-atomics \
+                          -Wl,-z,max-page-size=4096 -Wl,-z,common-page-size=4096 \
+                          -o "$AUX_ROOT/tmp/libself4k.so" tests/elf/libself4k.c); then
+            syms=$(/opt/homebrew/opt/llvm/bin/llvm-readelf -sW "$AUX_ROOT/tmp/libself4k.so")
+            pages=$(awk '$8 ~ /^self4k_/ && $7 != "UND" { print $2 }' <<<"$syms" |
+                    while read -r a; do echo $((16#$a >> 14)); done | sort -u)
+            if [ -z "$pages" ] || [ "$(wc -l <<<"$pages" | tr -d ' ')" -ne 1 ]; then
+                bad "4 KiB self-writing DSO precondition" "host pages: $(tr '\n' ' ' <<<"$pages")"
+            else
+                out=$(LXRT_SUBPAGE_LOG=100000 LXRT_ROOT="$AUX_ROOT" LXRT_GUEST_PAGE=4096 deadline 60 \
+                      ./build/lxrun /tmp/dlopen_self4k /tmp/libself4k.so 2>&1); rc=$?
+                n=$(grep -c 'subpage emulate' <<<"$out")
+                if [ "$rc" -eq 0 ] && grep -q '== self4k: ok (16000 contended atomic adds)' <<<"$out" &&
+                   [ "$n" -ge 17000 ] && ! grep -q 'cannot be emulated' <<<"$out"; then
+                    ok "4 KiB DSO writing its own data from the same host page: stores, LL/SC and LSE atomics exact under 4-thread contention ($n emulated)"
+                else
+                    bad "4 KiB self-writing DSO" "rc=$rc (142: the W/X livelock) $n emulated $(grep -E 'FAIL|cannot be emulated' <<<"$out" | head -3)"
+                fi
+            fi
+        else bad "build dlopen_self4k/libself4k" "$err"; fi
     else bad "build auxv_layout/libpg4k" "$err"; fi
 else
     echo "  skip  ARM64_AUXV_LAYOUT (no $STAGE or $GUEST_ROOT/lib64/libc.so.6)"

@@ -110,6 +110,9 @@ int  lxrt_rewrite_image(struct lxrt_image *img, struct lxrt_rewrite_report *rep,
 // The range must currently be writable; the caller seals it afterwards.
 int  lxrt_rewrite_range(uint64_t start, uint64_t end,
                         struct lxrt_rewrite_report *rep, char **err);
+// Could lxrt_rewrite_range find anything in [start, end)? A superset test of
+// the same words, cheap enough to run on every W/X flip of a sub-page.
+bool lxrt_rewrite_has_candidates(uint64_t start, uint64_t end);
 void lxrt_rewrite_totals(struct lxrt_rewrite_report *out);
 // Diagnostics: which trampoline pool, if any, an address falls in, and whether
 // a guest mapping request would land on one. The guest's loader reserves large
@@ -163,7 +166,8 @@ bool lxrt_subpage_tracked(uint64_t addr, uint64_t len);
 void lxrt_subpage_forget(uint64_t addr, uint64_t len);
 void lxrt_subpage_reapply(uint64_t addr, uint64_t len);
 long lxrt_subpage_mmap_noreplace(uint64_t addr, uint64_t len, int prot, bool anon, int fd, uint64_t off);
-bool lxrt_subpage_handle_fault(uint64_t pc, uint64_t fault_addr);
+// uap: the faulting ucontext_t (NULL: no store emulation, flip only).
+bool lxrt_subpage_handle_fault(uint64_t pc, uint64_t fault_addr, void *uap);
 
 // privmap.c -- Linux MAP_PRIVATE semantics (see the file's updates until the
 // first store) for private mappings of shared-memory files.
@@ -246,12 +250,16 @@ void lxrt_dirents_close(int fd);
 // procfs.c -- a synthetic /proc, materialised as real files. FEXServer dies on
 // /proc/self/exe before anything else; Steam and pressure-vessel read /proc
 // heavily.
-void        lxrt_proc_init(const char *exe_path, int argc, char **argv);
+// exe_path: the guest's name of its image (what readlink(/proc/self/exe) and a
+// re-exec of /proc/self/exe use); exe_link: the host path the procfs link
+// points at, or NULL for exe_path itself.
+void        lxrt_proc_init(const char *exe_path, const char *exe_link, int argc, char **argv);
 const char *lxrt_proc_translate(const char *path);
 // sysfs.c -- /sys/devices/system/cpu in the guest root (CPU counting).
 void lxrt_sysfs_init(void);
 const char *lxrt_proc_untranslate(const char *host, char *out, size_t n);
 const char *lxrt_proc_exe_path(void);
+const char *lxrt_proc_exe_link_file(char *out, size_t n);
 
 // process.c -- the runtime gets a real process model, because FEX and Steam
 // both need one. A second process is a second runtime; nothing the single
