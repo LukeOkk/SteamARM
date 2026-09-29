@@ -1,0 +1,288 @@
+Stage 22 -- KosmicKrisp as a second Vulkan driver; present modes reported
+(2026-09-29)
+=========================================================================
+
+Host: Mac mini M4, 16 GB, macOS 27.0 (26A428). Homebrew mesa 26.2.3
+(KosmicKrisp), molten-vk 1.4.2, vulkan-headers 1.4.357.0. Display 1920x1080
+at 165 Hz. Other SteamARM guests (a native arm64 Steam client, i386 tests)
+were running from other worktrees during every measurement below, so the
+fps figures carry that load.
+
+ZERO-VM: unchanged. The driver is a Mach-O dylib called in-process through
+the runtime's host bridge, exactly as MoltenVK is.
+
+Summary
+-------
+- STEAMARM_VK_ICD selects the driver the ELF Vulkan shim loads. Unset or
+  "moltenvk": MoltenVK, as before. "kosmickrisp": Mesa's KosmicKrisp. A
+  value starting with "/": that dylib. A driver that cannot be used falls
+  back to MoltenVK and prints one line on stderr.
+- KosmicKrisp works through the shim with no Khronos loader: aarch64, x86-64
+  and i386 guests (FEX thunks) create an instance and a device, submit and
+  read back, and present to an X window. D3D11 (DXVK) and D3D12
+  (VKD3D-Proton) probes under Proton Experimental run on it once the shim
+  reports fillModeNonSolid (commit 8a716c9; without it DXVK rejects the
+  adapter). MEASURED, below.
+- The default path is unchanged: every MoltenVK probe passes as before.
+- The shim logs each swapchain's present mode (requested, and what is passed
+  to the driver) with LXRT_VK_DEBUG=1; LXRT_VK_PRESENT_MODE=FIFO|IMMEDIATE
+  overrides it when the surface offers that mode.
+- Not tested: Steam's launch path (pressure-vessel) with STEAMARM_VK_ICD, any
+  real game, D3D9, 32-bit D3D on KosmicKrisp. See "Not done".
+
+1. What the shim does (VERIFIED IN SOURCE, this branch)
+-------------------------------------------------------
+shim/gen.py -> shim/vulkan_shim.c, constructor lxrt_vk_init:
+  - STEAMARM_VK_ICD and LXRT_VK_DEBUG are read with the HOST's getenv
+    (lxrt_host_dlsym(RTLD_DEFAULT, "getenv")): the environment the runtime
+    was started or re-executed with (runtime/process.c:137), readable before
+    the guest's libc is initialised. A variable a process sets for itself
+    after it started is not seen.
+  - kosmickrisp: /opt/homebrew/lib/libvulkan_kosmickrisp.dylib, then
+    /usr/local/lib/libvulkan_kosmickrisp.dylib.
+  - bind(): a dylib that exports vkCreateInstance (MoltenVK) is bound by name
+    as before. One with vk_icdGetInstanceProcAddr and no vkCreateInstance
+    (Mesa) is bound in ICD mode: vk_icdNegotiateLoaderICDInterfaceVersion(7),
+    then every slot from gipa(NULL, name); vk_icdGetInstanceProcAddr's slot
+    is the driver's gipa; vkEnumerate{Instance,Device}LayerProperties, which
+    the Khronos loader implements, report zero layers if the driver lacks
+    them.
+  - lxrt_vk_icd_fill(instance), called after every successful
+    vkCreateInstance (shim/wsi.c): each slot still empty is filled once from
+    gipa(instance, name), under a lock.
+  - lxrt_vk_missing(name): in ICD mode vkGetInstanceProcAddr /
+    vkGetDeviceProcAddr answer NULL for a driver entry point whose slot is
+    empty (the loader's behaviour) instead of a thunk that traps at brk #2.
+    Entry points the shim implements itself (X11 surfaces, transform
+    feedback) are not driver slots and stay available.
+  - Messages: "[shim] vk driver requested=X effective=Y (reason)" on a
+    fallback, or always with LXRT_VK_DEBUG=1 (reason "exports" or "icd").
+    Written with a raw Linux write(2): no libc needed in the constructor.
+  - The binary contains the literal "STEAMARM_VK_ICD" (strings: 1 match).
+shim/wsi.c, ICD mode only: the instance extension list keeps the driver's
+  own VK_KHR_xcb_surface / VK_KHR_xlib_surface (KosmicKrisp lists them) instead
+  of adding duplicates, and drops VK_EXT_acquire_xlib_display (it would hand
+  the driver's host X11 code a guest Display). X11 surfaces are still the
+  shim's (remote CAMetalLayer, stage12).
+shim/present.c: vkCreateSwapchainKHR (section 6).
+shim/features.c: fillModeNonSolid spoofed like geometryShader (section 5).
+Nothing touches driverVersion or any VkPhysicalDeviceProperties field for
+display; the values below are the drivers' own.
+
+2. Dispatchable handles without a loader (the crux)
+---------------------------------------------------
+UPSTREAM DOCUMENTED / VERIFIED IN SOURCE (Mesa main, fetched 2026-09-29
+through the gitlab API -- main, not the 26.2.3 tag):
+  src/vulkan/runtime/vk_object.h:43-44  struct vk_object_base {
+                                           VK_LOADER_DATA _loader_data; ...
+  src/vulkan/runtime/vk_object.c:39,52  _loader_data.loaderMagic = ICD_LOADER_MAGIC
+  src/vulkan/runtime/vk_instance.c:297-365  vk_instance_get_proc_addr: the
+      global names for any instance; with an instance, instance entry
+      points, then physical-device and device TRAMPOLINES, each only if
+      enabled by the instance's apiVersion / extensions
+  src/vulkan/util/vk_dispatch_trampolines_gen.py:116-127  a device
+      trampoline dispatches through vk_device->dispatch_table or
+      vk_object_base->device->dispatch_table -- never through _loader_data
+Khronos vk_icd.h: ICD_LOADER_MAGIC 0x01CDC0DE, set_loader_magic_value().
+The Khronos loader overwrites that first word with its own dispatch pointer;
+nothing in the driver reads it.
+
+MEASURED (host probe, a Mach-O C program dlopen'ing the dylib, no loader):
+  KosmicKrisp: negotiate -> 0, version 7. First word of VkInstance,
+  VkPhysicalDevice, VkDevice, VkQueue, VkCommandBuffer = 0x1cdc0de, before
+  and after a vkCmdFillBuffer + vkQueueSubmit + fence wait; readback
+  0xcafef00d. gipa gives vkCmdFillBuffer 0x...6e8f4 (trampoline) and
+  vkGetDeviceProcAddr gives 0x...7131c (the driver's own) -- both work.
+  MoltenVK, same probe: negotiate -> version 5, first words 0x1cdc0de,
+  readback ok.
+So the shim needs no dispatch pointer in the objects: it calls the driver
+through its own global table, as it always did for MoltenVK.
+
+MEASURED (host probe over shim/entrypoints.txt, 431 names):
+  gipa(NULL, name): 6 resolve (the globals and vk_icd*).
+  gipa(instance at apiVersion 1.4 with every instance extension but the X11
+  ones): 414 resolve, 17 NULL: vk_icdGetInstanceProcAddr (the shim fills
+  it), vkEnumerateInstanceLayerProperties (the shim's zero-layer version),
+  vkCreateHeadlessSurfaceEXT, and 14 *MVK entry points.
+  Two instances: 0 of 431 pointers differ.
+  A 1.0 instance without extensions: NULL for vkCmdBeginRendering,
+  vkQueueSubmit2, vkGetPhysicalDeviceProperties2, vkCreateMetalSurfaceEXT --
+  hence "fill what is still empty after EVERY vkCreateInstance", not only
+  after the first.
+
+3. The default path is unchanged (MEASURED)
+-------------------------------------------
+Baseline: `make shim` of HEAD dbd1657 in this worktree is byte-identical to
+the installed shim (sha256 46c9c0071fd19d2f6d70015d1f45c528faf4369a4e5ff0b14276eac00a300636,
+~/SteamARM-roots/steamroot/usr/lib64 and usr/lib/lxrt-emu, and the main
+checkout's build/). Final build of this branch: sha256
+9d49daaac45b1aa61d3c83d31e46592352bd732a9f7420db800d469ccb2b594d; rebuilding
+gives the same bytes.
+
+aarch64 guests (LXRT_ROOT=/tmp/lxrt-root, the shim picked up through
+LD_LIBRARY_PATH from a directory in that root's /tmp; no swap):
+  vkshim_test (tests/elf/vk_shim_consumer.c): baseline and new identical --
+    vkEnumerateInstanceVersion 1.4.357, 20 instance extensions, [0] Apple
+    M4; per-call cost 14.9 ns (baseline) / 11.7 ns (new).
+  vk_device (tests/elf/vk_device.c, built for aarch64): both "== vk_device:
+    ok", driver MoltenVK, driverInfo 1.4.2, raw driverVersion 10402,
+    driverID 14, apiVersion 1.3.357, readback 0xcafef00d 0x0badc0de 0x0badc0de.
+  vkpresent_test 60 frames: median 6.054 ms (baseline), 6.035 ms (new).
+  vktri_test 90 frames: median 6.058 / 6.060 ms; "triangulo dibujado".
+  vk_x11_present on the native X server :2, 570 frames FIFO: median
+    6.065 ms (baseline), 6.047 ms and 6.070 ms (new; two runs).
+x86-64 and i386 through FEX's Vulkan thunks (swap, section 7):
+  tests/elf/run_vk_device.sh: 2 passed, 0 failed (x86_64, i386), MoltenVK,
+    driverID 14, readback 0xcafef00d 0x0badc0de 0x0badc0de.
+  vk_x11_present x86-64 570 frames: median 6.055 / 6.077 ms (two runs);
+    i386 6.043 ms.
+  The steam root's x86-64 vulkaninfo (Ubuntu, 1.3.275): 1491 lines,
+    driverID DRIVER_ID_MOLTENVK, driverVersion 0.2.2210, conformance 1.4.4.0.
+  tests/win d3d11 probe: 151.8 and 153.7 fps (two runs); d3d12: 154.7 and
+    158.4 fps. (stage16 had ~162 fps; these runs add DXVK_LOG_LEVEL=info,
+    LXRT_VK_DEBUG=1 and the other guests' load. Not investigated.)
+
+4. KosmicKrisp through the shim (MEASURED)
+------------------------------------------
+What the application sees (vk_device, vk_x11_present, vulkaninfo):
+                     KosmicKrisp                  MoltenVK
+  deviceName         Apple M4                     Apple M4
+  driverName         KosmicKrisp                  MoltenVK
+  driverInfo         Mesa 26.2.3                  1.4.2
+  driverID           28 (MESA_KOSMICKRISP;        14 (MOLTENVK)
+                     Ubuntu's vulkaninfo prints
+                     UNKNOWN_VkDriverId_value28)
+  apiVersion         1.4.354                      1.3.357 to a 1.3 app,
+                                                  1.1.357 to a 1.1 app,
+                                                  1.4.357 in vulkaninfo
+  driverVersion      109060099 (26.2.3)           10402 (0.2.2210)
+  conformance        1.4.3.2                      1.4.4.0
+  InstanceVersion    1.3.354                      1.4.357
+  instance exts      16 (shim's list)             20
+  queue families     1                            4
+
+aarch64 guests, STEAMARM_VK_ICD=kosmickrisp:
+  "[shim] vk driver requested=kosmickrisp effective=kosmickrisp (icd)"
+  vkshim_test: ok, 22.0 ns per vkGetPhysicalDeviceProperties call (Mesa's
+    physical-device trampoline plus its own copy; MoltenVK 11.7-14.9 ns).
+  vk_device: "== vk_device: ok", readback 0xcafef00d 0x0badc0de 0x0badc0de,
+    device-local heap 16384 MiB; shim debug "props2 mask 0x7": KosmicKrisp
+    lacks all three extensions features.c emulates.
+  vkpresent_test (runtime window) 60 frames: median 6.022 ms.
+  vktri_test (SPIR-V -> Metal pipeline + draws) 90 frames: median 6.047 ms;
+    pipeline 148.7 ms (MoltenVK 91.8 ms cold, 3.4 ms warm -- caches differ,
+    not a comparison).
+  vk_x11_present :2, 570 frames FIFO: median 6.070, 6.064, 6.055 ms
+    (three runs); swapchain 800x600, 3 images; present modes offered
+    IMMEDIATE FIFO.
+  On screen: screencapture -x of the window region during a 1500-frame run,
+    window centre RGB (107,64,148) at +4.0 s and (180,64,75) at +6.5 s --
+    the test's clear colour (t, 0.25, 1-t) moving with t; the desktop
+    beside it (5,6,6). The frames reach the display.
+x86-64 and i386 through the FEX thunks (swap):
+  run_vk_device.sh: 2 passed, 0 failed; KosmicKrisp, driverID 28, apiVersion
+    1.4.354, readback ok, on both.
+  vk_x11_present 570 frames FIFO: x86-64 median 6.057 / 6.071 ms, i386
+    6.049 ms; "== vk x11 surface: ok".
+  vulkaninfo (x86-64): 1285 lines, exit 0; apiVersion 1.4.354,
+    driverVersion 26.2.3, driverName KosmicKrisp, driverInfo Mesa 26.2.3,
+    conformanceVersion 1.4.3.2.
+Fallbacks: STEAMARM_VK_ICD=/nonexistent/... -> "effective=moltenvk (dlopen
+  failed)"; =nosuchdriver -> "effective=moltenvk (unknown driver name)"; the
+  program then ran on MoltenVK. =/opt/homebrew/lib/libvulkan_kosmickrisp.dylib
+  (a path) -> KosmicKrisp, silent without LXRT_VK_DEBUG.
+
+5. D3D11 / D3D12 under Proton Experimental (MEASURED)
+-----------------------------------------------------
+tests/win d3d11_clear.c / d3d12_clear.c, built and run as tests/win/run.sh
+does (test prefix /tmp/fexhome/wtest, DXVK v3.1.1-27 and VKD3D-Proton of
+Proton Experimental), with DXVK_LOG_LEVEL=info LXRT_VK_DEBUG=1, 600 frames.
+The runner was a copy of run.sh's commands that kills only its own process
+tree on a timeout (none was needed).
+  Before 8a716c9 (KosmicKrisp):
+    DXVK: "Found device: Apple M4 (KosmicKrisp 26.2.3)"
+          "Skipping: Device does not support required feature 'fillModeNonSolid'"
+          "No adapters found" -> d3d11 FAIL; d3d12 FAIL as well (its DXGI is
+          DXVK's: "Failed to initialize DXVK").
+    DXVK names only the first missing feature.
+  With 8a716c9:
+                 MoltenVK      KosmicKrisp
+    d3d11        153.7 fps     158.1 fps   (an earlier run with the same
+                                            spoof, uncommitted: 170.5 fps)
+    d3d12        158.4 fps     154.1 fps   (earlier: 154.9 fps)
+  D3D11 on KosmicKrisp: feature level 11_1 maximum, 11_0 used. Logged on
+  BOTH drivers alike: DXVK "Graphics pipeline libraries not supported" and
+  "External memory features not supported"; VKD3D-Proton "Not all relevant
+  pipeline stages are supported by EXT_dgc"; FEX's guest thunk "Unknown
+  Vulkan function" for vkCreateMetalSurfaceEXT, vkGetMemoryMetalHandleEXT
+  and vkGetMemoryMetalHandlePropertiesEXT (4-6 lines per run; the thunk
+  returns NULL for names it has no signature for, and the probes ran).
+  These are clear-and-present probes, not games: the per-frame work is
+  trivial and both drivers sit near the 165 Hz refresh. They show that the
+  adapters come up and present, not relative game performance.
+
+6. Present modes (MEASURED unless marked)
+-----------------------------------------
+Offered by the surface (vk_x11_present): MoltenVK "FIFO IMMEDIATE",
+KosmicKrisp "IMMEDIATE FIFO". Neither offers MAILBOX or FIFO_RELAXED.
+Requested by the probes (shim log):
+  d3d11 (DXVK, Present(sc, 0, 0)): IMMEDIATE on both drivers.
+  d3d12 (VKD3D-Proton, Present(0,0)): FIFO on MoltenVK, IMMEDIATE on
+    KosmicKrisp, two swapchains each. Why it differs: UNKNOWN (HYPOTHESIS:
+    MoltenVK exposes VK_KHR_present_wait / present_id and KosmicKrisp does
+    not, audit "capabilities").
+vk_x11_present, 570 frames each:
+  MoltenVK FIFO       median 6.047 ms, mean 6.083
+  MoltenVK IMMEDIATE  median 6.039 ms, mean 4.858
+  KosmicKrisp FIFO    median 6.070 ms, mean 6.126
+  KosmicKrisp IMMEDIATE median 6.070 ms, mean 6.061
+  LXRT_VK_PRESENT_MODE=IMMEDIATE on a FIFO request:
+    MoltenVK "requested=FIFO passed=IMMEDIATE LXRT_VK_PRESENT_MODE=immediate
+    -> 0", median 6.060 ms, mean 6.061; KosmicKrisp median 6.010 ms, mean
+    4.637.
+  LXRT_VK_PRESENT_MODE=mailbox: "passed=FIFO ... (LXRT_VK_PRESENT_MODE not
+    understood: FIFO or IMMEDIATE)".
+  IMMEDIATE never moved the median off the 165 Hz refresh (6.06 ms); the
+  mean dropped below it in some runs and not in others, on both drivers.
+  Whether IMMEDIATE tears or unlocks through the cross-process layer is
+  still UNKNOWN; this probe waits for its fence every frame, so it cannot
+  run ahead of acquire. The "surface does not offer it" branch was not
+  exercised (both modes are always offered on Metal).
+
+7. The steam root's shim: swap protocol (MEASURED)
+--------------------------------------------------
+The x86 probes load the aarch64 shim from the Steam root, not from the
+worktree. Two copies are used: usr/lib64/libvulkan.so.1 (FEX-gb from
+/tmp/lxrt-root has no RPATH -- the copy tests/elf/run_vk_device.sh and
+tests/win reach) and usr/lib/lxrt-emu/libvulkan.so.1 (the Steam root's FEX
+has RPATH /usr/lib/lxrt-emu). A first swap of only lxrt-emu left the probes
+on the original shim (no "[shim] vk driver" line, MoltenVK despite
+STEAMARM_VK_ICD) -- that is how the second copy was found.
+Each session: sha256 of both recorded, both copied to a backup outside the
+root, originals renamed aside (running guests keep their inode), the test
+build copied in by rename, probes run, test build removed, originals renamed
+back, sha256 checked. Seven sessions (x86 vk_device twice -- the first
+swapped lxrt-emu only --, x86 X11 present, vulkaninfo, D3D, the uncommitted
+fillModeNonSolid experiment, final); every restore printed
+  46c9c0071fd19d2f6d70015d1f45c528faf4369a4e5ff0b14276eac00a300636 (before)
+  46c9c0071fd19d2f6d70015d1f45c528faf4369a4e5ff0b14276eac00a300636 (after)
+for every file swapped. No Steam client was running from that root (lsof: no
+process had the shim open before the first swap).
+
+Not done / open
+---------------
+- Steam's launch path: pressure-vessel passing STEAMARM_VK_ICD (and the
+  LXRT_VK_* variables) to the game is UNVERIFIED; the host-getenv read means
+  the variable must be in the environment the game process is exec'ed with.
+- Launcher: no settings mapping or detection was added (other stream). The
+  marker for detection is the literal STEAMARM_VK_ICD in libvulkan.so.1.
+- Not run with KosmicKrisp: D3D9, the 32-bit D3D probes, any game, Steam's
+  own UI. Wireframe (fillModeNonSolid spoofed) is UNKNOWN on KosmicKrisp.
+- tests/elf/run.sh was not run: its Vulkan sections use /tmp/lxrt-root's
+  older installed shim (sha256 b40109c8...), and that root has no
+  vulkaninfo; the same samples were run by hand above with both shims.
+- The installed shims were restored to the original; installing the new one
+  (scripts/install-steamroot-gfx.sh) is left to the user.
+- Present mode: the effective Metal state (CAMetalLayer.displaySyncEnabled)
+  is not reported; that needs a runtime bridge call (audit proposal), not
+  made here (runtime/ untouched).

@@ -73,6 +73,10 @@ void lxrt_mvk_vkDestroySurfaceKHR(VkInstance, VkSurfaceKHR, const void *);
 VkResult lxrt_mvk_vkGetPhysicalDeviceSurfaceCapabilitiesKHR(VkPhysicalDevice, VkSurfaceKHR, void *);
 VkResult lxrt_mvk_vkGetPhysicalDeviceSurfaceCapabilities2KHR(VkPhysicalDevice, const VkPhysicalDeviceSurfaceInfo2KHR *, void *);
 VkResult vkCreateMetalSurfaceEXT(VkInstance, const VkMetalSurfaceCreateInfoEXT *, const void *, VkSurfaceKHR *);
+// vulkan_shim.c (generated): a driver reached through the loader-ICD interface.
+extern int lxrt_vk_icd;
+void lxrt_vk_icd_fill(VkInstance);
+int lxrt_vk_missing(const char *name);
 
 // glibc, resolved from the process when the shim loads (no DT_NEEDED: -nostdlib).
 extern void *dlopen(const char *, int);
@@ -266,10 +270,61 @@ VkResult lxrt_inner_vkGetPhysicalDeviceSurfaceCapabilities2KHR(VkPhysicalDevice 
 // ---------------------------------------------------------------- instance
 static const char *const k_x11_exts[] = { "VK_KHR_xlib_surface", "VK_KHR_xcb_surface" };
 
+// ICD mode: Mesa's drivers list the X11 surface extensions themselves, for
+// their own X11 code (MEASURED: KosmicKrisp lists VK_KHR_xcb_surface and
+// VK_KHR_xlib_surface), so the shim adds its two only when missing; the
+// surfaces are still the shim's. VK_EXT_acquire_xlib_display is left out: it
+// would hand the driver's host X11 code a guest Display.
+static VkResult enumerate_icd(uint32_t *count, VkExtensionProperties *props)
+{
+    uint32_t n = 0;
+    VkResult r = lxrt_mvk_vkEnumerateInstanceExtensionProperties(0, &n, 0);
+    if (r != VK_SUCCESS)
+        return r;
+    VkExtensionProperties *all = malloc(sizeof *all * (n + 2));
+    if (!all)
+        return VK_ERROR_OUT_OF_HOST_MEMORY;
+    r = lxrt_mvk_vkEnumerateInstanceExtensionProperties(0, &n, all);
+    if (r != VK_SUCCESS && r != VK_INCOMPLETE) {
+        free(all);
+        return r;
+    }
+    uint32_t k = 0;
+    int have[2] = { 0, 0 };
+    for (uint32_t i = 0; i < n; i++) {
+        if (s_eq(all[i].extensionName, "VK_EXT_acquire_xlib_display"))
+            continue;
+        for (int x = 0; x < 2; x++)
+            if (s_eq(all[i].extensionName, k_x11_exts[x]))
+                have[x] = 1;
+        all[k++] = all[i];
+    }
+    for (int x = 0; x < 2; x++)
+        if (!have[x]) {
+            s_copy(all[k].extensionName, k_x11_exts[x], sizeof all[k].extensionName);
+            all[k++].specVersion = 6;
+        }
+    r = VK_SUCCESS;
+    if (!props) {
+        *count = k;
+    } else {
+        uint32_t m = *count < k ? *count : k;
+        for (uint32_t i = 0; i < m; i++)
+            props[i] = all[i];
+        *count = m;
+        if (m < k)
+            r = VK_INCOMPLETE;
+    }
+    free(all);
+    return r;
+}
+
 VkResult lxrt_inner_vkEnumerateInstanceExtensionProperties(const char *layer, uint32_t *count, VkExtensionProperties *props)
 {
     if (layer)
         return lxrt_mvk_vkEnumerateInstanceExtensionProperties(layer, count, props);
+    if (lxrt_vk_icd)
+        return enumerate_icd(count, props);
     uint32_t n = 0;
     VkResult r = lxrt_mvk_vkEnumerateInstanceExtensionProperties(0, &n, 0);
     if (r != VK_SUCCESS)
@@ -316,6 +371,8 @@ VkResult lxrt_inner_vkCreateInstance(const VkInstanceCreateInfo *ci, const void 
     c.ppEnabledExtensionNames = ext;
     VkResult r = lxrt_mvk_vkCreateInstance(&c, alloc, out);
     free(ext);
+    if (r == VK_SUCCESS)
+        lxrt_vk_icd_fill(*out);
     return r;
 }
 
@@ -325,7 +382,9 @@ PFN_vkVoidFunction lxrt_inner_vkGetInstanceProcAddr(VkInstance inst, const char 
     // then this file's or features.c's version, or MoltenVK's). Handing out
     // MoltenVK's own pointers would skip the rebasing.
     void *f = lxrt_rebase_proc(name);
-    if (!f)
+    if (f && lxrt_vk_missing(name))
+        f = 0;
+    else if (!f)
         f = (void *)lxrt_mvk_vkGetInstanceProcAddr(inst, name);
     return (PFN_vkVoidFunction)lxrt_tramp32(f);
 }

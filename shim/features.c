@@ -13,6 +13,14 @@
 //    geometry shader fails at pipeline creation instead of at start-up
 //    (HYPOTHESIS: most D3D11 games do not; the real fix is geometry-shader
 //    emulation in MoltenVK).
+//    fillModeNonSolid the same way, for KosmicKrisp (STEAMARM_VK_ICD), which
+//    reports it false (MoltenVK reports it true, so nothing changes there).
+//    DXVK refused the adapter, D3D11 and D3D12 (whose DXGI is DXVK's) alike:
+//    MEASURED "Skipping: Device does not support required feature
+//    'fillModeNonSolid'"; with it reported, both probes ran (stage22). A
+//    wireframe (D3D11_FILL_WIREFRAME) pipeline on such a device is invalid
+//    usage: what KosmicKrisp does with it is UNKNOWN (HYPOTHESIS: lines work,
+//    Metal has a lines fill mode; points do not).
 //
 // 2. VK_EXT_depth_clip_enable (DXVK: "required feature 'depthClipEnable'").
 //    Metal has the same switch (depth clip mode clip/clamp), which MoltenVK
@@ -41,8 +49,8 @@ typedef uint64_t VkPipeline;
 #define VK_INCOMPLETE 5
 
 #define N_FEATURES 55
-enum { F_GEOMETRY_SHADER = 4, F_DEPTH_CLAMP = 11, F_SHADER_CULL_DISTANCE = 38 };
-static const int k_spoof[] = { F_GEOMETRY_SHADER, F_SHADER_CULL_DISTANCE };
+enum { F_GEOMETRY_SHADER = 4, F_DEPTH_CLAMP = 11, F_FILL_MODE_NON_SOLID = 13, F_SHADER_CULL_DISTANCE = 38 };
+static const int k_spoof[] = { F_GEOMETRY_SHADER, F_FILL_MODE_NON_SOLID, F_SHADER_CULL_DISTANCE };
 #define N_SPOOF (sizeof k_spoof / sizeof k_spoof[0])
 
 #define STYPE_PHYSICAL_DEVICE_FEATURES_2                  1000059000
@@ -364,7 +372,7 @@ static void chain_relink(struct unlink *undo, int n)
 // Clear, in the caller's own structures, every spoofed feature the device
 // does not really have, drop the emulated extensions and their feature
 // structures, call MoltenVK, and put everything back.
-VkResult lxrt_inner_vkCreateDevice(VkPhysicalDevice pd, const VkDeviceCreateInfo *cci, const void *alloc, VkDevice *out)
+static VkResult create_device(VkPhysicalDevice pd, const VkDeviceCreateInfo *cci, const void *alloc, VkDevice *out)
 {
     if (!spoof_on() || !cci)
         return lxrt_mvk_vkCreateDevice(pd, cci, alloc, out);
@@ -443,6 +451,16 @@ VkResult lxrt_inner_vkCreateDevice(VkPhysicalDevice pd, const VkDeviceCreateInfo
     return r;
 }
 
+void lxrt_note_device(VkDevice dev, VkPhysicalDevice pd);   // present.c
+
+VkResult lxrt_inner_vkCreateDevice(VkPhysicalDevice pd, const VkDeviceCreateInfo *cci, const void *alloc, VkDevice *out)
+{
+    VkResult r = create_device(pd, cci, alloc, out);
+    if (r == VK_SUCCESS && out)
+        lxrt_note_device(*out, pd);
+    return r;
+}
+
 // Depth clip state -> depth clamp, per pipeline, then restore.
 VkResult lxrt_inner_vkCreateGraphicsPipelines(VkDevice dev, VkPipelineCache cache, uint32_t n,
                                    const VkGraphicsPipelineCreateInfo *cis, const void *alloc, VkPipeline *out)
@@ -481,9 +499,12 @@ VkResult lxrt_inner_vkCreateGraphicsPipelines(VkDevice dev, VkPipelineCache cach
 void *lxrt_rebase_proc(const char *name);   // vk_rebase.c (generated)
 
 void *lxrt_tramp32(void *fn);                // map32.c: 32-bit guests only
+int lxrt_vk_missing(const char *name);       // vulkan_shim.c (generated): ICD mode only
 
 void *lxrt_inner_vkGetDeviceProcAddr(VkDevice dev, const char *name)
 {
     void *f = lxrt_rebase_proc(name);
+    if (f && lxrt_vk_missing(name))
+        return 0;
     return lxrt_tramp32(f ? f : lxrt_mvk_vkGetDeviceProcAddr(dev, name));
 }

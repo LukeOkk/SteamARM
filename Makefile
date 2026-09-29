@@ -74,6 +74,7 @@ test-lxrt: lxrt
 
 # ---------------------------------------------------------------- vulkan shim
 # An ELF libvulkan.so.1 whose entry points tail-call into Mach-O MoltenVK
+# (or, with STEAMARM_VK_ICD=kosmickrisp, Mesa's KosmicKrisp: shim/gen.py)
 # through the runtime's host bridge. Built on the host: clang+lld can target
 # Linux aarch64 directly, no cross toolchain and no guest needed.
 LXRT_TARGET := aarch64-unknown-linux-gnu
@@ -93,12 +94,14 @@ build/shim-overrides.txt: shim/overrides.txt build/vk_rebase.names
 shim/vulkan_shim.S shim/vulkan_shim.c: shim/gen.py shim/entrypoints.txt build/shim-overrides.txt
 	python3 shim/gen.py shim/entrypoints.txt shim/vulkan_shim.S shim/vulkan_shim.c build/shim-overrides.txt
 
-build/libvulkan.so.1: shim/vulkan_shim.S shim/vulkan_shim.c shim/wsi.c shim/features.c shim/fallback.c shim/map32.c shim/memcap.c build/vk_rebase.c runtime/include/lxrt_host.h
+SHIM_SRCS := shim/vulkan_shim.S shim/vulkan_shim.c shim/wsi.c shim/features.c shim/fallback.c shim/map32.c \
+             shim/memcap.c shim/present.c build/vk_rebase.c
+build/libvulkan.so.1: $(SHIM_SRCS) runtime/include/lxrt_host.h
 	@mkdir -p build
 	$(CC) -target $(LXRT_TARGET) -shared -fPIC -nostdlib -O2 \
 	      -fuse-ld=$(CROSS_LD) -Iruntime/include -I$(VK_HEADERS)/include \
 	      -Wl,-soname,libvulkan.so.1 \
-	      -o $@.new shim/vulkan_shim.S shim/vulkan_shim.c shim/wsi.c shim/features.c shim/fallback.c shim/map32.c shim/memcap.c build/vk_rebase.c
+	      -o $@.new $(SHIM_SRCS)
 	@mv -f $@.new $@
 
 .PHONY: shim

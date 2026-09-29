@@ -53,9 +53,22 @@ static double now_ms(void) {
     return t.tv_sec * 1000.0 + t.tv_nsec / 1e6;
 }
 
+static const char *mode_name(VkPresentModeKHR m) {
+    switch ((int)m) {
+    case VK_PRESENT_MODE_IMMEDIATE_KHR: return "IMMEDIATE";
+    case VK_PRESENT_MODE_MAILBOX_KHR: return "MAILBOX";
+    case VK_PRESENT_MODE_FIFO_KHR: return "FIFO";
+    case VK_PRESENT_MODE_FIFO_RELAXED_KHR: return "FIFO_RELAXED";
+    default: return "?";
+    }
+}
+
+/* Usage: vk_x11_present [frames] [fifo|immediate] */
 int main(int argc, char **argv) {
     setvbuf(stdout, NULL, _IONBF, 0);
     int frames = argc > 1 ? atoi(argv[1]) : 240;
+    VkPresentModeKHR mode = argc > 2 && (argv[2][0] | 0x20) == 'i' ? VK_PRESENT_MODE_IMMEDIATE_KHR
+                                                                  : VK_PRESENT_MODE_FIFO_KHR;
     uint32_t dw = 800, dh = 600;
 
     xcb_connection_t *c = xcb_connect(NULL, NULL);
@@ -100,6 +113,13 @@ int main(int argc, char **argv) {
     CK(vkEnumeratePhysicalDevices(inst, &ndev, &phys));
     VkPhysicalDeviceProperties props; vkGetPhysicalDeviceProperties(phys, &props);
     printf("GPU: %s\n", props.deviceName);
+    /* As the application sees them (never edited by the shim). */
+    VkPhysicalDeviceDriverProperties drv = { .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DRIVER_PROPERTIES };
+    VkPhysicalDeviceProperties2 p2 = { .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2, .pNext = &drv };
+    vkGetPhysicalDeviceProperties2(phys, &p2);
+    printf("driver %s (%s), driverID %d, apiVersion %u.%u.%u, driverVersion %u\n", drv.driverName, drv.driverInfo,
+           (int)drv.driverID, VK_API_VERSION_MAJOR(p2.properties.apiVersion), VK_API_VERSION_MINOR(p2.properties.apiVersion),
+           VK_API_VERSION_PATCH(p2.properties.apiVersion), p2.properties.driverVersion);
 
     uint32_t nq = 0; vkGetPhysicalDeviceQueueFamilyProperties(phys, &nq, NULL);
     VkQueueFamilyProperties *qf = calloc(nq, sizeof *qf);
@@ -112,6 +132,11 @@ int main(int argc, char **argv) {
     }
     if (qi == UINT32_MAX) { printf("ninguna cola presenta\n"); return 1; }
     printf("familia de colas %u (grafica + present)\n", qi);
+    VkPresentModeKHR modes[8]; uint32_t nm = 8;
+    vkGetPhysicalDeviceSurfacePresentModesKHR(phys, surf, &nm, modes);
+    printf("present modes offered:");
+    for (uint32_t i = 0; i < nm && i < 8; i++) printf(" %s", mode_name(modes[i]));
+    printf("; requested %s\n", mode_name(mode));
 
     float prio = 1.0f;
     const char *dev_ext[] = { "VK_KHR_swapchain" };
@@ -140,7 +165,7 @@ int main(int argc, char **argv) {
         .imageSharingMode = VK_SHARING_MODE_EXCLUSIVE,
         .preTransform = caps.currentTransform,
         .compositeAlpha = VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR,
-        .presentMode = VK_PRESENT_MODE_FIFO_KHR, .clipped = VK_TRUE };
+        .presentMode = mode, .clipped = VK_TRUE };
     VkSwapchainKHR sc; CK(vkCreateSwapchainKHR(dev, &sci, NULL, &sc));
     uint32_t got = 0; vkGetSwapchainImagesKHR(dev, sc, &got, NULL);
     VkImage *imgs = calloc(got, sizeof *imgs);
