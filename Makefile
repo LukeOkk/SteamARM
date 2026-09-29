@@ -145,7 +145,9 @@ $(LAUNCHER_BIN): $(LAUNCHER_SRCS) launcher/SDLShim.h
 # run-app.sh's runner choice, the session wrapper (scripts/session.py), a
 # root's guest environment (scripts/guest-env.sh), the root builders' path
 # checks and swap (scripts/roots.sh: mkarmroot.sh, mkframeroot.sh) and what
-# run-steam-arm64.sh links, refuses and stops. All of them also run on Linux
+# run-steam-arm64.sh links, refuses and stops, and the arm64 client's
+# compatibility tool for x86 Proton through FEX (tools/steamarm-fex-proton,
+# its installer and its dry run). All of them also run on Linux
 # (guest_env.sh skips its scripts/mkframeroot.sh part there; mkarmroot.sh and
 # run_steam_arm64.sh skip: APFS clones, launchd reparenting).
 .PHONY: test-launcher-core
@@ -161,6 +163,7 @@ test-launcher-core:
 	tests/launcher/guest_env.sh
 	tests/launcher/mkarmroot.sh
 	tests/launcher/run_steam_arm64.sh
+	tests/launcher/fex_proton_tool.sh
 
 .PHONY: launcher
 launcher: $(LAUNCHER_BIN) launcher/Info.plist.in

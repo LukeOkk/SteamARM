@@ -84,6 +84,9 @@ guides, and nothing in them is ready for players yet. Start with the plan,
   [STEAM_FRAME_SNAPSHOT_2026-09-29.md](docs/STEAM_FRAME_SNAPSHOT_2026-09-29.md)
   (web research on Frame releases and Holo Core, checked against the Mac's
   records).
+- Games under the native client: x86 Proton through FEX, a compatibility
+  tool for it (experimental, probes only):
+  [FEX_GAME_BOUNDARY.md](docs/FEX_GAME_BOUNDARY.md).
 - Valve's ARM64 tools:
   [STEAM_FRAME_COMPAT_TOOLS.md](docs/STEAM_FRAME_COMPAT_TOOLS.md),
   [STEAM_RUNTIME_4_ARM64.md](docs/STEAM_RUNTIME_4_ARM64.md),
@@ -100,7 +103,8 @@ scripts/make-release.sh     # the downloadable .dmg, in build/release/
 
 Tests: `tests/elf/run.sh`, `tests/elf/run_i386.sh`,
 `tests/elf/run_vk_device.sh`, `tests/win/run.sh`,
-`tests/win/run_steam_path.sh`, `tests/x18_preserve/run.sh`,
+`tests/win/run_steam_path.sh`, `tests/win/run_fex_boundary.sh`,
+`tests/x18_preserve/run.sh`,
 `tests/steamframe_image/run.sh` (Linux), `tests/steamframe_image/redact.sh`,
 `tests/audio/run.sh`, `tests/launcher/safeguard.sh`, `make test-launcher-core`,
 `make test-arm64`, `python3 -m unittest tests/test_docs_records.py` (the

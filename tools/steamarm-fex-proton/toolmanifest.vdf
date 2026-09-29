@@ -1,0 +1,6 @@
+"manifest"
+{
+  "version" "2"
+  "commandline" "/steamarm-fex-proton %verb%"
+  "compatmanager_layer_name" "proton"
+}
