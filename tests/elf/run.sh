@@ -1180,7 +1180,7 @@ if [ -f "$STAGE/usr/lib64/libc.a" ] && [ -n "$GCCDIR" ]; then
                 out=$(deadline 60 ./build/lxrun "$PWD/build/android_bionic_rt" 2>&1); rc=$?
             fi
             if [ "$rc" -eq 0 ] && grep -q '== android bionic runtime: ok' <<<"$out"; then
-                ok "ANDROID_BIONIC_RT ($pg pages): $(grep -c '^  ok ' <<<"$out") checks (tagged-address prctl, msync, 4 KiB mremap FIXED/shrink/move)"
+                ok "ANDROID_BIONIC_RT ($pg pages): $(grep -c '^  ok ' <<<"$out") checks (tagged-address prctl, msync, 4 KiB mremap, clone TLS/CLONE_FILES, rt_tgsigqueueinfo)"
             else bad "ANDROID_BIONIC_RT ($pg pages)" "rc=$rc $(grep -E 'MAL|SIGBUS|SIGSEGV|lxrun:' <<<"$out" | head -6)"; fi
         done
         out=$(LXRT_TLS_KEEP_LOG=1 deadline 120 ./build/lxrun "$PWD/build/android_bionic_rt" tlskeep 2>&1); rc=$?

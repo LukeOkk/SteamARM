@@ -470,6 +470,22 @@ long lxrt_clone(uint64_t flags, uint64_t child_stack, uint32_t *ptid,
         return lxrt_fork();
     if (!child_stack)
         return LERR(EINVAL);
+    // A thread with its own copy of the descriptor table (no CLONE_FILES)
+    // cannot be made: a Darwin thread shares its process's table. bionic's
+    // crash handler clones such a "pseudothread" (debuggerd_handler.cpp,
+    // "pthread_create without CLONE_FILES") and closes every descriptor in
+    // it; run as an ordinary thread here it closed the process's stdin,
+    // stdout and stderr, and the crash ended in _exit(1) instead of the
+    // signal (stage 25). Refused, the handler gives up and the process dies
+    // by its signal, as Linux reports it.
+    if (!(flags & CLONE_FILES)) {
+        extern bool lxrt_trace_on(void);
+        if (lxrt_trace_on())
+            fprintf(lxrt_trace_stream(), "[lxrt] clone: a thread without CLONE_FILES (flags 0x%llx) "
+                            "cannot have its own descriptor table: EINVAL\n",
+                    (unsigned long long)flags);
+        return LERR(EINVAL);
+    }
 
     pthread_once(&g_once, gt_init);
     int tid = next_tid();
@@ -481,10 +497,15 @@ long lxrt_clone(uint64_t flags, uint64_t child_stack, uint32_t *ptid,
     ctx->x18 = lxrt_x18_get();
     ctx->rt_mask = lxrt_rt_mask_get();
     ctx->stack = child_stack;
-    ctx->tls = tls;
+    // Without CLONE_SETTLS the child starts with the parent's thread pointer:
+    // Linux copies TPIDR_EL0 into the new task (arm64 copy_thread). bionic's
+    // crash handler clones such a "pseudothread" (debuggerd_handler.cpp);
+    // started with 0 here, its first stack-protector load read address 0x28
+    // and every Android abort became a recursive SIGSEGV (stage 25).
+    ctx->tls = (flags & CLONE_SETTLS) ? tls : lxrt_tls_get();
     ctx->ctid = ctid;
     ctx->tid = tid;
-    ctx->set_tls = (flags & CLONE_SETTLS) != 0;
+    ctx->set_tls = true;
     ctx->clear_ctid = (flags & CLONE_CHILD_CLEARTID) != 0;
 
     // Both tid write-backs happen before the thread starts, so the parent can

@@ -3702,6 +3702,18 @@ restart:
             abort_backtrace(r);
         ret = lxrt_tgkill((int)a0, (int)a1, (int)a2);
         break;
+    case 240: // rt_tgsigqueueinfo(tgid, tid, sig, siginfo)
+    case 138: // rt_sigqueueinfo(pid, sig, siginfo)
+        // Sent like tgkill/kill; the caller's siginfo (si_code, si_value)
+        // is not carried, the handler sees what tgkill gives. bionic's
+        // crash handler (debuggerd_handler.cpp, resend_signal) re-raises a
+        // fatal signal this way after resetting it to SIG_DFL; ENOSYS sent
+        // it into async_safe_fatal and every Android abort ended as
+        // _exit(127) instead of SIGABRT (stage 25).
+        if (!a2 && nr == 240) { ret = LERR(EFAULT); break; }
+        ret = nr == 240 ? lxrt_tgkill((int)a0, (int)a1, (int)a2)
+                        : lxrt_kill((int)a0, (int)a1);
+        break;
     case LNR_rt_sigaction:
         ret = lxrt_rt_sigaction((int)a0, (const void *)a1, (void *)a2, (size_t)a3);
         break;

@@ -12,6 +12,12 @@
 //            bionic's CFI shadow does (ShadowWrite): the bytes arrive, the
 //            neighbours keep theirs, the source is gone; a 4 KiB-aligned
 //            shrink and move without FIXED
+//   clone    a thread cloned without CLONE_SETTLS starts with its parent's
+//            thread pointer (bionic's crash handler relies on it), and one
+//            without CLONE_FILES is refused with EINVAL (a Darwin thread
+//            cannot have its own descriptor table)
+//   sigqueue rt_tgsigqueueinfo to this thread runs the handler (bionic's
+//            abort raises SIGABRT that way)
 //   tlskeep  (argument "tlskeep") a TPIDR_EL0 read inside
 //            [BORINGSSL_bcm_text_start, BORINGSSL_bcm_text_end) is left as
 //            it is (the word is still `mrs x9, tpidr_el0`), and loads
@@ -30,6 +36,9 @@
 #include <string.h>
 #include <sys/mman.h>
 #include <sys/prctl.h>
+#include <sys/syscall.h>
+#include <signal.h>
+#include <linux/futex.h>
 #include <unistd.h>
 
 static int bad;
@@ -105,6 +114,21 @@ static int tlskeep(void)
     return bad;
 }
 
+static volatile uint64_t child_tp;
+static int clone_child(void *arg)
+{
+    (void)arg;
+    child_tp = (uint64_t)__builtin_thread_pointer();
+    return 0;
+}
+
+static volatile int got_usr1;
+static void on_usr1(int sig, siginfo_t *si, void *uc)
+{
+    (void)sig; (void)si; (void)uc;
+    got_usr1 = 1;
+}
+
 int main(int argc, char **argv)
 {
     setvbuf(stdout, NULL, _IONBF, 0);       // every line out before a crash
@@ -169,6 +193,38 @@ int main(int argc, char **argv)
     check(p != MAP_FAILED && ((uint8_t *)p)[1] == (uint8_t)(1 * 7 + 3) && ((uint8_t *)p)[0] == 0x5a,
           "mremap grow with MAYMOVE moves the bytes");
     (void)s4;
+
+    // clone: no CLONE_SETTLS -> the parent's thread pointer; no CLONE_FILES
+    // -> refused.
+    static char cstack[64 * 1024] __attribute__((aligned(16)));
+    pid_t ctid = 0;
+    int cflags = CLONE_VM | CLONE_FS | CLONE_FILES | CLONE_SIGHAND | CLONE_THREAD |
+                 CLONE_SYSVSEM | CLONE_CHILD_SETTID | CLONE_CHILD_CLEARTID;
+    int ct = clone(clone_child, cstack + sizeof cstack, cflags, NULL, NULL, NULL, &ctid);
+    if (ct > 0)
+        while (__atomic_load_n(&ctid, __ATOMIC_ACQUIRE) != 0)
+            syscall(SYS_futex, &ctid, FUTEX_WAIT, ct, NULL, NULL, 0);
+    check(ct > 0 && child_tp == (uint64_t)__builtin_thread_pointer(),
+          "clone without CLONE_SETTLS: the thread starts with its parent's thread pointer");
+    errno = 0;
+    ct = clone(clone_child, cstack + sizeof cstack, cflags & ~CLONE_FILES, NULL, NULL, NULL, &ctid);
+    check(ct == -1 && errno == EINVAL, "clone of a thread without CLONE_FILES -> EINVAL (no per-thread descriptor table)");
+
+    // rt_tgsigqueueinfo to ourselves.
+    struct sigaction sa;
+    memset(&sa, 0, sizeof sa);
+    sa.sa_sigaction = on_usr1;
+    sa.sa_flags = SA_SIGINFO;
+    sigaction(SIGUSR1, &sa, NULL);
+    siginfo_t qi;
+    memset(&qi, 0, sizeof qi);
+    qi.si_signo = SIGUSR1;
+    qi.si_code = SI_QUEUE;
+    qi.si_pid = getpid();
+    long qr = syscall(SYS_rt_tgsigqueueinfo, getpid(), (pid_t)syscall(SYS_gettid), SIGUSR1, &qi);
+    for (int i = 0; i < 100 && !got_usr1; i++)
+        usleep(1000);
+    check(qr == 0 && got_usr1, "rt_tgsigqueueinfo(self, SIGUSR1) runs the handler");
 
     printf(bad ? "== android bionic runtime: FAIL (%d)\n" : "== android bionic runtime: ok\n", bad);
     return bad ? 1 : 0;
