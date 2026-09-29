@@ -22,19 +22,22 @@ settings_env = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(settings_env)
 
 
-def kosmickrisp(icd_dirs=ICD_DIRS, macos=None, load=True):
-    version = macos if macos is not None else platform.mac_ver()[0]
-    try:
-        os_ok = int(version.split(".")[0]) >= 26
-    except (ValueError, IndexError):
-        os_ok = False
-    result = {"icd_json": "", "library": "", "version": "", "api_version": "",
-              "os_ok": os_ok, "exports_icd": False}
+# What the Vulkan shim dlopens for STEAMARM_VK_ICD=kosmickrisp, in its order
+# (k_kk_paths in shim/gen.py; tests/test_compat_status.py keeps the two the
+# same). settings-env.py passes only that name, so a KosmicKrisp anywhere else
+# is one the shim never loads.
+SHIM_KK_PATHS = ("/opt/homebrew/lib/libvulkan_kosmickrisp.dylib",
+                 "/usr/local/lib/libvulkan_kosmickrisp.dylib")
+
+
+def icd_manifests(icd_dirs=ICD_DIRS):
+    """(manifest, ICD object, library path it names) for every KosmicKrisp ICD
+    manifest; the path resolved as the Vulkan loader would, None when it does
+    not exist."""
     for directory in icd_dirs:
         for manifest in sorted(Path(directory).expanduser().glob("*.json")):
             try:
-                data = json.loads(manifest.read_text())
-                icd = data["ICD"]
+                icd = json.loads(manifest.read_text())["ICD"]
                 library_path = icd["library_path"]
                 if not isinstance(library_path, str) or "kosmickrisp" not in os.path.basename(library_path).lower():
                     continue
@@ -47,21 +50,43 @@ def kosmickrisp(icd_dirs=ICD_DIRS, macos=None, load=True):
             else:
                 candidates = [str(Path(base) / library_path) for base in
                               ("/opt/homebrew/lib", "/usr/local/lib")]
-            for candidate in candidates:
-                if not os.path.isfile(candidate):
-                    continue
-                library = os.path.realpath(candidate)
-                match = re.search(r"/Cellar/mesa/([^/]+)/", library)
-                result.update(icd_json=str(manifest), library=library,
-                              version=match.group(1) if match else "",
-                              api_version=str(icd.get("api_version") or ""))
-                if load:
-                    try:
-                        getattr(ctypes.CDLL(library), "vk_icdGetInstanceProcAddr")
-                        result["exports_icd"] = True
-                    except (OSError, AttributeError):
-                        pass
-                return result
+            found = next((c for c in candidates if os.path.isfile(c)), None)
+            yield manifest, icd, found
+
+
+def kosmickrisp(icd_dirs=ICD_DIRS, macos=None, load=True, shim_paths=SHIM_KK_PATHS):
+    """The KosmicKrisp the shim would load, if any: the first of shim_paths
+    that loads (as the shim's dlopen loop), and whether it exports the ICD
+    entry point the shim binds. An ICD manifest only adds its details, or
+    names a KosmicKrisp elsewhere ("found_elsewhere") that the shim ignores."""
+    version = macos if macos is not None else platform.mac_ver()[0]
+    try:
+        os_ok = int(version.split(".")[0]) >= 26
+    except (ValueError, IndexError):
+        os_ok = False
+    result = {"icd_json": "", "library": "", "version": "", "api_version": "",
+              "os_ok": os_ok, "exports_icd": False, "found_elsewhere": ""}
+    manifests = list(icd_manifests(icd_dirs))
+    for candidate in shim_paths:
+        if not os.path.isfile(candidate):
+            continue
+        handle = None
+        if load:
+            try:
+                handle = ctypes.CDLL(candidate)
+            except OSError:
+                continue   # the shim's dlopen fails too, and it tries the next path
+        library = os.path.realpath(candidate)
+        match = re.search(r"/Cellar/mesa/([^/]+)/", library)
+        result.update(library=library, version=match.group(1) if match else "")
+        for manifest, icd, found in manifests:
+            if found and os.path.realpath(found) == library:
+                result.update(icd_json=str(manifest), api_version=str(icd.get("api_version") or ""))
+                break
+        if handle is not None:
+            result["exports_icd"] = hasattr(handle, "vk_icdGetInstanceProcAddr")
+        return result
+    result["found_elsewhere"] = next((os.path.realpath(found) for _, _, found in manifests if found), "")
     return result
 
 
@@ -193,7 +218,12 @@ def main():
     label = kk["version"] or "versión desconocida"
     if kk["library"] and not report["shim"]["icd_selection"]:
         label += " (sin selección de ICD en el shim)"
-    print("KosmicKrisp: " + (label if kk["library"] else "no instalado"))
+    if kk["library"]:
+        print("KosmicKrisp: " + label)
+    elif kk["found_elsewhere"]:
+        print("KosmicKrisp: en %s, que el shim no carga (solo %s)" % (kk["found_elsewhere"], " o ".join(SHIM_KK_PATHS)))
+    else:
+        print("KosmicKrisp: no instalado")
     print("Shim Vulkan: selección de ICD " + ("sí" if report["shim"]["icd_selection"] else "no"))
     pres = report["presentation"]
     print("Pantallas: X11 nativo %s, Xvnc %s, Compartir pantalla %s" % tuple(
