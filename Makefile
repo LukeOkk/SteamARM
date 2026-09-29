@@ -160,7 +160,9 @@ $(LAUNCHER_BIN): $(LAUNCHER_SRCS) launcher/SDLShim.h
 # checks and swap (scripts/roots.sh: mkarmroot.sh, mkframeroot.sh) and what
 # run-steam-arm64.sh links, refuses and stops, and the arm64 client's
 # compatibility tool for x86 Proton through FEX (tools/steamarm-fex-proton,
-# its installer and its dry run). All of them also run on Linux
+# its installer and its dry run), apps.json compatibility of AppEntry, and
+# the APK inspector and Android package manager on synthetic APKs
+# (scripts/apk-inspect.py, scripts/android-pm.py). All of them also run on Linux
 # (guest_env.sh skips its scripts/mkframeroot.sh part there; mkarmroot.sh and
 # run_steam_arm64.sh skip: APFS clones, launchd reparenting).
 .PHONY: test-launcher-core
@@ -169,7 +171,11 @@ test-launcher-core:
 	swiftc -parse-as-library -swift-version 5 launcher/ApplicationCore.swift \
 	    launcher/tests/ApplicationCoreTests.swift -o build/application-core-tests
 	build/application-core-tests
-	python3 -m unittest tests/test_settings_env.py tests/test_compat_status.py tests/test_docs_records.py
+	swiftc -parse-as-library -swift-version 5 launcher/ApplicationCore.swift launcher/Models.swift \
+	    launcher/tests/AppEntryTests.swift -o build/app-entry-tests
+	build/app-entry-tests
+	python3 -m unittest tests/test_settings_env.py tests/test_compat_status.py tests/test_docs_records.py \
+	    tests/test_apk_inspect.py tests/test_android_pm.py
 	tests/launcher/run_app_dispatch.sh
 	tests/launcher/session.sh
 	tests/launcher/safeguard.sh

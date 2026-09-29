@@ -20,7 +20,9 @@ cat > "$W/launcher/apps.json" <<'JSON'
  {"id":"kk","name":"kk","command":["/opt/apps/k/run"],"root":"/tmp/lxrt-steamroot","fexRootfs":"/","env":{},"kind":"custom","overrides":{"graphicsBackend":"vulkanKosmicKrisp","synchronization":"esync"}},
  {"id":"hs","name":"Heroic Steam","command":["/opt/apps/h/run"],"root":"/tmp/lxrt-steamroot","fexRootfs":"/","env":{},"kind":"custom"},
  {"id":"heroic","name":"Heroic Games Launcher","command":["/opt/apps/heroic/Heroic-2.22.3-linux-arm64/heroic","--no-sandbox","--disable-gpu","--js-flags=--no-opt"],"root":"/tmp/lxrt-armroot","fexRootfs":null,"env":{"HOME_IN_GUEST":"/tmp/heroichome","LXRT_X18_ALL_TEXT":"/opt/apps/heroic/"},"kind":"heroic","architecture":"aarch64","readiness":"experimental"},
- {"id":"steam","name":"Fake","command":["/bin/fake"],"kind":"custom"}]
+ {"id":"steam","name":"Fake","command":["/bin/fake"],"kind":"custom"},
+ {"id":"android-org.example.game","name":"Juego","command":[],"root":"/s/android/packages/org.example.game","kind":"android","architecture":"aarch64","android":{"package":"org.example.game"}},
+ {"id":"android-cmd","name":"Juego2","command":["/system/bin/app_process64"],"kind":"android","architecture":"aarch64"}]
 JSON
 # A Vulkan shim that reads STEAMARM_VK_ICD (settings-env.py looks for the name).
 mkdir -p "$W/steamroot/usr/lib/lxrt-emu"
@@ -68,6 +70,10 @@ expect_in "$W2" steam-arm64 'display:  native (DISPLAY=:2)'
 expect_in "$W2" steam-arm64 'VNC cannot serve it'
 expect_in "$W2" steam 'display:  vnc (DISPLAY=:1)'
 expect bad   "architecture 'armv7'"
+# Android apps (docs/APK_SUPPORT.md): no runtime yet, refused whatever the entry holds.
+expect android-org.example.game "is an Android app; SteamARM's Android environment does not run apps yet" 'command:'
+expect android-cmd "is an Android app" 'command:'
+
 # LaunchPlanner's rule: the ARM64 base runs aarch64 only, the Steam root x86 only.
 expect armx86root "is aarch64 but its root is /tmp/lxrt-steamroot" 'command:'
 expect x86armroot "is x86_64 but its root is /tmp/lxrt-arm64root" 'command:'

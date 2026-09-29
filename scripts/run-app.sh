@@ -160,6 +160,12 @@ app = next((a for a in builtins if isinstance(a, dict) and a.get("id") == app_id
 if app is None:
     sys.stderr.write("run-app: unknown app id %r (not in %s)\n" % (app_id, apps_path))
     sys.exit(2)
+# An Android app (docs/APK_SUPPORT.md): installed by scripts/android-pm.py,
+# but there is no Android runtime to run it yet. Never a fake launch.
+if app.get("kind") == "android":
+    sys.stderr.write("run-app: app %r is an Android app; SteamARM's Android environment does not run "
+                     "apps yet (docs/ANDROID_ZERO_VM_FEASIBILITY.md)\n" % app_id)
+    sys.exit(2)
 cmd = [str(c) for c in app.get("command") or []]
 # -noverifyfiles on a fresh install also skips downloading the client itself
 # (the bootstrap finds no steamui.so and exits): only for an installed client.

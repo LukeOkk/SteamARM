@@ -73,6 +73,7 @@ struct AppIconView: View {
         case "steam": return "gamecontroller.fill"
         case "heroic": return "shield.lefthalf.filled"
         case "prism": return "cube.fill"
+        case "android": return "apps.iphone"
         default: return "app.dashed"
         }
     }
