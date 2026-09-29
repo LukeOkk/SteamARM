@@ -572,6 +572,7 @@ void lxrt_thread_exit(int code)
         threads_unlock();
         if (live == 0) {
             lxrt_sigstats_flush();
+            lxrt_sysv_exit();
             lxrt_proc_cleanup();
             _exit(code & 0xff);
         }

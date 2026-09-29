@@ -69,4 +69,9 @@ long lxrt_shmdt(uint64_t shmaddr);
 // 195. lbuf is a guest `struct shmid64_ds *`, or NULL for IPC_RMID.
 long lxrt_shmctl(int shmid, int lcmd, void *lbuf);
 
+// The process is exiting or exec'ing: issue the IPC_RMIDs it deferred for
+// kernel segments it still had attached (Linux's attach-after-IPC_RMID rule;
+// sysv_ipc.c, "deferred IPC_RMID").
+void lxrt_sysv_exit(void);
+
 #endif

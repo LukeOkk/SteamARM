@@ -279,6 +279,8 @@ static uint32_t write_emit_bits(const struct ep_interest *in)
     return L_EPOLLOUT | L_EPOLLWRNORM | (in->is_socket ? L_EPOLLWRBAND : 0u);
 }
 
+#define EP_ALIASES 8
+
 struct ep_inst {
     // `used` rather than a sentinel in `kq`: the table is static, so a free
     // slot is zero-filled, and zero is fd 0. Testing kq for a sentinel value
@@ -290,6 +292,10 @@ struct ep_inst {
     bool dead;           // closed, waiting for refs to drain
     struct ep_interest *v;
     int  n, cap;
+    // dup()s of kq (lxrt_epoll_dup): on Linux every one is the same epoll
+    // instance, and each is also a descriptor of the same kqueue here.
+    int  alias[EP_ALIASES];
+    int  nalias;
 };
 
 static struct ep_inst g_ep[MAX_EPOLL];
@@ -752,11 +758,22 @@ void lxrt_eventfd_close(int fd)
 
 // ---------------------------------------------------------------- epoll table
 
-// Caller holds g_ep_lock.
+static bool ep_names(const struct ep_inst *ep, int fd)
+{
+    if (ep->kq == fd)
+        return true;
+    for (int k = 0; k < ep->nalias; k++)
+        if (ep->alias[k] == fd)
+            return true;
+    return false;
+}
+
+// The instance `kq` names: its own descriptor or a dup of it. Caller holds
+// g_ep_lock.
 static struct ep_inst *ep_find(int kq)
 {
     for (int i = 0; i < MAX_EPOLL; i++)
-        if (g_ep[i].used && !g_ep[i].dead && g_ep[i].kq == kq)
+        if (g_ep[i].used && !g_ep[i].dead && ep_names(&g_ep[i], kq))
             return &g_ep[i];
     return NULL;
 }
@@ -764,12 +781,7 @@ static struct ep_inst *ep_find(int kq)
 // Detect if fd is a nested epoll instance (caller holds g_ep_lock).
 static bool is_nested_epoll_locked(int fd)
 {
-    for (int i = 0; i < MAX_EPOLL; i++) {
-        if (g_ep[i].used && !g_ep[i].dead && g_ep[i].kq == fd) {
-            return true;
-        }
-    }
-    return false;
+    return ep_find(fd) != NULL;
 }
 
 static struct ep_interest *ep_lookup(struct ep_inst *ep, int fd)
@@ -787,6 +799,7 @@ static void ep_release(struct ep_inst *ep)
         ep->v = NULL;
         ep->n = ep->cap = 0;
         ep->kq = -1;
+        ep->nalias = 0;
         ep->dead = false;
         ep->used = false;
     }
@@ -832,6 +845,7 @@ long lxrt_epoll_create1(int lflags)
     }
     ep->used = true;
     ep->kq = kq;
+    ep->nalias = 0;
     ep->refs = 0;
     ep->dead = false;
     ep->v = NULL;
@@ -841,12 +855,46 @@ long lxrt_epoll_create1(int lflags)
     return kq;
 }
 
+// A dup of an epoll descriptor is the same epoll instance on Linux. It was
+// not one here: tokio (Rust) registers its signal pipe through a
+// try_clone()d epoll descriptor (fcntl F_DUPFD_CLOEXEC), epoll_ctl on it
+// answered EINVAL, and the runtime could not be built: Heroic's comet
+// panicked at start (MEASURED, benchmarks/stage24-heroic.txt). The dup is
+// also a descriptor of the same kqueue, so recording it as an alias is all
+// it takes. At most EP_ALIASES per instance; a further dup is not recorded.
+void lxrt_epoll_dup(int oldfd, int newfd)
+{
+    if (oldfd < 0 || newfd < 0 || oldfd == newfd ||
+        atomic_load_explicit(&g_ep_live, memory_order_relaxed) == 0)
+        return;
+    pthread_mutex_lock(&g_ep_lock);
+    struct ep_inst *ep = ep_find(oldfd);
+    if (ep && !ep_names(ep, newfd) && ep->nalias < EP_ALIASES)
+        ep->alias[ep->nalias++] = newfd;
+    pthread_mutex_unlock(&g_ep_lock);
+}
+
 void lxrt_epoll_close(int fd)
 {
     if (fd < 0 || atomic_load_explicit(&g_ep_live, memory_order_relaxed) == 0)
         return;
     pthread_mutex_lock(&g_ep_lock);
     struct ep_inst *ep = ep_find(fd);
+    if (ep && ep->nalias > 0) {
+        // One descriptor of several: the instance lives on. When the one
+        // closing is kq itself, an alias (the same kqueue) takes its place.
+        if (ep->kq == fd) {
+            ep->kq = ep->alias[--ep->nalias];
+        } else {
+            for (int k = 0; k < ep->nalias; k++)
+                if (ep->alias[k] == fd) {
+                    ep->alias[k] = ep->alias[--ep->nalias];
+                    break;
+                }
+        }
+        pthread_mutex_unlock(&g_ep_lock);
+        return;
+    }
     if (ep) {
         ep->dead = true;
         atomic_fetch_sub_explicit(&g_ep_live, 1, memory_order_relaxed);

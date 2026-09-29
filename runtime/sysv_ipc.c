@@ -82,11 +82,13 @@
 #include "lxrt.h"
 #include "sysv_ipc.h"
 
+#include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <mach/mach.h>
 #include <mach/mach_vm.h>
 #include <pthread.h>
+#include <signal.h>
 #include <stdarg.h>
 #include <stdatomic.h>
 #include <stdbool.h>
@@ -1234,6 +1236,8 @@ static long pshm_get(int32_t key, uint64_t size, int lshmflg)
     return s->id;
 }
 
+static void kdefer_sweep(void);     // "deferred IPC_RMID", below
+
 static int shmflg_to_darwin_get(int lshmflg)
 {
     // SHM_HUGETLB (04000) and SHM_NORESERVE (010000) are Linux-only and sit on
@@ -1304,6 +1308,7 @@ long lxrt_shmget(int32_t key, uint64_t size, int lshmflg)
     bool oversize = size > cap;
 
     if (!oversize) {
+        kdefer_sweep();
         int id = shmget((key_t)key, (size_t)size, shmflg_to_darwin_get(lshmflg));
         if (id >= 0) {
             ipc_unlock();
@@ -1386,6 +1391,164 @@ static bool only_reservation(uint64_t addr, uint64_t len)
     return true;
 }
 
+// ------------------------------------------ kernel segments: deferred IPC_RMID
+//
+// Linux keeps a segment that was IPC_RMID'd while attached alive AND
+// attachable until its last detach (shm_perm.mode shows SHM_DEST meanwhile).
+// Darwin's shmctl(IPC_RMID) refuses every later shmat at once. X clients rely
+// on the Linux rule: cairo's xlib SHM pool sends XShmAttach, which the X
+// server carries out later, and marks the segment for removal right after it,
+// before the server has attached (a Linux cairo does not XSync there:
+// IPC_RMID_DEFERRED_RELEASE). On the Mac the server's shmat then failed, the
+// client got BadAccess (MIT-SHM ShmAttach), and GDK's X error handler ended
+// the program: Heroic's (Electron's) main process exited that way at start
+// (MEASURED, benchmarks/stage24-heroic.txt).
+//
+// So an IPC_RMID of a kernel segment this process has attached is deferred:
+// the segment stays attachable, and the real IPC_RMID is issued when this
+// process detaches its last attach of it, execs or exits. A process killed
+// before that leaves a record in RMID_DIR/<id> (its pid and the segment's
+// ctime); a later shmget in any runtime process removes the segment of a
+// record whose process is gone, as Linux would have at that process's exit.
+// Only kernel segments: the POSIX-backed ones (pshm_destroy) already follow
+// the Linux rule inside the runtime, and no other process can attach them.
+
+#define RMID_DIR   "/tmp/lxrt-shm-rmid"
+#define MAX_KATT   64
+#define MAX_KDEFER 64
+
+struct katt { bool used; uint64_t addr; int id; };
+static struct katt g_katt[MAX_KATT];        // this process's kernel attaches
+static int g_kdefer[MAX_KDEFER];            // ids whose IPC_RMID is deferred
+static int g_nkdefer;
+
+static void katt_add(uint64_t addr, int id)
+{
+    for (int i = 0; i < MAX_KATT; i++)
+        if (!g_katt[i].used) {
+            g_katt[i] = (struct katt){ true, addr, id };
+            return;
+        }
+    // Full: this attach is not tracked, and an IPC_RMID of its segment is not
+    // deferred unless another attach of it is (kdefer_try).
+}
+
+static int katt_take(uint64_t addr)
+{
+    for (int i = 0; i < MAX_KATT; i++)
+        if (g_katt[i].used && g_katt[i].addr == addr) {
+            g_katt[i].used = false;
+            return g_katt[i].id;
+        }
+    return -1;
+}
+
+static bool katt_holds(int id)
+{
+    for (int i = 0; i < MAX_KATT; i++)
+        if (g_katt[i].used && g_katt[i].id == id)
+            return true;
+    return false;
+}
+
+static int kdefer_index(int id)
+{
+    for (int i = 0; i < g_nkdefer; i++)
+        if (g_kdefer[i] == id)
+            return i;
+    return -1;
+}
+
+static void kdefer_path(char *out, size_t cap, int id)
+{
+    snprintf(out, cap, "%s/%d", RMID_DIR, id);
+}
+
+// Defer the IPC_RMID of kernel segment `id`: true when it was deferred (the
+// caller reports success), false when the caller should remove it now.
+// Caller holds the lock.
+static bool kdefer_try(int id)
+{
+    if (kdefer_index(id) >= 0)
+        return true;                    // a second IPC_RMID: already marked
+    if (!katt_holds(id) || g_nkdefer >= MAX_KDEFER)
+        return false;
+    struct shmid_ds ds;
+    if (shmctl(id, IPC_STAT, &ds) != 0)
+        return false;
+    g_kdefer[g_nkdefer++] = id;
+    char p[64];
+    mkdir(RMID_DIR, 0700);
+    kdefer_path(p, sizeof p, id);
+    int fd = open(p, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0600);
+    if (fd >= 0) {
+        dprintf(fd, "%d %lld\n", (int)getpid(), (long long)ds.shm_ctime);
+        close(fd);
+    }
+    return true;
+}
+
+// The deferred IPC_RMID of `id`, now. Caller holds the lock.
+static void kdefer_release(int id)
+{
+    int i = kdefer_index(id);
+    if (i < 0)
+        return;
+    g_kdefer[i] = g_kdefer[--g_nkdefer];
+    shmctl(id, IPC_RMID, NULL);
+    char p[64];
+    kdefer_path(p, sizeof p, id);
+    unlink(p);
+}
+
+// Records left by processes that died before their deferred IPC_RMID. The
+// segment is removed only if it is still the one recorded (same ctime), so a
+// reused id is left alone; a record whose pid is alive (or was reused) waits.
+static void kdefer_sweep(void)
+{
+    DIR *d = opendir(RMID_DIR);
+    if (!d)
+        return;
+    struct dirent *e;
+    while ((e = readdir(d)) != NULL) {
+        char *end;
+        long id = strtol(e->d_name, &end, 10);
+        if (e->d_name[0] < '0' || e->d_name[0] > '9' || *end || id < 0 || id > INT32_MAX)
+            continue;
+        char p[64];
+        kdefer_path(p, sizeof p, (int)id);
+        FILE *f = fopen(p, "r");
+        if (!f)
+            continue;
+        int pid = 0;
+        long long ctime = 0;
+        int n = fscanf(f, "%d %lld", &pid, &ctime);
+        fclose(f);
+        if (n != 2 || pid <= 0)
+            continue;
+        if (kill(pid, 0) == 0 || errno == EPERM)
+            continue;                   // its process is still there
+        struct shmid_ds ds;
+        if (shmctl((int)id, IPC_STAT, &ds) == 0 && (long long)ds.shm_ctime == ctime)
+            shmctl((int)id, IPC_RMID, NULL);
+        unlink(p);
+    }
+    closedir(d);
+}
+
+// This process is exiting or exec'ing: every deferred IPC_RMID happens now.
+// Linux frees such a segment once the last process detaches, which exit and
+// exec both do.
+void lxrt_sysv_exit(void)
+{
+    if (!g_nkdefer)
+        return;
+    ipc_lock();
+    while (g_nkdefer)
+        kdefer_release(g_kdefer[g_nkdefer - 1]);
+    ipc_unlock();
+}
+
 long lxrt_shmat(int shmid, uint64_t shmaddr, int lshmflg)
 {
     if (lshmflg & L_SHM_REMAP)
@@ -1427,6 +1590,9 @@ long lxrt_shmat(int shmid, uint64_t shmaddr, int lshmflg)
                         lshmflg & L_SHM_RDONLY);
         if (p == (void *)-1)
             return LERR(errno);
+        ipc_lock();
+        katt_add((uint64_t)(uintptr_t)p, shmid);
+        ipc_unlock();
         return (long)(uintptr_t)p;
     }
 
@@ -1510,6 +1676,11 @@ long lxrt_shmdt(uint64_t shmaddr)
             return LERR(errno);
         if (sized)
             rereserve_if_window(shmaddr, rs);
+        ipc_lock();
+        int kid = katt_take(shmaddr);
+        if (kid >= 0 && !katt_holds(kid))
+            kdefer_release(kid);        // its last attach here: see kdefer_try
+        ipc_unlock();
         return 0;
     }
     size_t len = (size_t)a->len;
@@ -1641,8 +1812,15 @@ long lxrt_shmctl(int shmid, int lcmd, void *lbuf)
     ipc_unlock();
 
     switch (cmd) {
-    case L_IPC_RMID:
+    case L_IPC_RMID: {
+        // Deferred while this process has it attached (see kdefer_try).
+        ipc_lock();
+        bool deferred = kdefer_try(shmid);
+        ipc_unlock();
+        if (deferred)
+            return 0;
         return shmctl(shmid, IPC_RMID, NULL) != 0 ? LERR(errno) : 0;
+    }
 
     case L_IPC_STAT: {
         if (!can_write(lbuf, sizeof(struct linux_shmid64_ds)))
@@ -1653,6 +1831,11 @@ long lxrt_shmctl(int shmid, int lcmd, void *lbuf)
             return LERR(errno);
         struct linux_shmid64_ds l;
         shmid_to_linux(&ds, &l);
+        // A deferred IPC_RMID reads as Linux's removed-but-attached segment.
+        ipc_lock();
+        if (kdefer_index(shmid) >= 0)
+            l.shm_perm.mode |= L_SHM_DEST;
+        ipc_unlock();
         memcpy(lbuf, &l, sizeof l);
         return 0;
     }
