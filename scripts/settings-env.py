@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """The launcher's settings.json as the environment of the programs SteamARM
-starts (launcher/SETTINGS_SPEC.md). One place for the translation: run-app.sh
-imports env_from_settings(), run-steam.sh evaluates --shell.
+starts (launcher/SETTINGS_SPEC.md). run-app.sh imports env_from_settings() and
+with_overrides(); run-steam.sh evaluates --shell.
 
   scripts/settings-env.py --shell [settings.json]   export lines for a shell
   scripts/settings-env.py --json  [settings.json]   the environment as JSON
@@ -11,12 +11,52 @@ Also writes $STATE/launcher/limits.env (the memory ceiling the guard reads).
 Games inherit Steam's environment, so a change reaches them when Steam starts.
 """
 import json
+import mmap
 import os
 import shlex
 import subprocess
 import sys
 
 STATE = os.environ.get("STEAMARM_STATE") or os.path.expanduser("~/SteamARM-roots")
+SHIM = os.path.join(STATE, "steamroot", "usr", "lib", "lxrt-emu", "libvulkan.so.1")
+ICD_MARKER = b"STEAMARM_VK_ICD"
+OVERRIDABLE = ("display", "vsync", "synchronization", "graphicsBackend")
+
+
+def effective_synchronization(value):
+    """The backend Proton actually gets. Mirrors RuntimeCapabilities.effectiveSynchronization
+    (launcher/ApplicationCore.swift): fsync needs futex_waitv, which lxrun lacks (ENOSYS);
+    no MSync-capable Wine exists here; esync is experimental (Proton 10.0 only) so AUTO does
+    not pick it. Anything else is Wine's default, wineserver."""
+    return "esync" if value == "esync" else "wineserver"
+
+
+def file_contains(path, needle):
+    """Search an installed binary without reading it into memory."""
+    try:
+        with open(path, "rb") as source:
+            if os.fstat(source.fileno()).st_size == 0:
+                return False
+            with mmap.mmap(source.fileno(), 0, access=mmap.ACCESS_READ) as data:
+                return data.find(needle) != -1
+    except (OSError, ValueError):
+        return False
+
+
+def shim_selects_icd(path=None):
+    """True when the installed Vulkan shim reads STEAMARM_VK_ICD (it can load an ICD such as
+    KosmicKrisp); an older shim only knows MoltenVK and ignores the variable."""
+    return file_contains(path or SHIM, ICD_MARKER)
+
+
+def with_overrides(s, overrides):
+    """Settings with an app's own choices on top (AppEntry.overrides). Only keys in
+    OVERRIDABLE and non-empty strings count; other values are ignored."""
+    merged = dict(s)
+    if isinstance(overrides, dict):
+        merged.update({key: value for key, value in overrides.items()
+                       if key in OVERRIDABLE and isinstance(value, str) and value})
+    return merged
 
 
 def total_ram_gb():
@@ -62,16 +102,25 @@ def env_from_settings(s, total=None):
     if vsync in ("on", "off"):
         n = "1" if vsync == "on" else "0"
         dxvk += ["dxgi.syncInterval = %s" % n, "d3d9.presentInterval = %s" % n]
-        env["VKD3D_SWAPCHAIN_PRESENT_MODE"] = "fifo" if vsync == "on" else "immediate"
+        # vkd3d-proton compares with strcmp against FIFO, IMMEDIATE, ...: lowercase
+        # is ignored. Proton 10.0's vkd3d has no such variable.
+        env["VKD3D_SWAPCHAIN_PRESENT_MODE"] = "FIFO" if vsync == "on" else "IMMEDIATE"
     top = usable_gb(total)
     vram = int(s.get("vramGB") or 0) or top
     vram = min(vram, top)
     env["LXRT_VK_MAX_VRAM_MB"] = str(vram * 1024)
     dxvk.append("dxgi.maxDeviceMemory = %d" % (vram * 1024))
-    if s.get("esync") is False:
-        env["PROTON_NO_ESYNC"] = "1"
-    if s.get("fsync") is False:
-        env["PROTON_NO_FSYNC"] = "1"
+    sync = s.get("synchronization")
+    if sync is None and ("esync" in s or "fsync" in s):
+        # settings.json written before the selector: the two booleans, exactly as before.
+        if s.get("esync") is False:
+            env["PROTON_NO_ESYNC"] = "1"
+        if s.get("fsync") is False:
+            env["PROTON_NO_FSYNC"] = "1"
+    else:
+        if effective_synchronization(sync) != "esync":
+            env["PROTON_NO_ESYNC"] = "1"
+        env["PROTON_NO_FSYNC"] = "1"   # fsync cannot work under lxrun
 
     # Procesador (FEX reads FEX_<OPTION>)
     if s.get("fexDiskCache"):
@@ -91,7 +140,11 @@ def env_from_settings(s, total=None):
     if s.get("fexX87Reduced"):
         env["FEX_X87REDUCEDPRECISION"] = "1"
 
-    # Gráficos
+    # Gráficos. The shim loads MoltenVK unless STEAMARM_VK_ICD names another
+    # driver; only a shim that reads the variable gets it. AUTO is MoltenVK,
+    # and WineD3D is never set (guest GL is software llvmpipe, no GL thunk).
+    if (s.get("graphicsBackend") or "auto") == "vulkanKosmicKrisp" and shim_selects_icd():
+        env["STEAMARM_VK_ICD"] = "kosmickrisp"
     if s.get("shaderCache") is False:
         env["DXVK_SHADER_CACHE"] = "0"
         env["VKD3D_SHADER_CACHE_PATH"] = "0"
