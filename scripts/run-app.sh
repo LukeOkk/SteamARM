@@ -40,7 +40,7 @@ STATUSFILE="$LDIR/running.status"   # read and removed by the launcher, not here
 X11_BUNDLE_ID=org.steamarm.X11
 STEAM_PATTERN='build/lxrun .*ubuntu12_32/steam '
 
-usage() { sed -n '2,24p' "$0" | sed 's/^# \{0,1\}//'; }
+usage() { sed -n '2,27p' "$0" | sed 's/^# \{0,1\}//'; }
 
 # Runtime processes that are guest programs: everything but Xvnc and FEXServer.
 # (The pattern must name build/lxrun: a bare word would match this shell. The
@@ -294,6 +294,8 @@ if [ -n "$(guest_pids)" ]; then
             *" DISPLAY=:2"*) rmode=native ;;
             *) rmode="$MODE" ;;
         esac
+        # No wrapper: a status or group from an earlier session is not this one's.
+        rm -f "$STATUSFILE" "$PGIDFILE"
         echo "$spid" > "$PIDFILE"
         echo steam > "$IDFILE"
         echo "$rmode" > "$MODEFILE"
@@ -320,9 +322,11 @@ scripts/safeguard.sh start >/dev/null
 L="$LOGS/$ID-$(date +%Y%m%d-%H%M%S).log"
 echo "$L" > "$LOGS/current"
 rm -f "$STATUSFILE" "$PGIDFILE"
-# env execs nohup, which execs session.py: $! is the session's group leader,
-# alive exactly as long as the program (the runner execs build/lxrun under it).
-SESSION=(/usr/bin/python3 scripts/session.py run "$LDIR" "$RUNNER")
+# env execs nohup, which execs session.py: $! is the session's group leader.
+# It lives while the program does, plus up to 8 s while it clears what the
+# program left in its group (scripts/session.py). The runner execs build/lxrun
+# under it. PYTHONCOERCECLOCALE: see session.py (no Python locale for guests).
+SESSION=(env PYTHONCOERCECLOCALE=0 STEAMARM_SESSION_PY=1 /usr/bin/python3 scripts/session.py run "$LDIR" "$RUNNER")
 if [ "$APP_ARCH" = aarch64 ]; then
     env ${APP_ENV[@]+"${APP_ENV[@]}"} DISPLAY=$DISP LXRT_ROOT="$APP_ROOT" \
         nohup "${SESSION[@]}" "${APP_CMD[@]}" > "$L" 2>&1 < /dev/null &

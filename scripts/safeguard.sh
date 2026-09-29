@@ -39,7 +39,8 @@ case "${1:-}" in
         if running; then echo "safeguard running (pid $(cat "$PIDF"))"; exit 0; fi
         # Its own session (scripts/session.py detach): started from an app's
         # launch, it must outlive that app's process group.
-        nohup /usr/bin/python3 "$(dirname "$0")/session.py" detach "$0" run </dev/null >>"$LOG" 2>&1 &
+        nohup env PYTHONCOERCECLOCALE=0 STEAMARM_SESSION_PY=1 \
+            /usr/bin/python3 "$(dirname "$0")/session.py" detach "$0" run </dev/null >>"$LOG" 2>&1 &
         echo $! > "$PIDF"
         disown 2>/dev/null
         echo "safeguard started (pid $!), log $LOG"
