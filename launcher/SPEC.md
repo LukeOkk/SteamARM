@@ -46,8 +46,14 @@ in `docs/APPLICATION_MANAGER.md`.
   (`tell application id "org.steamarm.X11" to activate`); vnc mode opens
   vnc://127.0.0.1:5901. The mode is the one the app was started with
   (~/SteamARM-roots/launcher/running.display), not the current setting.
-  Poll every 2 s: when the launched process and all guest `build/lxrun`
-  processes other than Xvnc/FEXServer are gone, return home automatically; in
+  Poll every 2 s: a session run through scripts/session.py ends when its
+  wrapper has exited and written running.status (or, if the wrapper was
+  killed, when the program's process group is empty); what it left behind in
+  its session (the native client's orphaned webhelper zygotes) is stopped by
+  `run-app.sh --reap`. Only a run adopted without a wrapper (scripts/
+  run-steam.sh) still waits until no guest `build/lxrun` other than
+  Xvnc/FEXServer is left (ApplicationCore.swift, SessionLiveness). Then return
+  home automatically; in
   vnc mode also quit Screen Sharing if the launcher opened it and it was not
   running before (`osascript -e 'quit app "Screen Sharing"'`).
 - Per-app context menu: Editar, Eliminar (confirm; delete install dir).

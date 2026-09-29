@@ -154,7 +154,7 @@ test-launcher-core:
 	swiftc -parse-as-library -swift-version 5 launcher/ApplicationCore.swift \
 	    launcher/tests/ApplicationCoreTests.swift -o build/application-core-tests
 	build/application-core-tests
-	python3 -m unittest tests/test_settings_env.py tests/test_compat_status.py
+	python3 -m unittest tests/test_settings_env.py tests/test_compat_status.py tests/test_docs_records.py
 	tests/launcher/run_app_dispatch.sh
 	tests/launcher/session.sh
 	tests/launcher/safeguard.sh
