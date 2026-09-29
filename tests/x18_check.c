@@ -27,8 +27,13 @@ static struct x18_plan plan(uint32_t i) {
     CHECK(p.nwords >= 0 && p.nwords <= 32);
     CHECK((size_t)p.nwords * 4 <= lxrt_x18_tramp_bytes(i));
     if (p.verdict == X18_OK) {
-        CHECK(p.back_idx >= 0 && p.back_idx < p.nwords);
-        CHECK(p.words[p.back_idx] == 0);
+        if (p.terminal) {
+            CHECK(p.back_idx == -1 && p.alt_idx == -1);
+            CHECK(p.words[p.nwords - 1] == 0xd61f0200);
+        } else {
+            CHECK(p.back_idx >= 0 && p.back_idx < p.nwords);
+            CHECK(p.words[p.back_idx] == 0);
+        }
         if (p.alt_idx >= 0) CHECK(p.words[p.alt_idx] == 0);
     } else { CHECK(p.nwords == 0); CHECK(p.back_idx == -1 && p.alt_idx == -1); }
     return p;
@@ -73,14 +78,23 @@ static void selftest(void) {
     expect_fields(0xd53bd052, 1, X18_CLS_SYSREG, false, false);
     unsupported(0xc8127c20, "exclusive");
     unsupported(0x4872fc20, "casp pair");
-    unsupported(0xd61f0240, "branch register");
+    struct x18_plan branch = plan(0xd61f0240);
+    CHECK(branch.verdict == X18_OK && branch.terminal && branch.nwords == 7);
+    branch = plan(0xd63f0240);
+    CHECK(branch.verdict == X18_OK && branch.terminal && branch.nwords == 9);
+    CHECK(branch.words[6] == (0xd2800000u | (4u << 5) | 30u));
+    CHECK(branch.words[7] == (0xf2800000u | (1u << 21) | (0x1000u << 5) | 30u));
+    branch = plan(0xd65f0240);
+    CHECK(branch.verdict == X18_OK && branch.terminal && branch.nwords == 7);
     unsupported(0xd53b4212, "sysreg");
     unsupported(0x9100025f, "writes sp");
     unsupported(0xf8408ff2, "sp writeback");
     unsupported(0xa8c14bf2, "sp writeback");
-    unsupported(0xf97ffff2, "imm overflow");
-    unsupported(0xf84f0bf2, "imm overflow");
-    unsupported(0x914003f2, "imm overflow");
+    CHECK(plan(0xf97ffff2).verdict == X18_OK);
+    CHECK(plan(0xf84f0bf2).verdict == X18_OK);
+    CHECK(plan(0x914003f2).verdict == X18_OK);
+    struct x18_plan shifted = plan(0x914077f2); /* add x18, sp, #0x1d000 */
+    CHECK(shifted.verdict == X18_OK && shifted.words[4] == 0x910043e1);
     struct x18_plan p = plan(0xf94003f2);
     CHECK(p.verdict == X18_OK && p.nwords == 8);
     CHECK(p.words[0] == 0xa9bf07e0 && p.words[1] == 0xd53bd061);
@@ -129,21 +143,25 @@ static void selftest(void) {
     /* Both edges of each immediate's signed/unsigned range. */
     for (unsigned imm = 0; imm < 4096; ++imm) {
         p = plan(0xf94003f2 | (imm << 10));
-        CHECK(p.verdict == (imm <= 4093 ? X18_OK : X18_UNSUPPORTED));
-        if (p.verdict == X18_OK) CHECK(((p.words[4] >> 10) & 4095) == imm + 2);
+        CHECK(p.verdict == X18_OK);
+        if (imm <= 4093) CHECK(((p.words[4] >> 10) & 4095) == imm + 2);
+        else CHECK(p.words[4] == 0x910043e1 &&
+                   ((p.words[5] >> 10) & 4095) == imm);
     }
     for (unsigned imm = 0; imm < 512; ++imm) {
         int signed_imm = imm < 256 ? (int)imm : (int)imm - 512;
         p = plan(0xf84003f2 | (imm << 12));
-        CHECK(p.verdict == (signed_imm <= 239 ? X18_OK : X18_UNSUPPORTED));
+        CHECK(p.verdict == X18_OK);
+        if (signed_imm > 239) CHECK(p.words[4] == 0x910043e1);
     }
     for (unsigned imm = 0; imm < 128; ++imm) {
         int signed_imm = imm < 64 ? (int)imm : (int)imm - 128;
         p = plan(0xa9400ff2 | (imm << 15));
-        CHECK(p.verdict == (signed_imm <= 61 ? X18_OK : X18_UNSUPPORTED));
-        if (p.verdict == X18_OK) CHECK(((p.words[4] >> 15) & 127) == ((imm + 2) & 127));
+        CHECK(p.verdict == X18_OK);
+        if (signed_imm <= 61) CHECK(((p.words[4] >> 15) & 127) == ((imm + 2) & 127));
+        else CHECK(p.words[4] == 0x910043e1);
         p = plan(0x28400ff2 | (imm << 15));
-        CHECK(p.verdict == (signed_imm <= 59 ? X18_OK : X18_UNSUPPORTED));
+        CHECK(p.verdict == X18_OK);
     }
     fprintf(stderr, "self-tests: %s (%d failures)\n", failures ? "FAIL" : "PASS", failures);
 }
@@ -187,11 +205,11 @@ static void fixture_tests(void) {
         uint64_t regs;
         enum x18_verdict verdict;
     } cases[] = {
-        {0xf97ffff2, UINT64_C(0x80040000), X18_UNSUPPORTED}, /* ldr x18, [sp, #0x7ff8] */
+        {0xf97ffff2, UINT64_C(0x80040000), X18_OK}, /* ldr x18, [sp, #0x7ff8] */
         {0xf85003f2, UINT64_C(0x80040000), X18_OK}, /* ldur x18, [sp, #-0x100] */
         {0xf84efbf2, UINT64_C(0x80040000), X18_OK}, /* ldtr x18, [sp, #0xef] */
         {0x28600ff2, UINT64_C(0x80040008), X18_OK}, /* ldnp w18, w3, [sp, #-0x100] */
-        {0x695f8ff2, UINT64_C(0x80040008), X18_UNSUPPORTED}, /* ldpsw x18, x3, [sp, #0xfc] */
+        {0x695f8ff2, UINT64_C(0x80040008), X18_OK}, /* ldpsw x18, x3, [sp, #0xfc] */
         {0xacc10e52, UINT64_C(0x40000), X18_OK}, /* ldp q18, q3, [x18], #0x20 */
         {0x2d410e52, UINT64_C(0x40000), X18_OK}, /* ldp s18, s3, [x18, #0x8] */
         {0x6d410e52, UINT64_C(0x40000), X18_OK}, /* ldp d18, d3, [x18, #0x10] */
@@ -217,9 +235,9 @@ static void fixture_tests(void) {
         {0x18000052, UINT64_C(0x40000), X18_OK}, /* ldr w18, 0x74 <.text+0x74> */
         {0x98ffffd2, UINT64_C(0x40000), X18_OK}, /* ldrsw x18, 0x68 <.text+0x68> */
         {0xd8000040, UINT64_C(0x0), X18_NOT_A_SITE}, /* prfm pldl1keep, 0x7c <.text+0x7c> */
-        {0xd61f0240, UINT64_C(0x40000), X18_UNSUPPORTED}, /* br x18 */
-        {0xd63f0240, UINT64_C(0x40000), X18_UNSUPPORTED}, /* blr x18 */
-        {0xd65f0240, UINT64_C(0x40000), X18_UNSUPPORTED}, /* ret x18 */
+        {0xd61f0240, UINT64_C(0x40000), X18_OK}, /* br x18 */
+        {0xd63f0240, UINT64_C(0x40000), X18_OK}, /* blr x18 */
+        {0xd65f0240, UINT64_C(0x40000), X18_OK}, /* ret x18 */
         {0xd53bd052, UINT64_C(0x40000), X18_OK}, /* mrs x18, TPIDR_EL0 */
         {0xd51bd052, UINT64_C(0x40000), X18_OK}, /* msr TPIDR_EL0, x18 */
         {0xd53b4212, UINT64_C(0x40000), X18_UNSUPPORTED}, /* mrs x18, NZCV */

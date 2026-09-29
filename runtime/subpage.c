@@ -36,6 +36,7 @@
 #include <string.h>
 #include <sys/mman.h>
 #include <sys/param.h>
+#include <sys/stat.h>
 #include <libproc.h>
 #include <unistd.h>
 
@@ -269,6 +270,79 @@ static bool back_range(uint64_t hstart, uint64_t hend)
     return true;
 }
 
+// A file segment can start 4 KiB into a host page while its much larger
+// interior is still host-page aligned. The edges need a private copy, but the
+// interior can remain a lazy MAP_PRIVATE file mapping. libcef.so's 162 MiB
+// text segment otherwise made thousands of mach_vm_region/allocate calls and
+// pread copies before Steam's webhelper could reach CefInitialize.
+static int copy_file_edge(int fd, uint64_t dst, size_t len, uint64_t off)
+{
+    uint8_t bounce[LXRT_HOST_PAGE] = {0};
+    size_t done = 0;
+    while (done < len) {
+        ssize_t n = pread(fd, bounce + done, len - done, (off_t)(off + done));
+        if (n < 0) {
+            if (errno == EINTR) continue;
+            return -1;
+        }
+        if (!n) break;
+        done += (size_t)n;
+    }
+    memcpy((void *)dst, bounce, len);
+    return 0;
+}
+
+static bool fast_file_interior(uint64_t addr, uint64_t len, int prot,
+                               int fd, uint64_t off, long *result)
+{
+    uint64_t end = addr + len;
+    uint64_t inside = LXRT_ALIGN_UP(addr, LXRT_HOST_PAGE);
+    uint64_t inside_end = LXRT_ALIGN_DOWN(end, LXRT_HOST_PAGE);
+    struct stat st;
+    if (end < addr || off > UINT64_MAX - len ||
+        (addr & (LXRT_HOST_PAGE - 1)) != (off & (LXRT_HOST_PAGE - 1)) ||
+        inside_end <= inside || inside_end - inside < (1u << 20) ||
+        fstat(fd, &st) != 0 || st.st_size < 0 || (uint64_t)st.st_size < off + len)
+        return false;
+
+    uint64_t hstart = LXRT_ALIGN_DOWN(addr, LXRT_HOST_PAGE);
+    uint64_t hend = LXRT_ALIGN_UP(end, LXRT_HOST_PAGE);
+    if (hstart < inside) adopt_untracked(hstart);
+    if (inside_end < hend) adopt_untracked(inside_end);
+    if (!back_range(hstart, inside) || !back_range(inside_end, hend)) {
+        *result = LERR(ENOMEM);
+        return true;
+    }
+    void *mapped = mmap((void *)inside, (size_t)(inside_end - inside),
+                        PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_FIXED,
+                        fd, (off_t)(off + inside - addr));
+    if (mapped == MAP_FAILED) {
+        *result = LERR(errno);
+        return true;
+    }
+    if ((inside > addr && copy_file_edge(fd, addr, (size_t)(inside - addr), off) != 0) ||
+        (inside_end < end && copy_file_edge(fd, inside_end, (size_t)(end - inside_end),
+                                           off + inside_end - addr) != 0)) {
+        *result = LERR(errno);
+        return true;
+    }
+    record(addr, end, prot);
+    if ((hstart < inside && apply_prot(hstart, prot & PROT_WRITE ? PROT_WRITE : PROT_EXEC) != 0) ||
+        (inside_end < hend && apply_prot(inside_end, prot & PROT_WRITE ? PROT_WRITE : PROT_EXEC) != 0)) {
+        *result = LERR(errno);
+        return true;
+    }
+    int whole_prot = prot;
+    if ((whole_prot & PROT_WRITE) && (whole_prot & PROT_EXEC))
+        whole_prot &= ~PROT_EXEC;
+    if (mprotect((void *)inside, (size_t)(inside_end - inside), whole_prot) != 0) {
+        *result = LERR(errno);
+        return true;
+    }
+    *result = (long)addr;
+    return true;
+}
+
 bool lxrt_trace_on(void);
 #define STEP(fmt, ...) do { if (lxrt_trace_on()) \
     fprintf(lxrt_trace_stream(), "[lxrt]    subpage " fmt "\n", ##__VA_ARGS__); } while (0)
@@ -348,6 +422,13 @@ long lxrt_subpage_mmap_noreplace(uint64_t addr, uint64_t len, int prot, bool ano
 static long subpage_mmap_locked(uint64_t addr, uint64_t len, int prot, bool anon,
                                 int fd, uint64_t off)
 {
+    long fast_result;
+    if (!getenv("LXRT_NO_FAST_SUBPAGE") && !anon && fd >= 0 &&
+        fast_file_interior(addr, len, prot, fd, off, &fast_result)) {
+        STEP("file interior mapped directly 0x%llx+0x%llx", (unsigned long long)addr,
+             (unsigned long long)len);
+        return fast_result;
+    }
     uint64_t hstart = LXRT_ALIGN_DOWN(addr, LXRT_HOST_PAGE);
     uint64_t hend = LXRT_ALIGN_UP(addr + len, LXRT_HOST_PAGE);
     // Whatever already lives in these host pages and was never tracked (a

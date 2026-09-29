@@ -93,13 +93,30 @@ if not isinstance(settings, dict):
 import importlib.util
 spec = importlib.util.spec_from_file_location(
     "settings_env", os.path.join(os.getcwd(), "scripts", "settings-env.py"))   # cwd: the checkout
-env = {}
+# Steam's Linux fossilize replay stalls here while processing Schedule I.
+# This flag affects Valve's pre-cache only; DXVK/VKD3D and Metal cache remain.
+env = {"STEAM_ENABLE_SHADER_CACHE_MANAGEMENT":
+       os.environ.get("STEAM_ENABLE_SHADER_CACHE_MANAGEMENT", "0")} if app_id == "steam" else {}
 env.update(app.get("env") or {})
 # The launcher's settings (launcher/SETTINGS_SPEC.md) -> environment.
 senv = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(senv)
 env.update(senv.env_from_settings(settings))
 senv.write_limits(settings)
+if app.get("kind") == "windows":
+    pspec = importlib.util.spec_from_file_location(
+        "proton_command", os.path.join(os.getcwd(), "scripts", "proton-command.py"))
+    proton = importlib.util.module_from_spec(pspec)
+    pspec.loader.exec_module(proton)
+    try:
+        root = app.get("root") or "/tmp/lxrt-steamroot"
+        if root == "/tmp/lxrt-steamroot":
+            root = os.path.join(senv.STATE, "steamroot")
+        cmd, proton_env = proton.resolve(app, root)
+    except (OSError, ValueError) as error:
+        sys.stderr.write("run-app: %s\n" % error)
+        sys.exit(2)
+    env.update(proton_env)
 pairs = []
 for k, v in sorted(env.items()):
     if re.match(r"^[A-Za-z_][A-Za-z0-9_]*$", str(k)):
@@ -118,6 +135,7 @@ print("APP_NAME=%s" % q(str(app.get("name") or app_id)))
 print("APP_ROOT=%s" % q(str(app.get("root") or "/tmp/lxrt-steamroot")))
 fr = app.get("fexRootfs")
 print("APP_FEXROOTFS=%s" % q("/" if fr is None else str(fr)))
+print("APP_PREFIX=%s" % q(env.get("STEAM_COMPAT_DATA_PATH", "") if app.get("kind") == "windows" else ""))
 print("GEOMETRY=%s" % q(geometry))
 print("DMODE=%s" % q(mode))
 print("APP_ENV=(%s)" % " ".join(q(p) for p in pairs))
@@ -265,6 +283,8 @@ if [ -n "$(guest_pids)" ]; then
     exit 3
 fi
 
+scripts/env-links.sh "$STATE" >/dev/null || exit 1
+[ -z "$APP_PREFIX" ] || mkdir -p "$APP_ROOT$APP_PREFIX" || exit 1
 if [ "$MODE" = native ]; then ensure_native_x; else ensure_xvnc; fi
 
 # Sound (scripts/audio.sh) at the launcher's volume, unless it is muted.

@@ -147,3 +147,9 @@ layers, DroidDeck with the arm64 Steam client) run on Linux kernels, where
 neither limit exists. SteamARM's x86 Proton path already runs the game's x86
 code through FEX -- the same translator ARM64 Proton would load -- with the
 guest address space relocated so both limits are handled.
+
+Follow-up, 2026-09-28: a native Mach-O probe linked with
+`-Wl,-pagezero_size,0x1000` did shrink `__PAGEZERO` to 0x4000, but `MAP_FIXED`
+at 0x7ffe0000 terminated the process with exit 137 (SIGKILL). Shrinking the
+segment alone does not make Wine's low-address reservation available. A second
+probe at 0x100000000 overlapped its own text mapping; discard that result.

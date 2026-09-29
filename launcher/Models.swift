@@ -62,6 +62,7 @@ struct AppEntry: Codable, Identifiable, Hashable {
     var env: [String: String] = [:]
     var kind: String = "custom"  // steam | heroic | prism | custom
     var installDir: String?      // host directory removed on delete
+    var protonTool: String? = nil // Windows apps: installed Steam Proton directory name
 
     static let steam = AppEntry(
         id: "steam", name: "Steam", icon: nil,

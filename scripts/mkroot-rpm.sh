@@ -80,9 +80,9 @@ REPO="$(cd "$(dirname "$0")/.." && pwd)"
 WORK="${STEAMARM_BUILD:-$HOME/SteamARM-build}"
 RPMDIR="$WORK/rpms"
 META="$WORK/repodata-f43"
-STAGE="$WORK/rootstage-f43"
+STAGE="${MKROOT_STAGE:-$WORK/rootstage-f43}"
 FEX_OUT="${FEX_OUT:-$WORK/out}"
-LOCK="$REPO/scripts/mkroot-rpm.lock"
+LOCK="${MKROOT_LOCK:-$REPO/scripts/mkroot-rpm.lock}"
 LLVM_BIN="${LLVM_BIN:-/opt/homebrew/opt/llvm/bin}"
 if [ -z "${LLD:-}" ]; then
     if [ -x "$LLVM_BIN/ld.lld" ]; then LLD="$LLVM_BIN/ld.lld"; else LLD="$(command -v ld.lld || true)"; fi
@@ -99,6 +99,9 @@ KOJI=https://kojipkgs.fedoraproject.org/packages
 # the VM's base system (bash, xkeyboard-config, mesa-dri-drivers, libstdc++
 # and libgcc for FEX). Shared-library dependencies are added by the lock step.
 ROOT_SEEDS=(glibc libgcc libstdc++ bash tigervnc-server-minimal xkbcomp xkeyboard-config mesa-dri-drivers)
+# Another root (scripts/mkarmroot.sh): its own seeds; "so:libfoo.so.N" seeds
+# the package that provides that shared library.
+[ -n "${MKROOT_SEEDS:-}" ] && read -r -a ROOT_SEEDS <<<"$MKROOT_SEEDS"
 # Only for compiling the samples; unpacked into the stage, never into the root.
 BUILD_PKGS=(glibc-devel glibc-static kernel-headers gcc vulkan-headers)
 
@@ -248,6 +251,14 @@ soname = re.compile(r'^[^\s()/]+\.so[^\s()]*\(.*\)\(64bit\)$')
 sel, todo = {}, []
 for s in seeds:
     via = 'seed'
+    if s.startswith('so:'):
+        want = s[3:] + '()(64bit)'
+        prov = provides.get(want)
+        if not prov:
+            print(f'  warning: nothing provides {want} (seed)')
+            continue
+        s = min(prov, key=lambda x: (len(x), x))
+        via = f'seed {want}'
     while s in obsoleted:
         print(f'  note: seed {s} is obsoleted by {obsoleted[s]}, taking that')
         via = f'seed {s}, obsoleted by {obsoleted[s]}'
@@ -389,7 +400,7 @@ for dp, dns, fns in os.walk(root):
             n += 1
 print(f'  {n} absolute symlinks made relative')
 PY
-    [ -e "$tmp/usr/lib/ld-linux-aarch64.so.1" ] && [ -x "$tmp/usr/bin/Xvnc" ] \
+    [ -e "$tmp/usr/lib/ld-linux-aarch64.so.1" ] && { [ -n "${MKROOT_STAGE_ONLY:-}" ] || [ -x "$tmp/usr/bin/Xvnc" ]; } \
         && [ -e "$tmp/usr/share/X11/xkb/rules/evdev" ] || die "stage incomplete after unpacking"
     echo "$want" > "$tmp/.lxrt-stage"
     rm -rf "$STAGE"; mv "$tmp" "$STAGE"
@@ -760,6 +771,8 @@ main() {
     fi
     step do_fetch
     step do_stage
+    # MKROOT_STAGE_ONLY=1: the caller assembles the root from the stage.
+    [ -z "${MKROOT_STAGE_ONLY:-}" ] || return 0
     step do_root "$1"
     [ $# -lt 2 ] || step do_samples "$2"
     log "== done in $(( $(date +%s) - t0 )) s: LXRT_ROOT=$1${2:+ LXRT_SAMPLES=$2}"

@@ -23,6 +23,13 @@ struct AddAppView: View {
     @State private var chosenIcon: URL?
     @State private var customName = ""
     @State private var showImporter = false
+    @State private var compatibility: CompatibilityStatus?
+    @State private var protonTool = ""
+
+    private var isWindows: Bool {
+        guard let staging else { return false }
+        return Installer.isWindowsExecutable(staging.appendingPathComponent(chosenExec))
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
@@ -51,12 +58,16 @@ struct AddAppView: View {
                 if step == .customPick {
                     Button("Añadir") { finishCustom() }
                         .keyboardShortcut(.defaultAction)
-                        .disabled(chosenExec.isEmpty || customName.trimmingCharacters(in: .whitespaces).isEmpty)
+                        .disabled(chosenExec.isEmpty || customName.trimmingCharacters(in: .whitespaces).isEmpty || (isWindows && protonTool.isEmpty))
                 }
             }
         }
         .padding(22)
         .frame(width: 580)
+        .task {
+            compatibility = await CompatibilityStatus.load(project: model.projectDir)
+            protonTool = compatibility?.protons.first(where: { $0.supported })?.name ?? ""
+        }
         .fileImporter(isPresented: $showImporter, allowedContentTypes: [.data, .item],
                       allowsMultipleSelection: false) { result in
             if case .success(let urls) = result, let u = urls.first { startCustom(u) }
@@ -71,7 +82,7 @@ struct AddAppView: View {
                    "shield.lefthalf.filled") { runKnown { r, h in try await Installer.installHeroic(report: r, holder: h) } }
             option("Minecraft Java (Prism Launcher)", "Descarga el AppImage x86_64 y lo extrae sin ejecutarlo.",
                    "cube.fill") { runKnown { r, h in try await Installer.installPrism(report: r, holder: h) } }
-            option("Personalizada", "Un .AppImage, .tar.gz / .tar.xz / .tgz, .deb o un ejecutable ELF.",
+            option("Personalizada (Linux / Windows)", "AppImage, archivo tar, .deb, ELF o .exe x86/x86_64. Windows usa el Proton que elijas.",
                    "shippingbox") { error = nil; showImporter = true }
         }
     }
@@ -111,6 +122,17 @@ struct AddAppView: View {
             TextField("Nombre", text: $customName)
             Picker("Ejecutable", selection: $chosenExec) {
                 ForEach(executables, id: \.self) { Text($0).tag($0) }
+            }
+            if isWindows {
+                Picker("Proton", selection: $protonTool) {
+                    Text("Seleccionar Proton instalado").tag("")
+                    ForEach(compatibility?.protons ?? []) { tool in
+                        Text(tool.supported ? tool.name : "\(tool.name) · \(tool.status)")
+                            .tag(tool.name).disabled(!tool.supported)
+                    }
+                }
+                Text("Cada app tiene su propio prefijo. Para programas con DLL o datos adicionales, importa un archivo tar que incluya toda su carpeta. ARM64 todavía requiere adaptar el runtime zero-VM.")
+                    .font(.caption).foregroundStyle(.secondary)
             }
             Picker("Icono", selection: $chosenIcon) {
                 Text("Ninguno").tag(URL?.none)
@@ -184,6 +206,8 @@ struct AddAppView: View {
 
     private func finishCustom() {
         guard let staging else { return }
+        let windows = isWindows
+        guard !windows || !protonTool.isEmpty else { return }
         let name = customName.trimmingCharacters(in: .whitespaces)
         let id = model.uniqueId(for: name)
         let final = Paths.appsRoot.appendingPathComponent(id)
@@ -201,7 +225,8 @@ struct AddAppView: View {
         }
         let guest = Paths.guestPath(for: final.appendingPathComponent(chosenExec))
         model.upsert(AppEntry(id: id, name: name, icon: icon, command: [guest],
-                              kind: "custom", installDir: final.path))
+                              kind: windows ? "windows" : "custom", installDir: final.path,
+                              protonTool: windows ? protonTool : nil))
         status = "\(name) añadida."
         step = .done
     }
@@ -220,7 +245,7 @@ struct AddAppView: View {
 
     static func guessName(_ file: URL) -> String {
         var n = file.lastPathComponent
-        for ext in [".appimage", ".tar.gz", ".tar.xz", ".tar.bz2", ".tgz", ".txz", ".tar", ".deb"]
+        for ext in [".appimage", ".tar.gz", ".tar.xz", ".tar.bz2", ".tgz", ".txz", ".tar", ".deb", ".exe"]
             where n.lowercased().hasSuffix(ext) {
             n = String(n.dropLast(ext.count))
             break

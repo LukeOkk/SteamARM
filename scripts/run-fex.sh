@@ -16,6 +16,9 @@
 # /tmp/lxrt-root/usr/bin; e.g. <root>/usr/bin of a scripts/mkroot-rpm.sh root).
 set -u
 cd "$(dirname "$0")/.." || exit 1
+# Recreate the volatile root links after a reboot, including direct CLI use.
+scripts/env-links.sh >/dev/null || exit 1
+mkdir -p "${STEAMARM_STATE:-$HOME/SteamARM-roots}/logs"
 # Never run a guest without the memory guard (two Mac hangs without it).
 [ -n "${STEAMARM_NO_SAFEGUARD:-}" ] || scripts/safeguard.sh start >/dev/null
 TRACE=""
@@ -32,6 +35,10 @@ export HOME=/tmp/fexhome
 # libobjc reads this at start-up; see runtime/process.c (lxrt_execve).
 export OBJC_DISABLE_INITIALIZE_FORK_SAFETY=YES
 export FEX_ROOTFS="${FEX_ROOTFS-/tmp/fexhome/.local/share/fex-emu/RootFS/Ubuntu_24_04}"
+# FEXServer owns the rootfs it advertises to every client. Keep its existing
+# stable default, but allow isolated runtime roots (e.g. Holo Core) to select
+# the same server root explicitly for a smoke test or managed session.
+FEX_SERVER_ROOTFS="${FEX_SERVER_ROOTFS:-/tmp/fexhome/.local/share/fex-emu/RootFS/Ubuntu_24_04}"
 export FEX_SILENTLOG=0 FEX_OUTPUTLOG=stderr
 export DISPLAY="${DISPLAY:-:2}"   # the native X server (scripts/run-x11-native.sh)
 # SMC detection by page tracking (FEX's default for Linux guests).
@@ -59,13 +66,31 @@ FEXDIR="${FEXDIR:-/tmp/lxrt-root/usr/bin}"
 # PATH): Steam's "Play" then died in 5 s with "Couldn't connect to FEXServer
 # socket" (MEASURED, Schedule I).
 if ! pgrep -f 'lxrun .*FEXServer' >/dev/null 2>&1; then
+    # Darwin materialises FEX's abstract socket here. Remember any stale
+    # socket inode left by a crashed server: the new server unlinks and binds
+    # it again. Wait for that new socket instead of always sleeping four
+    # seconds on a cold launch.
+    uid="$(id -u)"
+    socket="/tmp/lxrt-abstract-$uid/$uid.FEXServer.Socket"
+    old_socket_inode="$(stat -f %i "$socket" 2>/dev/null || true)"
     # In a subshell: the server must not be a child of this shell, which is
     # about to exec the guest -- a program that reaps all its children (pressure-
     # vessel's pv-adverb) then waited for FEXServer forever (MEASURED).
-    ( TMPDIR=/tmp LXRT_ROOT=/tmp/lxrt-root FEX_ROOTFS=/tmp/fexhome/.local/share/fex-emu/RootFS/Ubuntu_24_04 \
+    ( TMPDIR=/tmp LXRT_ROOT="$LXRT_ROOT" FEX_ROOTFS="$FEX_SERVER_ROOTFS" \
         nohup ./build/lxrun "$FEXDIR"/FEXServer --foreground --persistent=0 >"$FEXSERVER_LOG" 2>&1 & )
-    sleep 4
-    if ! pgrep -f 'lxrun .*FEXServer' >/dev/null 2>&1; then
+    ready=0
+    for ((i=0; i<80; i++)); do
+        socket_inode="$(stat -f %i "$socket" 2>/dev/null || true)"
+        if [ -n "$socket_inode" ] && [ "$socket_inode" != "$old_socket_inode" ] &&
+           pgrep -f 'lxrun .*FEXServer' >/dev/null 2>&1; then
+            # bind creates the pathname just before listen(2).
+            sleep 0.1
+            ready=1
+            break
+        fi
+        sleep 0.1
+    done
+    if [ "$ready" -ne 1 ] || ! pgrep -f 'lxrun .*FEXServer' >/dev/null 2>&1; then
         echo "run-fex: FEXServer did not start (see $FEXSERVER_LOG); not starting the guest" >&2
         exit 1
     fi

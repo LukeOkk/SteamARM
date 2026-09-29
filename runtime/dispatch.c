@@ -1185,6 +1185,11 @@ static long do_mmap(uint64_t addr, uint64_t len, long prot, long lflags,
                                    (lflags & LINUX_MAP_ANONYMOUS) != 0,
                                    (int)fd, off);
         if (r >= 0 && exec_map) {
+            if (fd >= 0 && len > (128ull << 20)) {
+                struct lxrt_range gap;
+                if (lxrt_elf_gap_before_exec((int)fd, off, addr, &gap))
+                    lxrt_pool_offer_elf_gap(gap.start, gap.end);
+            }
             // Code mapped at a 4 KiB file offset still has to be rewritten:
             // the runtime's own libvulkan.so.1 shim is linked with 4 KiB
             // segments, its text lands here, and its private syscalls ran

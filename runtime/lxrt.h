@@ -37,6 +37,8 @@ int lxrt_elf_exec_sections(int fd, uint64_t file_off, uint64_t len, uint64_t map
                            struct lxrt_range *out, int max);
 int lxrt_elf_exec_sections_path(const char *path, uint64_t load_bias,
                                 struct lxrt_range *out, int max);
+bool lxrt_elf_gap_before_exec(int fd, uint64_t file_off, uint64_t map_base,
+                              struct lxrt_range *gap);
 
 struct lxrt_image {
     uint8_t *base;          // where the image actually landed
@@ -48,6 +50,7 @@ struct lxrt_image {
     size_t   span;          // bytes reserved at base
     uint64_t brk;           // end of the image, where the heap starts
     bool     is_pie;
+    bool     subpage;   // p_align < host page: permissions kept per 4 KiB (subpage.c)
     // PT_INTERP, if any. A dynamic executable names its loader here and the
     // runtime must start *that*, not the executable's own entry point.
     char     interp[256];
@@ -114,6 +117,7 @@ void lxrt_rewrite_totals(struct lxrt_rewrite_report *out);
 // -- a failure mode that otherwise looks like random corruption.
 bool lxrt_pool_contains(uint64_t addr);
 bool lxrt_pool_overlaps(uint64_t start, uint64_t end);
+void lxrt_pool_offer_elf_gap(uint64_t start, uint64_t end);
 
 // dispatch.c -- the trampoline's target. Writes the result into regs->x[0].
 void lxrt_dispatch(struct lxrt_regs *regs);
@@ -149,6 +153,7 @@ int lxrt_errno_to_linux(int e);
 // subpage.c -- 4 KiB guest mappings on 16 KiB host pages. x86 Linux binaries
 // are linked with p_align 0x1000 and Darwin's mmap refuses a MAP_FIXED address
 // that is not 16 KiB aligned.
+uint64_t lxrt_guest_page(void);   // stack.c: AT_PAGESZ (LXRT_GUEST_PAGE)
 bool lxrt_subpage_needed(uint64_t addr, uint64_t len, uint64_t off);
 long lxrt_subpage_mmap(uint64_t addr, uint64_t len, int prot, bool anon,
                        int fd, uint64_t off);
