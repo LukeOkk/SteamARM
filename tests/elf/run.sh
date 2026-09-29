@@ -1196,6 +1196,28 @@ else
     echo "  skip  ANDROID_BIONIC_RT (no $STAGE)"
 fi
 
+# BINDER_IPC: Android binder between lxrun processes, raw ioctls against the
+# Linux UAPI header (runtime/binder.c, runtime/binder_hub.c; benchmarks/
+# stage25-binder.txt). A private hub directory, and a hub that leaves 2 s
+# after its last client: nothing outlives the test.
+if [ -f "$STAGE/usr/include/linux/android/binder.h" ] && [ -n "$GCCDIR" ]; then
+    if err=$(glibc_cc -static-pie -O2 -pthread -o build/binder_ipc tests/elf/binder_ipc.c); then
+        bdir=$(mktemp -d /tmp/lxrt-binder-test.XXXXXX)
+        out=$(LXRT_BINDER_DIR=$bdir LXRT_BINDER_HUB_IDLE=2 deadline 60 ./build/lxrun "$PWD/build/binder_ipc" 2>&1); rc=$?
+        if [ "$rc" -eq 0 ] && grep -q '== binder ipc: ok' <<<"$out"; then
+            ok "BINDER_IPC: $(grep -c '^  ok ' <<<"$out") checks across two processes (transaction/reply, FD, node refs, nested call, oneway order, SG+FDA, death notification, poll)"
+        else bad "BINDER_IPC" "rc=$rc $(grep -E 'MAL|lxrun:' <<<"$out" | head -6)"; fi
+        out=$(LXRT_BINDER_DIR=$bdir LXRT_BINDER_HUB_IDLE=2 deadline 60 ./build/lxrun "$PWD/build/binder_ipc" pool 2>&1); rc=$?
+        if [ "$rc" -eq 0 ] && grep -q '== binder pool: ok' <<<"$out"; then
+            ok "BINDER_POOL: BR_SPAWN_LOOPER, two looper threads serving at once, EINTR restart, BINDER_THREAD_EXIT"
+        else bad "BINDER_POOL" "rc=$rc $(grep -E 'MAL|lxrun:' <<<"$out" | head -6)"; fi
+        sleep 3
+        rm -rf "$bdir"
+    else bad "build binder_ipc" "$err"; fi
+else
+    echo "  skip  BINDER_IPC (no $STAGE with linux/android/binder.h)"
+fi
+
 echo
 summary="== $PASS passed, $FAIL failed"
 [ "$XFAIL" -eq 0 ] || summary="$summary ($XFAIL expected failures)"

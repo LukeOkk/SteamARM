@@ -3,6 +3,7 @@
 // Usage: lxrun [--trace] [--dry-run] <elf> [args...]
 
 #include "lxrt.h"
+#include "binder.h"
 #include <dlfcn.h>
 #include <libproc.h>
 #include <mach/mach.h>
@@ -349,6 +350,9 @@ static void load_debug_env(void)
 
 int main(int argc, char **argv)
 {
+    // The binder driver's hub (runtime/binder_hub.c) is this same executable.
+    if (argc >= 2 && !strcmp(argv[1], "--binder-hub"))
+        return lxrt_binder_hub_main(argc, argv);
     load_debug_env();
     lxrt_mounts_load_env();   // a fake bwrap's binds, if we are its child
     // A traced runtime traces its exec'd children too: the guest's execve

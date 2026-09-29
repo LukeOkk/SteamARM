@@ -43,6 +43,8 @@
 #include <pthread.h>
 #include <unistd.h>
 
+#include "binder.h"
+
 // Private syscall numbers, far outside the Linux range (which ends around 463).
 // These are the graphics bridge: a guest ELF asks the runtime for the address
 // of a Mach-O symbol and then calls it with a plain `blr`. After the lookup
@@ -569,8 +571,12 @@ static long guest_close(int fd)
     lxrt_memfd_close(fd);
     lxrt_pathfd_close(fd);
     lxrt_evdev_close(fd);
+    lxrt_binder_close(fd);
     return ret_of(close(fd));
 }
+// For modules that close a descriptor on the guest's behalf (binder.c: the
+// FDA descriptors Linux closes when a buffer is freed).
+long lxrt_guest_close_fd(int fd) { return guest_close(fd); }
 
 static long do_clock_gettime(long clk, uint64_t user_ts)
 {
@@ -906,6 +912,7 @@ static void alias_fd(int oldfd, int newfd)
     lxrt_signalfd_dup(oldfd, newfd);
     lxrt_inotify_dup(oldfd, newfd);
     lxrt_socket_dup(oldfd, newfd);
+    lxrt_binder_dup(oldfd, newfd);
 }
 
 // What an implicit close (dup2 onto a live descriptor) must release. Same
@@ -921,6 +928,7 @@ static void forget_fd(int fd)
     lxrt_inotify_close(fd);
     lxrt_socket_close(fd);
     lxrt_memfd_close(fd);
+    lxrt_binder_close(fd);
 }
 
 // Linux places mmap(NULL, ...) top-down from just below the stack; Darwin
@@ -2050,6 +2058,10 @@ static long do_fstat(int fd, uint64_t out)
     if (!out)
         return LERR(EFAULT);
     struct stat d;
+    if (lxrt_binder_fstat(fd, &d)) {        // a binder device, not the socket under it
+        stat_to_linux(&d, (struct linux_stat *)out);
+        return 0;
+    }
     const char *pf = lxrt_pathfd_path(fd);
     if (pf ? stat(pf, &d) != 0 : fstat(fd, &d) != 0)
         return LERR(errno);
@@ -2071,6 +2083,10 @@ static long do_fstatat(int dirfd, const char *path, uint64_t out, int flags)
     // with it set means "stat the dirfd itself", which is fstat.
     if (lxrt_at_is_empty_path(flags) && path[0] == '\0')
         return do_fstat(lxrt_dirfd_to_darwin(dirfd), out);
+    if (lxrt_binder_stat(path, &d)) {
+        stat_to_linux(&d, (struct linux_stat *)out);
+        return 0;
+    }
     const char *mp = at_through_mounts(dirfd, path);
     if (mp)
         dirfd = -100;
@@ -2350,6 +2366,10 @@ restart:
             ret = lxrt_evdev_write((int)a0, (const void *)a1, (size_t)a2);
             break;
         }
+        if (lxrt_binder_is((int)a0)) {       // binder has no write(): EINVAL
+            ret = LERR(EINVAL);
+            break;
+        }
         {
             long seal = lxrt_memfd_check_write((int)a0, -1, a2);
             if (seal < 0) { ret = seal; break; }
@@ -2365,6 +2385,10 @@ restart:
         }
         if (lxrt_evdev_is((int)a0)) {
             ret = lxrt_evdev_read((int)a0, (void *)a1, (size_t)a2);
+            break;
+        }
+        if (lxrt_binder_is((int)a0)) {       // nor read(): the socket's bytes are doorbells
+            ret = LERR(EINVAL);
             break;
         }
         if (lxrt_timerfd_is((int)a0)) {
@@ -2402,6 +2426,15 @@ restart:
         ret = ret_of((long)lseek((int)a0, (off_t)a1, (int)a2));
         break;
     case LNR_openat:
+        // /dev/binder, /dev/hwbinder, /dev/vndbinder: the userspace binder
+        // driver (binder.c, binder_hub.c), whatever the root has under /dev.
+        {
+            int bctx = a1 ? lxrt_binder_context_of((const char *)a1) : -1;
+            if (bctx >= 0) {
+                ret = lxrt_binder_open(bctx, (int)a2);
+                break;
+            }
+        }
         // A read-only bind (fake bwrap) refuses every write, as the mount
         // itself would on Linux.
         if (lxrt_mounts_readonly((const char *)a1) &&
@@ -2444,6 +2477,14 @@ restart:
     case LNR_faccessat:
         // Linux passes three arguments here; faccessat2 (439) is the one that
         // carries flags.
+        if (lxrt_binder_context_of((const char *)a1) >= 0) {
+            // The binder devices exist (binder.c) whatever the root holds:
+            // libbinder's initWithDriver falls back to /dev/binder when
+            // access() fails, which would put vndservicemanager on the wrong
+            // context. crw-rw-rw-: execute is refused.
+            ret = ((int)a2 & 1) ? LERR(EACCES) : 0;
+            break;
+        }
         {
             const char *mp = at_through_mounts((int)a0, (const char *)a1);
             ret = ret_of(faccessat(mp ? AT_FDCWD : lxrt_dirfd_to_darwin((int)a0),
@@ -2523,6 +2564,10 @@ restart:
         break;
     }
     case LNR_mmap:
+        if (!((long)a3 & LINUX_MAP_ANONYMOUS) && lxrt_binder_is((int)a4)) {
+            ret = lxrt_binder_mmap(a0, a1, (int)a2, (int)a3, (int)a4, a5);
+            break;
+        }
         ret = do_mmap(a0, a1, (long)a2, (long)a3, (long)a4, (long)a5);
         lxrt_memlog('m', ret >= 0 && !a0 ? (uint64_t)ret : a0, a1, (long)a2, (long)a3, ret);
         if (ret >= 0 && !((long)a3 & 0x20))     // file-backed (not MAP_ANONYMOUS)
@@ -2535,6 +2580,8 @@ restart:
             fprintf(lxrt_trace_stream(), "[lxrt] WARNING: guest munmap 0x%llx+0x%llx covers a "
                             "trampoline pool\n", (unsigned long long)a0,
                     (unsigned long long)a1);
+        if (lxrt_binder_munmap(a0, a1, &ret))
+            break;
         ret = do_munmap(a0, a1);
         lxrt_memlog('u', a0, a1, 0, 0, ret);
         if (ret == 0)
@@ -2635,6 +2682,12 @@ restart:
         break;
     case LNR_prlimit64:
         ret = do_prlimit64((long)a0, (long)a1, a2, a3);
+        break;
+    case 163:   // getrlimit: struct rlimit is prlimit64's layout on LP64.
+        ret = do_prlimit64(0, (long)a0, 0, a1);   // bionic's Parcel reads RLIMIT_NOFILE
+        break;
+    case 164:   // setrlimit
+        ret = do_prlimit64(0, (long)a0, a1, 0);
         break;
     case LNR_getrandom:
         if (!a0)
@@ -3208,6 +3261,9 @@ restart:
         break;
     case LNR_epoll_ctl:
         ret = lxrt_epoll_ctl((int)a0, (int)a1, (int)a2, (const void *)a3);
+        // binder_poll marks the calling thread as a poller (LOOPER_STATE_POLL).
+        if (ret == 0 && ((int)a1 == 1 || (int)a1 == 3) && lxrt_binder_is((int)a2))
+            lxrt_binder_polled((int)a2);
         break;
     case LNR_epoll_pwait:
         ret = lxrt_epoll_pwait((int)a0, (void *)a1, (int)a2, (int)a3,
@@ -3441,6 +3497,10 @@ restart:
         break;
     }
     case LNR_faccessat2:
+        if (lxrt_binder_context_of((const char *)a1) >= 0) {
+            ret = ((int)a2 & 1) ? LERR(EACCES) : 0;
+            break;
+        }
         {
             const char *mp = at_through_mounts((int)a0, (const char *)a1);
             ret = lxrt_faccessat2(mp ? -100 : (int)a0, mp ? mp : translate((const char *)a1), (int)a2,
@@ -3727,6 +3787,12 @@ restart:
         ret = do_getitimer((int)a0, (void *)a1);
         break;
     case LNR_ppoll:
+        if (a0 && lxrt_binder_any()) {
+            const struct { int fd; short ev, rev; } *pf = (const void *)a0;
+            for (uint64_t i = 0; i < a1 && i < 4096; i++)
+                if (lxrt_binder_is(pf[i].fd))
+                    lxrt_binder_polled(pf[i].fd);
+        }
         ret = do_ppoll(a0, a1, a2, a3);
         break;
     case LNR_pselect6:

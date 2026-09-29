@@ -9,6 +9,7 @@
 // that skips it hangs instead of failing.
 
 #include "lxrt.h"
+#include "binder.h"
 #include <signal.h>
 #include "fileops2.h"
 
@@ -579,6 +580,7 @@ static void exit_on_host_stack(void *arg) __attribute__((noreturn));
 
 void lxrt_thread_exit(int code)
 {
+    lxrt_binder_thread_exit();      // the hub releases this thread's binder_threads
     struct guest_thread *gt = pthread_getspecific(g_gt_key);
     if (gt)
         unregister_thread(gt->tid);
