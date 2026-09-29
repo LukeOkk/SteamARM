@@ -75,6 +75,21 @@ All FIFO; the display refreshes every 6.06 ms.
 The X server's CPU use while presenting: 0.0 % (stage 12). The spikes under
 interaction are not investigated.
 
+Present modes and the second driver, `vk_x11_present` hosted in the native
+X server, 570 frames each (stage 22, `stage22-kosmickrisp.txt` §6; other
+SteamARM guests were running):
+
+| driver, mode | median | mean |
+|---|---:|---:|
+| MoltenVK, FIFO | 6.047 ms | 6.083 ms |
+| MoltenVK, IMMEDIATE | 6.039 ms | 4.858 ms |
+| KosmicKrisp, FIFO | 6.070 ms | 6.126 ms |
+| KosmicKrisp, IMMEDIATE | 6.070 ms | 6.061 ms |
+
+IMMEDIATE never moved the median off the refresh; the mean dropped below it
+in some runs and not in others. The probe waits for its fence every frame,
+so whether IMMEDIATE tears or unlocks is UNKNOWN.
+
 ## Direct3D probes
 
 Windows programs that create a device and clear the window, through
@@ -88,13 +103,21 @@ rates sit at the 165 Hz display.
 | D3D9, D3D11, D3D12, 64- and 32-bit, Proton directly | 161.7-163.4 | stage 16 |
 | the same through Steam's container (pressure-vessel) | 159.9-161.7 | stage 16 |
 | D3D9/11/12, 64- and 32-bit, after the stage 21 runtime changes | ~158-161 | stage 21 |
+| D3D9/11/12, 64- and 32-bit, after the stage 23 runtime changes | 158.9-161.8 | `stage23-runtime-fixes.txt`; 158.7-161.9 after the merge (`benchmarks/README.md`, after stage 23) |
+| D3D11 / D3D12 64-bit on MoltenVK, same session as the next row | 153.7 / 158.4 | stage 22 (`stage22-kosmickrisp.txt` §5; other guests running, extra logging) |
+| D3D11 / D3D12 64-bit on KosmicKrisp (`STEAMARM_VK_ICD=kosmickrisp`) | 158.1 / 154.1 | stage 22 (the same) |
 
 ## Steam
 
 | measurement | result | record |
 |---|---|---|
 | x86 client: start to login window | 85-86 s | stage 18, stage 21 |
+| x86 client, signed in, from the launcher: start to the main window | 88-93 s in 4 of 5 starts (the fifth died, host SIGTRAP) | `benchmarks/README.md`, after stage 23 |
 | x86 client on a clean install: second start to "Sign in to Steam" | 120 s | stage 17 |
+| native arm64 client, Fedora armroot, `scripts/run-steam-arm64.sh`: BrowserReady / sign-in window | 7-9 s / 10-13 s | stage 22 E18, stage 23 E5, E7, C1, C4 |
+| the same on the Steam Frame root | 15-17 s / 17-19 s | stage 23 F3-F6 |
+| native arm64 client from the launcher: sign-in window | 17-18 s (stage 23 L3-L10); 15-16 s (Fedora root) and 21 s (Frame root) after the merge | stage 23; `benchmarks/README.md`, after stage 23 |
+| native arm64 client at its sign-in window: lxrun processes, resident total | 8, 2.28-2.36 GB (Fedora root); 10, 2.53-2.66 GB (Frame root) | stage 23 |
 | `scripts/setup.sh` on a clean checkout (Homebrew formulae already installed) | 6.5 min; build tree 1.8 GB, roots 8.4 GB | stage 17 |
 | pressure-vessel start-up to the webhelper, after the fd-link fix | 142 s → 27 s | stage 8 |
 | native arm64 webhelper start, libcef mapped from file instead of copied | 2.52 s → 1.49 s | stage 21 |
@@ -103,10 +126,13 @@ rates sit at the 165 Hz display.
 ## Not measured
 
 - Any game: frame rate, frame-time tails, load times, shader stutter.
-- The native arm64 client: it has no window yet.
-- IMMEDIATE present mode, and the V-Sync setting's effect.
+- The native arm64 client after sign-in (sign-in was not attempted): the
+  main window, the library, downloads.
+- The launcher's V-Sync setting's effect in a game, and whether IMMEDIATE
+  tears or unlocks through the cross-process layer.
 - esync against wineserver sync; fsync does not exist here (no
   `futex_waitv`).
-- KosmicKrisp against MoltenVK (the shim cannot load KosmicKrisp yet).
+- KosmicKrisp against MoltenVK beyond clear-and-present probes: D3D9,
+  32-bit D3D, Steam's launch path, games.
 - FEX's translation cache on disk (a setting exists).
 - Retina (2×) displays.

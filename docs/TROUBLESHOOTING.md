@@ -97,12 +97,22 @@ the full mode if you changed it, and **Sistema → esync/fsync** off.
 The memory guard (`scripts/safeguard.sh`) stopped the Linux programs before
 the Mac ran out of memory. The launcher now says so and gives the reason;
 `~/SteamARM-roots/logs/safeguard.log` has a `STOP` or `KILL` line with it.
-It acts only when macOS reports critical memory pressure, or when free
-memory stays under 12 % for 3 s, and then it stops the largest program
-first (usually the game), and the rest only if the pressure lasts 5 s more.
-Up to 0.3.4 it stopped everything as soon as free memory read under 35 %,
-which on a 16 GB Mac happened with Steam alone and other apps open. Close
-other apps, or raise **Sistema → DRAM** (at most the maximum the list
+It checks every second and stops programs for two kinds of reason:
+
+- **Memory pressure.** macOS reports critical memory pressure for 2 s, or
+  free memory stays under 12 % for 3 s. Then it stops the largest program
+  first (usually the game), and the rest only if the pressure lasts 5 s
+  more (a `STOP largest guest` line). Up to 0.3.4 it stopped everything as
+  soon as free memory read under 35 %, which on a 16 GB Mac happened with
+  Steam alone and other apps open.
+- **Hard limits**, whatever the free memory: all the Linux programs
+  together use more than **Sistema → DRAM** (8 GB if the launcher has not
+  written that limit yet), fseventsd uses more than 1500 MB, more than 80
+  Linux processes run, or the kernel's VM objects or map entries pass
+  1,500,000. Then it stops every Linux program at once, Steam included (a
+  `KILL:` line with the limit).
+
+Close other apps, or raise **Sistema → DRAM** (at most the maximum the list
 offers). A signal 9 without such a line in `safeguard.log` came from
 elsewhere.
 

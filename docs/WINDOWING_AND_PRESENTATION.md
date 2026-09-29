@@ -2,7 +2,9 @@
 
 Linux programs draw with X11. SteamARM gives them an X server whose windows
 are real macOS windows, and lets Vulkan frames bypass that server
-altogether. Line numbers are at `dbd1657`.
+altogether. Line numbers are at `dbd1657`, except where a line names
+another commit; the V-Sync and native-client sections were updated on
+2026-09-29 after stages 22-23.
 
 Labels: MEASURED (a command and its result), VERIFIED IN SOURCE (file:line),
 UPSTREAM DOCUMENTED, HYPOTHESIS, UNKNOWN.
@@ -15,8 +17,8 @@ UPSTREAM DOCUMENTED, HYPOTHESIS, UNKNOWN.
 | VNC | Fedora's Xvnc (aarch64) under lxrun, display `:1` (`scripts/run-app.sh`, `ensure_xvnc`) | Screen Sharing at `vnc://127.0.0.1:5901` | experimental: fine for the Steam UI; Vulkan games cannot present |
 
 The mode is `display` in `settings.json` or `STEAMARM_DISPLAY`
-(`launcher/SPEC.md`). `launcher/ApplicationCore.swift:320-321` carries the
-states and reasons.
+(`launcher/SPEC.md`). `launcher/ApplicationCore.swift:522-523` (at
+`b3f64c8`) carries the states and reasons.
 
 ## Native windows
 
@@ -96,12 +98,20 @@ Limitations (stage 12):
   by `tests/elf/vk_present.c` and `vk_triangle.c` (stage 4).
 - The native arm64 client uses `DISPLAY=:2`. Its webhelper's GPU process
   loaded Mesa's software Vulkan (lavapipe), not the shim
-  (`docs/STEAMWEBHELPER_BRINGUP.md`). How its frames reach the X server is
-  not recorded (UNKNOWN).
+  (`docs/STEAMWEBHELPER_BRINGUP.md`), and cannot initialise GL on this X
+  server, so the webhelper composites in software; its "Sign in to Steam"
+  window is an ordinary X toplevel, 700x440, class `steamwebhelper`
+  (MEASURED, stages 22-23). How its frames reach the X server in detail is
+  not recorded (UNKNOWN). On the Steam Frame root the client's own GL
+  windows use indirect GLX through `+iglx` (`benchmarks/stage23-frame-root.txt`).
 
 ## V-Sync
 
-The setting and its bug are in `docs/GRAPHICS_BACKEND_ARCHITECTURE.md`.
-On a Metal surface only FIFO and IMMEDIATE exist. All recorded pacing runs
-were FIFO and locked to the 165 Hz display. Whether IMMEDIATE unlocks or
-tears through the cross-process layer is UNKNOWN.
+The setting, and the VKD3D-Proton value that was ignored until `7ad4919`,
+are in `docs/GRAPHICS_BACKEND_ARCHITECTURE.md`. On a Metal surface only
+FIFO and IMMEDIATE exist. Stage 22 recorded IMMEDIATE runs of
+`vk_x11_present` through the cross-process layer on MoltenVK and
+KosmicKrisp: the median stayed at the 165 Hz refresh (6.04-6.07 ms), the
+mean dropped below it in some runs (MEASURED,
+`benchmarks/stage22-kosmickrisp.txt` §6). Whether IMMEDIATE unlocks or
+tears there is UNKNOWN: that probe waits for its fence every frame.

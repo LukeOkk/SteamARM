@@ -5,7 +5,10 @@ about how Valve's native arm64 Steam client offers compatibility tools:
 Proton ARM64, FEX, Steam Linux Runtime 4.0 Arm64 and Lepton. The project
 owner's goal is to see a Proton ARM64 entry in Steam > Settings >
 Compatibility while that client runs under lxrun. Updated 2026-09-29 after
-`benchmarks/stage21-native-arm64-client.txt`.
+`benchmarks/stage21-native-arm64-client.txt`, and again after stages 22-23
+(`benchmarks/stage22-native-arm64-bringup.txt`,
+`benchmarks/stage23-native-arm64-jit.txt`,
+`benchmarks/stage23-frame-root.txt`) where they answered something here.
 
 - The content comes from web research by a cloud session on 2026-09-29.
 - A second, adversarial pass re-checked every claim. It confirmed 29, refuted
@@ -17,10 +20,13 @@ Compatibility while that client runs under lxrun. Updated 2026-09-29 after
   arm64 client under lxrun (MEASURED on the M4 under macOS 27,
   `benchmarks/stage21-native-arm64-client.txt`). It starts, updates itself
   from the `steam_client_linuxarm64` manifest (version 1788652215), and
-  loads `steamui.so` and `steamclient.so`. Its main process then aborts with
-  `free(): invalid pointer`, before any window. So it has not reached
-  Settings > Compatibility, and no ARM64 Proton entry has been seen under
-  SteamARM.
+  loads `steamui.so` and `steamclient.so`. In stage 21 its main process
+  then aborted with `free(): invalid pointer`, before any window. Since
+  stages 22-23 it reaches its "Sign in to Steam" window with V8's JIT on,
+  on the Fedora armroot and on the root derived from the Frame image, also
+  from the launcher (MEASURED). Sign-in was not attempted, so it has not
+  reached Settings > Compatibility, and no ARM64 Proton entry has been seen
+  under SteamARM.
 - Proton ARM64 cannot start unmodified on macOS (`benchmarks/stage18-settings-audio-controllers.txt`,
   `benchmarks/stage19-steamframe-base-and-arm64-limits.txt` §2). See §7.
 - Blocked or unreachable from the cloud session: partner.steamgames.com,
@@ -528,8 +534,8 @@ https://github.com/Daaboulex/steam-arm64-nix/blob/main/fhs.nix
 
 | need | community report | SteamARM today |
 |---|---|---|
-| Host libraries | The arm64 steamwebhelper takes GLib, GTK3, X11, NSS/NSPR, audio, font and graphics libraries from the host. The `steam` bootstrap needs only glibc. | `scripts/mkarmroot.sh` builds a Fedora 43 aarch64 root for the native client at `$STEAMARM_STATE/armroot` (default `~/SteamARM-roots/armroot`) (VERIFIED IN SOURCE). The client's home is `<armroot>/tmp/armhome` (MEASURED, stage21). The root holds the shared-library closure of what the client links: GTK 2, NSS with softokn and freebl, X11, Mesa GLX/EGL, audio, SDL2 and more; 153 packages, about 570 MB (MEASURED, stage21). It is separate from `/tmp/lxrt-arm64root`, the link meant for the Frame-derived root, which no script builds (`docs/CURRENT_STEAM_ENVIRONMENT.md` §3; `scripts/env-links.sh:13-19`). |
-| `lsof` | The client checks its webhelper NetworkService WebSocket with `lsof`. | MEASURED for the x86 client: it requires `lsof` ("lsof is required to run steam") and rejects the WebSocket when the check fails (`benchmarks/stage8-steam-zero-vm.txt:296-311`). On the arm64 client under PRoot, a missing `lsof` led to "free(): invalid pointer" and an abort (COMMUNITY OBSERVATION, https://github.com/huntergdavis/steamclienttermux/blob/main/docs/TECHNICAL_LOG.md). lxrun serves `/proc/<pid>/fd` and `/proc/net/tcp` for it (`runtime/procpid.c`, VERIFIED IN SOURCE). `scripts/mkarmroot.lock` has no lsof package (VERIFIED IN SOURCE). stage21's client aborts with "free(): invalid pointer" (MEASURED), not yet diagnosed. HYPOTHESIS: the missing `lsof` is the cause. |
+| Host libraries | The arm64 steamwebhelper takes GLib, GTK3, X11, NSS/NSPR, audio, font and graphics libraries from the host. The `steam` bootstrap needs only glibc. | `scripts/mkarmroot.sh` builds a Fedora 43 aarch64 root for the native client at `$STEAMARM_STATE/armroot` (default `~/SteamARM-roots/armroot`) (VERIFIED IN SOURCE). The client's home is `<armroot>/tmp/armhome` (MEASURED, stage21). The root holds the shared-library closure of what the client links: GTK 2, NSS with softokn and freebl, X11, Mesa GLX/EGL, audio, SDL2 and more; 153 packages, about 570 MB (MEASURED, stage21). It is separate from `/tmp/lxrt-arm64root`, the link for the Frame-derived root. At this page's first writing no script built that root; since `2c6322a` `scripts/mkframeroot.sh` derives it from the extracted image (an APFS clone plus `etc/resolv.conf`, `etc/localtime` and `.lxrt-guest-env`), and the client reaches its sign-in window there too (MEASURED, `benchmarks/stage23-frame-root.txt`). |
+| `lsof` | The client checks its webhelper NetworkService WebSocket with `lsof`. | MEASURED for the x86 client: it requires `lsof` ("lsof is required to run steam") and rejects the WebSocket when the check fails (`benchmarks/stage8-steam-zero-vm.txt:296-311`). On the arm64 client under PRoot, a missing `lsof` led to "free(): invalid pointer" and an abort (COMMUNITY OBSERVATION, https://github.com/huntergdavis/steamclienttermux/blob/main/docs/TECHNICAL_LOG.md). lxrun serves `/proc/<pid>/fd` and `/proc/net/tcp` for it (`runtime/procpid.c`, VERIFIED IN SOURCE). At stage21 `scripts/mkarmroot.lock` had no lsof package, and stage21's client aborted with "free(): invalid pointer" (MEASURED); the HYPOTHESIS then was that the missing `lsof` caused it. Stage 22 refuted that: the abort came from missing X locale data (`docs/STEAM_ARM64_BRINGUP.md`). A missing `lsof` did something else under lxrun: the client looked for it in every `PATH` directory and answered each webhelper transport connection with 403; with `lsof` in the root (`cb257b3`), no rejection and the login window appears (MEASURED, stage 22 E12b-E16). The Frame root has its own `lsof` 4.99.3. |
 | SysV semaphores | The client relies on semop wakeups; PRoot had to fix them. | VERIFIED IN SOURCE: `runtime/sysv_ipc.c` passes semaphores to Darwin's kernel SysV implementation, `semctl` SETVAL and SETALL included (the `L_SETVAL` and `L_SETALL` cases). HYPOTHESIS: Darwin's kernel then wakes blocked `semop` waiters itself. `semtimedop` is emulated as a polled `semop` with a backoff from 100 us to 5 ms (VERIFIED IN SOURCE, the `semtimedop` comment in the same file), so its wakeups are late by up to that interval. |
 | robust futex list | The client uses `set_robust_list` and `get_robust_list`; PRoot had to emulate them. | VERIFIED IN SOURCE: `runtime/dispatch.c:2202-2222` keeps the thread's own list. The kernel's walk of the list when a thread dies is not implemented. |
 | CEF sandbox | CEF was run with `-cef-disable-gpu` / `--no-sandbox`. | VERIFIED IN SOURCE: lxrun reports `max_user_namespaces` 0, so `steamwebhelper.sh` starts CEF with `--no-sandbox` (`runtime/proc_ext.c:1174-1184`). |
@@ -664,37 +670,48 @@ the client redistributable.
    ARM64 builds cannot be used from x86 Steam under FEX (UPSTREAM
    DOCUMENTED, Proton README). The record also holds stage15, where the x86
    client installed Proton (ARM64); the native client is what counts now.
-   stage21 runs that client under lxrun, up to an abort in its main process
-   (MEASURED).
-2. **That client up to its Settings page under lxrun.** stage21 got it to
+   stage21 ran that client under lxrun up to an abort in its main process;
+   since stages 22-23 it runs to its sign-in window (MEASURED).
+2. **That client up to its Settings page under lxrun.** Stage 21 got it to
    load `steamui.so` and `steamclient.so` and to start its UI process tree.
-   steamwebhelper reached BrowserReady in an earlier run (MEASURED). Open
-   items:
-   - the main process's `free(): invalid pointer` abort (MEASURED). Its
-     cause is now a HIGH-CONFIDENCE HYPOTHESIS from disassembly: `vgui2_s`
-     ignores an Xlib error and frees an uninitialised pointer, on the
-     rescue-dialog path taken after the webhelper times out, because the
-     root had no X locale data (`docs/STEAM_ARM64_BRINGUP.md`). The earlier
-     `lsof` HYPOTHESIS (§5.4) is not part of that chain;
-   - the NSS network-process FATAL of earlier notes. The last one in
-     `cef_log.txt` is from 2026-09-28 17:17:19 (`libsoftokn3.so: cannot
-     open shared object`); the file is in the root now. No later run
-     reached CEF logging, so whether it is gone is UNKNOWN
-     (`docs/STEAMWEBHELPER_BRINGUP.md`);
-   - the renderers' V8 without a JIT or with one that asks for the W^X flip
-     (HYPOTHESIS, `docs/CURRENT_STEAM_ENVIRONMENT.md` §7 and §9).
+   Stages 22-23 took it to its "Sign in to Steam" window with V8's JIT on,
+   on the Fedora armroot and on the Frame-derived root (MEASURED,
+   `docs/STEAM_ARM64_BRINGUP.md`). The Settings page needs a sign-in,
+   which was not attempted: that is the open item now. The items this list
+   held at stage 21 are settled:
+   - the main process's `free(): invalid pointer` abort. Its mechanism, a
+     `vgui2_s` call that ignores an Xlib error and frees an uninitialised
+     pointer on the rescue-dialog path after a webhelper timeout, on a root
+     without X locale data, was confirmed by probe, and with X locale data
+     in the root the path is not reached (MEASURED, stage 22 E1-E2). The
+     earlier `lsof` HYPOTHESIS (§5.4) was not part of that chain;
+   - the NSS network-process FATAL of earlier notes (the last one in
+     `cef_log.txt` is from 2026-09-28 17:17:19, `libsoftokn3.so: cannot
+     open shared object`). Not seen in any run since the stage 22 root
+     rebuild: those runs reached CEF logging and logged 0 FATAL, or only
+     the GPU process's (MEASURED, `docs/STEAMWEBHELPER_BRINGUP.md`). The
+     live sign-in QR code shows the network process reaching Valve's
+     servers;
+   - the renderers' V8: it JITs since stage 23 (RWX pages split W^X per
+     page, MEASURED, `benchmarks/stage23-native-arm64-jit.txt`).
 
-   stage21's root holds the closure of what the client links (MEASURED).
-   Its lock has GTK 2 but not the GTK 3 of the community report, and no
-   aarch64 `lsof` (VERIFIED IN SOURCE, `scripts/mkarmroot.lock`).
+   stage21's root held the closure of what the client links (MEASURED).
+   Its lock has GTK 2 but not the GTK 3 of the community report (VERIFIED
+   IN SOURCE, `scripts/mkarmroot.lock`); stage 22 added an aarch64 `lsof`
+   and X and glibc locale data to it.
 3. **A launch the way installers do it.** The links of §6, `package/beta`,
    `LD_LIBRARY_PATH` and a restart on exit code 42 (COMMUNITY OBSERVATION).
    stage21 started the client by hand:
    `LXRT_ROOT=<armroot> LXRT_GUEST_PAGE=4096 HOME=/tmp/armhome DISPLAY=:2 build/lxrun /tmp/armhome/.local/share/Steam/steamrtarm64/steam`
    (MEASURED). Whether it made the links of §6 is not recorded (UNKNOWN).
-   SteamARM's launch path still keys on `ubuntu12_32/steam` and `steamui.so`
-   (VERIFIED IN SOURCE, `scripts/run-app.sh:41, 94-98`;
-   `docs/CURRENT_STEAM_ENVIRONMENT.md` §7).
+   At stage 21 SteamARM's launch path keyed on `ubuntu12_32/steam` and
+   `steamui.so` (`docs/CURRENT_STEAM_ENVIRONMENT.md` §7). Since `e8114fa`
+   and `9468028` the launcher has two aarch64 entries that start
+   `steamrtarm64/steam` directly through `scripts/run-native.sh`, not
+   through `steam.sh`, so the installer-style links and the restart on exit
+   code 42 are still not done; adopting a client started outside the
+   launcher still keys on `ubuntu12_32/steam` (VERIFIED IN SOURCE,
+   `scripts/run-app.sh:42`).
 4. **A client build and channel that carries the offer.** Builds on the
    steamdeck_stable line differ in it (COMMUNITY OBSERVATION, §3). Whether
    stable 1788652215 and publicbeta 1790545198 carry it: UNKNOWN.
@@ -739,7 +756,7 @@ the client redistributable.
 | Proton ARM64 is built with `-march=armv8.2-a` (VERIFIED IN SOURCE). The M4 under macOS 27 reports FEAT_LSE, RDM, DotProd and LRCPC2 (MEASURED, `benchmarks/stage5-idregs.txt`). There is no ISA blocker there, and the Cortex-A57 SIGILL reports do not apply. | VERIFIED IN SOURCE / MEASURED; the conclusion is HYPOTHESIS |
 | Lepton (3029110) needs rootless podman, user namespaces and Android binder. It is not viable under lxrun on macOS. Since it offers itself even where it cannot run (§3), SteamARM should filter it or document it as unsupported. | HYPOTHESIS |
 | The arm64 client can be fetched from Valve at run time, on the user's Mac, instead of being copied out of the Frame image. stage21 did so from the `steam_client_linuxarm64` manifest, and the client then updated itself (MEASURED). No repository script does it yet: `scripts/install-steam.sh` fetches only the x86 bootstrap, and no script names a `linuxarm64` URL (VERIFIED IN SOURCE; `docs/CURRENT_STEAM_ENVIRONMENT.md` §5.2). The steamrt3c runtime was probably not part of stage21's install, since `steam-runtime-launcher-service` was missing (HYPOTHESIS). | MEASURED / VERIFIED IN SOURCE / HYPOTHESIS |
-| The steamwebhelper NSS FATAL came from a missing NSS module: the last one, at 2026-09-28 17:17:19, names `libsoftokn3.so` (MEASURED, `cef_log.txt`). stage21's root now carries NSS with softokn and freebl, and steamwebhelper reached BrowserReady at 17:15:32 the same day (MEASURED). The 2026-09-29 webhelpers never reached CEF logging, so whether the FATAL is gone is UNKNOWN. The run now ends in the main process, at `free(): invalid pointer` (MEASURED; cause in `docs/STEAM_ARM64_BRINGUP.md`). | MEASURED / UNKNOWN |
+| The steamwebhelper NSS FATAL came from a missing NSS module: the last one, at 2026-09-28 17:17:19, names `libsoftokn3.so` (MEASURED, `cef_log.txt`). stage21's root now carries NSS with softokn and freebl, and steamwebhelper reached BrowserReady at 17:15:32 the same day (MEASURED). The webhelpers of the early 2026-09-29 run (02:15) never reached CEF logging, and that run ended in the main process at `free(): invalid pointer`. Later the same day, after the stage 22 root rebuild, every run reached CEF logging with no NSS FATAL (0 FATAL, or only the GPU process's), the abort was no longer reached, and the client showed its sign-in window with a live sign-in QR code (MEASURED, `benchmarks/stage22-native-arm64-bringup.txt` E2, E5, E16, E18; stage 23). | MEASURED |
 | steamcmd for linuxarm64 could fetch depots 4185400, 4628740 and 3127680 for offline inventory without x86 emulation. 3127680 is ownersonly (COMMUNITY OBSERVATION); the others may also need an entitled account. | HYPOTHESIS |
 
 ### 7.4 Next steps
@@ -747,7 +764,8 @@ the client redistributable.
 These steps are now ordered, with the rest of the ARM64 work, in
 `docs/ARM64_FIRST_MIGRATION.md`; the list below keeps their detail.
 
-On the Mac, in this order. stage21 has done parts of steps 1 to 4.
+On the Mac, in this order. Stages 21-23 have done steps 3 and 4 and parts
+of steps 1 and 2; step 5 needs a sign-in, which was not attempted.
 
 1. Get the native client. Done in stage21: downloaded from Valve's
    `steam_client_linuxarm64` manifest on the Mac, then self-updated
@@ -759,15 +777,20 @@ On the Mac, in this order. stage21 has done parts of steps 1 to 4.
    `LXRT_GUEST_PAGE=4096`. Record the per-file values in `benchmarks/`.
 3. Put the host libraries of §5.4 and an aarch64 `lsof` in the ARM64 root.
    Done by `scripts/mkarmroot.sh` for the libraries the client links, NSS
-   with softokn and freebl included (stage21). Its lock has no GTK 3 and no
-   `lsof`. Still to do: add `lsof` to its seeds, run stage21's command
-   again, and record whether the `free(): invalid pointer` abort changes.
+   with softokn and freebl included (stage21). Its lock has no GTK 3. Done
+   in stage 22: `lsof`, X locale data, glibc locales, SDL3 and the
+   `libnssckbi.so` link added to its seeds; the `free(): invalid pointer`
+   abort is no longer reached and the client shows its sign-in window
+   (MEASURED, `benchmarks/stage22-native-arm64-bringup.txt`).
 4. Start `steamrtarm64/steam` as an `aarch64` launcher entry. stage21
-   started it by hand with `build/lxrun` (MEASURED). `scripts/run-native.sh`
-   defaults `LXRT_ROOT` to `/tmp/lxrt-arm64root` and does not set
-   `LXRT_GUEST_PAGE` (VERIFIED IN SOURCE, `scripts/run-native.sh:19-29`), so
-   the entry must set both. Add the links of §6, and the launcher keys for
-   `steamrtarm64/steam` beside the `ubuntu12_32/steam` ones.
+   started it by hand with `build/lxrun` (MEASURED). Done: the entries
+   `steam-arm64` (Fedora armroot) and `steam-arm64-frame` (Frame root) in
+   `scripts/builtin-apps.json` set `LXRT_ROOT` through their root and
+   `LXRT_GUEST_PAGE=4096` in their environment, and the client reaches its
+   sign-in window from the launcher (MEASURED, stage 23 L1-L10; the
+   post-merge check in `benchmarks/README.md`). Still to do: the links of
+   §6, and the launcher keys for adopting a `steamrtarm64/steam` started
+   outside the launcher, beside the `ubuntu12_32/steam` ones.
 5. Open Steam > Settings > Compatibility. Record the list shown,
    `compat_log.txt`, the client version and the channel in a new
    `benchmarks/` stage.
@@ -823,7 +846,8 @@ From the research session:
 Only on the Mac, with lxrun:
 
 - what the native arm64 client's Compatibility list shows (stage21: the
-  client starts, then aborts before its window);
+  client started, then aborted before its window; since stages 22-23 it
+  reaches its sign-in window, and nothing past sign-in has been tried);
 - the SLR4-arm64 bwrap plan;
 - the per-file `p_align` of the client (stage21: it needs
   `LXRT_GUEST_PAGE=4096`);

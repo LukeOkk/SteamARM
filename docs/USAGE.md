@@ -6,12 +6,32 @@ follows the layout of the [Ryujinx](https://ryujinx.app) emulator's.
 
 ## The launcher
 
-- **Steam** starts the Linux Steam client. Its windows are ordinary macOS
-  windows (a rootless X server). The card shows **Detener** while it runs.
+- **Steam** starts the Linux Steam client (the x86 client under FEX: the
+  working route). Its windows are ordinary macOS windows (a rootless X
+  server). The card shows **Detener** while it runs.
+- **Steam ARM64 (experimental)** and **Steam ARM64 · Steam Frame
+  (experimental)** start Valve's native arm64 client with no FEX, on two
+  different ARM64 roots. It reaches its "Sign in to Steam" window
+  (MEASURED, `benchmarks/stage23-*.txt`); sign-in, the library, downloads
+  and games under it are not verified, and Proton ARM64 does not run on
+  macOS. Neither root nor the client is set up by **Instalar**: each card
+  is disabled, with the reason, until they exist
+  (`docs/STEAM_ARM64_BRINGUP.md`). Opening one asks for confirmation first.
 - **+** adds other Linux programs: a `.tar.gz`/`.zip`/AppImage you pick, or
-  a known installer (Heroic, Prism Launcher). Right-click a card to edit or
-  delete it.
-- Only one program runs at a time. Stopping it stops all its Linux processes.
+  a known installer (Heroic, Prism Launcher). The launcher reads the
+  program's ELF header first: an aarch64 program goes to the ARM64 root
+  and runs without FEX, anything else to the x86 root. Right-click a card
+  to open it, see or change its settings (**Ajustes…**: an added app can
+  override display, V-Sync, synchronization and the graphics engine; the
+  built-in entries show theirs read-only), open its folder or logs, mark
+  it as a favourite, or delete it (added apps only).
+- The library has a search field and the filters Todas, Favoritas,
+  Recientes, ARM64, x86 and Windows; each card shows its last launch, how
+  many times it ran and for how long.
+- Only one program runs at a time. Stopping it stops all its Linux
+  processes. When a program ends with an error, the launcher shows its exit
+  code or signal, or the memory guard's reason (see
+  `docs/TROUBLESHOOTING.md`).
 - Starting a program also starts the memory guard, sound and the controller
   service (below).
 
@@ -23,11 +43,12 @@ affects games (the settings window reminds you).
 
 | Section | What it controls |
 |---|---|
-| **Interfaz** | Start Steam when the launcher opens; ask before stopping; native windows or a VNC desktop, and its resolution; the source folder the launcher runs scripts from |
+| **Interfaz** | Start Steam when the launcher opens; ask before stopping; the application backend: native windows or a VNC desktop, and its resolution (Lightning JIT and Apple Hypervisor are listed disabled, with the reason; no choice uses a virtual machine); the source folder the launcher runs scripts from |
 | **Entrada** | Controllers, one page per player (below) |
-| **Sistema** | Language and time zone of Linux programs; vsync (per game / on / off); **DRAM** and **VRAM** limits; esync/fsync |
-| **Procesador** | FEX options: on-disk translation cache (experimental), x86 memory-ordering emulation (TSO full/fast/off), multiblock, self-modifying code detection, reduced-precision x87 |
-| **Gráficos** | Shader cache, anisotropic filtering, frame-rate limit, DXVK HUD, Metal HUD |
+| **Sistema** | Language and time zone of Linux programs; V-Sync (AUTO / ON / OFF); **DRAM** and **VRAM** limits; Proton synchronization (AUTO / default / MSync / fsync / esync: fsync and MSync are disabled, esync is experimental and needs a Proton that has it); what to do when a setting cannot work for an app (AUTO, ESTRICTO, PREGUNTAR) |
+| **Procesador** | FEX options: on-disk translation cache (experimental), x86 memory-ordering emulation (TSO full/fast/off), multiblock, self-modifying code detection, reduced-precision x87; the Proton and runtime tools installed |
+| **Gráficos** | The graphics engine: AUTO (MoltenVK), Vulkan (MoltenVK), Vulkan (KosmicKrisp: experimental, offered only when Homebrew's Mesa is installed and the installed Vulkan shim can load it) or OpenGL (WineD3D: disabled). Shader cache, anisotropic filtering, frame-rate limit, DXVK HUD, Metal HUD |
+| **Runtime** | Read-only: every backend and capability, its state and reason, and what was detected on this Mac |
 | **Sonido** | Sound on/off and volume |
 | **Atajos** | Keyboard shortcuts: screenshot (F8 by default, saved to `~/Pictures/SteamARM`), stop the running program, toggle the Metal HUD. Shortcuts while a game has focus need the Accessibility permission, and screenshots need Screen Recording |
 | **Registros** | Proton log, `WINEDEBUG`, DXVK and VKD3D-Proton log levels; opens the logs folder (`~/SteamARM-roots/logs`) |

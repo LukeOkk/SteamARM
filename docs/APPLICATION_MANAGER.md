@@ -5,6 +5,14 @@ processes, what exists today, and the order in which it changes. The target
 is set by the ZERO-VM mission: one managed session at a time, ARM64-first,
 and Steam as one application among others.
 
+**Status, 2026-09-29 (`b3f64c8`).** "Today" below is the 2026-09-28 audit,
+kept as written. The table after it and the next steps are updated: the
+built-in entries come from `scripts/builtin-apps.json`, the launcher runs
+sessions through `SessionMachine`, and Valve's native arm64 client has two
+experimental entries that reach its sign-in window from the launcher
+(MEASURED, `benchmarks/stage23-native-arm64-jit.txt` L1-L10 and the
+post-merge check in `benchmarks/README.md`).
+
 ## Today (VERIFIED IN SOURCE, 2026-09-28 audit)
 
 - **The launch primitive.** `LauncherModel.launch` runs
@@ -37,17 +45,17 @@ and Steam as one application among others.
   - The install chain: `install-steam.sh` (i386 bootstrap), and
     `install-steamroot-gfx.sh`, which hides the hypervisor bit from FEX.
 
-## What changed (this commit)
+## What changed (the application-core commit, updated to `b3f64c8`)
 
 | target abstraction | where | state |
 |---|---|---|
 | Program ISA from its ELF, never its name | `ELFInspector` (`launcher/ApplicationCore.swift`); "Add app" stores it in `AppEntry.architecture` | done, tested |
 | ApplicationDefinition carries the ISA | `AppEntry.architecture` (`aarch64` / `x86_64` / `i386`; nil = x86_64, so existing `apps.json` files keep working) | done |
-| LinuxBaseEnvironment | `LinuxBaseEnvironment` with two built-ins: `arm64` (`/tmp/lxrt-arm64root`, no translator) and `legacy-x86` (`/tmp/lxrt-steamroot`, FEX, `transitional`) | model done; the launcher does not read it yet |
+| LinuxBaseEnvironment | `LinuxBaseEnvironment` with three built-ins: `arm64` (`/tmp/lxrt-arm64root`, the Steam Frame root, no translator), `armroot` (`/tmp/lxrt-armroot`, the Fedora armroot, no translator, transitional; `1de9fd1`) and `legacy-x86` (`/tmp/lxrt-steamroot`, FEX, `transitional`) | done; the launcher reads it for an entry's "Entorno base" and for why an ARM64 entry is unavailable (`launcher/LauncherModel.swift:255-277`) |
 | ARM64-first launch plan | `LaunchPlanner`: aarch64 runs natively only, never through FEX; x86_64/i386 run through FEX only; `usesVirtualMachine` is always false | done, tested |
 | Runner per ISA | `run-app.sh` sends aarch64 entries to the new `scripts/run-native.sh` (`build/lxrun <program>`, no `FEX_*` variables). It writes `running.arch` = `<arch> <translator>`, and refuses an aarch64 entry in the x86 root or an x86 entry in the ARM64 base, as `LaunchPlanner` does | done, dry-run tested |
-| Session state machine | `SessionMachine`: `idle → starting → running → stopping → cleanup → idle`, `starting → failed → cleanup → idle`, `running → crashed / exited → cleanup → idle`. The lock is taken before any process exists | model done, tested; `LauncherModel` still uses its own `Phase` |
-| Backends, session mode and capabilities | `ApplicationCore.swift`: `PresentationMode` (native windows / VNC) is separate from `ExecutionBackend` (lxrun / Lightning JIT / Apple Hypervisor). `ApplicationBackendPreset` maps the four presets onto them. `SessionVirtualizationMode` is `VM — Apple Hypervisor` only for that backend, and no fallback ever returns it. `RuntimeCapabilities.current` states what exists today, with its evidence: native windows ready; VNC experimental; lxrun ready; Lightning JIT and Apple Hypervisor unavailable (neither exists in the tree); esync experimental; fsync unsupported (no `futex_waitv`); MSync unavailable; MoltenVK ready; KosmicKrisp and WineD3D/OpenGL unavailable | model done, tested; no UI reads it yet |
+| Session state machine | `SessionMachine`: `idle → starting → running → stopping → cleanup → idle`, `starting → failed → cleanup → idle`, `running → crashed / exited → cleanup → idle`. The lock is taken before any process exists | done, tested; `LauncherModel` uses it instead of its own phase since `774f590` |
+| Backends, session mode and capabilities | `ApplicationCore.swift`: `PresentationMode` (native windows / VNC) is separate from `ExecutionBackend` (lxrun / Lightning JIT / Apple Hypervisor). `ApplicationBackendPreset` maps the four presets onto them. `SessionVirtualizationMode` is `VM — Apple Hypervisor` only for that backend, and no fallback ever returns it. `RuntimeCapabilities.current` states what exists today, with its evidence: native windows ready; VNC experimental; lxrun ready; Lightning JIT and Apple Hypervisor unavailable (neither exists in the tree); esync experimental; fsync unsupported (no `futex_waitv`); MSync unavailable; MoltenVK ready; KosmicKrisp unavailable and WineD3D/OpenGL unsupported. `RuntimeCapabilities.detect(from:)` refines that table with what `scripts/compat-status.py` finds on the Mac: KosmicKrisp becomes experimental when it is installed, on macOS 26 or later, loads as an ICD and the installed shim reads `STEAMARM_VK_ICD`; esync is experimental only with an esync Proton (`1de9fd1`) | done, tested; the Settings window and its read-only Runtime page read it, and disabled options show their reason (`774f590`) |
 | One process group and an exit status per session | `scripts/session.py run` (started by `run-app.sh`) puts the program and what it forks in a group of its own (`running.pgid`). A process that starts its own session (setsid: wineserver, daemons) leaves that group; `--stop`'s `kill -9` of leftover guests still catches it. How the program ended goes to `running.status`: `N` for an exit code, `N signal S` for a signal. Leftovers get 5 s, then SIGTERM, then SIGKILL. `--stop` signals the group first (`session.py stop`). FEXServer and `safeguard.sh` start in their own sessions (`session.py detach`), so a stop never takes them down. The program gets the caller's environment and signal dispositions, not Python's: no coerced `LC_CTYPE`, default SIGPIPE, and nohup's ignored SIGHUP kept. The launcher reports the status ("terminó con el código N / la señal S") and keeps the 15 s guess only for a run it adopted without a wrapper | done; `tests/launcher/session.sh` 24/24 on Linux; macOS CI 23/23 + 1 skip (`benchmarks/stage20-ci-macos-runner.txt`) |
 
 Steam, Heroic and Prism are marked `x86_64`, so they behave exactly as
@@ -59,66 +67,80 @@ Tests (they build and run on Linux too):
 make test-launcher-core
 ```
 
-It runs three tests:
+It runs (Makefile target `test-launcher-core`):
 
 - `launcher/tests/ApplicationCoreTests.swift`: ELF detection, launch plans,
-  session transitions, backends and capabilities;
+  session transitions, backends and capabilities, detection, fallback
+  policy, the library;
+- `tests/test_settings_env.py`, `tests/test_compat_status.py`: the settings
+  → environment translation and the compatibility inventory;
 - `tests/launcher/run_app_dispatch.sh`: `run-app.sh --dry-run` for
-  aarch64/x86_64/i386/Steam/invalid entries and the root rule;
+  aarch64/x86_64/i386/Steam/invalid entries, the root rule and the built-in
+  entries (25 passed at `9468028`);
 - `tests/launcher/session.sh`: `scripts/session.py` with real processes
-  (about 20 s).
+  (about 20 s);
+- `tests/launcher/safeguard.sh`: the memory guard with fake guests;
+- `tests/launcher/guest_env.sh`: a root's `.lxrt-guest-env` and
+  `scripts/mkframeroot.sh` on a fake extraction.
 
-The same three run on every PR in `.github/workflows/macos.yml`, on a macOS
-runner, after `make all`.
+The same target runs on every PR in `.github/workflows/macos.yml`, on a
+macOS runner, after `make all`.
 
 ## Next steps, in order (all need the Mac)
 
 The launcher's part of `docs/ARM64_FIRST_MIGRATION.md` (step 10 there).
-Wiring Steam ARM64 into the launcher is being worked on separately; nothing
-below is claimed as done unless it says so.
+Status at `b3f64c8` is given per step; nothing is claimed as done unless it
+says so.
 
-1. **Build and smoke-test.** Run `make launcher test-launcher-core`. Then copy
-   an aarch64 test program into the ARM64 root, for example the `hello_dyn`
-   sample from `scripts/mkroot-rpm.sh`. Add an entry for it to `apps.json` by
-   hand, with `"architecture": "aarch64"` and `"root": "/tmp/lxrt-arm64root"`
-   ("Añadir app" cannot do this yet, step 5). Launch it from the launcher, and
-   check its log and `running.arch = "aarch64 none"`.
-2. **The ARM64 roots.** `/tmp/lxrt-arm64root` is meant for a root derived
-   from the Steam Frame image (the target; extracted and inventoried on
-   2026-09-29, `docs/STEAM_FRAME_INVENTORY.md`); `scripts/env-links.sh`
-   links it when `~/SteamARM-roots/arm64root` exists, which it does not yet
-   (MEASURED). Stage 21 ran the native client from a different root: the
-   Fedora armroot of `scripts/mkarmroot.sh`, through a hand-made
-   `/tmp/lxrt-armroot` link that no script creates (MEASURED). Until one of
-   them is linked by a script, the launcher must show aarch64 entries as
-   unavailable, not failing.
+1. **Build and smoke-test.** PARTLY DONE: `make test-launcher-core` passes
+   on the Mac (stage 23; the post-merge check), and both ARM64 Steam
+   entries were started and stopped from the launcher (below). A
+   `running.arch = "aarch64 none"` check is not recorded. Still to do: add
+   a small aarch64 program (for example the `hello_dyn` sample from
+   `scripts/mkroot-rpm.sh`) with "Añadir app", launch it from the launcher,
+   and check its log and `running.arch = "aarch64 none"`.
+2. **The ARM64 roots.** DONE. `/tmp/lxrt-arm64root` is the root derived
+   from the Steam Frame image by `scripts/mkframeroot.sh` (an APFS clone on
+   the SteamFrameRoot volume; `$STATE/arm64root` points at it while the
+   volume is attached, MEASURED in `benchmarks/stage23-frame-root.txt`).
+   `/tmp/lxrt-armroot` is the Fedora armroot of `scripts/mkarmroot.sh`. At
+   the audit that link was made by hand; since `e8114fa`
+   `scripts/env-links.sh` links both when their roots exist. An aarch64
+   entry whose root or program is missing is shown as unavailable with the
+   reason, not as failing (`launcher/LauncherModel.swift:255-277`).
 3. **Exit status and a process group per session.** Done in
-   `scripts/session.py` (see the table above). Still to do on the Mac: run
-   `tests/launcher/session.sh` there, and check that a Steam stop through the
-   group leaves no `steamwebhelper` behind (the wrapper's SIGTERM/SIGKILL
-   steps should show in the log). `safeguard.sh` could later kill the
-   recorded group before every `lxrun`.
-4. **Wire `SessionMachine` into `LauncherModel`.** It replaces `Phase`. Take
-   the lock in `launch` before running the script, and release it only after
-   cleanup; `ended(status:)` takes the value from `running.status`. `RunningView` shows the architecture and translator from
-   `running.arch`, and `Session Mode: ZERO-VM`.
-5. **"Añadir app" per ISA.** Today every added program is copied under the
-   Steam root (`Paths.appsRoot`) before its ISA is read, and its entry gets
-   `root = /tmp/lxrt-steamroot`. For aarch64 programs `run-app.sh` refuses
-   that pairing. The add flow must read the ELF first and install aarch64
-   programs under the ARM64 base, with that root.
-6. **One Steam definition.** Move Steam out of the `run-app.sh` dict and
-   `AppEntry.steam` into a single JSON (`$STATE/launcher/builtin.json`, or
-   `apps.json` with `builtIn: true`) read by both.
-7. **Steam ARM64 as its own entry.** Its command is known:
-   `steamrtarm64/steam` under the client's `.local/share/Steam` (stage 21).
-   The entry needs `architecture: aarch64`, the root it runs on (the Fedora
-   armroot now, the Frame-derived root later) and `LXRT_GUEST_PAGE=4096`,
-   which `scripts/run-native.sh` does not set (VERIFIED IN SOURCE,
-   `:19-29`). The client does not reach a window yet
-   (`docs/STEAM_ARM64_BRINGUP.md`). The x86 client remains as
-   TRANSITIONAL_COMPATIBILITY until the ARM64 one passes the acceptance test
-   (open, UI, close, library, open again).
+   `scripts/session.py` (see the table above). On the Mac,
+   `tests/launcher/session.sh` passes (23/0 in stage 23's
+   `make test-launcher-core`), and a stop of the native arm64 client
+   through the launcher left 0 steam, steamwebhelper or other guest
+   processes (MEASURED, stage 23 L1-L10 and the post-merge check). The same
+   check for the x86 client is not recorded. `safeguard.sh` could later
+   kill the recorded group before every `lxrun`.
+4. **Wire `SessionMachine` into `LauncherModel`.** DONE in `774f590`
+   (VERIFIED IN SOURCE, built; the lock is taken before `run-app.sh` starts
+   anything, and the exit status comes from `running.status`). The running
+   panel shows the architecture and translator (from `running.arch`, else
+   the entry), the base environment and "Modo de sesión: ZERO-VM".
+5. **"Añadir app" per ISA.** DONE in `774f590` (VERIFIED IN SOURCE, built,
+   not exercised from the UI): the add flow reads the ELF before moving the
+   program; aarch64 programs go to the Fedora armroot's `opt/apps` with
+   root `/tmp/lxrt-armroot`, the rest to the x86 root as before
+   (`launcher/AddAppView.swift:35-42`).
+6. **One Steam definition.** DONE in `e8114fa`: `scripts/builtin-apps.json`
+   holds the built-in entries and both `run-app.sh` and the launcher read
+   it. `AppEntry.steam` stays in `launcher/Models.swift` only as the
+   fallback when that file cannot be read.
+7. **Steam ARM64 as its own entry.** DONE: `steam-arm64` ("Steam ARM64
+   (experimental)", Fedora armroot, `e8114fa`) and `steam-arm64-frame`
+   ("Steam ARM64 · Steam Frame (experimental)", Steam Frame root,
+   `9468028`), both `architecture: aarch64` with `LXRT_GUEST_PAGE=4096`,
+   `HOME_IN_GUEST=/tmp/armhome` and `LXRT_X18_ALL_TEXT=libcef.so` in the
+   entry's environment. From the launcher the client reaches its sign-in
+   window: 9 of 10 start/stop cycles in stage 23, and 15-16 s (Fedora
+   root) and 21 s (Frame root) in the post-merge check (MEASURED). Sign-in
+   was not attempted. The x86 client remains the default,
+   TRANSITIONAL_COMPATIBILITY, until the ARM64 one passes the acceptance
+   test (open, UI, close, library, open again).
 
 ## Virtual machines: not an option
 
@@ -127,12 +149,12 @@ ZERO-VM is mandatory (`AGENTS.md`). The VM path was removed on 2026-09-27
 `launcher/ApplicationCore.swift`):
 
 - `ExecutionBackend.appleHypervisorLegacy` exists only so the launcher can
-  show Apple Hypervisor as **unavailable, with that reason** (`:326`). No
-  runner starts a VM, and `usesVirtualMachine` is false for every other
-  backend.
+  show Apple Hypervisor as **unavailable, with that reason** (`:528`, at
+  `b3f64c8`). No runner starts a VM, and `usesVirtualMachine` is false for
+  every other backend (`:319`).
 - No fallback ever returns it: the execution fallback goes from Lightning
-  JIT to lxrun and otherwise to nothing (`:356-360`), and the graphics
-  fallback order never involves a VM (`:349-354`).
+  JIT to lxrun and otherwise to nothing (`:624-628`), and the graphics
+  fallback order never involves a VM (`:617-623`).
 - `SessionVirtualizationMode` reads "ZERO-VM" for every session that can
   run.
 

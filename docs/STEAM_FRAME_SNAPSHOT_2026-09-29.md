@@ -52,6 +52,14 @@ decides.
 | `holo-core-aarch64-preview` | a clone at `67f0d559`, its README, and the package index | `docs/HOLO_CORE_ARM64_AUDIT.md` |
 | Valve's native arm64 client | fetched from `steam_client_linuxarm64` (version 1788652215); it starts under lxrun, updates itself, loads `steamui.so` and `steamclient.so`, then aborts with `free(): invalid pointer` | `benchmarks/stage21-native-arm64-client.txt` |
 
+Records made after this check, later on 2026-09-29, and not used in it: the
+image was extracted and inventoried (`docs/STEAM_FRAME_INVENTORY.md`), and
+the native client now reaches its "Sign in to Steam" window with V8's JIT
+on, also on a root derived from this image
+(`benchmarks/stage22-native-arm64-bringup.txt`,
+`benchmarks/stage23-native-arm64-jit.txt`,
+`benchmarks/stage23-frame-root.txt`). Sign-in was not attempted.
+
 ## 2. Releases, channels and images
 
 | fact | value | label |

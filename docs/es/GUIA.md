@@ -39,6 +39,13 @@ de ahí a Metal (MoltenVK).
 5. En Steam, activa **Ajustes → Compatibilidad → Steam Play** para todos los
    títulos y elige **Proton Experimental**.
 
+Las tarjetas **Steam ARM64 (experimental)** y **Steam ARM64 · Steam Frame
+(experimental)** abren el cliente ARM64 nativo de Valve, sin FEX. Llega a
+su ventana de inicio de sesión, pero el inicio de sesión, la biblioteca y
+los juegos no están verificados, y Proton ARM64 no funciona en macOS.
+**Instalar** no las prepara: cada tarjeta sale desactivada, con el motivo,
+mientras falten su raíz o el cliente. Para jugar, usa **Steam**.
+
 ## Configuración
 
 La ventana de configuración sigue el diseño de Ryujinx:
@@ -47,9 +54,10 @@ La ventana de configuración sigue el diseño de Ryujinx:
 |---|---|
 | Interfaz | Abrir Steam al iniciar, confirmar al detener, ventanas nativas o VNC |
 | Entrada | Mandos por jugador (ver abajo) |
-| Sistema | Idioma y zona horaria, sincronización vertical, **DRAM/VRAM**, esync/fsync |
+| Sistema | Idioma y zona horaria, sincronización vertical, **DRAM/VRAM**, sincronización de Proton (esync experimental; fsync y MSync desactivados), qué hacer si un ajuste no puede funcionar |
 | Procesador | Opciones de FEX: caché de traducción (experimental), orden de memoria TSO, multibloque, detección de código automodificable, x87 reducido |
-| Gráficos | Caché de sombreadores, filtrado anisotrópico, límite de FPS, HUD de DXVK y de Metal |
+| Gráficos | Motor: MoltenVK (por defecto) o KosmicKrisp (experimental; solo si está instalado el Mesa de Homebrew y el shim instalado puede cargarlo). Caché de sombreadores, filtrado anisotrópico, límite de FPS, HUD de DXVK y de Metal |
+| Runtime | Solo lectura: cada backend, su estado y el motivo, y lo detectado en este Mac |
 | Sonido | Salida y volumen |
 | Atajos | Captura (F8), detener la app, alternar el HUD de Metal |
 | Registros | Registro de Proton, `WINEDEBUG`, niveles de DXVK y VKD3D |
@@ -59,13 +67,22 @@ La ventana de configuración sigue el diseño de Ryujinx:
 16 GB, a 12; con 64 GB, a 60. **Automático** usa ese máximo.
 
 - La DRAM es el tope de todo lo que ejecuta SteamARM. El vigilante de
-  memoria detiene los programas antes de que el Mac se quede sin memoria:
-  solo con presión de memoria crítica de macOS, o con menos del 12 % libre
-  durante 3 s. Primero detiene el programa más grande (normalmente el
-  juego); el resto solo si la presión sigue 5 s después. El launcher dice
-  que fue él y por qué, en lugar de "terminó con la señal 9". Hasta la
-  0.3.4 lo detenía todo con menos del 35 % libre, y cerraba Steam en Macs
-  de 16 GB con otras apps abiertas.
+  memoria detiene los programas antes de que el Mac se quede sin memoria,
+  por dos tipos de motivo:
+  - **Presión de memoria**: presión crítica de macOS durante 2 s, o menos
+    del 12 % libre durante 3 s. Primero detiene el programa más grande
+    (normalmente el juego); el resto solo si la presión sigue 5 s después.
+    Hasta la 0.3.4 lo detenía todo con menos del 35 % libre, y cerraba
+    Steam en Macs de 16 GB con otras apps abiertas.
+  - **Límites fijos**, aunque quede memoria libre: todos los programas
+    Linux juntos pasan de la DRAM elegida (8 GB si el launcher aún no
+    escribió ese límite), fseventsd pasa de 1500 MB, hay más de 80
+    procesos Linux, o los objetos o entradas de mapa de memoria del kernel
+    pasan de 1.500.000. Entonces detiene todos los programas Linux a la
+    vez, Steam incluido.
+
+  En los dos casos el launcher dice que fue él y por qué, en lugar de
+  "terminó con la señal 9".
 - La VRAM es la memoria de vídeo que ven los juegos.
 
 ## Mandos
