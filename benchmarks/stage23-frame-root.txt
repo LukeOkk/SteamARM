@@ -1,0 +1,320 @@
+Stage 23 (Frame root) -- the native arm64 client on the Steam Frame root (2026-09-29)
+====================================================================================
+
+ZERO-VM. No FEX for the client. Host: Mac mini M4, 16 GB, macOS 27.0, X on
+display :2 (scripts/run-x11-native.sh; the XQuartz build runs with +iglx).
+Runtime: stage 23's V8 JIT work (benchmarks/stage23-native-arm64-jit.txt,
+code at fa3e539) plus this record's script changes; no --jitless anywhere.
+Root: derived from the Steam Frame 0.3.0 image (SteamOS "holo", Arch-based,
+BUILD_ID 20260922.5152327), extracted at /Volumes/SteamFrameRoot/rootfs
+(docs/STEAM_FRAME_IMAGE.md), cloned to /Volumes/SteamFrameRoot/arm64root =
+$STATE/arm64root = /tmp/lxrt-arm64root. The extraction was only read.
+Labels: MEASURED, VERIFIED IN SOURCE, UPSTREAM DOCUMENTED, HYPOTHESIS, UNKNOWN.
+
+Result (MEASURED, runs F3-F6 and N1 below)
+------------------------------------------
+Valve's native arm64 client reaches its "Sign in to Steam" window (700x440,
+IsViewable) on the Frame root, with V8's JIT on, in 5 of 5 runs after the
+fixes below: 4 runs of scripts/run-steam-arm64.sh (180 s each) and 1 through
+the launcher's runner, scripts/run-native.sh (120 s). In each run the window
+was mapped at every 15 s sample from its first appearance to the stop.
+Stage 22 E19 on the same root: the client exited 2 s after start at
+"glXChooseVisual failed".
+
+Frame root against the Fedora root (scripts/mkarmroot.sh), same build, same
+Mac, same sampler (lxrun count and total RSS of this checkout's lxrun
+processes, every 15 s):
+
+                         Frame root (F3-F6)       Fedora root (C1, C4)
+  BrowserReady           15-17 s                  7-8 s
+  login window ready     17-19 s                  11-12 s
+  window samples         41 of 41 from 30 s       17 of 17 from 15 s
+                         to the stop              to the stop
+  webhelper launches     2 (1 restart at start)   1 (0 restarts)
+  renderer launches      11 (5 + 6)               5
+  FATAL in cef_log       0                        0
+  lxrun processes        10 (F6)                  8 (C4)
+  resident, total        2.53-2.66 GB             2.28-2.33 GB
+  runtime fault reports  4 per run (atomupd-manager, below)   0
+  client build           steamdeck_stable branch  public branch
+                         (both version 1788652215)
+
+So the Frame root gets as far as the Fedora root (the login window), about
+5-7 s later, with one more webhelper start and about 0.25 GB more in summed
+RSS (which counts shared pages once per process; the sum includes the first
+webhelper's two zygotes, 295 MB each, which stay alive: below). Login was
+not attempted.
+
+What stood in the way (each MEASURED)
+-------------------------------------
+1. GLX. The image's Mesa is deckard-mesa-linux-aarch64
+   26.3.0_devel+git8aa73b4b-1 (pacman db, usr/lib/holo/pacmandb):
+   usr/lib/dri holds zink_dri.so and display-controller names, all links to
+   libdril_dri.so, and no swrast_dri.so; Vulkan is libvulkan_freedreno. Probes
+   (tests/arm64/glx_probe.c, run in the root under lxrun on :2):
+     none (as E19)                    visuals 64 X / 0 GL, glXChooseVisual
+                                      fails; glxinfo: "couldn't find RGB GLX
+                                      visual or fbconfig"
+     LIBGL_ALWAYS_INDIRECT=1 (a)      same. glXQueryServerString -> NULL,
+                                      glXGetConfig -> 6 (GLX_BAD_VALUE): no
+                                      GLX vendor library at all. libglvnd
+                                      1.7.0 falls back to the vendor
+                                      "indirect" when the server names none
+                                      (UPSTREAM DOCUMENTED, libglvnd
+                                      src/GLX/libglxmapping.c
+                                      FALLBACK_VENDOR_NAME; the image's
+                                      libGLX.so.0 carries the string
+                                      "indirect"), and the image has no
+                                      libGLX_indirect.so.0: Arch's mesa
+                                      package makes that link (UPSTREAM
+                                      DOCUMENTED, its PKGBUILD: "ln -sr
+                                      $libdir/libGLX_{mesa,indirect}.so.0"),
+                                      deckard-mesa does not. Fedora's
+                                      libglvnd adds a second fallback name
+                                      (UPSTREAM DOCUMENTED, libglvnd.spec
+                                      "0001-glx-Add-another-fallback-library-
+                                      name.patch"; its libGLX.so.0 carries
+                                      "system") and the Fedora root links
+                                      libGLX_system.so.0 to libGLX_mesa.so.0:
+                                      why GLX finds Mesa there.
+     __GLX_VENDOR_LIBRARY_NAME=mesa   Mesa loads, prints "DRI3 not available"
+       (with or without INDIRECT,     260 times and gives up: glXGetConfig
+       LIBGL_KOPPER_DISABLE=1 or      -> 3 (GLX_NO_EXTENSION). Upstream Mesa
+       LIBGL_KOPPER_DRI2=1)           prints that and fails only when zink
+                                      was asked for (src/glx/glxext.c,
+                                      __glXInitialize, main branch as fetched
+                                      2026-09-29), and never falls back to
+                                      indirect for zink. HYPOTHESIS: this
+                                      build asks for zink by default (the
+                                      Frame's GL is zink on turnip).
+     + MESA_LOADER_DRIVER_OVERRIDE=swrast
+                                      64 GL visuals, 64 fbconfigs, an
+                                      indirect context, GL_RENDERER "Apple
+                                      M4", GL_VERSION "1.4 (2.1 Metal -
+                                      91.7)": GLX through the X server's
+                                      +iglx, backed by macOS OpenGL. Any
+                                      non-zink name would do; with INDIRECT
+                                      unset Mesa first tries "swrast" ("glx:
+                                      failed to create drisw screen") and
+                                      then goes indirect, same result.
+   (b) A software driver: libdril_dri.so exports
+       __driDriverGetExtensions_swrast and _kms_swrast, but
+       libgallium-26.3.0-devel.so has no llvmpipe or softpipe (no libLLVM in
+       its DT_NEEDED; the only "llvmpipe" string is VK_DRIVER_ID_MESA_LLVMPIPE)
+       and there is no swrast_dri.so; LIBGL_ALWAYS_SOFTWARE=1 gives 0 GL
+       visuals after 18 s. MEASURED (llvm-nm, llvm-readelf, strings, probe).
+   (c) Not needed: no package was added to the root.
+   The webhelper's GPU process still cannot initialise ANGLE on this GLX
+   ("Cannot create an OpenGL ES platform on GLX without the
+   GLX_EXT_create_context_es_profile extension", "Exiting GPU process due
+   to errors during initialization"), as on the Fedora root (stage 22).
+2. DNS. With GL working (F1) the client got as far as its update check:
+   "Download failed: http error 0 (client-update.steamstatic.com/...)",
+   "Fatal error: Steam needs to be online to update", no webhelper. The
+   image has no etc/resolv.conf (systemd-resolved makes it on the device) and
+   its nsswitch.conf ends in "dns": `getent ahosts client-update.steamstatic.com`
+   in the root returned 2 (not found); with etc/resolv.conf (1.1.1.1,
+   8.8.8.8, as scripts/mkarmroot.sh writes) it returned Fastly addresses.
+3. The client's branch. On this root the client opts itself into the beta
+   "steamdeck_stable" ("Client beta changed from '' to 'steamdeck_stable'",
+   E19; package/beta). HYPOTHESIS: SteamOS detection -- the bootstrap's
+   strings put "steamdeck_stable" with "/run/host/etc/os-release",
+   "steamos" and "/etc/steamos-oobe-image" (which the image has). The first
+   start with DNS (F2) found no steam_client_steamdeck_stable_linuxarm64
+   .installed, downloaded 223,154 KB in 30 s, extracted (22 s), installed
+   (18 s) and exited ("Update complete, launching Steam..." but no new
+   process: run directly, nothing relaunches it; steam.sh would). The
+   steamdeck_stable manifest has the same version, 1788652215, with
+   different bins_linuxarm64, bins_sdk, bins_misc, steam_linuxarm64 ... zips:
+   steamrtarm64/steam and steamui.so changed, libcef.so is identical (cmp).
+   Every later run: "Download skipped ... installed version 1788652215".
+   The Fedora root's home keeps the public build.
+
+What the Frame root already had (MEASURED, ls; stage 22 added these to the
+Fedora root's seeds): usr/share/X11/locale (libx11 1.8.9), C.utf8,
+en_US.utf8 and es_* glibc locales (holo-glibc-locales 2.39-2), lsof 4.99.3,
+usr/lib/libnssckbi.so -> p11-kit-trust.so, a TLS bundle
+(etc/ssl/certs/ca-certificates.crt). libSDL3.so.0 is not in the system
+directories and is not needed: the root's SDL2 is SDL2 2.30.2 itself, not
+sdl2-compat, and the client loads the SDL3 it ships ("Loaded SDL version
+3.4.0"). Vulkan: only the freedreno ICD (and MangoHud, fossilize, gamescope
+WSI and MESA_vram_report_limit implicit layers); steamsysinfo logs
+"CVulkanTopology: failed to get physical device count" (the Fedora root has
+lavapipe and reports llvmpipe). Not in the way of the login window, so
+nothing was moved aside and nothing added. SteamARM's Vulkan for native
+aarch64 programs is the shim built as build/libvulkan.so.1 (`make shim`; a
+libvulkan.so.1 that loads MoltenVK, stage 4), not an ICD JSON. V1 (09:47):
+the image's vulkaninfo in the root, LD_LIBRARY_PATH pointing at a copy of
+the shim in <root>/tmp (no root file replaced): "Apple M4",
+DRIVER_ID_MOLTENVK, driverInfo 1.4.2, driverVersion 0.2.2210 (MoltenVK's
+10402, passed through unchanged); with the root's own loader: "Failed to
+detect any valid GPUs", ERROR_INITIALIZATION_FAILED. MEASURED.
+scripts/mkarmroot.sh installs the shim as the Fedora root's libvulkan.so.1
+when build/libvulkan.so.1 exists; on this Mac that root has the Khronos
+loader (libvulkan.so.1 -> libvulkan.so.1.4.341, MEASURED ls), so both roots
+reached the login window without it. scripts/mkframeroot.sh does not
+install it: the client with a Vulkan device (steamsysinfo, the webhelper) is
+untested.
+
+Deriving the root: scripts/mkframeroot.sh
+-----------------------------------------
+  scripts/mkframeroot.sh [--adopt] [--home-from DIR] [SRC [OUT]]
+APFS clone of the extraction (cp -Rc; same volume required, OUT inside SRC
+refused, SRC must say ID=steamos), then only:
+  etc/resolv.conf      nameservers (item 2)
+  etc/localtime        the host's zone, so the client's logs use the Mac's
+                       clock (the image says America/Los_Angeles)
+  .lxrt-guest-env      __GLX_VENDOR_LIBRARY_NAME=mesa,
+                       MESA_LOADER_DRIVER_OVERRIDE=swrast,
+                       LIBGL_ALWAYS_INDIRECT=1 (item 1)
+  .lxrt-frameroot      marker: source BUILD_ID, date, the list above
+  dev/shm, run         empty directories, if the image lacks them
+It keeps <root>/tmp (the client home, tmp/armhome) and <root>/opt/apps
+across rebuilds (built as OUT.new, swapped at the end; an interrupted swap is
+recovered on the next run), links $STATE/arm64root, and --home-from copies a
+client home (rsync, without steamapps/common) when the root has none. The
+stage 22 hand clone was rebuilt with --adopt: 32 s (clone 23 s), MEASURED.
+Nothing extracted from the image is committed or shipped.
+The environment file is read by scripts/run-steam-arm64.sh and
+scripts/run-native.sh (scripts/guest-env.sh; a variable already set wins), so
+the launcher's runner gets it too (run N1).
+Integrity (MEASURED): after all the runs, `rsync -rlni --delete` from the
+extraction to the derived root (tmp/ and sys/ excluded; the runtime writes
+sys/devices/system/cpu, runtime/sysfs.c) lists only the overlay (4 lines:
+etc/resolv.conf, dev/shm, the two .lxrt-* files; etc/localtime is a link
+rsync -rl did not list) and 12 fontconfig caches with new mtimes. The
+extraction has no resolv.conf and no .lxrt-* file, and etc/os-release and
+usr/lib/libGL.so.1.7.0 have the same sha1 before and after.
+
+Runs (host times; scripts/run-steam-arm64.sh unless noted; env as in
+stage 23 plus the root's .lxrt-guest-env; X windows sampled every 15 s with
+xwininfo on :2; logs in $STATE/logs/native-arm64-steam-<date>.log and the
+client's logs in <root>/tmp/armhome/.local/share/Steam/logs; no x86 Steam
+client was running during any run)
+-------------------------------------------------------------------------
+P   08:48-08:59 (between the runs), probes in the root under lxrun
+    (glxinfo, the GLX probe that became tests/arm64/glx_probe.c, getent):
+    items 1 and 2 above.
+F1  08:55:24, 180 s, GL env set by hand, no resolv.conf: the update check
+    fails (item 2), "Fatal error: Steam needs to be online to update" at
+    2 s; the client process stayed, silent, until the stop. No window.
+F2  09:00:17, + etc/resolv.conf: the steamdeck_stable update (item 3); the
+    client exits after installing it, 72 s. No window.
+F3  09:03:54, 180 s: BrowserReady +15 s, login window +17 s; window at 11 of
+    12 samples (not yet at 16 s); webhelper launches 2 (restart at start),
+    11 renderer launches, 0 FATAL, 4 runtime fault reports (atomupd-manager).
+    -- scripts/mkframeroot.sh --adopt rebuilds the root (09:13); the GL env
+       now comes from <root>/.lxrt-guest-env --
+F4  09:13:47, 180 s: BrowserReady +16 s, window +17 s; window 10 of 10
+    samples from 31 s to 166 s; 2 launches, 11 renderers, 0 FATAL;
+    2.63-2.66 GB.
+F5  09:17:08, 180 s: BrowserReady +16 s, window +17 s; window 10 of 10
+    (30-166 s); same counts; 2.56-2.61 GB.
+C1  09:20:35, 180 s, Fedora root (control): BrowserReady +8 s, window
+    +12 s; window 11 of 11 (15-165 s); 1 launch, 0 restarts, 5 renderers,
+    0 FATAL, 0 fault reports; 2.30-2.33 GB.
+N1  09:26:46, 120 s, the launcher's runner: scripts/run-native.sh with the
+    env a launcher entry would pass (LXRT_ROOT=/tmp/lxrt-arm64root,
+    HOME_IN_GUEST=/tmp/armhome, LXRT_GUEST_PAGE=4096,
+    LXRT_X18_ALL_TEXT=libcef.so; the GL env from the root's file):
+    BrowserReady +15 s, window +17 s; window 6 of 6 (30-106 s); 2 launches,
+    11 renderers, 0 FATAL; stopped by PID tree, 0 lxrun left.
+C2  09:29:13, 60 s, .lxrt-guest-env moved aside (control): the client exits
+    after 2 s, as in E19 -- and 2 webhelper zygotes it had started were left
+    running with parent 1: the script's descendant tracking never saw them.
+    Killed by PID (they were this run's). Fixed in scripts/run-steam-arm64.sh
+    (orphaned lxrun of this checkout running a steamrtarm64 program, started
+    during the session, are stopped at the end).
+C3  09:31:37, 20 s, same control, fixed script: "stopping orphaned
+    webhelper processes: <1 pid>", 0 lxrun left.
+F6  09:32:36, 180 s, final scripts: BrowserReady +17 s, window +19 s;
+    window 10 of 10 (30-166 s); 2 launches, 11 renderers, 0 FATAL;
+    10 lxrun processes, 2.53-2.57 GB.
+C4  09:35:57, 90 s, Fedora root (control): BrowserReady +7 s, window
+    +11 s; window 6 of 6; 1 launch, 5 renderers; 8 lxrun, 2.28-2.31 GB.
+F7  09:38:05, 50 s: process list at 40 s: the client, the running
+    webhelper, its 2 zygotes and 3 children, its network service -- and the
+    2 zygotes of the first webhelper, parent 1, 295 MB each.
+The sampler's lxrun count also matched its own awk (up to 2) until 09:32;
+the counts above are from F6 and C4, taken after that was fixed. Its RSS
+sums were off by under 5 MB. 0 of this checkout's lxrun processes were left
+after any run (after C2, once its 2 zygotes were killed).
+
+What differs on the Frame root (MEASURED, client logs; not in the way)
+------------------------------------------------------------------------
+The client takes its SteamOS paths: SteamOSManager ("daemon not present"),
+CGamescopeController, the steamos telemetry service, NetworkManager
+("IClientNetworkDeviceManager::IsInterfaceValid took too long: 2512 msec"),
+gpu-trace, /usr/bin/steamos-polkit-helpers/steamos-update (which runs
+atomupd-manager), steamos-devkit-mode --disable, timedatectl, dbus-launch,
+a missing jupiter-dock-updater. atomupd-manager (Valve's, 64 KB) cannot reach
+the system D-Bus ("GLib-GIO-CRITICAL ... G_IS_DBUS_CONNECTION") and then
+reads address 0x8: "[lxrt] SIGSEGV at pc ... image+0x1878c addr 0x8", 4 times
+per run. HYPOTHESIS: the same NULL dereference happens on Linux without a
+system bus; the runtime only reports it. The client carries on. The update UI
+logs "X Error of failed request: GLXBadCurrentWindow" and continues.
+The periodic "Background update loop checking for update" about once a
+second after 2 min of running is the same on the Fedora root (stage 23 E5/E7
+logs: 193-221 per run): not root-specific.
+
+Still open
+----------
+1. The restart of the first webhelper within a second of its start ("Restart
+   webhelper process, counter 2" from chromehtml.so's CChromeIPCClient):
+   cause UNKNOWN. It costs 5 renderer launches; its cost in time is not
+   measured. Its two zygotes then live on with parent 1 until the session
+   ends (F7): on Linux a zygote
+   exits when its browser's socket closes (HYPOTHESIS for Chromium 126);
+   why they do not here is UNKNOWN.
+2. Start-up is 5-7 s slower than on the Fedora root. HYPOTHESIS: the SteamOS
+   paths above (NetworkManager's 2.5 s IPC timeout, the restart in 1).
+3. No Vulkan device in this root as built (freedreno only). The shim gives
+   one (V1); whether the client and its webhelper behave with it is
+   UNKNOWN, so it is not installed.
+4. GL is indirect GLX 1.4 over the X protocol: enough for the client's vgui
+   windows; the webhelper composites in software, as on the Fedora root.
+5. The home is the stage 22 copy of the Fedora root's home, now on the
+   steamdeck_stable build. The image's own bootstrap
+   (usr/lib/steam/steam.tar.zst) was not used.
+6. The launcher's built-in "steam-arm64" entry is unchanged: it still names
+   /tmp/lxrt-armroot. What it should become is below.
+
+The launcher entry (not changed; what it should become)
+--------------------------------------------------------
+  {"id": "steam-arm64", "name": "Steam ARM64 (experimental)", "kind": "steam",
+   "builtIn": true, "readiness": "experimental",
+   "command": ["/tmp/armhome/.local/share/Steam/steamrtarm64/steam"],
+   "root": "/tmp/lxrt-arm64root", "fexRootfs": null,
+   "env": {"HOME_IN_GUEST": "/tmp/armhome", "LXRT_GUEST_PAGE": "4096",
+           "LXRT_X18_ALL_TEXT": "libcef.so"},
+   "architecture": "aarch64"}
+i.e. only "root" changes: the GL variables come from the root's
+.lxrt-guest-env through scripts/run-native.sh (N1). Without that file (a root
+not made by scripts/mkframeroot.sh) the entry's env would need
+__GLX_VENDOR_LIBRARY_NAME=mesa, MESA_LOADER_DRIVER_OVERRIDE=swrast and
+LIBGL_ALWAYS_INDIRECT=1. Conditions: the SteamFrameRoot volume attached and
+/tmp/lxrt-arm64root linked (scripts/env-links.sh links it only when
+$STATE/arm64root resolves), and a client in <root>/tmp/armhome
+(scripts/mkframeroot.sh --home-from). tests/launcher/run_app_dispatch.sh
+expects LXRT_ROOT=/tmp/lxrt-armroot for steam-arm64 and would change with it.
+Until then the Fedora root stays the entry's root: it starts faster (C1, C4).
+
+Tests (this branch, MEASURED on the Mac after the last script change)
+---------------------------------------------------------------------
+  tests/arm64/frame_glx.sh           1 passed, 0 failed (the root's env:
+                                     indirect context, "Apple M4"; notes:
+                                     no env and vendor alone -> no GL visual)
+  tests/launcher/guest_env.sh        18 passed, 0 failed (guest-env.sh, and
+                                     mkframeroot.sh on a fake extraction:
+                                     overlay, carried home, recovery of an
+                                     interrupted swap, refusals, extraction
+                                     unchanged)
+  tests/elf/run.sh                   56 passed, 0 failed, 2 expected failures
+  tests/elf/run_i386.sh              18 passed, 0 failed
+  make test-arm64                    4 passed, 0 failed
+  make test-launcher-core            pass (application core; 10 unittest;
+                                     run_app_dispatch 22/0; session 23/0;
+                                     safeguard 7/0; guest_env 18/0)
+  tests/win/run.sh was not run: nothing the x86/FEX route uses changed
+  (run-fex.sh, run-steam.sh and run-app.sh are untouched; guest-env.sh is
+  read only by run-native.sh and run-steam-arm64.sh).

@@ -76,6 +76,7 @@ static void fault_report(int sig, siginfo_t *info, void *uap)
         uint32_t esr = uc->uc_mcontext->__es.__esr;
         bool write = ((esr >> 26) == 0x24 || (esr >> 26) == 0x25) && (esr & (1u << 6));
         if (lxrt_jit_handle_fault(pc, faddr, uap) ||
+            lxrt_wx_handle_fault(pc, faddr, esr) ||
             lxrt_privmap_handle_fault(faddr, write) ||
             lxrt_lowptr_fixup(uap, faddr) ||
             lxrt_subpage_handle_fault(pc, faddr))
@@ -88,6 +89,13 @@ static void fault_report(int sig, siginfo_t *info, void *uap)
     char buf[512];
     int n = snprintf(buf, sizeof buf, "\n[lxrt] %s at pc 0x%llx", name,
                      (unsigned long long)pc);
+    // Which address, and the thread's sp and lr: a fault inside a host
+    // routine (a zygote died once in _platform_memset, stage 23) says
+    // nothing without them.
+    if ((sig == SIGBUS || sig == SIGSEGV) && info)
+        n += snprintf(buf + n, sizeof buf - n, " addr %p sp 0x%llx lr 0x%llx",
+                      info->si_addr, (unsigned long long)uc->uc_mcontext->__ss.__sp,
+                      (unsigned long long)uc->uc_mcontext->__ss.__lr);
     if (g_img) {
         uint64_t base = (uint64_t)g_img->base;
         if (pc >= base && pc < base + g_img->span)
@@ -418,6 +426,10 @@ int main(int argc, char **argv)
             path = resolve_program(argv[i]);
         }
     }
+
+    // What the process is decides what a read-write-execute mprotect means:
+    // x86 code under FEX (read-write is enough) or native code (wxsplit.c).
+    lxrt_wx_set_program(path);
 
     // Must precede any rewriting: the TLS trampolines encode the slot offset.
     if (lxrt_tls_init() != 0) {

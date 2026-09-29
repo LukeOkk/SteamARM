@@ -33,7 +33,7 @@ clean:
 # exec (measured, see benchmarks/stage2-pagezero.txt). The consequence is that
 # non-PIE Linux images, which link at 0x200000, cannot be loaded in-process.
 LXRT_SRCS := runtime/procpid.c runtime/main.c runtime/elf.c runtime/elfsect.c runtime/errno_map.c runtime/fsflags.c runtime/pathfd.c runtime/evdev.c runtime/rewrite.c \
-             runtime/dirents.c runtime/jit.c runtime/dispatch.c runtime/x18.c runtime/gbase.c \
+             runtime/dirents.c runtime/jit.c runtime/wxsplit.c runtime/dispatch.c runtime/x18.c runtime/gbase.c \
              runtime/epoll_eventfd.c runtime/fex_support.c runtime/fileops2.c \
              runtime/futex_ops.c runtime/inotify.c runtime/ioctl_tty.c runtime/mounts.c runtime/memlog.c runtime/mremap.c runtime/timerfd_signalfd.c runtime/proc_ext.c runtime/privmap.c runtime/shmirror.c runtime/sysv_ipc.c runtime/process.c runtime/procfs.c runtime/signal.c runtime/socket.c runtime/stack.c runtime/subpage.c runtime/sysfs.c runtime/sysreg.c runtime/window.m runtime/remote_layer.m runtime/thread.c runtime/tls.c runtime/trampoline.S runtime/vdso_map.c runtime/vdso_blob.S
 LXRT_CFLAGS := -arch arm64 -fmodules -Wall -Wextra -Wno-unused-parameter -O2 -Iruntime
@@ -142,8 +142,9 @@ $(LAUNCHER_BIN): $(LAUNCHER_SRCS) launcher/SDLShim.h
 
 # The launcher's application core without UI (launcher/ApplicationCore.swift),
 # the settings -> environment translation and the compatibility inventory,
-# run-app.sh's runner choice and the session wrapper (scripts/session.py). All
-# of them also run on Linux.
+# run-app.sh's runner choice, the session wrapper (scripts/session.py) and a
+# root's guest environment (scripts/guest-env.sh). All of them also run on
+# Linux (guest_env.sh skips its scripts/mkframeroot.sh part there).
 .PHONY: test-launcher-core
 test-launcher-core:
 	@mkdir -p build
@@ -154,6 +155,7 @@ test-launcher-core:
 	tests/launcher/run_app_dispatch.sh
 	tests/launcher/session.sh
 	tests/launcher/safeguard.sh
+	tests/launcher/guest_env.sh
 
 .PHONY: launcher
 launcher: $(LAUNCHER_BIN) launcher/Info.plist.in

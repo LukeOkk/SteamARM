@@ -548,13 +548,17 @@ static void adopt_untracked(uint64_t hpage)
     int cur = (ri.protection & VM_PROT_READ ? PROT_READ : 0)
             | (ri.protection & VM_PROT_WRITE ? PROT_WRITE : 0)
             | (ri.protection & VM_PROT_EXECUTE ? PROT_EXEC : 0);
+    bool wx = lxrt_wx_intersects(hpage, LXRT_HOST_PAGE);
     for (uint64_t g = hpage; g < hpage + LXRT_HOST_PAGE; g += GUEST_PAGE) {
         bool covered = false;
         for (int i = 0; i < g_nsubs && !covered; i++)
             if (g_subs[i].start <= g && g_subs[i].end >= g + GUEST_PAGE)
                 covered = true;
+        // A page of a native guest's RWX range (wxsplit.c) is RWX to the
+        // guest whatever the host page carries at this moment.
         if (!covered)
-            record(g, g + GUEST_PAGE, cur);
+            record(g, g + GUEST_PAGE,
+                   wx && lxrt_wx_contains(g) ? PROT_READ | PROT_WRITE | PROT_EXEC : cur);
     }
 }
 
@@ -628,6 +632,32 @@ bool lxrt_subpage_handle_fault(uint64_t pc, uint64_t fault_addr)
                 fprintf(lxrt_trace_stream(), " [0x%llx-0x%llx %d]", (unsigned long long)g_subs[i].start,
                         (unsigned long long)g_subs[i].end, g_subs[i].prot);
         fprintf(lxrt_trace_stream(), "\n");
+    }
+    // A native guest's RWX guest pages in this host page (a JIT's code at
+    // 4 KiB granularity) are scanned before the page becomes executable, the
+    // way wxsplit.c does it for whole host pages: read-only, count, rewrite,
+    // count again, and only then execute. RX guest pages were scanned when
+    // they became executable; RW ones are data and never scanned (a data word
+    // that looks like svc is not an instruction, and rewriting it would
+    // corrupt it). FEX's guest pages hold x86 code: no scan there.
+    if (prefer == PROT_EXEC && lxrt_wx_enabled()) {
+        struct lxrt_range r[LXRT_HOST_PAGE / GUEST_PAGE];
+        int nr = 0;
+        for (int i = 0; i < g_nsubs && nr < (int)(sizeof r / sizeof r[0]); i++) {
+            if ((g_subs[i].prot & (PROT_WRITE | PROT_EXEC)) != (PROT_WRITE | PROT_EXEC) ||
+                g_subs[i].start >= hpage + LXRT_HOST_PAGE || g_subs[i].end <= hpage)
+                continue;
+            r[nr].start = g_subs[i].start > hpage ? g_subs[i].start : hpage;
+            r[nr].end = g_subs[i].end < hpage + LXRT_HOST_PAGE ? g_subs[i].end : hpage + LXRT_HOST_PAGE;
+            nr++;
+        }
+        g_in_subpage = true;        // the scan's own faults are not flips
+        bool clean = !nr || lxrt_wx_scan_for_exec(hpage, r, nr);
+        g_in_subpage = false;
+        if (!clean) {
+            pthread_mutex_unlock(&g_lock);
+            return false;
+        }
     }
     int rc = apply_prot(hpage, prefer);
     pthread_mutex_unlock(&g_lock);

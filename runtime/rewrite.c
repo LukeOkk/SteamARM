@@ -426,6 +426,32 @@ static void accumulate(const struct lxrt_rewrite_report *r)
     g_totals.x18_unreachable += r->x18_unreachable;
 }
 
+// Read-only census of [start, end): how many words lxrt_rewrite_range would
+// replace (svc, TLS, CTR_EL0 and ID-register reads; no x18 pass, there are no
+// section windows for generated code). Never writes, so it can run while the
+// range is read-only -- the W^X split (wxsplit.c) counts under PROT_READ, where
+// no other thread can store into the page between the count and the seal.
+// Every site kind starts with 0xD4 (svc) or 0xD5 (mrs/msr): the top byte
+// filters almost every word before classify() looks at it.
+size_t lxrt_rewrite_count(uint64_t start, uint64_t end)
+{
+    const uint32_t *w = (const uint32_t *)(uintptr_t)(start & ~3ull);
+    size_t words = (size_t)((end & ~3ull) - (start & ~3ull)) / 4, n = 0;
+    for (size_t i = 0; i < words; i++) {
+        uint32_t top = w[i] >> 24;
+        if (top != 0xD4 && top != 0xD5)
+            continue;
+        unsigned rt = 0;
+        enum site_kind k = classify(w[i], &rt);
+        if (k == SITE_NONE)
+            continue;
+        if ((k == SITE_TLS_READ || k == SITE_TLS_WRITE) && !lxrt_tls_ready())
+            continue;               // rewrite_chunk_code leaves these alone too
+        n++;
+    }
+    return n;
+}
+
 int lxrt_rewrite_range(uint64_t start, uint64_t end,
                        struct lxrt_rewrite_report *rep, char **err)
 {

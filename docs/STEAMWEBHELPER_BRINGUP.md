@@ -78,8 +78,8 @@ libLLVM carry 1 and 2 refused x18 sites (`writes sp`).
 | NSS FATAL | UNKNOWN whether gone: the files are there now, but no later run reached CEF logging |
 | `libnssckbi.so`, which libcef dlopens by name | absent from the Fedora root at the audit; present in the Steam Frame root |
 | D-Bus system bus | no socket in either root; whether CEF needs one to start: UNKNOWN |
-| V8's JIT under lxrun | HYPOTHESIS: an unpatched arm64 V8 cannot JIT on Apple Silicon under lxrun (RWX is refused, and a W^X flip cannot be done behind its back; `docs/CURRENT_STEAM_ENVIRONMENT.md` §7). BrowserReady comes from the browser process and does not show that a renderer ran JIT code. Ways out listed there: `--js-flags=--jitless`, a V8 that asks for the flip, or store emulation in the runtime |
-| RWX-as-RW rule | right for x86 V8 under FEX, wrong for native code (`runtime/dispatch.c:1306-1321`); should apply to FEX guests only |
+| V8's JIT under lxrun | works since stage 23 (MEASURED, `benchmarks/stage23-native-arm64-jit.txt`): RWX code pages are split W^X per 16 KiB page by the fault handler and scanned before they execute (`runtime/wxsplit.c`); the renderers had also been dying because the zygote resets SIGSEGV/SIGBUS to SIG_DFL, which switched off the runtime's own fault handling (fixed in `runtime/signal.c`). The earlier HYPOTHESIS that an unpatched V8 cannot JIT here is refuted |
+| RWX-as-RW rule | applies to FEX guests only since stage 23; a native guest's RWX range is split W^X (`runtime/dispatch.c` do_mprotect_inner, `runtime/wxsplit.c`) |
 
 ## Next measurement
 

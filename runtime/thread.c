@@ -554,6 +554,8 @@ long lxrt_clone3(const void *uargs, uint64_t size, const struct lxrt_regs *paren
 // A guest thread calling exit(2) means "this thread", not the process. glibc's
 // pthread_join waits for the CLONE_CHILD_CLEARTID write and the futex wake
 // that follows it, so both must happen or the join hangs forever.
+static void exit_on_host_stack(void *arg) __attribute__((noreturn));
+
 void lxrt_thread_exit(int code)
 {
     struct guest_thread *gt = pthread_getspecific(g_gt_key);
@@ -574,6 +576,24 @@ void lxrt_thread_exit(int code)
             _exit(code & 0xff);
         }
     }
+    // Everything from the clear-tid wake on runs on this host thread's own
+    // stack, not the guest's: the dispatcher runs on the guest stack, and the
+    // joiner may unmap that stack as soon as it wakes (glibc frees thread
+    // stacks beyond its 40 MiB cache at join). pthread_exit's teardown then
+    // faulted inside libsystem_kernel on the unmapped stack and the fault went
+    // to the guest (MEASURED: tests/elf/jit_rwx.c, 8 threads x 20 rounds of
+    // create/join, SIGSEGV at stat+0x10 / mach_port_mod_refs+0x68 with a
+    // guest-stack address, 2 of 4 runs). The top of the host pthread's stack
+    // holds only the abandoned frames of thread_start, which never returns.
+    extern void lxrt_run_on_stack(uint64_t sp, void (*fn)(void *), void *arg)
+        __attribute__((noreturn));
+    uint64_t top = (uint64_t)(uintptr_t)pthread_get_stackaddr_np(pthread_self());
+    lxrt_run_on_stack((top - 16384) & ~15ull, exit_on_host_stack, gt);
+}
+
+static void exit_on_host_stack(void *arg)
+{
+    struct guest_thread *gt = arg;
     if (gt && gt->clear_child_tid) {
         __atomic_store_n(gt->clear_child_tid, 0, __ATOMIC_SEQ_CST);
         // Both flavours, and this is the whole of a hang that looked like a

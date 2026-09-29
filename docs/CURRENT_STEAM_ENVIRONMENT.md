@@ -167,7 +167,7 @@ Sources:
 | `steamroot/tmp/fexhome` (guest `/tmp/fexhome`) | Guest `HOME` (`run-fex.sh:34`; passwd user `steam`, `mksteamroot.sh:61-64`). Holds the Steam install, `.fex-emu`, and FEX's rootfs clone `RootFS/Ubuntu_24_04`. | data | KEEP the convention. This path is baked into Steam's configuration and symlinks (`scripts/env-links.sh:2-4`). |
 | `/usr/lib/lxrt-emu` (inside the Steam root) | The only host directory visible inside pressure-vessel containers. Holds `FEX-emu`, the thunks, the shim and the aarch64 X libraries (`runtime/mounts.c:283-312`). | aarch64 | KEEP for game payloads. The X libraries are REPLACE_WITH_HOLO. |
 | `~/SteamARM-roots/samples` → `/tmp/lxrt-samples` | aarch64 test programs | aarch64 | KEEP |
-| `/tmp/lxrt-arm64root` | The ARM64 base the launcher and `scripts/run-native.sh` expect. `scripts/env-links.sh:16-18` links it when `$STEAMARM_STATE/arm64root` exists; that does not exist on the owner's Mac (MEASURED `ls`), so neither does the link. It is meant to point at a root derived from the Steam Frame image (`docs/ARM64_FIRST_MIGRATION.md`, the target). | aarch64 | new, REPLACE_WITH_HOLO target |
+| `/tmp/lxrt-arm64root` | The ARM64 base the launcher and `scripts/run-native.sh` expect. `scripts/env-links.sh:16-18` links it when `$STEAMARM_STATE/arm64root` exists; that did not exist on the owner's Mac at the audit (MEASURED `ls`). Since stage 23 it is the root `scripts/mkframeroot.sh` derives from the Steam Frame image (an APFS clone on the `SteamFrameRoot` volume, so it resolves only while that volume is attached), and the native arm64 client reaches its login window from it (MEASURED, `benchmarks/stage23-frame-root.txt`). | aarch64 | new, REPLACE_WITH_HOLO target |
 | `$STEAMARM_STATE/armroot` → `/tmp/lxrt-armroot` | Fedora 43 aarch64 root built by `scripts/mkarmroot.sh` (150 root packages) for Valve's native client; stage 21 ran from it. The `/tmp` link was made by hand: no script creates it (MEASURED). | aarch64 | TRANSITIONAL; REPLACE_WITH_HOLO |
 | `steamframe-oobe-repair-20260922.5153644-0.3.0.img` (on the owner's Mac) | Valve's Steam Frame recovery image: the source of the ARM64 userspace. It is read with `scripts/steamframe-image.py` (read-only, never booted, never bundled). Extracted and inventoried on 2026-09-29 (MEASURED): SteamOS 0.3.0, 965 packages, glibc 2.39, a Steam bootstrap with the native client; `docs/STEAM_FRAME_INVENTORY.md`. | data (aarch64 contents) | STEAM_RUNTIME_OWNED; PROPRIETARY_DO_NOT_REDISTRIBUTE |
 | `$STEAMARM_STATE/launcher/` | `apps.json`, `settings.json`, `running.{pid,id,display,arch}` | data | KEEP |
@@ -385,6 +385,13 @@ Behaviours of the Steam client that the runtime handles specially
   - with the rule, when it executes its code (a fault).
 - This does not stop the network process, which runs no JS; the NSS FATAL
   comes first. It stops the renderers.
+- Update, stage 23 (`benchmarks/stage23-native-arm64-jit.txt`): none of
+  the ways below was needed. The runtime now keeps each 16 KiB page of a
+  native guest's RWX range either read-write or read-execute and flips it on
+  faults, scanning a page read-only before it becomes executable
+  (`runtime/wxsplit.c`); with the runtime's SIGSEGV/SIGBUS handler kept when
+  the zygote resets them to SIG_DFL, the unpatched V8 JITs and the login
+  window comes (MEASURED). What follows is the analysis as it stood.
 - The likely ways out:
   - run steamwebhelper with `--js-flags=--jitless` (no JIT and no
     WebAssembly; slower JS), set in the derived root's `steamwebhelper.sh`;

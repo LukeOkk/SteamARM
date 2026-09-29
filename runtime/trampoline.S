@@ -224,6 +224,22 @@ _lxrt_thread_enter:
     mov     x0,  xzr                // Linux: the child sees clone() return 0
     br      x16
 
+// void lxrt_run_on_stack(uint64_t sp, void (*fn)(void *), void *arg)
+// Continue on another stack; fn must not return. A guest thread's exit
+// (thread.c) leaves the guest's stack this way before waking the joiner,
+// which may unmap that stack the moment it wakes.
+    .text
+    .globl _lxrt_run_on_stack
+    .balign 4
+_lxrt_run_on_stack:
+    mov     sp,  x0
+    mov     x16, x1
+    mov     x0,  x2
+    mov     x29, xzr
+    mov     x30, xzr
+    blr     x16
+    brk     #0x1
+
 // ---------------------------------------------------------------- signals
 
 

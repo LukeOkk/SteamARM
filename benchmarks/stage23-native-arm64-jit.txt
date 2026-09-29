@@ -1,0 +1,272 @@
+Stage 23 -- V8's JIT in the native arm64 Steam client, without --jitless (2026-09-29)
+=====================================================================================
+
+ZERO-VM. No FEX for the client. Host: Mac mini M4, 16 GB, macOS 27.0, X on
+display :2 (scripts/run-x11-native.sh). Client: steamrtarm64/steam, version
+1788652215, Valve's steamwebhelper.sh unmodified (sha1
+7bcd9e1a8783c8639d27716d1066e998d46469d3 before and after every run).
+Labels: MEASURED, VERIFIED IN SOURCE, UPSTREAM DOCUMENTED, HYPOTHESIS, UNKNOWN.
+
+Result (MEASURED, runs E5 and E7 below; E7 on the final code commit fa3e539):
+with this stage's runtime and NO --jitless, Valve's native arm64 client
+reaches BrowserReady 8-9 s after start and its "Sign in to Steam" window
+(700x440, class steamwebhelper) is mapped on :2 at every 15 s sample while
+the client runs (E5: 15 s to 180 s; E7: 15 s to 165 s, the 180 s sample fell
+after the stop); 1 webhelper launch, 0 restarts, 5 renderer launches in
+180 s (stage 22 E17 without --jitless: 1137 in 90 s), 0 FATAL in these runs'
+cef_log lines. One renderer runs V8's JIT: 469-470 write flips and 541-544
+execute flips of its code pages in 180 s, every page scanned before it
+became executable, 0 words that needed rewriting. A screen capture of the
+window (E4) shows the complete login page: account/password form and a live
+sign-in QR code. Login was not attempted. The launcher path
+(scripts/run-app.sh steam-arm64, no --jitless) showed the window in 9 of 10
+start/stop cycles (L1-L10); the failed one is open item 1.
+
+Two runtime defects stood between V8 and its code pages; both are fixed:
+
+1. mprotect(RWX) of anonymous memory was granted as read-write (right for x86
+   V8 under FEX, whose code the host never executes; wrong for native code).
+2. When the guest set SIGSEGV/SIGBUS back to SIG_DFL, the runtime set the
+   host disposition to SIG_DFL too, so the runtime's own fault handlers (JIT
+   and W^X flips, sub-page flips, privmap copy-on-write) never ran: the
+   kernel killed the process on the first such fault. The webhelper's zygote
+   does that before it forks renderers. This is why stage 22 E11 found "No
+   lxrun report precedes it" for the renderers' SIGBUS.
+Fixing 1 alone changed nothing (E1: 2281 renderer launches in 180 s, no
+window). 1 + 2 gave the window (E2).
+
+What V8 does (MEASURED, zygote-tree trace, 2026-09-29 07:27, renderer 3211)
+------------------------------------------------------------------------
+  mmap(hint, 0x1003f000, PROT_NONE)          reservation (256 MiB + slack)
+  prctl(PR_SET_VMA, ...)                     names it
+  munmap head 0x34000, munmap tail 0xb000    256 KiB alignment
+  mprotect(0x7eff76940000, 0x10000000, RWX)  the WHOLE code range, once
+  madvise(0x7eff76940000, 0x10000000, DONTNEED)
+  mprotect(0x7eff7e740000, 0x1d8000, RW)     copy of the embedded builtins,
+  mprotect(0x7eff7e740000, 0x1d8000, RX)     at the top of the range
+  -- then no further mprotect in the code range: code is written into the
+     RWX pages and executed from them.
+All of it host-page aligned; no 4 KiB-granular commit in this Chromium
+(126.0.6478.183, "This is Chrome version" line in cef_log.txt).
+
+Design (runtime/wxsplit.c)
+--------------------------
+The task proposed turning the range into MAP_JIT and letting runtime/jit.c's
+per-thread switch handle it. Not done, for this reason: jit.c rescans, on a
+thread's flip back to execute, only what that thread was told or guessed it
+wrote (4 KiB after the first faulting store; note_written(), VERIFIED IN
+SOURCE runtime/jit.c). MAP_JIT's write/execute switch is per thread
+(UPSTREAM DOCUMENTED, pthread_jit_write_protect_np; MEASURED for this
+runtime in stage5-jit.txt): a thread in write mode stores to any MAP_JIT
+page without faulting while every thread in execute mode runs the same page
+without faulting. V8's background compile and GC threads write code the
+main thread runs, and never flip back themselves. So with MAP_JIT an
+unpatched JIT's bytes can execute without ever being scanned, which breaks
+the rule that no executable page may hold an unvalidated svc.
+
+Instead, a native guest's RWX range of private anonymous memory is recorded
+(sorted, merged range table: V8's 256 MiB is one entry; 5000 separate
+commits are 5000 entries, no fixed limit) and each 16 KiB host page of it is
+either read-write or read-execute, never both:
+  - store into a read-execute page -> fault -> the page becomes read-write;
+  - instruction fetch from a read-write page -> fault -> the page is made
+    READ-ONLY, the RWX guest bytes in it are counted for svc / mrs-msr
+    TPIDR_EL0 / mrs CTR_EL0 / ID-register reads (lxrt_rewrite_count, a
+    read-only census), rewritten if any (page opened RW for that), counted
+    again read-only until clean, then made read-execute and the I-cache
+    invalidated.
+Page protections are process-wide, so no thread can execute a byte that was
+not scanned after its last store, whichever thread stored it. A page nobody
+executes stays read-write, which is all the old grant ever gave. Sub-page RWX
+commits (4 KiB inside a 16 KiB host page, subpage.c's union split) are
+scanned the same way before their host page becomes executable; RX and RW
+guest pages sharing that host page are not scanned (code already scanned /
+data). Any other protection ends the split for its range (RX goes through
+rewrite_and_seal as before, PROT_NONE is PROT_NONE); munmap, MAP_FIXED and
+mremap keep the table in step; madvise(DONTNEED) keeps the host protection.
+FEX keeps the RW grant: the main program's name decides (FEX, FEX-gb,
+FEXInterpreter, FEXLoader; not FEXServer); LXRT_WX_SPLIT=0/1 overrides.
+The table's lock is taken with asynchronous signals blocked (a guest handler
+runs nested in the host handler and could otherwise wait on its own lock).
+
+x18 in JIT output: the scan does not run the x18 pass (it needs executable-
+section windows, which generated code does not have). V8 excludes x18 from
+its allocatable registers ("x18 is the platform register and is reserved for
+the use of platform ABIs", ALWAYS_ALLOCATABLE_GENERAL_REGISTERS without x18:
+UPSTREAM DOCUMENTED, v8 src/codegen/arm64/register-arm64.h, main branch as
+fetched 2026-09-29). MEASURED in the renderer (LXRT_WX_STATS=/path logs the
+first 64 x18-naming words with 4 words either side): 34 x18-naming words in
+scanned pages over 180 s, 8 distinct contexts, every one among words such as
+0x0000000b, 0x0000000d, 0x000006c8, 0x00000a88 that are not plausible code
+(as instructions they are udf), i.e. V8's code-object metadata tables. E.g.
+  a92b0068 0000000b b12c0208 0000000b [b92d0644] 0000000b 000006c8 001b0800
+  00000900 01c60a00 0000093c 01e60a00 [b1260a44] 00c6080e 00000a88 00c60800
+So: no evidence of x18 in executed V8 code (HYPOTHESIS that there is none,
+supported by the source and by these samples; not proven by disassembling
+every JIT page).
+
+Runtime changes (commits on worktree-wf_31df40d5-73c-1, each measured)
+---------------------------------------------------------------------
+0bcc2f1  thread.c/trampoline.S: a guest thread's exit wakes its joiner from
+         the host pthread's own stack (lxrt_run_on_stack), not the guest's.
+         Before: jit_rwx's 8 threads x 20 rounds of create/join failed 5 of 6
+         runs -- a host SIGSEGV at libsystem_kernel stat+0x10 /
+         mach_port_mod_refs+0x68 on a guest-stack address (the joiner had
+         unmapped the stack glibc freed at join), delivered to the guest.
+         After: 0 of 6, and 0 in every later run.   MEASURED
+0519fb5  wxsplit.c (new), dispatch.c (mprotect/munmap/mmap/mremap hooks),
+         subpage.c (scan before a union page becomes executable), rewrite.c
+         (lxrt_rewrite_count), signal.c/main.c (fault hook), tests.
+d19704b  signal.c: SIGSEGV/SIGBUS keep host_handler when the guest sets
+         SIG_DFL; a fault no runtime handler absorbs gets the default action
+         (SIG_DFL + raise), as before only under LXRT_DEBUG_DEFAULT_FAULTS.
+3177646  LXRT_WX_STATS=/host/path: counters (every 5 s while faulting, and
+         at exit) and the x18-naming words go to that file; jit_rwx forks.
+ecca552  scripts/run-native.sh exports a Linux PATH (PATH_IN_GUEST
+         overrides): a launcher start handed the client the Mac's PATH and it
+         looked for bash along it ("lxrun: open /opt/homebrew/opt/rustup/bin/
+         bash: No such file or directory", MEASURED in L1/L2). The fault
+         report prints the fault address, sp and lr.
+fa3e539  sub-page adoption asks the range table once per host page; a scan
+         line only for a range with something rewritten; jit_rwx: a 4 KiB
+         PROT_NONE guard inside a committed RWX host page.
+
+Tests
+-----
+tests/elf/jit_rwx.c (JIT_RWX_NATIVE in tests/elf/run.sh): 256 MiB PROT_NONE
+reservation; RWX commit, write, call; rewrite in place and call (101 rounds);
+svc #0 (getpid) in generated code; mrs tpidr_el0 in generated code; RWX ->
+RX (store faults) -> RWX; munmap + MAP_FIXED re-reserve + recommit;
+DONTNEED (zeros) and re-run; PROT_NONE half inside a committed range (read
+and write fault) and recommit; a second thread calling one function 2.5-2.8
+million times while this thread writes and runs 400 functions in other pages
+and 199 in the spinner's own 16 KiB page; 8 threads x 20 rounds on a page's
+first fetch; a 4 KiB PROT_NONE guard inside a committed host page (the rest
+of the page runs, is rewritten, and its svc is rewritten); a 4 KiB commit
+(sub-page) with a svc; 5000 separate RWX commits run and decommitted; V8's
+whole-range pattern; the same in a forked child.
+  build/lxrun jit_rwx:                         45 ok, 0 mal   MEASURED
+  LXRT_GUEST_PAGE=4096:                        45 ok, 0 mal   MEASURED
+  LXRT_WX_SPLIT=0 (the old RW grant):          dies on the first call, rc 132
+  runtime lines: "JIT output: 1 svc sites rewritten" x4 (chunk, guard page,
+  sub-page, child), "tls 1" x1; the svc word reads back as a branch
+  (e.g. 167ffbff).
+  LXRT_WX_STATS at 4 KiB: 675 write flips, 5799 exec flips, 3 scans with
+  sites, 3 words rewritten.
+Full regression on the final code commit (fa3e539; the same numbers, fps
+aside, on ecca552), this worktree:
+  make lxrt && tests/elf/run.sh      56 passed, 0 failed, 2 xfail
+     (main's 54 + JIT_RWX_NATIVE + the /dev/input evdev test, which runs only
+      when steamarm-inputd is not running -- it is not built here;
+      HYPOTHESIS for the second +1, main's run not repeated)
+  tests/elf/run_i386.sh              18 passed, 0 failed
+  make test-arm64                    4 passed, 0 failed
+  make test-launcher-core            pass
+  tests/elf/run_vk_device.sh         2 passed, 0 failed
+  tests/win/run.sh                   11 passed, 0 failed (d3d11 158.8 fps,
+                                     d3d12 159.2, d3d9 159.3, d3d9_32 160.5,
+                                     d3d11_32 160.8, d3d12_32 161.8; on
+                                     ecca552: 159.3, 156.1, 180.6, 160.8,
+                                     160.9, 161.8)
+  tests/win/run_steam_path.sh        2 passed, 0 failed
+  tests/launcher/run_app_dispatch.sh 22 passed, 0 failed
+
+Runs (scripts/run-steam-arm64.sh unless noted; its env: LXRT_ROOT=/tmp/
+lxrt-armroot LXRT_GUEST_PAGE=4096 HOME=/tmp/armhome DISPLAY=:2
+LXRT_X18_ALL_TEXT=libcef.so TMPDIR=/tmp PATH=<Linux> OBJC_DISABLE_
+INITIALIZE_FORK_SAFETY=YES; X windows sampled every 15 s with xwininfo on
+:2; logs in $STATE/logs/native-arm64-steam-<date>.log and the client's logs)
+-------------------------------------------------------------------------
+T1 07:27, 40 s, OLD runtime (main 50998f6), LXRT_TRACE_MATCH=--type=zygote:
+   the V8 sequence above; 360 "RWX outside MAP_JIT: granted as RW".
+E1 07:47:29, 180 s, + W^X split only: no window (0 of 13 samples), 2281
+   renderer launches ("Failed to adjust OOM score of renderer").
+T2 07:51, 35 s, same build, zygote trace: every renderer's 256 MiB mprotect
+   now says "W^X split", and there is NOT ONE host_handler SIGBUS/SIGSEGV
+   line in any renderer; each renderer's trace just stops, then the zygote
+   SIGKILLs it on the browser's request.
+T3 07:53, 30 s, same build, browser-tree trace (LXRT_TRACE_MATCH=
+   -nocrashdialog): 190 "W^X split" mprotects, 0 SIGBUS/SIGSEGV
+   host_handler lines; the zygote calls rt_sigaction(SIGSEGV) and
+   rt_sigaction(SIGBUS) just before it forks renderers (the handler value
+   is not in the trace; that it is SIG_DFL is HYPOTHESIS, confirmed in
+   effect by E2); renderer 36024 ends silently mid-run.
+E2 07:56:40, 180 s, + host handler kept under SIG_DFL: BrowserReady
+   07:56:47 (7 s), login window BrowserReady 07:56:51, window at 12 of 12
+   live samples; 1 webhelper launch, 5 renderer launches, 0 FATAL in this
+   run's cef_log lines.
+E3 08:00:52, 180 s, LXRT_WX_STATS=<file>: window 12 of 12; the JIT renderer
+   (pid 44937) at its last report: 488 write flips, 563 exec flips, 0 scans
+   with sites, 0 words rewritten, 34 x18-naming words seen.
+E4 08:04:44, 120 s, + x18 word logging: window 7 of 8 live samples (the 8th
+   during the stop); screencapture -R 610,305,700,440 while it was up: the
+   full login page (not kept: it holds a live sign-in QR code).
+E5 08:21:50, 180 s, build ecca552, LXRT_WX_STATS=<file>: webhelper
+   launched 08:21:55, BrowserReady 08:21:58 (8 s), login window BrowserReady
+   08:22:02 (12 s); window at 12 of 12 live samples (15 s .. 180 s); 1
+   webhelper launch, 0 restarts, 5 renderer launches, 0 FATAL in this run's
+   cef_log lines; 8 lxrun processes, 2.29-2.34 GB resident in total (stage
+   22 E16 with --jitless: 2.34-2.38 GB); JIT renderer 82267: 470 write
+   flips, 544 exec flips, 0 scans with sites, 34 x18-naming words (all data,
+   see above).
+E6 08:25:24, 90 s, build ecca552 WITH --jitless (control): BrowserReady
+   08:25:31, login window 08:25:35, window 6 of 6 live samples, 5 renderer
+   launches, steamwebhelper.sh restored (sha1 equal). The workaround still
+   works; it is no longer needed.
+E7 08:39:46, 180 s, final code commit fa3e539, LXRT_WX_STATS=<file>:
+   webhelper launched 08:39:52, BrowserReady 08:39:55 (9 s), login window
+   BrowserReady 08:39:59 (13 s); window at 11 of 11 samples taken while
+   the client ran (15 s .. 165 s); 1 webhelper launch, 5 renderer
+   launches, 0 FATAL; 8 lxrun processes, 2.29-2.36 GB resident; JIT
+   renderer 10201: 469 write flips, 541 exec flips, 0 scans with sites, 0
+   words rewritten, 33 x18-naming words (34 logged, the same data
+   contexts); steamwebhelper.sh sha1 equal.
+0 of this worktree's lxrun processes were left after any run.
+
+Launcher path (scripts/run-app.sh steam-arm64: the built-in entry of
+scripts/builtin-apps.json, scripts/run-native.sh, NO --jitless; no other
+launcher session running -- no $STATE/launcher/running.pid; before each
+--stop, no lxrun guest other than this checkout's Steam was running, since
+--stop kills every guest lxrun)
+--------------------------------------------------------------------------
+L1 08:07:37 window after about 13 s (capture: full login page); --stop in 2 s,
+   0 steam/steamwebhelper processes left.
+L2 08:08:20 NO window in 90 s: one of the two zygotes died at start --
+   "[lxrt] SIGBUS at pc 0x19df87b40 = outside the guest image" (that pc is
+   libsystem_platform _platform_memset+0xb0, a host routine; no fault
+   address was printed then) -- and the browser sat in read() on its
+   channel; --stop cleared it, 0 left. (Open item 1.)
+L3 08:11:55, L4 08:12:40, L5 08:13:20 (PATH fix in): window after 17-18 s,
+   still mapped 20 s later, 5 renderer launches each, --stop in 3 s, 0 left.
+L6 08:27:14, L7 08:27:49, L8 08:28:25 (build ecca552): window after 17-18 s,
+   still mapped 15 s later, 5 renderer launches each, --stop in 3 s, 0 left.
+L9 08:43:09, L10 08:43:45 (final code commit fa3e539): window after 17-18
+   s, still mapped 15 s later, 5 renderer launches each, --stop in 3 s, 0 left.
+So launch -> window -> stop -> launch -> window -> stop held for L3..L10.
+
+Still open
+----------
+1. L2: a webhelper zygote died at start with SIGBUS inside a host memset,
+   before the guest had installed any handler (so the runtime's startup
+   fault reporter caught it). 1 of 10 launcher cycles, 0 of 7 direct runs;
+   the only such line in $STATE/logs. Cause UNKNOWN; whether this stage's
+   changes play a part is UNKNOWN. The report now prints the fault address,
+   sp and lr for the next occurrence.
+2. mmap(RWX) (as opposed to mprotect) by a native guest still becomes
+   MAP_JIT with jit.c's switch, whose rescan is exact only for a guest that
+   names its ranges (FEX, patched). An unpatched native JIT that maps RWX
+   directly gets the weaker scan. V8 does not do this (trace above).
+3. /proc/self/maps shows a split range as rw-p or r-xp, not rwxp.
+4. A store executed from the host page it writes never makes progress (the
+   same limit as tests/elf/run.sh's subpage4k xfail); the runtime says so
+   after 1000 repeats (on the renderer's stderr, which nobody reads).
+   Whether V8 ever does it is UNKNOWN; the flip counts of E3/E5/E7 (about
+   500 each way in 180 s) show no such livelock.
+5. A rewritten site in JIT output is a PC-relative branch to a trampoline;
+   code that is later copied elsewhere (V8's code-space compaction) carries
+   a broken branch. 0 sites were found in V8's output in E3/E5/E7.
+6. A system call that writes guest memory (read(2) into a buffer) in a split
+   page while it is read-execute would get EFAULT from Darwin, where Linux
+   writes; the same holds for MAP_JIT regions. Not measured; not seen.
+7. XOpenIM() with LANG=es_MX.UTF-8, steam-runtime-launcher-service, the
+   file-backed mremap message, GL on XQuartz: unchanged from stage 22.

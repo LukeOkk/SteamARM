@@ -7,7 +7,9 @@
 #   scripts/run-steam-arm64.sh [--for SECONDS] [--jitless] [steam args...]
 #
 # Root: scripts/mkarmroot.sh ($STEAMARM_STATE/armroot, seen by the runtime as
-# /tmp/lxrt-armroot; ARMROOT=<dir> ARMROOT_LINK=/tmp/<name> for another root);
+# /tmp/lxrt-armroot; ARMROOT=<dir> ARMROOT_LINK=/tmp/<name> for another root,
+# e.g. the Steam Frame root of scripts/mkframeroot.sh:
+#   ARMROOT=$STEAMARM_STATE/arm64root ARMROOT_LINK=/tmp/lxrt-arm64root);
 # the client lives in its tmp/armhome (HOME=/tmp/armhome in the guest).
 # X: the native X server on :2 (scripts/run-x11-native.sh), started if needed.
 # Log (runtime + client stdout/stderr):
@@ -15,14 +17,14 @@
 # The client's own logs are in <root>/tmp/armhome/.local/share/Steam/logs.
 # --for SECONDS stops the session after that long. Stopping it (--for,
 # Ctrl-C) signals only the processes this run started, by PID.
-# --jitless: a WORKAROUND, not a fix. V8 in the webhelper's renderers asks for
-#   read-write-execute code pages; the runtime grants them read-write only
-#   (runtime/dispatch.c, do_mprotect_inner), so every renderer dies on its
-#   first JIT call and the login window never comes. This adds
-#   --js-flags=--jitless to Valve's steamwebhelper.sh for the session (and
-#   -noverifyfiles, or the client restores the file at start), then puts the
-#   original back. If this script is killed first, the client's own file
-#   verification restores it on the next normal start (MEASURED).
+# --jitless: no longer needed (stage 23): V8's read-write-execute code pages
+#   are split W^X page by page by the runtime (runtime/wxsplit.c) and the
+#   login window comes with the JIT on. Kept as a control and a fallback: it
+#   adds --js-flags=--jitless to Valve's steamwebhelper.sh for the session
+#   (and -noverifyfiles, or the client restores the file at start), then
+#   puts the original back. If this script is killed first, the client's own
+#   file verification restores it on the next normal start (MEASURED).
+# LXRT_WX_STATS=/host/file collects the renderers' W^X flip counters.
 # LXRT_* variables are passed through. LXRT_X18_ALL_TEXT defaults to
 # libcef.so: libcef has x18 uses outside its FDEs (stage 21, change 5).
 set -u
@@ -72,6 +74,10 @@ unset LD_LIBRARY_PATH FEX_ROOTFS FEX_GUESTBASE
 export OBJC_DISABLE_INITIALIZE_FORK_SAFETY=YES
 export LXRT_ROOT="$LINK" LXRT_GUEST_PAGE=4096 HOME=/tmp/armhome
 export LXRT_X18_ALL_TEXT="${LXRT_X18_ALL_TEXT-libcef.so}"
+# The environment the root names for its guests (the Steam Frame root's
+# indirect GLX, scripts/mkframeroot.sh); a variable the caller set wins.
+. scripts/guest-env.sh
+guest_env_from_root "$ARMROOT"
 echo "log: $LOG"
 LXRUN="$PWD/build/lxrun"
 "$LXRUN" /tmp/armhome/.local/share/Steam/steamrtarm64/steam "$@" >"$LOG" 2>&1 &
@@ -90,11 +96,32 @@ track() {
             for (p in ours) printf "%s ", p
         }')
 }
+# A client that exits in its first seconds can leave webhelper zygotes that
+# were never seen as its descendants: reparented to launchd between two polls
+# (MEASURED, benchmarks/stage23-frame-root.txt C2). Those are this checkout's
+# lxrun, parent 1, running a steamrtarm64 program, started after this session.
+orphans() {
+    /bin/ps -axo pid=,ppid=,etime=,command= | /usr/bin/awk -v lx="$LXRUN " -v max=$((SECONDS + 2)) '
+        function secs(t,  a, n, d) {
+            d = 0; if (index(t, "-")) { split(t, a, "-"); d = a[1]; t = a[2] }
+            n = split(t, a, ":")
+            return d * 86400 + (n == 3 ? a[1] * 3600 + a[2] * 60 + a[3] : a[1] * 60 + a[2])
+        }
+        $2 == 1 && index($0, lx) && index($0, "/steamrtarm64/") && secs($3) <= max { printf "%s ", $1 }'
+}
+reap_orphans() {
+    local o; o=$(orphans)
+    [ -n "$o" ] || return 0
+    echo "stopping orphaned webhelper processes: $o"
+    kill -TERM $o 2>/dev/null; sleep 2
+    o=$(orphans); [ -z "$o" ] || kill -KILL $o 2>/dev/null
+}
 stop() {
     track
     [ -z "$PIDS" ] || kill -TERM $PIDS 2>/dev/null
-    for _ in 1 2 3 4 5; do track; [ -n "$PIDS" ] || return 0; sleep 1; done
-    kill -KILL $PIDS 2>/dev/null
+    for _ in 1 2 3 4 5; do track; [ -n "$PIDS" ] || break; sleep 1; done
+    [ -z "$PIDS" ] || kill -KILL $PIDS 2>/dev/null
+    reap_orphans
 }
 trap 'stop; restore_wh; exit 130' INT TERM
 SECONDS=0
@@ -102,5 +129,6 @@ while track; [ -n "$PIDS" ]; do
     if [ -n "$FOR" ] && [ "$SECONDS" -ge "$FOR" ]; then stop; break; fi
     sleep 1
 done
+reap_orphans
 restore_wh
 echo "ended after ${SECONDS} s; log: $LOG"

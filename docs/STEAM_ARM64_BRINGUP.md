@@ -1,14 +1,63 @@
 # Valve's native arm64 Steam client under lxrun
 
-Status on 2026-09-29: the client starts, updates itself, loads `steamui.so`
-and `steamclient.so`, and starts its webhelper. It does not reach a window.
-The working route is still the x86 client under FEX. This page collects the
-bring-up (`benchmarks/stage21-native-arm64-client.txt`), the Mac's logs as
-read by the 2026-09-29 audit, and the analysis of the abort.
+Status on 2026-09-29 (stage 23): the client reaches its "Sign in to Steam"
+window with V8's JIT on, from `scripts/run-steam-arm64.sh` and from the
+launcher (`scripts/run-app.sh steam-arm64`); login itself was not tried
+(MEASURED, `benchmarks/stage23-native-arm64-jit.txt`). Stage 22 reached the
+same window only with `--jitless`
+(`benchmarks/stage22-native-arm64-bringup.txt`); stage 23 split V8's
+read-write-execute code pages W^X per page (`runtime/wxsplit.c`) and kept
+the runtime's SIGSEGV/SIGBUS handler when the guest resets them to SIG_DFL.
+It also reaches that window on the root derived from the Steam Frame image
+(`scripts/mkframeroot.sh`), in 5 of 5 runs, 5-7 s later than on the Fedora
+root (MEASURED, `benchmarks/stage23-frame-root.txt`; next section).
+The working route for games is still the x86 client under FEX. The sections
+below are the earlier bring-up (`benchmarks/stage21-native-arm64-client.txt`),
+the Mac's logs as read by the 2026-09-29 audit, and the analysis of the
+abort, kept as written.
 
 Labels: MEASURED (a command and its result), VERIFIED IN SOURCE (file:line),
 UPSTREAM DOCUMENTED, HYPOTHESIS, UNKNOWN. Logs are in
 `~/SteamARM-roots/logs/`; code line numbers are at `dbd1657`.
+
+## On the Steam Frame root (stage 23)
+
+```sh
+scripts/mkframeroot.sh [--home-from ~/SteamARM-roots/armroot/tmp/armhome]
+scripts/env-links.sh                    # /tmp/lxrt-arm64root, while the volume is attached
+ARMROOT=~/SteamARM-roots/arm64root ARMROOT_LINK=/tmp/lxrt-arm64root \
+    scripts/run-steam-arm64.sh --for 180
+tests/arm64/frame_glx.sh                # GLX in that root: an indirect context
+```
+
+- **Root.** An APFS clone of the extraction of the Steam Frame 0.3.0 image
+  (`/Volumes/SteamFrameRoot/rootfs`, never written) with three additions:
+  `etc/resolv.conf`, the host's `etc/localtime`, and `.lxrt-guest-env`
+  (MEASURED, `benchmarks/stage23-frame-root.txt`).
+- **GL.** The image's Mesa (deckard-mesa) has no software driver and, on
+  its own, finds no GLX visual on the Mac's X server: the client exited at
+  `glXChooseVisual failed` (stage 22 E19). Indirect GLX through the X
+  server works with `__GLX_VENDOR_LIBRARY_NAME=mesa`,
+  `MESA_LOADER_DRIVER_OVERRIDE=swrast` and `LIBGL_ALWAYS_INDIRECT=1`,
+  which `.lxrt-guest-env` names. `scripts/run-steam-arm64.sh` and
+  `scripts/run-native.sh` read that file (`scripts/guest-env.sh`).
+- **Network.** The image has no `resolv.conf`; without one the client's
+  update check failed ("http error 0") and it exited.
+- **Branch.** On this root the client moves itself to the
+  `steamdeck_stable` branch: the same version, 1788652215, with other
+  binaries (it updated itself once, about 220 MB).
+- **Result.** The login window in 5 of 5 runs, from `run-steam-arm64.sh`
+  and from the launcher's runner (`run-native.sh`). BrowserReady at 15-17 s
+  against 7-8 s on the Fedora root; 2.53-2.66 GB against 2.28-2.33 GB.
+  MEASURED: the first webhelper is restarted within a second of its start
+  (cause UNKNOWN), and its two zygotes stay alive for the whole session.
+  The client also takes its SteamOS code paths (SteamOSManager,
+  NetworkManager, atomupd-manager, which crashes without a system D-Bus).
+  That these paths and the restart explain the slower start is a
+  HYPOTHESIS.
+- **Launcher.** The built-in entry still uses the Fedora root. To move it,
+  change only its `"root"` to `/tmp/lxrt-arm64root`; the GL variables come
+  from the root's file.
 
 ## How it runs today
 
@@ -175,6 +224,11 @@ to the abort is what E2 measures; it is not measured here.
 
 That the client gets further on the Frame root is a HYPOTHESIS until it is
 run there (`docs/ARM64_FIRST_MIGRATION.md`).
+Run there on 2026-09-29 (stage 23): it gets as far as on the Fedora root
+(the login window), not further, once GLX, DNS and the branch are handled.
+The rows still absent there (a system D-Bus socket, `libSDL3.so.0` in the
+system directories, `steam-runtime-launcher-service`) did not stop it
+(`benchmarks/stage23-frame-root.txt`).
 
 ## ARM64 tools the native client installed
 
