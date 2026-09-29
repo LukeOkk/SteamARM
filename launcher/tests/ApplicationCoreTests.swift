@@ -37,6 +37,8 @@ struct ApplicationCoreTests {
         return d
     }
 
+    static let t0Stats = Date(timeIntervalSince1970: 2_000_000)
+
     static func main() throws {
         let dir = FileManager.default.temporaryDirectory.appendingPathComponent("appcore-\(getpid())")
         try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
@@ -87,6 +89,35 @@ struct ApplicationCoreTests {
         let envs = try JSONDecoder().decode([LinuxBaseEnvironment].self,
                                             from: JSONEncoder().encode(LinuxBaseEnvironment.builtIn))
         check(envs == LinuxBaseEnvironment.builtIn, "environments round-trip as JSON")
+        // The Fedora ARM64 root of the native arm64 Steam client: native, never FEX.
+        let p4 = try LaunchPlanner.plan(architecture: "aarch64", environmentID: "armroot")
+        check(p4.runner == .native && p4.environment.guestRoot == "/tmp/lxrt-armroot" && !p4.usesVirtualMachine, "aarch64 in armroot -> native")
+        check(p4.environment.transitional, "armroot is transitional")
+        do { _ = try LaunchPlanner.plan(architecture: "x86_64", environmentID: "armroot"); check(false, "x86 pinned to armroot") }
+        catch let e as LaunchPlanError { check(e == .environmentCannotRun(environment: "armroot", architecture: .x86_64), "\(e)") }
+        check(LinuxBaseEnvironment.named(guestRoot: "/tmp/lxrt-armroot/")?.id == "armroot", "environment by guest root")
+        check(LinuxBaseEnvironment.named(guestRoot: "/tmp/lxrt-steamroot")?.id == "legacy-x86", "x86 root by guest root")
+        check(LinuxBaseEnvironment.named(guestRoot: "/tmp/elsewhere") == nil, "unknown root")
+
+        // Session files: running.status and running.arch as the scripts write them.
+        check(SessionFiles.status("7\n") == (7, nil), "exit status 7")
+        check(SessionFiles.status("137 signal 9") == (137, 9), "death by signal 9")
+        check(SessionFiles.status("") == (nil, nil), "no status")
+        check(SessionFiles.arch("x86_64 FEX\n")?.architecture == .x86_64 && SessionFiles.arch("x86_64 FEX")?.translator == "FEX", "running.arch x86")
+        check(SessionFiles.arch("aarch64 none")?.architecture == .aarch64 && SessionFiles.arch("aarch64 none")?.translator == "none", "running.arch aarch64")
+        check(SessionFiles.arch("") == nil, "empty running.arch")
+
+        // Per-app stats (library.json): optional fields, partial files decode.
+        let partial = try JSONDecoder().decode([String: AppStats].self, from: Data(#"{"steam":{"favorite":true},"x":{}}"#.utf8))
+        check(partial["steam"]?.favorite == true && partial["steam"]?.launchCount == nil && partial["x"] == AppStats(), "partial library.json")
+        var st = AppStats()
+        st.noteLaunch(at: t0Stats)
+        st.noteLaunch(at: t0Stats.addingTimeInterval(100))
+        st.noteEnd(SessionRecord(appID: "steam", status: 0, outcome: .exited, duration: 42))
+        st.noteEnd(SessionRecord(appID: "steam", status: nil, outcome: .stopping, duration: 8), countRuntime: false)
+        check(st.launchCount == 2 && st.lastLaunch == t0Stats.addingTimeInterval(100), "launch count and last launch")
+        check(st.totalRuntime == 42 && st.lastStatus == nil && st.lastOutcome == "stopping", "runtime counted only when known")
+        check(try JSONDecoder().decode(AppStats.self, from: JSONEncoder().encode(st)) == st, "stats round-trip")
 
         // Sessions: lock before start, one app at a time, every path back to idle.
         let t0 = Date(timeIntervalSince1970: 1000)
@@ -151,6 +182,109 @@ struct ApplicationCoreTests {
         check(caps.graphicsFallback(after: .auto) == .vulkanMoltenVK, "AUTO starts at MoltenVK today")
         check(caps.graphicsFallback(after: .vulkanMoltenVK) == nil, "no WineD3D fallback yet")
         for (k, v) in caps.graphics { check(!v.reason.isEmpty, "\(k) has a reason") }
+        check(caps.graphics[.openGLWineD3D]?.state == .unsupported, "WineD3D: software GL only")
+        check(caps.effectiveGraphics(.auto) == .vulkanMoltenVK, "AUTO graphics is MoltenVK")
+        check(caps.effectiveGraphics(.vulkanKosmicKrisp) == .vulkanMoltenVK, "undetected KosmicKrisp -> MoltenVK")
+        check(caps.effectiveGraphics(.openGLWineD3D) == .vulkanMoltenVK, "WineD3D -> MoltenVK")
+        // Presets: the two ZERO-VM ones follow presentation; the others are never usable.
+        check(caps.status(of: .nativeWindows).state == .ready, "native windows preset")
+        check(caps.status(of: .vncScreenSharing).state == .experimental, "VNC preset")
+        check(!caps.status(of: .lightningJIT).usable && !caps.status(of: .appleHypervisor).usable, "JIT/VM presets unusable")
+        check(!caps.status(of: .appleHypervisor).reason.isEmpty, "Apple Hypervisor says why")
+
+        // Detection (scripts/compat-status.py --json) refines the table, never beyond it.
+        let json = #"""
+        {"moltenvk":{"path":"/opt/homebrew/lib/libMoltenVK.dylib","version":"1.4.2","vulkan":"1.4.357"},
+         "fex":{"patchedInstalled":true,"steamInstalled":false},
+         "protons":[{"name":"Proton - Experimental","architecture":"x86_64","installed":true,"supported":true,"esync":false,"fsync":true,"ntsync":true},
+                    {"name":"Proton 10.0","architecture":"x86_64","installed":true,"supported":true,"esync":true,"fsync":true,"ntsync":false}],
+         "kosmickrisp":{"icd_json":"/k.json","library":"/k.dylib","version":"26.2.3","api_version":"1.4.354","os_ok":true,"exports_icd":true},
+         "shim":{"path":"/s","installed":true,"icd_selection":false},
+         "presentation":{"native_x":true,"xvnc":true,"screen_sharing":true},
+         "nativeArmReason":"r","note":"n"}
+        """#
+        var probe = try JSONDecoder().decode(RuntimeProbe.self, from: Data(json.utf8))
+        check(probe.kosmickrisp?.version == "26.2.3" && probe.shim?.icdSelection == false && probe.protons.count == 2, "probe decodes")
+        var d = RuntimeCapabilities.detect(from: probe)
+        check(d.graphics[.vulkanMoltenVK]?.state == .ready && d.graphics[.vulkanMoltenVK]?.reason.contains("1.4.2") == true, "MoltenVK detected")
+        check(d.graphics[.vulkanKosmicKrisp]?.state == .unavailable && d.graphics[.vulkanKosmicKrisp]?.reason.contains("STEAMARM_VK_ICD") == true,
+              "KosmicKrisp installed but the shim cannot select it")
+        check(d.synchronization[.esync]?.state == .experimental && d.synchronization[.esync]?.reason.contains("Proton 10.0") == true, "esync: Proton 10.0 only")
+        check(d.synchronization[.fsync]?.state == .unsupported && d.synchronization[.msync]?.state == .unavailable, "fsync/msync unchanged by detection")
+        check(d.execution[.appleHypervisorLegacy]?.usable == false && d.execution[.lightningJIT]?.usable == false, "detection never enables JIT or a VM")
+        check(d.graphics[.openGLWineD3D]?.state == .unsupported, "detection never enables WineD3D")
+        check(d.effectiveSynchronization(.auto) == .wineserver, "AUTO still wineserver with esync experimental")
+        probe.shim?.icdSelection = true
+        d = RuntimeCapabilities.detect(from: probe)
+        check(d.graphics[.vulkanKosmicKrisp]?.state == .experimental, "KosmicKrisp with an ICD-selecting shim: experimental")
+        check(d.effectiveGraphics(.auto) == .vulkanMoltenVK && d.effectiveGraphics(.vulkanKosmicKrisp) == .vulkanKosmicKrisp, "AUTO stays on MoltenVK")
+        probe.kosmickrisp?.osOK = false
+        check(RuntimeCapabilities.detect(from: probe).graphics[.vulkanKosmicKrisp]?.state == .unavailable, "KosmicKrisp needs macOS 26")
+        probe.kosmickrisp = nil
+        check(RuntimeCapabilities.detect(from: probe).graphics[.vulkanKosmicKrisp]?.reason.contains("no está instalado") == true, "no KosmicKrisp")
+        probe.protons = [.init(name: "Proton - Experimental", fsync: true, ntsync: true)]
+        probe.moltenvk = .init(path: "", version: "no instalado")
+        probe.presentation = .init(nativeX: false, xvnc: true, screenSharing: false)
+        d = RuntimeCapabilities.detect(from: probe)
+        check(d.synchronization[.esync]?.state == .unavailable, "no esync-capable Proton")
+        check(d.effectiveSynchronization(.esync) == .wineserver, "unavailable esync -> wineserver")
+        check(d.graphics[.vulkanMoltenVK]?.state == .unavailable, "no MoltenVK")
+        check(d.presentation[.nativeWindows]?.state == .unavailable && d.presentation[.vncScreenSharing]?.state == .unavailable, "display pieces missing")
+
+        // Issues and the fallback policy: only settings that cannot work count.
+        check(caps.issues(display: .nativeWindows, synchronization: .auto, graphics: .auto, appInX86Root: false).isEmpty, "nothing to fall back from")
+        check(caps.issues(display: .vncScreenSharing, synchronization: .esync, graphics: .vulkanMoltenVK, appInX86Root: true).isEmpty, "VNC in the x86 root is fine")
+        let vncArm = caps.issues(display: .vncScreenSharing, synchronization: .auto, graphics: .auto, appInX86Root: false)
+        check(vncArm.count == 1 && vncArm[0].setting == "display" && vncArm[0].fallback == "native", "VNC outside the x86 root -> native")
+        let bad = caps.issues(display: .nativeWindows, synchronization: .fsync, graphics: .vulkanKosmicKrisp, appInX86Root: true)
+        check(bad.map(\.setting) == ["synchronization", "graphicsBackend"], "fsync and KosmicKrisp both reported")
+        check(bad.first?.fallback == "wineserver" && bad.last?.fallback == "vulkanMoltenVK", "their fallbacks")
+        check(bad.allSatisfy { !$0.summary.isEmpty }, "issues say why")
+        check(FallbackPolicy.auto.decision(for: bad) == .proceed && FallbackPolicy.strict.decision(for: bad) == .refuse
+              && FallbackPolicy.ask.decision(for: bad) == .ask, "policy decisions")
+        check(FallbackPolicy.strict.decision(for: []) == .proceed, "no issue: every policy launches")
+
+        // settings.json from before the selectors keeps what it ran.
+        check(SettingsMigration.synchronization(stored: nil, esync: true, fsync: true) == "esync", "esync+fsync -> esync")
+        check(SettingsMigration.synchronization(stored: nil, esync: false, fsync: true) == "wineserver", "no esync -> wineserver")
+        check(SettingsMigration.synchronization(stored: nil, esync: nil, fsync: false) == "esync", "only fsync off -> esync")
+        check(SettingsMigration.synchronization(stored: nil, esync: nil, fsync: nil) == "auto", "new install -> AUTO")
+        check(SettingsMigration.synchronization(stored: "wineserver", esync: true, fsync: true) == "wineserver", "stored choice wins")
+        check(SettingsMigration.graphicsBackend(stored: "vulkan") == "vulkanMoltenVK", "legacy vulkan -> MoltenVK")
+        check(SettingsMigration.graphicsBackend(stored: nil) == "auto" && SettingsMigration.graphicsBackend(stored: "bogus") == "auto", "graphics default AUTO")
+        check(SettingsMigration.fallbackPolicy(stored: "ask") == "ask" && SettingsMigration.fallbackPolicy(stored: nil) == "auto", "fallback policy")
+
+        // Library: search, filters, favourites first, recent by date, logs by exact id.
+        let items = [LibraryItem(id: "steam", name: "Steam", architecture: "x86_64", isWindows: false),
+                     LibraryItem(id: "steam-arm64", name: "Steam ARM64 (experimental)", architecture: "aarch64", isWindows: false),
+                     LibraryItem(id: "heroic", name: "Heroic Games Launcher", architecture: nil, isWindows: false),
+                     LibraryItem(id: "juego", name: "Juego Añejo", architecture: nil, isWindows: true)]
+        var lib: [String: AppStats] = [:]
+        lib["heroic", default: AppStats()].favorite = true
+        lib["steam", default: AppStats()].noteLaunch(at: t0Stats)
+        lib["juego", default: AppStats()].noteLaunch(at: t0Stats.addingTimeInterval(60))
+        check(Library.visible(items, stats: lib, query: "", filter: .all) == ["heroic", "steam", "steam-arm64", "juego"], "favourites first")
+        check(Library.visible(items, stats: lib, query: "", filter: .favorites) == ["heroic"], "favourites filter")
+        check(Library.visible(items, stats: lib, query: "", filter: .recent) == ["juego", "steam"], "recent, newest first")
+        check(Library.visible(items, stats: lib, query: "", filter: .arm64) == ["steam-arm64"], "ARM64 filter")
+        check(Library.visible(items, stats: lib, query: "", filter: .x86) == ["heroic", "steam"], "x86 filter (nil arch is x86_64)")
+        check(Library.visible(items, stats: lib, query: "", filter: .windows) == ["juego"], "Windows filter")
+        check(Library.visible(items, stats: lib, query: "anejo", filter: .all) == ["juego"], "search ignores case and accents")
+        check(Library.visible(items, stats: lib, query: "steam", filter: .x86) == ["steam"], "search within a filter")
+        check(Library.isLog("steam-20260929-054400.log", of: "steam"), "a steam log")
+        check(!Library.isLog("steam-arm64-20260929-054400.log", of: "steam"), "steam-arm64 logs are not steam's")
+        check(Library.isLog("steam-arm64-20260929-054400.log", of: "steam-arm64"), "a steam-arm64 log")
+        check(!Library.isLog("steam-20260929-0544.log", of: "steam") && !Library.isLog("xsteam-20260929-054400.log", of: "steam"), "exact form only")
+        check(Library.newestLog(of: "steam", in: ["steam-20260928-100000.log", "steam-arm64-20260930-100000.log",
+                                                  "steam-20260929-090000.log", "current"]) == "steam-20260929-090000.log", "newest log")
+        check(Library.programDirectory(of: ["/bin/bash", "/tmp/fexhome/.local/share/Steam/steam.sh", "-noverifyfiles"]) == "/tmp/fexhome/.local/share/Steam", "script after a shell")
+        check(Library.programDirectory(of: ["/tmp/armhome/.local/share/Steam/steamrtarm64/steam"]) == "/tmp/armhome/.local/share/Steam/steamrtarm64", "program dir")
+        check(Library.programDirectory(of: ["run"]) == nil, "relative command")
+        check(Library.duration(30) == "menos de 1 min" && Library.duration(720) == "12 min" && Library.duration(11_520) == "3 h 12 min", "durations")
+        check(Library.subtitle(nil) == "Sin abrir todavía", "never opened")
+        var sub = AppStats(); sub.noteLaunch(at: t0Stats); sub.totalRuntime = 720
+        let line = Library.subtitle(sub, now: t0Stats.addingTimeInterval(3600))
+        check(line.contains("1 vez") && line.contains("12 min") && line.contains("hace"), "subtitle: \(line)")
 
         print(failures == 0 ? "application core: all checks passed" : "application core: \(failures) FAILED")
         exit(failures == 0 ? 0 : 1)

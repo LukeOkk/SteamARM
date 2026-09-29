@@ -94,12 +94,24 @@ struct LinuxBaseEnvironment: Codable, Equatable, Identifiable {
     var transitional: Bool                // TRANSITIONAL_COMPATIBILITY
 
     static let legacyX86 = LinuxBaseEnvironment(
-        id: "legacy-x86", name: "x86-64 Steam root (FEX)", guestRoot: "/tmp/lxrt-steamroot",
+        id: "legacy-x86", name: "Raíz x86-64 de Steam (FEX)", guestRoot: "/tmp/lxrt-steamroot",
         architectures: [.x86_64, .i386], translator: .fex, fexRootfs: "/", transitional: true)
     static let arm64 = LinuxBaseEnvironment(
-        id: "arm64", name: "ARM64 root (Steam Frame / Holo)", guestRoot: "/tmp/lxrt-arm64root",
+        id: "arm64", name: "Raíz ARM64 (Steam Frame / Holo)", guestRoot: "/tmp/lxrt-arm64root",
         architectures: [.aarch64], translator: .none, fexRootfs: nil, transitional: false)
-    static let builtIn = [arm64, legacyX86]
+    /// The Fedora 43 aarch64 root of scripts/mkarmroot.sh, where the native
+    /// arm64 Steam client runs (benchmarks/stage21). Transitional until the
+    /// Holo-derived root exists; a rebuild wipes it, client included.
+    static let armroot = LinuxBaseEnvironment(
+        id: "armroot", name: "Raíz ARM64 (Fedora 43, scripts/mkarmroot.sh)", guestRoot: "/tmp/lxrt-armroot",
+        architectures: [.aarch64], translator: .none, fexRootfs: nil, transitional: true)
+    static let builtIn = [arm64, armroot, legacyX86]
+
+    /// The environment whose guest root is `root`, if it is a known one.
+    static func named(guestRoot root: String, in environments: [LinuxBaseEnvironment] = builtIn) -> LinuxBaseEnvironment? {
+        let trimmed = root.count > 1 && root.hasSuffix("/") ? String(root.dropLast()) : root
+        return environments.first { $0.guestRoot == trimmed }
+    }
 }
 
 // MARK: - Launch plan
@@ -243,6 +255,51 @@ struct SessionMachine {
     }
 }
 
+/// The files scripts/run-app.sh and scripts/session.py leave in
+/// $STATE/launcher for the running session.
+enum SessionFiles {
+    /// running.status: "N" for exit code N, "N signal S" for a death by signal S.
+    static func status(_ text: String) -> (status: Int32?, signal: Int32?) {
+        let fields = text.split(whereSeparator: { $0 == " " || $0 == "\n" || $0 == "\t" }).map(String.init)
+        let status = fields.first.flatMap { Int32($0) }
+        let signal = fields.count == 3 && fields[1] == "signal" ? Int32(fields[2]) : nil
+        return (status, signal)
+    }
+
+    /// running.arch: "<arch> <translator>", e.g. "x86_64 FEX" or "aarch64 none".
+    static func arch(_ text: String) -> (architecture: GuestArchitecture?, translator: String)? {
+        let fields = text.split(whereSeparator: { $0 == " " || $0 == "\n" || $0 == "\t" }).map(String.init)
+        guard let first = fields.first else { return nil }
+        return (GuestArchitecture(rawValue: first), fields.count > 1 ? fields[1] : "")
+    }
+}
+
+/// Per-app history kept by the launcher in $STATE/launcher/library.json (not
+/// in apps.json: built-ins are not stored there). Every field is optional so
+/// that an older or partial file still decodes.
+struct AppStats: Codable, Equatable {
+    var favorite: Bool?
+    var launchCount: Int?
+    var totalRuntime: TimeInterval?
+    var lastLaunch: Date?
+    var lastStatus: Int32?
+    var lastOutcome: String?     // SessionPhase raw value: failed, exited, crashed, stopping
+
+    /// One more launch at `date` (counted when the program was started).
+    mutating func noteLaunch(at date: Date) {
+        launchCount = (launchCount ?? 0) + 1
+        lastLaunch = date
+    }
+
+    /// The end of a session. `countRuntime` is false for a session whose start
+    /// is unknown (adopted from scripts/run-steam.sh).
+    mutating func noteEnd(_ record: SessionRecord, countRuntime: Bool = true) {
+        if countRuntime { totalRuntime = (totalRuntime ?? 0) + max(0, record.duration) }
+        lastStatus = record.status
+        lastOutcome = record.outcome.rawValue
+    }
+}
+
 // MARK: - Backends, session mode and capabilities
 
 /// How a session reaches the screen. Separate from how its code executes:
@@ -288,21 +345,165 @@ enum ApplicationBackendPreset: String, Codable, CaseIterable {
     }
 }
 
+extension PresentationMode {
+    var label: String { self == .nativeWindows ? "Ventanas nativas" : "VNC (Compartir Pantalla)" }
+}
+
+extension ApplicationBackendPreset {
+    var label: String {
+        switch self {
+        case .nativeWindows: return "Ventanas nativas (recomendado)"
+        case .vncScreenSharing: return "VNC (Compartir Pantalla)"
+        case .lightningJIT: return "Lightning JIT"
+        case .appleHypervisor: return "Apple Hypervisor"
+        }
+    }
+}
+
 enum SynchronizationBackend: String, Codable, CaseIterable {
     case auto, wineserver, msync, fsync, esync
+
+    var label: String {
+        switch self {
+        case .auto: return "AUTO"
+        case .wineserver: return "DEFAULT (wineserver)"
+        case .msync: return "MSYNC"
+        case .fsync: return "FSYNC"
+        case .esync: return "ESYNC"
+        }
+    }
 }
 
 enum GraphicsBackend: String, Codable, CaseIterable {
     case auto, openGLWineD3D, vulkanMoltenVK, vulkanKosmicKrisp
+
+    var label: String {
+        switch self {
+        case .auto: return "AUTO"
+        case .openGLWineD3D: return "OpenGL (WineD3D)"
+        case .vulkanMoltenVK: return "Vulkan (MoltenVK)"
+        case .vulkanKosmicKrisp: return "Vulkan (KosmicKrisp)"
+        }
+    }
+}
+
+/// What a launch does when a setting it asks for cannot work (settings key
+/// "fallbackPolicy"). Only reached when there is such a setting: VNC for a
+/// program outside the x86 root, or a stored value that stopped being usable.
+enum FallbackPolicy: String, Codable, CaseIterable {
+    case auto, strict, ask
+
+    var label: String {
+        switch self {
+        case .auto: return "AUTO (usar la alternativa)"
+        case .strict: return "ESTRICTO (no abrir)"
+        case .ask: return "PREGUNTAR"
+        }
+    }
+
+    enum Decision: Equatable { case proceed, refuse, ask }
+
+    func decision(for issues: [CapabilityIssue]) -> Decision {
+        guard !issues.isEmpty else { return .proceed }
+        switch self {
+        case .auto: return .proceed
+        case .strict: return .refuse
+        case .ask: return .ask
+        }
+    }
 }
 
 /// What a capability is today, from this repository and its measurements --
 /// never from what it is meant to become.
 struct CapabilityStatus: Equatable {
-    enum State: String { case ready, experimental, unsupported, unavailable }
+    enum State: String {
+        case ready, experimental, unsupported, unavailable
+
+        var label: String {
+            switch self {
+            case .ready: return "Listo"
+            case .experimental: return "Experimental"
+            case .unsupported: return "No soportado"
+            case .unavailable: return "No disponible"
+            }
+        }
+    }
     var state: State
     var reason: String
     var usable: Bool { state == .ready || state == .experimental }
+}
+
+/// One requested setting that cannot work for this launch, and what runs instead.
+struct CapabilityIssue: Equatable {
+    var setting: String      // settings key: display, synchronization, graphicsBackend
+    var requested: String    // raw values, as stored
+    var fallback: String
+    var summary: String      // for the user, in Spanish
+}
+
+/// What scripts/compat-status.py --json found on this Mac (the subset the
+/// capability table needs). Read in a subprocess so no driver is loaded into
+/// the launcher itself.
+struct RuntimeProbe: Decodable, Equatable {
+    struct Driver: Decodable, Equatable { var path: String; var version: String }
+    struct KosmicKrisp: Decodable, Equatable {
+        var icdJSON: String
+        var library: String
+        var version: String
+        var osOK: Bool
+        var exportsICD: Bool
+        enum CodingKeys: String, CodingKey {
+            case icdJSON = "icd_json", library, version, osOK = "os_ok", exportsICD = "exports_icd"
+        }
+        init(icdJSON: String = "", library: String = "", version: String = "", osOK: Bool = false, exportsICD: Bool = false) {
+            (self.icdJSON, self.library, self.version, self.osOK, self.exportsICD) = (icdJSON, library, version, osOK, exportsICD)
+        }
+        init(from decoder: Decoder) throws {
+            let c = try decoder.container(keyedBy: CodingKeys.self)
+            icdJSON = try c.decodeIfPresent(String.self, forKey: .icdJSON) ?? ""
+            library = try c.decodeIfPresent(String.self, forKey: .library) ?? ""
+            version = try c.decodeIfPresent(String.self, forKey: .version) ?? ""
+            osOK = try c.decodeIfPresent(Bool.self, forKey: .osOK) ?? false
+            exportsICD = try c.decodeIfPresent(Bool.self, forKey: .exportsICD) ?? false
+        }
+    }
+    struct Shim: Decodable, Equatable {
+        var path: String
+        var installed: Bool
+        var icdSelection: Bool
+        enum CodingKeys: String, CodingKey { case path, installed, icdSelection = "icd_selection" }
+    }
+    struct Proton: Decodable, Equatable {
+        var name: String
+        var supported: Bool
+        var esync: Bool
+        var fsync: Bool
+        var ntsync: Bool
+        enum CodingKeys: String, CodingKey { case name, supported, esync, fsync, ntsync }
+        init(name: String, supported: Bool = true, esync: Bool = false, fsync: Bool = false, ntsync: Bool = false) {
+            (self.name, self.supported, self.esync, self.fsync, self.ntsync) = (name, supported, esync, fsync, ntsync)
+        }
+        init(from decoder: Decoder) throws {
+            let c = try decoder.container(keyedBy: CodingKeys.self)
+            name = try c.decode(String.self, forKey: .name)
+            supported = try c.decodeIfPresent(Bool.self, forKey: .supported) ?? false
+            esync = try c.decodeIfPresent(Bool.self, forKey: .esync) ?? false
+            fsync = try c.decodeIfPresent(Bool.self, forKey: .fsync) ?? false
+            ntsync = try c.decodeIfPresent(Bool.self, forKey: .ntsync) ?? false
+        }
+    }
+    struct Presentation: Decodable, Equatable {
+        var nativeX: Bool
+        var xvnc: Bool
+        var screenSharing: Bool
+        enum CodingKeys: String, CodingKey { case nativeX = "native_x", xvnc, screenSharing = "screen_sharing" }
+    }
+
+    var moltenvk: Driver
+    var kosmickrisp: KosmicKrisp?
+    var shim: Shim?
+    var protons: [Proton]
+    var presentation: Presentation?
 }
 
 /// The launcher's source of truth for which options exist, and why the rest
@@ -314,28 +515,85 @@ struct RuntimeCapabilities {
     var synchronization: [SynchronizationBackend: CapabilityStatus]
     var graphics: [GraphicsBackend: CapabilityStatus]
 
-    /// The state of the tree as of 0.3.4. Each reason names its evidence.
+    /// The state of the tree as of 0.3.4, before anything is detected on this
+    /// Mac (detect(from:) refines it). Each reason names its evidence.
     static let current = RuntimeCapabilities(
         presentation: [
-            .nativeWindows: .init(state: .ready, reason: "cross-process Metal layer in native X windows (benchmarks/stage12)"),
-            .vncScreenSharing: .init(state: .experimental, reason: "cannot show the Metal layer, so games cannot present through it (stage12)"),
+            .nativeWindows: .init(state: .ready, reason: "capa Metal entre procesos en ventanas X nativas (benchmarks/stage12)"),
+            .vncScreenSharing: .init(state: .experimental, reason: "sirve para la interfaz de Steam; Xvnc no muestra la capa Metal, así que los juegos Vulkan no pueden presentar ahí (stage12)"),
         ],
         execution: [
-            .auto: .init(state: .ready, reason: "lxrun: aarch64 directly, x86/i386 through FEX; no VM"),
-            .lightningJIT: .init(state: .unavailable, reason: "no Lightning JIT exists in this repository"),
-            .appleHypervisorLegacy: .init(state: .unavailable, reason: "the VM path was removed on 2026-09-27 (docs/history)"),
+            .auto: .init(state: .ready, reason: "lxrun: aarch64 directamente, x86/i386 con FEX; sin máquina virtual"),
+            .lightningJIT: .init(state: .unavailable, reason: "no existe ningún Lightning JIT en este repositorio"),
+            .appleHypervisorLegacy: .init(state: .unavailable, reason: "la ruta con máquina virtual se retiró el 2026-09-27 (docs/history); SteamARM es ZERO-VM"),
         ],
         synchronization: [
-            .wineserver: .init(state: .ready, reason: "Wine's default, no fast path"),
-            .esync: .init(state: .experimental, reason: "eventfd is implemented in lxrun (runtime/epoll_eventfd.c); not measured with games"),
-            .fsync: .init(state: .unsupported, reason: "lxrun has no futex_waitv (syscall 449)"),
-            .msync: .init(state: .unavailable, reason: "no MSync-capable Wine is integrated"),
+            .wineserver: .init(state: .ready, reason: "el camino por defecto de Wine, sin vía rápida"),
+            .esync: .init(state: .experimental, reason: "solo Proton 10.0 lo incluye; lxrun implementa eventfd (runtime/epoll_eventfd.c) pero no entre procesos: sin verificar con juegos"),
+            .fsync: .init(state: .unsupported, reason: "lxrun no implementa futex_waitv (syscall 449): Proton lo prueba, recibe ENOSYS y no lo usa"),
+            .msync: .init(state: .unavailable, reason: "no hay ningún Wine con MSync integrado (MSync es un parche del Wine de macOS, no del Proton de Linux)"),
         ],
         graphics: [
-            .vulkanMoltenVK: .init(state: .ready, reason: "D3D9/11/12 probes through DXVK/VKD3D-Proton (benchmarks/stage14, stage16)"),
-            .vulkanKosmicKrisp: .init(state: .unavailable, reason: "not integrated; the shim loads MoltenVK by path, no ICD selection yet"),
-            .openGLWineD3D: .init(state: .unavailable, reason: "no host OpenGL path for guest GL (no GL thunk target on macOS)"),
+            .vulkanMoltenVK: .init(state: .ready, reason: "D3D9/11/12 por DXVK/VKD3D-Proton (benchmarks/stage14, stage16)"),
+            .vulkanKosmicKrisp: .init(state: .unavailable, reason: "sin detectar todavía; el shim carga MoltenVK por ruta"),
+            .openGLWineD3D: .init(state: .unsupported, reason: "el OpenGL del invitado es llvmpipe por software y no hay thunk de GL"),
         ])
+
+    /// The static table refined with what is installed on this Mac. Nothing
+    /// becomes more than the table allows: fsync, MSync, WineD3D, Lightning
+    /// JIT and Apple Hypervisor stay what they are whatever is installed.
+    static func detect(from probe: RuntimeProbe, base: RuntimeCapabilities = .current) -> RuntimeCapabilities {
+        var caps = base
+
+        if probe.moltenvk.path.isEmpty {
+            caps.graphics[.vulkanMoltenVK] = .init(state: .unavailable, reason: "MoltenVK no está instalado (brew install molten-vk)")
+        } else {
+            caps.graphics[.vulkanMoltenVK] = .init(state: .ready, reason: "MoltenVK \(probe.moltenvk.version): D3D9/11/12 por DXVK/VKD3D-Proton (benchmarks/stage14, stage16)")
+        }
+
+        let kk = probe.kosmickrisp ?? .init()
+        let kkName = kk.version.isEmpty ? "KosmicKrisp" : "KosmicKrisp \(kk.version)"
+        if kk.library.isEmpty {
+            caps.graphics[.vulkanKosmicKrisp] = .init(state: .unavailable, reason: "KosmicKrisp no está instalado (Mesa de Homebrew)")
+        } else if !kk.osOK {
+            caps.graphics[.vulkanKosmicKrisp] = .init(state: .unavailable, reason: "\(kkName) necesita macOS 26 o posterior (Metal 4)")
+        } else if !kk.exportsICD {
+            caps.graphics[.vulkanKosmicKrisp] = .init(state: .unavailable, reason: "\(kkName) no carga o no exporta vk_icdGetInstanceProcAddr")
+        } else if probe.shim?.icdSelection != true {
+            caps.graphics[.vulkanKosmicKrisp] = .init(state: .unavailable, reason: "\(kkName) está instalado, pero el shim Vulkan instalado no admite STEAMARM_VK_ICD: solo carga MoltenVK")
+        } else {
+            caps.graphics[.vulkanKosmicKrisp] = .init(state: .experimental, reason: "\(kkName) detectado y el shim admite STEAMARM_VK_ICD; sin medir con juegos")
+        }
+
+        let esync = probe.protons.filter { $0.supported && $0.esync }.map(\.name)
+        if esync.isEmpty {
+            caps.synchronization[.esync] = .init(state: .unavailable, reason: "ningún Proton instalado incluye esync (Proton Experimental y Hotfix no lo compilan)")
+        } else {
+            caps.synchronization[.esync] = .init(state: .experimental, reason: "solo en \(esync.joined(separator: ", ")); lxrun implementa eventfd pero no entre procesos: sin verificar con juegos")
+        }
+
+        if let p = probe.presentation {
+            if !p.nativeX {
+                caps.presentation[.nativeWindows] = .init(state: .unavailable, reason: "falta el servidor X nativo (scripts/build-xquartz.sh)")
+            }
+            if !p.xvnc || !p.screenSharing {
+                let missing = !p.xvnc ? "Xvnc no está en la raíz x86" : "no se encuentra Compartir Pantalla"
+                caps.presentation[.vncScreenSharing] = .init(state: .unavailable, reason: missing)
+            }
+        }
+        return caps
+    }
+
+    /// The state of one of the launcher's backend presets.
+    func status(of preset: ApplicationBackendPreset) -> CapabilityStatus {
+        let missing = CapabilityStatus(state: .unavailable, reason: "sin datos")
+        switch preset {
+        case .nativeWindows: return presentation[.nativeWindows] ?? missing
+        case .vncScreenSharing: return presentation[.vncScreenSharing] ?? missing
+        case .lightningJIT: return execution[.lightningJIT] ?? missing
+        case .appleHypervisor: return execution[.appleHypervisorLegacy] ?? missing
+        }
+    }
 
     /// AUTO resolved to a concrete synchronization backend: the fastest one
     /// that is usable, else Wine's default.
@@ -343,6 +601,17 @@ struct RuntimeCapabilities {
         if requested != .auto { return synchronization[requested]?.usable == true ? requested : .wineserver }
         for b in [SynchronizationBackend.msync, .fsync, .esync] where synchronization[b]?.state == .ready { return b }
         return .wineserver
+    }
+
+    /// AUTO resolved to a concrete graphics backend: the first ready one
+    /// (MoltenVK today). A requested one that is not usable falls back.
+    func effectiveGraphics(_ requested: GraphicsBackend) -> GraphicsBackend {
+        if requested == .auto {
+            return [GraphicsBackend.vulkanMoltenVK, .vulkanKosmicKrisp, .openGLWineD3D]
+                .first { graphics[$0]?.state == .ready } ?? .vulkanMoltenVK
+        }
+        if graphics[requested]?.usable == true { return requested }
+        return graphicsFallback(after: requested) ?? .vulkanMoltenVK
     }
 
     /// The next graphics backend to try after `failed`, when fallback is
@@ -357,5 +626,156 @@ struct RuntimeCapabilities {
     /// an automatic fallback: it needs the user's explicit choice.
     func executionFallback(after failed: ExecutionBackend) -> ExecutionBackend? {
         failed == .lightningJIT && execution[.auto]?.usable == true ? .auto : nil
+    }
+
+    /// The settings of one launch that cannot work as asked, each with what
+    /// runs instead. scripts/run-app.sh and scripts/settings-env.py apply the
+    /// same fallbacks by themselves; FallbackPolicy decides whether to launch.
+    func issues(display: PresentationMode, synchronization sync: SynchronizationBackend,
+                graphics gfx: GraphicsBackend, appInX86Root: Bool) -> [CapabilityIssue] {
+        var out: [CapabilityIssue] = []
+        if display == .vncScreenSharing {
+            let reason: String? = !appInX86Root
+                ? "Xvnc se ejecuta dentro de la raíz x86 de Steam: un programa de otra raíz no encuentra la pantalla :1"
+                : (presentation[.vncScreenSharing]?.usable == false ? presentation[.vncScreenSharing]?.reason : nil)
+            if let reason {
+                out.append(.init(setting: "display", requested: "vnc", fallback: "native",
+                                 summary: "Pantalla: \(PresentationMode.vncScreenSharing.label) → \(PresentationMode.nativeWindows.label) (\(reason))"))
+            }
+        }
+        let effSync = effectiveSynchronization(sync)
+        if sync != .auto && effSync != sync {
+            let reason = synchronization[sync]?.reason ?? "no disponible"
+            out.append(.init(setting: "synchronization", requested: sync.rawValue, fallback: effSync.rawValue,
+                             summary: "Sincronización: \(sync.label) → \(effSync.label) (\(reason))"))
+        }
+        let effGfx = effectiveGraphics(gfx)
+        if gfx != .auto && effGfx != gfx {
+            let reason = graphics[gfx]?.reason ?? "no disponible"
+            out.append(.init(setting: "graphicsBackend", requested: gfx.rawValue, fallback: effGfx.rawValue,
+                             summary: "Gráficos: \(gfx.label) → \(effGfx.label) (\(reason))"))
+        }
+        return out
+    }
+}
+
+/// settings.json values written before the selectors existed, read so that
+/// what ran before keeps running (the Proton environment included).
+enum SettingsMigration {
+    /// The esync/fsync booleans became one "synchronization" choice. fsync
+    /// never worked under lxrun (no futex_waitv), so esync true -> "esync",
+    /// false -> Wine's default; no booleans at all (a new install) -> AUTO.
+    static func synchronization(stored: String?, esync: Bool?, fsync: Bool?) -> String {
+        if let stored, SynchronizationBackend(rawValue: stored) != nil { return stored }
+        if esync != nil || fsync != nil {
+            return (esync == false ? SynchronizationBackend.wineserver : .esync).rawValue
+        }
+        return SynchronizationBackend.auto.rawValue
+    }
+
+    /// "vulkan" was the only value (MoltenVK); nothing stored is AUTO.
+    static func graphicsBackend(stored: String?) -> String {
+        guard let stored else { return GraphicsBackend.auto.rawValue }
+        if stored == "vulkan" { return GraphicsBackend.vulkanMoltenVK.rawValue }
+        return GraphicsBackend(rawValue: stored) != nil ? stored : GraphicsBackend.auto.rawValue
+    }
+
+    static func fallbackPolicy(stored: String?) -> String {
+        stored.flatMap { FallbackPolicy(rawValue: $0) }?.rawValue ?? FallbackPolicy.auto.rawValue
+    }
+}
+
+// MARK: - Library
+
+/// The library's filter chips.
+enum LibraryFilter: String, CaseIterable, Identifiable {
+    case all, favorites, recent, arm64, x86, windows
+    var id: String { rawValue }
+    var label: String {
+        switch self {
+        case .all: return "Todas"
+        case .favorites: return "Favoritas"
+        case .recent: return "Recientes"
+        case .arm64: return "ARM64"
+        case .x86: return "x86"
+        case .windows: return "Windows"
+        }
+    }
+}
+
+/// What the library needs to know of an entry to sort and filter it.
+struct LibraryItem: Equatable {
+    var id: String
+    var name: String
+    var architecture: String?   // AppEntry.architecture
+    var isWindows: Bool
+}
+
+enum Library {
+    /// The ids to show, in order: favourites first (the library's order
+    /// otherwise); Recientes is newest launch first.
+    static func visible(_ items: [LibraryItem], stats: [String: AppStats], query: String,
+                        filter: LibraryFilter) -> [String] {
+        let q = query.trimmingCharacters(in: .whitespacesAndNewlines)
+        let opts: String.CompareOptions = [.caseInsensitive, .diacriticInsensitive]
+        let matching = items.filter { item in
+            guard q.isEmpty || item.name.range(of: q, options: opts) != nil
+                    || item.id.range(of: q, options: opts) != nil else { return false }
+            let arch = GuestArchitecture.of(item.architecture)
+            switch filter {
+            case .all: return true
+            case .favorites: return stats[item.id]?.favorite == true
+            case .recent: return stats[item.id]?.lastLaunch != nil
+            case .arm64: return !item.isWindows && arch == .aarch64
+            case .x86: return !item.isWindows && (arch == .x86_64 || arch == .i386)
+            case .windows: return item.isWindows
+            }
+        }
+        if filter == .recent {
+            return matching.sorted {
+                (stats[$0.id]?.lastLaunch ?? .distantPast) > (stats[$1.id]?.lastLaunch ?? .distantPast)
+            }.map(\.id)
+        }
+        let fav = matching.filter { stats[$0.id]?.favorite == true }
+        return (fav + matching.filter { stats[$0.id]?.favorite != true }).map(\.id)
+    }
+
+    /// run-app.sh names logs <id>-YYYYmmdd-HHMMSS.log; the exact form keeps
+    /// "steam" from matching "steam-arm64-...".
+    static func isLog(_ fileName: String, of id: String) -> Bool {
+        let pattern = "^" + NSRegularExpression.escapedPattern(for: id) + #"-\d{8}-\d{6}\.log$"#
+        return fileName.range(of: pattern, options: .regularExpression) != nil
+    }
+
+    /// The newest of an app's logs among `fileNames` (the timestamp sorts).
+    static func newestLog(of id: String, in fileNames: [String]) -> String? {
+        fileNames.filter { isLog($0, of: id) }.max()
+    }
+
+    /// The directory of the program a guest command line runs (the script
+    /// after a shell or env), as a guest path.
+    static func programDirectory(of command: [String]) -> String? {
+        let wrappers: Set<String> = ["/bin/bash", "/bin/sh", "/usr/bin/bash", "/usr/bin/sh", "/usr/bin/env"]
+        guard let program = command.first(where: { $0.hasPrefix("/") && !wrappers.contains($0) }) else { return nil }
+        let dir = (program as NSString).deletingLastPathComponent
+        return dir.isEmpty ? "/" : dir
+    }
+
+    /// "3 h 12 min", "12 min", "menos de 1 min".
+    static func duration(_ seconds: TimeInterval) -> String {
+        let m = Int(seconds / 60)
+        if m < 1 { return "menos de 1 min" }
+        return m >= 60 ? "\(m / 60) h \(m % 60) min" : "\(m) min"
+    }
+
+    /// The card's second line: last launch, count and time used.
+    static func subtitle(_ stats: AppStats?, now: Date = Date()) -> String {
+        guard let s = stats, let last = s.lastLaunch, let n = s.launchCount, n > 0 else { return "Sin abrir todavía" }
+        let f = RelativeDateTimeFormatter()
+        f.locale = Locale(identifier: "es_ES")
+        f.unitsStyle = .full
+        var parts = [f.localizedString(for: last, relativeTo: now), n == 1 ? "1 vez" : "\(n) veces"]
+        if let t = s.totalRuntime, t > 0 { parts.append(duration(t)) }
+        return parts.joined(separator: " · ")
     }
 }

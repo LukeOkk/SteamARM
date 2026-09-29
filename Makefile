@@ -133,14 +133,16 @@ $(LAUNCHER_BIN): $(LAUNCHER_SRCS) launcher/SDLShim.h
 	    @rpath/libSDL2-2.0.0.dylib $@
 
 # The launcher's application core without UI (launcher/ApplicationCore.swift),
+# the settings -> environment translation and the compatibility inventory,
 # run-app.sh's runner choice and the session wrapper (scripts/session.py). All
-# three also run on Linux.
+# of them also run on Linux.
 .PHONY: test-launcher-core
 test-launcher-core:
 	@mkdir -p build
 	swiftc -parse-as-library -swift-version 5 launcher/ApplicationCore.swift \
 	    launcher/tests/ApplicationCoreTests.swift -o build/application-core-tests
 	build/application-core-tests
+	python3 -m unittest tests/test_settings_env.py tests/test_compat_status.py
 	tests/launcher/run_app_dispatch.sh
 	tests/launcher/session.sh
 	tests/launcher/safeguard.sh
