@@ -1,5 +1,12 @@
 # FEX_REUSE_ANALYSIS
 
+> **SUPERSEDED — VM-era provenance.** Audited while FEX was built in the
+> Fedora VM. The FEX pin is unchanged (`08f451d3b`,
+> `scripts/build-fex-host.sh:74`), and FEX is now built on the Mac with no
+> VM (stage 9), with 8 host patches (`scripts/build-fex-host.sh:79`) and 3
+> thunk-generator patches in `patches/`. The source analysis below still
+> applies to that commit.
+
 **FEX version audited:** `FEX-2609-113-g08f451d3b` — commit `08f451d3b` ("Merge pull request #5980 from Plagman/plagman/maxrwsize_mr"), tag FEX-2609 plus 113 commits. This is the exact commit built on the project's Linux guest (`~/FEX` on the Fedora 43 aarch64 VM; `git describe --tags`) and the commit checked out on the host for this audit. Date: 2026-09-25.
 
 **Evidence classes.** MEASURED — run in this project, output recorded under `benchmarks/`. VERIFIED IN SOURCE — the cited file:line exists at this commit and says what is claimed. UPSTREAM DOCUMENTED — `docs/` or an in-tree comment. HYPOTHESIS — plausible, not confirmed. UNKNOWN — not determinable from the source; needs a measurement. Nothing below is upgraded from HYPOTHESIS to fact without a measurement.

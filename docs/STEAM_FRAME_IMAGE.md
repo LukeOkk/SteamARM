@@ -27,13 +27,19 @@ whose frames decode to 16 KiB more than `ram_bytes`.
 
 MEASURED on synthetic images, Linux, 2026-09-28: 12/12 checks pass.
 
-Whether the Steam Frame image fails for this reason is a HYPOTHESIS until
-`diagnose` runs on it. `diagnose` classifies every compressed extent:
+`diagnose` classifies every compressed extent:
 
 - `frame-larger-than-ram`: the case above. Harmless for this tool.
 - `frame-incomplete-input` or `short-output`: the data really is damaged or
   truncated. A partial `.img.bz2` download or decompression gives this;
   `info` then marks the partition `TRUNCATED`.
+
+On the Steam Frame image this is now MEASURED (2026-09-29, on the Mac): of
+214,760 zstd extents, 111,347 are `frame-larger-than-ram`, 103,413 are `ok`
+and 0 are damaged. The btrfs-progs failure is the case above, not a damaged
+image. `extract` then finished with exit 0: 180,797 files (8.6 GiB), 12,672
+directories, 30,033 symlinks, 4,276 hard links. Results:
+`docs/STEAM_FRAME_INVENTORY.md`.
 
 ## Steps (on the Mac)
 
@@ -50,7 +56,7 @@ hdiutil create -size 40g -type SPARSEBUNDLE -fs 'Case-sensitive APFS' \
 hdiutil attach ~/SteamARM-roots/steamframe-root.sparsebundle
 python3 scripts/steamframe-image.py extract "$IMG" /Volumes/SteamFrameRoot/rootfs
 python3 scripts/steamframe-image.py inventory /Volumes/SteamFrameRoot/rootfs \
-    --json ~/SteamARM-roots/logs/steamframe-inventory.json --md docs/STEAM_FRAME_INVENTORY.md
+    --json ~/SteamARM-roots/logs/steamframe-inventory.json --md ~/SteamARM-roots/logs/steamframe-inventory.md
 ```
 
 Notes:
@@ -71,7 +77,10 @@ Notes:
 ## What the inventory answers
 
 The inventory answers the questions `STEAM_FRAME_ROOTFS_AUDIT.md` asks of
-the image:
+the image. The answers for the 0.3.0 image are in
+`docs/STEAM_FRAME_INVENTORY.md`. It redacts private per-device pacman
+mirror URLs by itself (`tests/steamframe_image/redact.sh`); check any other
+output for them before sharing it.
 
 - `os-release` and `BUILD_ID`;
 - the pacman database (`usr/lib/holo/pacmandb`), with version, arch and
@@ -84,8 +93,9 @@ the image:
 - Vulkan ICDs, where Qualcomm's Turnip/freedreno must be replaced by
   SteamARM's MoltenVK shim;
 - NSS: whether `libsoftokn3.so` and `libfreeblpriv3.so` sit next to
-  `libnss3.so`. If they do, the steamwebhelper FATAL should be gone with this
-  base (HYPOTHESIS until the inventory shows them);
+  `libnss3.so`. In the 0.3.0 image they do (MEASURED). That the
+  steamwebhelper NSS FATAL does not occur with this base stays a HYPOTHESIS
+  until the client runs on it;
 - systemd units for Steam, FEX, Lepton and gamescope;
 - what `lxrun` can load:
   - aarch64 `ET_EXEC` files, which `runtime/elf.c` refuses;
@@ -96,7 +106,7 @@ the image:
     libraries (MEASURED, `benchmarks/stage21-native-arm64-client.txt`);
   - libraries in the same case, which go through `runtime/subpage.c`;
   - the page size the image's kernel was built for, from its config or its
-    `Image` header.
+    `Image` header: 4 KiB for the 0.3.0 image (MEASURED).
 
 ## Licence
 
@@ -126,6 +136,11 @@ native Steam client's root:
 - move Qualcomm-only ICDs and services aside in the derived root, not in the
   extracted copy;
 - keep `tmp/` as runtime state.
+
+The image has no FEX (no FEX binaries, no `binfmt.d` rules; MEASURED), so
+x86 payloads keep using SteamARM's own FEX. None of these steps has been
+done yet: they write under `~/SteamARM-roots` and need the owner's go-ahead.
+Their order is in `docs/ARM64_FIRST_MIGRATION.md` (steps 6-8).
 
 This has to be measured on the Mac with lxrun (steamwebhelper past
 BrowserReady, network process alive, Steam UI, Settings → Compatibility).

@@ -1,5 +1,10 @@
 # PERFORMANCE_BASELINE
 
+> **SUPERSEDED — VM-era.** These are the VM baseline and the first
+> ZERO-VM measurements, taken while the VM still existed (8 vCPU guest). The
+> "Status: CURRENT" line below is kept as it was written. The ZERO-VM
+> baseline is `docs/PERFORMANCE_BASELINE.md`.
+
 **Status: CURRENT.** Milestone 1 (Stage 0 + Stage 1) has been executed and
 most of what §2 listed as unmeasured is now measured. The brief's hypothesis —
 "the VM is the bottleneck" — is **refuted in its naive form and replaced by a

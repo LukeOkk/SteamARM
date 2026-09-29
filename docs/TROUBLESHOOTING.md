@@ -38,8 +38,13 @@ the newest `~/SteamARM-roots/logs/steam-*.log`. If Steam exits right away, stop 
 the launcher (**Detener**) and start it again.
 
 **Steam uses "Proton ARM64" / games don't start**
-Steam must see an x86-64 machine. SteamARM hides FEX's hypervisor CPUID bit
-for that. If you changed FEX options by hand, go back to the defaults.
+This applies to the x86 Steam client, the route the launcher uses today.
+That client must see an x86-64 machine: if it notices FEX, it switches to
+ARM64 tools that cannot run here. SteamARM hides FEX's identifying CPUID
+leaves from the `steam` executable for that. If you changed FEX options by
+hand, go back to the defaults. (Valve's native arm64 client, still
+experimental, sees an arm64 machine by design; this setting does not apply
+to it. See `docs/STEAM_ARM64_BRINGUP.md`.)
 
 **Why aren't all the ARM64 tools selectable?**
 The ARM64 Proton and FEX downloads can be installed without being runnable
@@ -47,8 +52,9 @@ by this macOS runtime. Valve's ARM64 Proton requires native ARM64 Steam;
 Valve explicitly excludes an x86 Steam client running through FEX. Native
 Wine ARM64EC also needs low-address mappings and Windows' x18 TEB convention
 that this runtime does not yet implement. The current working route uses
-the macOS-patched FEX and x86 Proton, with no VM. Enabling the hypervisor
-leaves alone does not implement ARM64 support.
+the macOS-patched FEX and x86 Proton, with no VM. Letting the x86 client see
+FEX's CPUID leaves only makes it pick those ARM64 tools; it does not make
+them run. There is no virtual-machine option to fall back on.
 
 **Procesador → Compatibilidad instalada** lists the installed tools and their
 status. `python3 scripts/compat-status.py` provides the same inventory and

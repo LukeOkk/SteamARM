@@ -1,0 +1,84 @@
+# ARM64-first: the migration plan
+
+**Target.** Everything ARM64 except game payloads. Valve's native arm64
+Steam client runs directly on lxrun, with no FEX. FEX runs only x86 and i386
+game code. No virtual machine at any point (`AGENTS.md`).
+
+**Today.** The x86 client under FEX is the only route that reaches Steam's
+window (MEASURED, stages 8-21). The native arm64 client starts and updates
+itself but aborts before its window (MEASURED, stage 21).
+
+This page replaces five next-step lists that disagreed on the root:
+`docs/CURRENT_STEAM_ENVIRONMENT.md` §10, `docs/APPLICATION_MANAGER.md`
+"Next steps", `docs/STEAM_FRAME_COMPAT_TOOLS.md` §7.4,
+`docs/STEAM_RUNTIME_4_ARM64.md` §5.3 and `docs/LEPTON_REUSE_ANALYSIS.md`
+"Next steps". Those lists stay as the detailed notes for their area; the
+order is here.
+
+Labels: MEASURED, VERIFIED IN SOURCE, UPSTREAM DOCUMENTED, HYPOTHESIS,
+UNKNOWN. Status per step: DONE (with evidence), IN PROGRESS (being worked on
+elsewhere, not claimed here), OPEN.
+
+## The root decision
+
+| root | what it is | role |
+|---|---|---|
+| Fedora 43 aarch64 armroot (`scripts/mkarmroot.sh`, `/tmp/lxrt-armroot`) | the shared-library closure of what the client links; 150 root packages; stage 21 ran on it | **TRANSITIONAL.** Keep it until the Frame root runs the client at least as far |
+| Steam Frame / Holo root (extracted from `steamframe-oobe-repair-20260922.5153644-0.3.0.img`) | Valve's own aarch64 userspace for the client: SteamOS 0.3.0 "holo", 965 packages, glibc 2.39 (`docs/STEAM_FRAME_INVENTORY.md`) | **TARGET.** It already has what the Fedora root lacked in stage 21: X locale data, glibc locales, `lsof`, GTK 3, `libnssckbi.so` |
+| Fedora 43 `lxrt-root` (`scripts/mkroot-rpm.sh`) | FEX, FEXServer, test programs | KEEP for FEX and `tests/elf` until the Frame root is proven for them |
+| x86 Steam root (`steamroot`) | the x86 client and x86 Proton's world | KEEP for game payloads; its client-only parts are REMOVE_LATER |
+
+Rules for the Frame root (`docs/STEAM_FRAME_IMAGE.md`, licence section):
+extract it only from the owner's own copy of the image, use it on that Mac,
+never put extracted files in the repository or the `.dmg`. Derive the
+runtime root as an APFS clone; never modify the extracted copy.
+
+## Steps, in order
+
+Each step has an exit test. Steps 1-4 are independent of each other; from
+step 5 on, each step depends on the ones before it unless its row says
+otherwise.
+
+| # | step | exit test | status |
+|---|---|---|---|
+| 1 | Runtime correctness for native code: poisoned rewrite sites trap | a poisoned site is `brk #1` | DONE, `dbd1657` (was `svc #1`; `tests/elf/run.sh` 37/37, MEASURED) |
+| 2 | The memory guard stops guests only on real pressure | Steam survives normal memory use on a 16 GB Mac | DONE in source, `e4047ef`: `tests/launcher/safeguard.sh` 7/7 (MEASURED on the Mac, 2026-09-29, fake guests). A full Steam session under the new rule is not recorded |
+| 3 | Regression tests for the stage 21 runtime changes (4 KiB ELF, AT_PAGESZ, FDE filter, large `sp` offsets, trampoline range, poison) | each has a test in `tests/elf` | IN PROGRESS elsewhere |
+| 4 | Extract and inventory the Frame root | `extract` exit 0; inventory written | DONE, 2026-09-29 (MEASURED: 180,797 files, 965 packages; `docs/STEAM_FRAME_INVENTORY.md`) |
+| 5 | Confirm the abort's cause on the Fedora root (E1, E1b, E2 in `docs/STEAM_ARM64_BRINGUP.md`) | E2: no `free(): invalid pointer` after the webhelper timeout | OPEN; needs the owner's approval (writes in `~/SteamARM-roots`). The Fedora root is being changed elsewhere |
+| 6 | Derive the ARM64 base from the Frame root and link it: `cp -cR` the extraction, point `~/SteamARM-roots/arm64root` at the clone, `scripts/env-links.sh` links `/tmp/lxrt-arm64root` | `LXRT_ROOT=/tmp/lxrt-arm64root build/lxrun /usr/bin/bash -c 'echo ok'` prints `ok` | OPEN; writes in `~/SteamARM-roots`, needs approval |
+| 7 | Adapt the derived root: move the Qualcomm Vulkan ICD aside, add SteamARM's shim with an ICD JSON, keep `tmp/` as state | `vulkaninfo` from the root lists Apple M4 through the shim | OPEN |
+| 8 | Run the client on the derived root: the Frame image carries its own bootstrap (`usr/lib/steam/steam.tar.zst`, `steamrtarm64/` built 2026-09-15), or use the stage 21 download | the client reaches its login window | OPEN |
+| 9 | The webhelper to BrowserReady and a stable UI (`docs/STEAMWEBHELPER_BRINGUP.md`) | BrowserReady, a network process that stays up, the Steam window | OPEN. The blocker |
+| 10 | Launcher: a Steam ARM64 entry (`architecture: aarch64`, its root, `LXRT_GUEST_PAGE=4096`, its `HOME`), a persistent `/tmp` link, keys for `steamrtarm64/steam` beside `ubuntu12_32/steam` | the launcher starts and stops it; `running.arch` = `aarch64 none` | IN PROGRESS elsewhere; can go ahead of steps 5-9, since the launcher only starts and stops the client |
+| 11 | Acceptance of the ARM64 client | open, UI, close, library, open again | OPEN |
+| 12 | SLR 4 arm64's pressure-vessel under lxrun (`docs/STEAM_RUNTIME_4_ARM64.md` §5.3 steps 5-6) | `pressure-vessel-wrap --version` and `_v2-entry-point --verb=run -- true` | OPEN |
+| 13 | Route Windows games to x86 Proton through SteamARM's FEX under the arm64 client (`docs/STEAM_FRAME_COMPAT_TOOLS.md` §7.3), and keep Valve's FEX from being used | one Windows probe renders when launched by the arm64 client | OPEN |
+| 14 | Retire the x86 client's parts (`docs/CURRENT_STEAM_ENVIRONMENT.md` §6: i386 client, x86 webhelper, x86 bash, amd64 `lsof`, HideHypervisorBit) | the x86 client is no longer started | OPEN; only after 11 and 13 |
+
+Independent of that order:
+
+- **Graphics: KosmicKrisp.** Installed and conformant on the host; the shim
+  cannot load it until it has an ICD mode (`docs/GRAPHICS_BACKEND_ARCHITECTURE.md`).
+  IN PROGRESS elsewhere.
+- **x18 on the M4.** `tests/x18_preserve/run.sh` under macOS 27
+  (`docs/X18_VIRTUALIZATION.md`). OPEN.
+- **Android (Lepton).** `docs/LEPTON_REUSE_ANALYSIS.md` steps 1-3
+  (alignment, one bionic program under lxrun). OPEN. The Frame root has
+  `usr/share/guestos/android` (57 MB) and podman 5.5.2 (MEASURED).
+
+## Blockers
+
+| blocker | state | where |
+|---|---|---|
+| Main client aborts with `free(): invalid pointer` | MEASURED. Cause: HIGH-CONFIDENCE HYPOTHESIS, a Valve `vgui2_s` bug reached when the webhelper times out and the root has no X locale data | `docs/STEAM_ARM64_BRINGUP.md` |
+| The webhelper never initialises (2026-09-29) | MEASURED; cause UNKNOWN | `docs/STEAMWEBHELPER_BRINGUP.md` |
+| V8 JIT under lxrun | HYPOTHESIS | `docs/CURRENT_STEAM_ENVIRONMENT.md` §7 |
+| An arm64 client prefers Proton ARM64 and SLR 4 arm64 | Proton ARM64 cannot start on macOS: `0x7ffe0000` and the low 4 GiB (MEASURED, stage 18; VERIFIED IN SOURCE, stage 19 §2), and x18 for the TEB (UNKNOWN on the M4, see above) | `docs/STEAM_FRAME_COMPAT_TOOLS.md` §7 |
+| 45 aarch64 `ET_EXEC` files in the Frame root (busybox, gawk, gcc, SteamVR's `XRService`...) | lxrun refuses `ET_EXEC` (`runtime/elf.c`). `awk` is a link to `gawk`, and the bootstrap's `steam.sh` names `awk` twice (MEASURED). Whether that path runs at start-up: UNKNOWN | `docs/STEAM_FRAME_INVENTORY.md` |
+
+## Measured status
+
+`docs/ARM64_FIRST_AUDIT.md` has the numbers: processes per route, rewrite
+coverage, missing root pieces, installed versus runnable tools, and the
+UNKNOWNs with the command that measures each.

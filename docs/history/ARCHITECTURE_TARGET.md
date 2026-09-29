@@ -1,5 +1,12 @@
 # ARCHITECTURE_TARGET
 
+> **SUPERSEDED — VM-era.** Written as the plan to leave the VM. Its ZERO-VM
+> core now exists (`docs/ARCHITECTURE.md`); the current target and its
+> ordered plan are `docs/ARCHITECTURE.md` ("Target: ARM64-first") and
+> `docs/ARM64_FIRST_MIGRATION.md`. Two claims below are out of date: it is
+> no longer "planned", and Valve does ship a native arm64 Steam client
+> (`benchmarks/stage21-native-arm64-client.txt`). Kept as history.
+
 **Status: PLANNED.** Nothing here exists yet. Where a claim is uncertain it is
 marked EXPERIMENTAL or BLOCKED rather than stated as fact.
 

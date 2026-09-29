@@ -1,68 +1,74 @@
-# Referencia oficial Steam Frame
+# Steam Frame: official reference
 
-Snapshot verificado el 2026-09-28 para auditar el stack ARM64 de Valve sin
-arrancar el kernel de la imagen.
+Snapshot checked on 2026-09-28, to audit Valve's ARM64 stack without booting
+the image's kernel.
 
-## Versión y fuente
+## Version and source
 
-- Steamworks describe Steam Frame como Snapdragon 8 Gen 3 ARM64 con SteamOS
-  basado en Arch, y documenta Windows x86 por Proton+FEX y Android por Lepton:
+- Steamworks describes Steam Frame as a Snapdragon 8 Gen 3 ARM64 device
+  running an Arch-based SteamOS, and documents Windows x86 games through
+  Proton + FEX and Android through Lepton:
   <https://partner.steamgames.com/doc/steamhardware/steamframe/compatibility>
-- Valve anunció SteamOS 0.4.1 Beta para Steam Frame el 2026-09-25:
+- Valve announced SteamOS 0.4.1 Beta for Steam Frame on 2026-09-25:
   <https://steamcommunity.com/ogg/4165890/announcements/detail/674006995886409326>
-- El índice oficial de recovery consultado el 2026-09-28 aún muestra como
-  recovery completa más reciente
-  `steamframe-oobe-repair-20260922.5153644-0.3.0.img.bz2` (3.8 GiB,
-  2026-09-22 22:57 UTC), junto con `.zip` y QDL:
+- On 2026-09-28 the official recovery index still listed, as the newest full
+  recovery, `steamframe-oobe-repair-20260922.5153644-0.3.0.img.bz2` (3.8 GiB,
+  2026-09-22 22:57 UTC), with `.zip` and QDL variants:
   <https://steamdeck-images.steamos.cloud/recovery/>
-- No había recovery 0.4.1 o superior en ese índice. El identificador
-  `20260925.6191901` queda como community-observed, no como snapshot oficial
-  confirmado por este sondeo.
+- The index had no 0.4.1 or newer recovery. The identifier
+  `20260925.6191901` stays community-observed, not an official snapshot
+  confirmed by this check.
 
-## Artefacto local y hashes
+## Local copy and hashes
 
-La copia recibida del usuario coincide en nombre con el índice oficial.
-`bzip2 -tv` terminó con `ok`. Valve no publica hash en el índice consultado;
-los SHA-256 siguientes son mediciones locales, no checksums del proveedor.
+The copy the owner received has the same name as the index entry.
+`bzip2 -tv` ended with `ok`. Valve publishes no hash in the index; the
+SHA-256 values below are local measurements, not vendor checksums.
 
-| Artefacto | Tamaño | SHA-256 | Permisos |
+| artefact | size | SHA-256 | permissions |
 |---|---:|---|---|
-| Archivo comprimido en `~/Downloads/` | 3.8 GiB | `3a4a077f1b1f40688ab3279affcb56776bd97c54db1573e7c65fc52a97106676` | read-only |
-| Imagen raw en `~/SteamARM-roots/reference/` | 7,516,192,768 bytes | `081a38c051e99c09db6ae91be994b67ef3347ea71f330d803ab861f0ba8cc654` | read-only |
+| compressed archive in `~/Downloads/` | 3.8 GiB | `3a4a077f1b1f40688ab3279affcb56776bd97c54db1573e7c65fc52a97106676` | read-only |
+| raw image in `~/SteamARM-roots/reference/` | 7,516,192,768 bytes | `081a38c051e99c09db6ae91be994b67ef3347ea71f330d803ab861f0ba8cc654` | read-only |
 
-## GPT y filesystems
+`steamframe-image.py info --hash` gave the same size and SHA-256 for the raw
+image on 2026-09-29 (MEASURED).
 
-Imagen raw: GUID Partition Table, sectores de 512 bytes. La partición de
-datos principal es Btrfs; no es un rootfs que macOS monte de forma nativa.
-Inspección con `gpt -r show`, `hdiutil imageinfo` y attach `-readonly -nomount`;
-`diskutil info` confirmó `Media Read-Only: Yes`.
+## GPT and filesystems
 
-| Partición | Inicio (sector) | Sectores | Tamaño | Tipo observado |
+Raw image: GUID partition table, 512-byte sectors. Inspected with
+`gpt -r show`, `hdiutil imageinfo` and an attach with `-readonly -nomount`;
+`diskutil info` confirmed `Media Read-Only: Yes`.
+
+| partition | start (sector) | sectors | size | type observed |
 |---|---:|---:|---:|---|
 | `esp` | 34 | 524,288 | 256 MiB | FAT32 |
 | `efi-A` | 524,322 | 131,072 | 64 MiB | FAT32 |
-| `rootfs-A` | 655,394 | 10,485,760 | 5 GiB | Btrfs, etiqueta `rootfs-A`; 4,475,207,680/5,368,709,120 bytes usados |
+| `rootfs-A` | 655,394 | 10,485,760 | 5 GiB | btrfs, label `rootfs-A`, 4,475,207,680 of 5,368,709,120 bytes used; zstd-compressed, sectorsize 4096 |
 | `var-A` | 11,141,154 | 524,288 | 256 MiB | ext4 |
 | `home` | 11,665,442 | 204,800 | 100 MiB | ext4 |
 
-No se arrancó la imagen, no se cargó su kernel, no se montó ningún filesystem
-con escritura y no se ejecutó código del rootfs. `btrfs check` validó el
-filesystem y sus checksums; `btrfs restore` no pudo descomprimir la mayoría de
-los datos ZSTD, así que el inventario de paquetes y binarios sigue pendiente.
-El detalle está en `STEAM_FRAME_ROOTFS_AUDIT.md`.
+The image was not booted, its kernel was not loaded, no filesystem was
+mounted writable, and no code from the root was run. `btrfs check`
+validated the filesystem and its checksums. `btrfs restore` failed on the
+zstd extents; `scripts/steamframe-image.py` read them instead, and on
+2026-09-29 extracted and inventoried the whole root (MEASURED). Details:
+`docs/STEAM_FRAME_ROOTFS_AUDIT.md`; results: `docs/STEAM_FRAME_INVENTORY.md`.
 
-## Qué sirve de referencia
+The root's own `BUILD_ID` is `20260922.5152327`, not the file name's
+`5153644` (MEASURED, `etc/os-release`).
 
-Steam Frame es la referencia primaria para el layout Linux ARM64 real y las
-decisiones de arquitectura. Separar packages genéricos Arch ARM64 de firmware,
-kernel, drivers, servicios del dispositivo y capas propietarias específicas
-de Snapdragon/Frame. Un archivo presente en recovery no pasa automáticamente
-a ser redistribuible o necesario en ZERO-VM.
+## What it is a reference for
 
-## Investigación web del 2026-09-29
+Steam Frame is the primary reference for a real Linux ARM64 layout and for
+Valve's architecture decisions. Generic Arch ARM64 packages have to be told
+apart from firmware, kernel, drivers, device services and proprietary layers
+specific to Snapdragon and the Frame (`docs/STEAM_FRAME_INVENTORY.md`,
+"Reuse classification"). A file present in the recovery image is not
+automatically redistributable, nor needed under ZERO-VM.
 
-La investigación web del 2026-09-29 sobre canales, imágenes de recovery,
-bundles de actualización y árboles de paquetes está en
-`STEAM_FRAME_SNAPSHOT_2026-09-29.md` (en inglés). Sus datos son investigación
-web con etiquetas de evidencia, no mediciones hechas en el Mac. Donde coinciden
-con las mediciones de este archivo, esa página lo indica y las cita.
+## Web research of 2026-09-29
+
+The web research of 2026-09-29 on channels, recovery images, update bundles
+and package trees is in `STEAM_FRAME_SNAPSHOT_2026-09-29.md`. It is web
+research with evidence labels, not measurements on the Mac. Where it agrees
+with the measurements here, that page says so and cites them.
