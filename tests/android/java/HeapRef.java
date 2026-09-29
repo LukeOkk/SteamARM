@@ -20,8 +20,8 @@ public class HeapRef {
         long base = ((Integer) baseOf.invoke(u, Object[].class)).longValue();
         long max = 0;
         StringBuilder sb = new StringBuilder();
-        Object[] kinds = { new Object(), new byte[16], new byte[4 << 20], "a string", HeapRef.class };
-        String[] names = { "Object", "byte[16]", "byte[4 MiB]", "String literal", "Class" };
+        Object[] kinds = { new Object(), new byte[16], new byte[4 << 20], "a string", HeapRef.class, Object.class };
+        String[] names = { "Object", "byte[16]", "byte[4 MiB]", "String literal", "Class", "Object.class (boot image)" };
         for (int i = 0; i < kinds.length; i++) {
             slot[0] = kinds[i];
             long ref = ((Integer) getInt.invoke(u, slot, base)).intValue() & 0xffffffffL;

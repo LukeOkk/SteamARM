@@ -1,9 +1,11 @@
 # Android userspace on lxrun, with no VM
 
-Status 2026-09-29, stage 25 (`benchmarks/stage25-android-userspace.txt`).
+Status 2026-09-29, stage 25 (`benchmarks/stage25-android-userspace.txt`,
+`benchmarks/stage25-art-x86-fex.txt`).
 The owner's goal is Android on the Mac: install APKs and, later, the Google
 Play Store, with **zero VM** (`AGENTS.md`). This page says what of Android
-runs today, how to run it, what stops Java, and what the next layers need.
+runs today, how to run it, what stops Java on arm64, how Java runs on the
+x86_64 build under FEX, and what the next layers need.
 
 Labels: MEASURED, VERIFIED IN SOURCE, UPSTREAM DOCUMENTED, HYPOTHESIS,
 UNKNOWN. Everything MEASURED here is on a Mac mini M4, macOS 27.0.
@@ -18,6 +20,15 @@ so its heap has to be mapped below 4 GiB, and macOS maps nothing below
 4 GiB in an arm64 process (MEASURED; VERIFIED IN SOURCE). Every Java process
 of Android (zygote, system_server, every app, the Play Store) needs ART.
 That wall comes before binder. Both have to fall before an APK runs.
+
+The x86_64 build of the same Android does get past that wall, zero-VM:
+under SteamARM's FEX, whose 64-bit "low window" gives an x86-64 process
+guest addresses below 4 GiB, x86-64 ART maps its heap and boot image there
+and runs Java, interpreted and JIT-compiled, with the Mac JVM's results
+(MEASURED, section "x86_64 Android under FEX"). That makes Java/Kotlin apps
+and apps with x86-64 native code possible now; apps whose native code is
+arm64-v8a only still need the native arm64 path, because the x86 image has
+no arm64 native bridge.
 
 ## What runs today (MEASURED)
 
@@ -159,8 +170,106 @@ What could get past it, zero-VM, in order of promise:
    FEX-like JIT for arm64 guests. Correct in principle, large, and slow.
 4. A VM: excluded by `AGENTS.md`.
 
-Until one of these lands, nothing that runs Java can start: no zygote, no
-system_server, no APK, no Play Store. Native daemons and tools can.
+Until one of these lands, nothing that runs Java can start in the arm64
+root: no zygote, no system_server, no APK, no Play Store. Native daemons and
+tools can. The x86_64 root below is the way around it that exists today.
+
+## x86_64 Android under FEX (Java runs)
+
+Stage 25, `benchmarks/stage25-art-x86-fex.txt`. Waydroid's x86_64 build of
+the same LineageOS 18.1 (20250628, VANILLA), run by SteamARM's FEX under
+lxrun. No VM.
+
+Why it works (MEASURED): FEX translates every guest address. SteamARM's FEX
+has a 64-bit low window (guest 0 < x < 4 GiB at host 0x8000000000 + x,
+`benchmarks/stage7-guest-base.txt`), normally only for ET_EXEC and wine
+processes; `FEX_LOWWINDOW=1` gives it to Android's PIE programs. x86-64 ART
+asks for its heap with `MAP_32BIT` (VERIFIED IN SOURCE: ART's low-4 GiB
+allocator is for aarch64 only, `libartbase/base/mem_map.h:32-39`), which
+FEX's 32-bit allocator serves inside the window. Objects then sit at guest
+0x12c03c50, ART's own preferred heap base (`tests/android/java/HeapRef.java`
+reads the 32-bit references back). With `FEX_LOWWINDOW=0` the same run fails
+exactly like native arm64 ART.
+
+| program (x86-64, under FEX) | result (MEASURED) |
+|---|---|
+| `toybox ls /`, `uname -m`, `id`, `sha256sum framework.jar` | correct (`x86_64`; `uid=501(system_steamarm)`; the Mac's `shasum`) |
+| `sh` (mksh): arithmetic, pipes, `$(toybox ...)` | correct |
+| `linkerconfig --target /linkerconfig` (static ET_EXEC) | writes `ld.config.txt` (the legacy layout), then aborts on `VENDOR_VNDK_VERSION` (no property service) |
+| `dalvikvm64 -cp hello.dex Hello` | "Hello from Java on ART, no VM", `java.vm.name=Dalvik`, `os.arch=x86_64`, 0.98 s, 222 MB peak RSS |
+| `dalvikvm64 -Xint Loop 2000000 2` | the Mac JVM's result, 156 ms/round (HotSpot's interpreter: 46) |
+| `dalvikvm64 Loop 20000000 5` (JIT) | the Mac JVM's result, 77 ms/round after warm-up (HotSpot C2: 62.5) |
+| a JIT code cache of 128 KiB, collected and reused (`gen_jitchurn.py`) | the Mac JVM's checksum, 1.9 s |
+| `dex2oat64 --compiler-filter=speed hello.dex` | an odex in 0.85 s; its AOT code runs, 80 ms/round from the first round |
+
+Start-up of a small program: 0.12 s and 35 MB peak RSS (native arm64
+toybox: 0.03-0.06 s, 19 MB). A second FEXServer for this root: 10 MB.
+
+How to run it:
+
+```sh
+scripts/mkandroidroot.sh --arch x86_64        # download, sha256, extract, emulator side
+make lxrt
+scripts/run-android-x86.sh /system/bin/toybox uname -a
+scripts/run-android-x86.sh /apex/com.android.art/bin/dalvikvm64 -cp /data/local/tmp/hello.dex Hello
+scripts/run-android-x86.sh --server-stop       # its FEXServer (it also leaves after 60 s idle)
+ANDROID_ROOT_DIR=/nonexistent tests/android/run.sh   # the x86_64 section only
+```
+
+- The root is `/Volumes/SteamARMAndroid/root-x86_64`, next to the arm64 one,
+  with the aarch64 side of the emulator in `/usr/lib/lxrt-emu` (FEX-emu,
+  FEXServer, their glibc; `--emu` reinstalls it after a FEX rebuild). The
+  runtime runs every x86 ELF under `/usr/lib/lxrt-emu/FEX`.
+- `scripts/run-android-x86.sh` gives `env -i`, `init.environ.rc`'s variables,
+  `FEX_ROOTFS=/`, `FEX_LOWWINDOW=1`, and a FEXServer of the root's own (own
+  socket name and lock): a FEX client takes its rootfs from its server, and
+  the shared server serves the Ubuntu rootfs. On first use it runs the
+  image's own `linkerconfig`.
+- The FEX in that root carries three patches this stage added
+  (`scripts/build-fex-host.sh` applies them; the shared roots were not
+  reinstalled): a free `mmap` hint below 4 GiB is honoured in the window
+  (ART's boot image reservation), SMC tracking of a shared view made
+  writable while another view is executable (ART's dual-mapped JIT code
+  cache: without it, stale code after code cache collections), and a 16 KiB
+  interrupt fault page (without it FEX never delivered a signal it had
+  deferred: mksh hung in `rt_sigsuspend` after its child's SIGCHLD). The
+  last two affect every FEX guest on SteamARM.
+- Runtime changes the same work needed: `getrlimit`/`setrlimit` (163/164),
+  `/proc/self/stat`'s startstack, `RLIM_INFINITY` in Linux's encoding,
+  `madvise` below 4 GiB under a guest base, AF_UNIX datagrams up to Linux's
+  size (liblog's records), `getgroups`; `/system/etc/passwd` gets a
+  `system_steamarm` entry for the Mac's uid (ART's `System` class needs
+  `getpwuid`).
+
+CPU features (MEASURED): FEX reports SSSE3, SSE4.1/4.2, POPCNT, AVX, AVX2,
+FMA, BMI1/2, AES, SHA and no AVX-512. linker64, libc, libart,
+libart-compiler, libandroid_runtime and boot.oat use SSSE3/SSE4/POPCNT and
+no AVX; ART's JIT targets "ssse3,sse4.1,sse4.2,-avx,-avx2,popcnt". AVX code
+is in 24 libraries (codecs, libcrypto, libjpeg) and AVX-512 in 10 (libhwui,
+the vendor Mesa/LLVM); HYPOTHESIS: behind runtime CPU dispatch, so not taken
+with FEX's CPUID, not exercised here.
+
+The trade-off, honestly:
+
+- Possible now, zero-VM: Java/Kotlin apps, and apps that ship x86-64 native
+  libraries (of the 10 F-Droid samples of stage 25, every package with
+  native code also ships x86_64 except one armeabi-only game). The image's
+  1,217 i386 files could run under FEX's 32-bit mode too (UNTESTED).
+- Not possible on this path: apps whose native code is arm64-v8a only. The
+  x86 image has no native bridge (`ro.dalvik.vm.native.bridge=0`); the
+  arm64-to-x86 translators that exist, Intel's Houdini and Google's
+  libndk_translation, are proprietary, absent from the image, and SteamARM
+  must not bundle them. On an arm64 Mac that would be arm64 code translated
+  to x86 and back again anyway.
+- Costs: every Android process is a FEX process (~0.1 s and ~15 MB more to
+  start), ART's JIT output is translated a second time (1.23x HotSpot C2 on
+  the measured loop), the interpreter is 3.4x HotSpot's.
+- ARM64-first is still the direction: arm64 apps need the native root and
+  the ART heap work above. This path runs Java today and lets binder,
+  properties, init and zygote be built against a working ART meanwhile.
+
+Not done here: zygote, system_server, binder, properties, init, graphics,
+input, audio. `dalvikvm64` and `dex2oat64` only.
 
 ## The next layer: binder (for the next agent)
 
@@ -226,16 +335,20 @@ Around binder, before anything Java could run even with ART fixed:
   lxrun (links inside `__PAGEZERO`); the linker then uses its default
   namespace (MEASURED enough for the programs above). ART and apps want
   `/linkerconfig/ld.config.txt`: generate it on the host (the tool is open
-  source) or write one.
+  source) or write one. The x86_64 image's linkerconfig runs under FEX and
+  writes the main file before it stops on the missing properties (MEASURED;
+  `libandroid_runtime.so` needs it to find `libstatssocket.so`).
 - **Graphics, input, audio**: `docs/LEPTON_REUSE_ANALYSIS.md` 4.
 
 ## APKs and the Google Play Store
 
-- An APK is a zip: its dex runs on ART (blocked above) and its
-  `lib/arm64-v8a/*.so` load into an ART process (blocked with it).
+- An APK is a zip: its dex runs on ART (blocked above in the arm64 root;
+  running in the x86_64 root under FEX) and its `lib/<abi>/*.so` load into
+  an ART process of that ABI. `lib/arm64-v8a` needs the arm64 root;
+  `lib/x86_64` (and, untested, `lib/x86`) runs in the x86_64 root;
   `armeabi-v7a`-only apps cannot run on Apple silicon (no AArch32; 1,684
-  32-bit arm files in this image are unusable for the same reason). x86 ABIs
-  would need FEX inside Android: analysis only, not planned.
+  32-bit arm files in the arm64 image are unusable for the same reason) and
+  have no translator in the x86 image either.
 - Google Play Store and Google Play services are proprietary. SteamARM will
   never commit or bundle them; if it ever fetches them, it does so on the
   owner's Mac from Google's official source, and only if that is legal. The
@@ -247,20 +360,31 @@ Around binder, before anything Java could run even with ART fixed:
 
 ## Order of work
 
-1. The ART heap (above): without it, nothing Java runs. Start with a
-   feasibility count of the reference sites outside the poisoning hooks in
-   ART's source.
+1. The ART heap (above): without it, nothing Java runs in the arm64 root.
+   Start with a feasibility count of the reference sites outside the
+   poisoning hooks in ART's source.
 2. Binder, in parallel (native services can be tested without ART:
-   `servicemanager` and `service list`, a native client and server).
-3. Properties and a minimal init sequence.
-4. Then zygote with the rebuilt ART, system_server, `pm install` of an
-   arm64-v8a APK, and a window (Lepton's graphics analysis, 4).
+   `servicemanager` and `service list`, a native client and server). The
+   x86_64 root runs the same libbinder under FEX, with a working ART, so
+   binder can be tested against Java there too (x86-64 guests reach the
+   runtime's ioctls through FEX; UNTESTED).
+3. Properties and a minimal init sequence (also what linkerconfig's
+   `VENDOR_VNDK_VERSION` abort asks for).
+4. Then zygote, system_server, `pm install` and a window (Lepton's graphics
+   analysis, 4): first in the x86_64 root for Java and x86-64 apps, then
+   with the rebuilt ART for arm64-v8a APKs.
 
 ## Tests and records
 
-- `tests/android/run.sh`: the programs above against the root; ART is an
-  expected failure with the heap reason.
+- `tests/android/run.sh`: the programs above against the arm64 root (ART
+  an expected failure with the heap reason), then an x86_64 section against
+  `root-x86_64` under FEX: bionic programs, two freestanding x86-64 probes
+  (`x86_lowwin.c`: `MAP_32BIT`, `MADV_DONTNEED` zeroing, low hints,
+  startstack, `RLIM_INFINITY`; `x86_dualview.c`: code rewritten through a
+  dual-mapped memfd), and `dalvikvm64` against the Mac's JVM. Each section
+  skips without its root.
 - `tests/elf/run.sh` ANDROID_BIONIC_RT and "kept TLS reads"
   (`tests/elf/android_bionic_rt.c`): the runtime changes, with no Android
   root needed.
-- `benchmarks/stage25-android-userspace.txt`: every run, before and after.
+- `benchmarks/stage25-android-userspace.txt` and
+  `benchmarks/stage25-art-x86-fex.txt`: every run, before and after.
