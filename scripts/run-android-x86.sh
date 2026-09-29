@@ -5,7 +5,8 @@
 # Android under FEX"; benchmarks/stage25-art-x86-fex.txt.
 #
 #   scripts/run-android-x86.sh <guest program> [args...]
-#   scripts/run-android-x86.sh --server-stop    stop this script's FEXServer
+#   scripts/run-android-x86.sh --server-stop    stop this root's FEXServer
+#   scripts/run-android-x86.sh --server-pid     print its PID, if it runs
 #
 # The guest sees the Android root as "/" (LXRT_ROOT) with Android's own
 # environment (init.environ.rc) and nothing of the Mac's. The runtime hands
@@ -31,26 +32,29 @@
 #   ANDROID_X86_SERVER_IDLE  seconds the server stays after its last client (60)
 set -u
 cd "$(dirname "$0")/.." || exit 1
+. scripts/roots.sh
 ROOT="${ANDROID_X86_ROOT:-/Volumes/SteamARMAndroid/root-x86_64}"
 LXRUN="${LXRUN:-build/lxrun}"
-SOCK_NAME=steamarm-android-x86_64.FEXServer.Socket
+# One server per root: the socket name carries a hash of the root's path.
+SOCK_NAME="steamarm-android-$(printf '%s' "$ROOT" | shasum | cut -c1-12).FEXServer.Socket"
 uid=$(id -u)
 socket="/tmp/lxrt-abstract-$uid/$SOCK_NAME"
 
 pidfile="$ROOT/data/local/tmp/.fexserver.pid"
-server_pids() {   # the server this script started, if it still runs
-    local p
+server_pids() {   # this root's server, if it still runs: the PID file's
+    local p r     # process must be an lxrt-emu FEXServer AND run on this root
     p=$(cat "$pidfile" 2>/dev/null) || return 0
     case "$p" in ''|*[!0-9]*) return 0 ;; esac
-    ps -p "$p" -o command= 2>/dev/null | grep -q 'lxrt-emu/FEXServer' && echo "$p"
+    ps -p "$p" -o command= 2>/dev/null | grep -q 'lxrt-emu/FEXServer' || return 0
+    r=$(procs_env LXRT_ROOT "$p")
+    [ "${r#* }" = "$ROOT" ] && echo "$p"
     return 0
 }
 
-if [ "${1:-}" = --server-stop ]; then
-    pids=$(server_pids)
-    [ -z "$pids" ] || kill $pids
-    exit 0
-fi
+case "${1:-}" in
+    --server-stop) pids=$(server_pids); [ -z "$pids" ] || kill "$pids"; exit 0 ;;
+    --server-pid) server_pids; exit 0 ;;
+esac
 [ $# -ge 1 ] || { echo "usage: $0 <guest program> [args...] | --server-stop" >&2; exit 2; }
 [ -x "$ROOT/usr/lib/lxrt-emu/FEX" ] || {
     echo "run-android-x86: no x86_64 Android root with FEX at $ROOT (scripts/mkandroidroot.sh --arch x86_64)" >&2; exit 1; }

@@ -3650,8 +3650,16 @@ restart:
         // and ART, which clears heap regions that way, read old objects back
         // where Linux gives zeros (MEASURED with tests/android/x86_lowwin.c,
         // benchmarks/stage25-art-x86-fex.txt).
-        if (lxrt_gbase() && a0 && a0 < (1ull << 32) && a1 <= (1ull << 32) - a0)
-            a0 += lxrt_gbase();
+        // A range that runs past 4 GiB (64-bit window) is two host ranges:
+        // the window's part, then the identity part from 4 GiB on.
+        if (lxrt_gbase() && a0 && a0 < (1ull << 32)) {
+            uint64_t low = a1 <= (1ull << 32) - a0 ? a1 : (1ull << 32) - a0;
+            ret = do_madvise(a0 + lxrt_gbase(), low, (int)a2);
+            if (ret == 0 && a1 > low)
+                ret = do_madvise(1ull << 32, a1 - low, (int)a2);
+            lxrt_memlog('a', a0 + lxrt_gbase(), a1, (long)a2, 0, ret);
+            break;
+        }
         ret = do_madvise(a0, a1, (int)a2);
         lxrt_memlog('a', a0, a1, (long)a2, 0, ret);
         break;

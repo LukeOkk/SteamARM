@@ -146,8 +146,8 @@ if [ ! -x "$X86_ROOT/system/bin/toybox" ] || [ ! -x "$X86_ROOT/usr/lib/lxrt-emu/
 fi
 # The FEXServer scripts/run-android-x86.sh starts is stopped at the end,
 # unless one was already running.
-local pidfile="$X86_ROOT/data/local/tmp/.fexserver.pid" had_server=0 p
-if p=$(cat "$pidfile" 2>/dev/null) && ps -p "$p" -o command= 2>/dev/null | grep -q lxrt-emu/FEXServer; then
+local had_server=0
+if [ -n "$(ANDROID_X86_ROOT="$X86_ROOT" scripts/run-android-x86.sh --server-pid)" ]; then
     had_server=1
 fi
 x() {   # x DEADLINE guest-command...: the guest's output; $? is its status

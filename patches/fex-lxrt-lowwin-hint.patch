@@ -29,7 +29,7 @@ diff --git a/Source/Tools/LinuxEmulation/LinuxSyscalls/SyscallsSMCTracking.cpp b
 +    // SteamARM benchmarks/stage25-art-x86-fex.txt).
 +    bool HintDone = false;
 +    if (!Map32Bit && Is64Bit && FEX::HLE::GuestBase && addr && !(flags & (MAP_FIXED | FEX_MAP_FIXED_NOREPLACE)) &&
-+        reinterpret_cast<uint64_t>(addr) + length <= (1ULL << 32)) {
++        reinterpret_cast<uint64_t>(addr) < (1ULL << 32) && length <= (1ULL << 32) - reinterpret_cast<uint64_t>(addr)) {
 +      Result = (uint64_t)Get32BitAllocator()->Mmap((void*)addr, length, prot, flags | FEX_MAP_FIXED_NOREPLACE, fd, offset);
 +      HintDone = !FEX::HLE::HasSyscallError(Result);
 +    }
