@@ -27,10 +27,10 @@
 // bytes). Every emulated access is bracketed by full barriers, which is at
 // least as strong as any ordering the guest instruction asked for.
 //
-// Exclusive stores. The local exclusive monitor does not survive the fault:
-// the ARM ARM (context-switch support) says an exception return clears it,
-// so a native retry of the STXR would fail and the guest's retry loop would
-// fault again. The STXR is performed instead as a compare-and-swap against the
+// Exclusive stores. The local exclusive monitor does not survive the fault
+// (MEASURED on an M4, benchmarks/stage23: 64 of 64 STXR fail when a page
+// fault falls between them and their LDXR, 0 of 64 without), so a native
+// retry of the STXR would fail and the guest's retry loop would fault again. The STXR is performed instead as a compare-and-swap against the
 // value its load-exclusive returned: the nearest preceding LDXR/LDAXR (LDXP/
 // LDAXP) with the same size and base register, provided nothing between the
 // two can have overwritten that value or the base (checked conservatively,

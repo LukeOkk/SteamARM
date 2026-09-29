@@ -22,6 +22,11 @@
 //     a host page unless a guest page inside it asked for it, but write can
 //     leak across the 4 KiB boundaries inside one 16 KiB page. That is inherent
 //     to the hardware and is what a 16 KiB kernel would do too.
+//
+// Such a page is read-write or read-execute at any moment, flipped by the
+// fault handler below. A store executed from it into it cannot complete
+// either way, so the handler performs that store itself (storemu.c); and code
+// stored into an executable 4 KiB guest page is rewritten before it runs.
 
 #include "lxrt.h"
 #include "storemu.h"

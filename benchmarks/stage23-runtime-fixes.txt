@@ -1,0 +1,216 @@
+Stage 23 -- two runtime bugs out of the xfail list (2026-09-29)
+==============================================================
+
+ZERO-VM. Host: Mac mini M4, macOS 27.0. Base: main at 50998f6. "main" below
+is that commit's runtime built unchanged in a scratch directory; "new" is
+this branch. Labels: MEASURED, VERIFIED IN SOURCE, UPSTREAM DOCUMENTED,
+HYPOTHESIS, UNKNOWN.
+
+Result (MEASURED): both known failures of tests/elf/run.sh are fixed and
+replaced by passing tests with negative controls. tests/elf/run.sh goes from
+55 passed / 0 failed / 2 xfail (main, this worktree) to 63 passed / 0 failed
+/ 0 xfail. Full regression at the end.
+
+
+1. The W/X livelock of 4 KiB sub-pages
+--------------------------------------
+
+What it was (MEASURED + VERIFIED IN SOURCE, runtime/subpage.c at 50998f6).
+A 16 KiB host page holding a guest code page (r-x) and a writable guest data
+page (rw-) of a 4 KiB-aligned image wants rwx. Darwin refuses write+execute
+outside MAP_JIT, so the page is rw- or r-x at any moment and the fault
+handler flips it: a store fault -> rw-, an instruction fetch fault -> r-x.
+A store executed from that page into that page needs both at once. With
+LXRT_SUBPAGE_LOG=6 on build/subpage4k selfwrite (main):
+  subpage flip: pc 0x1056fa268 addr 0x1056fb280 -> write
+  subpage flip: pc 0x1056fa268 addr 0x1056fa268 -> exec
+  ... the same pair forever (killed by the 5 s deadline, rc 142).
+Real-world exposure: every 4 KiB-aligned aarch64 executable or library whose
+code at the end of its text writes data at the start of its data segment in
+the same 16 KiB page (the task brief counts 25 executables and 21 libraries
+4 KiB-aligned in the Steam Frame root; not re-measured here).
+
+Design (VERIFIED IN SOURCE, runtime/storemu.c, runtime/subpage.c).
+- On a data abort with WnR set (ESR bit 6) whose pc lies in a W/X-split
+  host page, the handler decodes the instruction. If it is a store whose
+  bytes touch that page, the handler performs it: it checks the guest
+  protection of every 4 KiB page written (a page the guest did not make
+  writable -> a real fault, as on Linux), mprotects the split page(s) rw-
+  while the thread is parked in the handler holding the sub-page lock,
+  stores, mprotects r-x again, updates result/writeback registers and
+  advances pc. The host page is never writable and executable at once.
+  Other threads that run into the page meanwhile wait on the lock in their
+  own fault handler and find it executable again.
+- Covered: STR/STRB/STRH/STUR/STTR (unsigned offset, unscaled, pre/post-
+  index, register offset with UXTW/LSL/SXTW/SXTX), SIMD&FP STR/STUR B-Q,
+  STP/STNP (W, X, S, D, Q), ST1-ST4 (multiple and single structure, post-
+  index by immediate or register), STLR/STLLR/STLUR, LSE LD<op>/ST<op>
+  (ADD, CLR, EOR, SET, SMAX, SMIN, UMAX, UMIN), SWP, CAS, CASP, DC ZVA.
+  Atomics are performed with host atomics on the same memory (atomic
+  against other threads); plain stores keep per-element single-copy
+  atomicity; every emulated access is bracketed by full barriers.
+- Exclusives. The monitor does not survive the fault (MEASURED, probe
+  monitor.S: 64 of 64 STXR fail when a first-touch page fault falls between
+  them and their LDXR, 0 of 64 with a plain load there instead). So STXR is
+  performed as a compare-and-swap against the value its LDXR loaded:
+    way 1: the LDXR's destination still holds it (nothing between the two
+           can write it or the base) -> CAS against that register;
+    way 2: the loop body overwrote it (clang: `ldaxr w8,[x9]; add w8,w8,w0;
+           stlxr w10,w8,[x9]; cbnz w10,<ldaxr>`), and the instruction after
+           the STXR is `cbnz Ws, <the LDXR>`: then re-running the loop from
+           the LDXR with the current registers is exactly the guest's own
+           retry after a failed store-exclusive, so the handler performs
+           that retry: atomic load, the body interpreted (add/sub/adc/sbc,
+           logical imm/reg, mov wide, bitfield, csel family, ccmp, variable
+           shifts, madd/msub, conditional branches, barriers; no memory
+           access), CAS; repeated until the CAS succeeds or the body
+           branches out; registers, flags and pc committed as the guest
+           would have them.
+  Like QEMU user mode, this accepts ABA. Neither way applies -> refused.
+- Refused forms keep the old flip and print, at most 8 times a process,
+  "[lxrt] subpage: store at pc ... cannot be emulated (<why>): W/X flip".
+- Rescan rule (was missing on this path; MEASURED below). Code stored into
+  an executable 4 KiB guest page is rewritten before it runs: after an
+  emulated store into one (the guest page must be guest-writable, i.e. the
+  guest mprotected it rwx), and at every write->execute flip of a split page
+  (the page was writable, so any executable 4 KiB page in it is rescanned).
+  lxrt_rewrite_has_candidates() (rewrite.c) pre-checks each 4 KiB page for
+  the only patterns classify() can match (`svc #0`; MRS/MSR with op0 = 3),
+  so unchanged code costs a vectorised compare, not a scan. Gated by
+  g_rewrite_mapped, as mapped code is; LXRT_NO_RESCAN=1 turns it off, as it
+  does for JIT output.
+- Not changed: a store from ANOTHER host page into a split page still flips
+  it rw- (and can still write the guest's r-x 4 KiB page in it: the leak the
+  subpage.c header documents). mprotect(PROT_EXEC) of a sub-page range does
+  not rewrite (lxrt_subpage_mprotect); the next write->exec flip rescans it,
+  a direct rw-(unflipped)->r-x mprotect does not. UNKNOWN whether any guest
+  does that; not addressed here.
+
+Tests (tests/elf/run.sh), MEASURED main -> new:
+  subpage4k s  10 stores from the shared page, count checked   142 -> 0
+  subpage4k c  store into the r-x code page (negative control) 142 -> 138
+               (SIGBUS reported at the store; Linux faults too)
+  subpage4k p  svc+udf stored into an rwx 4 KiB page by an     142 -> 42
+               emulated store, then run (42 = the svc was
+               rewritten; LXRT_NO_RESCAN=1 control: 132, the
+               live svc ran Darwin getpid, then udf SIGILL)
+  subpage4k f  the same store from the far page (flip path)    132 -> 42
+               (main ran the svc live: the missing rescan;
+               LXRT_NO_RESCAN=1 control: 132)
+  subpage_stores  87 store forms run once against the stack    142 -> 0
+               (hardware) and once against the shared page
+               (runtime); 1.5 KiB of memory, 1 KiB of result
+               registers and NZCV compared: identical, 87 of 87
+               emulated, 0 refused
+  dlopen_self4k   4 KiB DSO dlopened at LXRT_GUEST_PAGE=4096:  142 -> 0
+               1000 plain stores, stores of a 4-element array,
+               LL/SC (clang, loaded register reused) and LSE
+               add/CAS, then 4 threads x 2000 x (LL/SC + LSE)
+               adds on one counter: total exact (16000);
+               17009 stores emulated, 0.55 s
+  Mutation check of the differential test (each mutant rebuilt): 12 mutants
+  of storemu.c (ST single index, STXR status, LDSMAX signedness, post-index
+  writeback, SXTW, ST3 interleave, GT/GE, carry flag, bitmask rotation,
+  SBC carry, MOVK, flags commit): 11 fail the test (rc 3 or timeout), 1
+  survives: "flags not committed after the interpreted retry" -- equivalent
+  in a single-threaded run, where the guest's first (native) pass has left
+  the same flags. MEASURED.
+
+Cost (MEASURED, 3 runs each, new vs main, perf4k probe in the scratch dir):
+  100000 stores from the shared page, each emulated   0.41-0.42 s  (~4.1 us
+                                                        a store; main: hangs)
+  100000 x (store from far page + call into the page:  main 0.72-0.74 s
+    one write flip + one exec flip)                     new  0.75-0.76 s
+                                                        LXRT_NO_RESCAN 0.72-0.73 s
+    the same with a full rescan per exec flip, before the candidate
+    pre-check: 1.26-1.27 s (+5.4 us a flip) -- why the pre-check exists.
+  hello (start-up)                                      0.010-0.012 s both
+
+FEX route (MEASURED): FEX's JIT uses MAP_JIT regions, not sub-pages. With
+LXRT_SUBPAGE_LOG=1000000, i386_subpage, i386_smc_subpage, i386_rwx_atomic,
+i386_dyn and i386_threads under FEX log 0 emulated stores, 0 flips, 0
+refusals (x86 guest pages are never host-executable, so no host page wants
+write and execute). Verdicts unchanged (smc_subpage: its existing xfail).
+
+Valve's native arm64 client (MEASURED, scripts/run-steam-arm64.sh --for 90
+--jitless, LXRT_SUBPAGE_LOG=3000 per process, new build, 08:16): BrowserReady,
+"SP DesktopLoginWindow_uid0" created 700x440 at +8 s and shown (WasHidden 0),
+1 webhelper launch, 0 restarts, no FATAL in cef_log.txt for the run, no fault
+report in the runtime log. Sub-page events over all processes: 0 emulated
+stores, 6 write flips, 0 exec flips, 0 refusals. So this client does not hit
+the livelock case in a login-window session; the fix matters for the 4 KiB
+programs and libraries that do (the probes above), not for this session.
+steamwebhelper.sh restored (398 bytes).
+
+
+2. Relative /proc/self/exe
+--------------------------
+
+What it was (VERIFIED IN SOURCE, runtime/procfs.c:288 and main.c:472 at
+50998f6): g_exe was the program path exactly as lxrun got it, and the
+procfs "exe" symlink pointed at it. Started by a relative path, readlink
+returned a relative path, and static glibc asserted:
+  Fatal glibc error: ../sysdeps/unix/sysv/linux/dl-origin.c:42
+  (_dl_get_origin): assertion failed: linkval[0] == '/'   (rc 134, MEASURED)
+Two more consequences (MEASURED with tests/elf/proc_self_exe.c on main):
+open("/proc/self/exe") failed for a relative name (the kernel resolves a
+relative link target against the procfs directory) and for an absolute
+guest path under LXRT_ROOT (the target was the guest path, followed as a
+host path).
+
+Fix (VERIFIED IN SOURCE, main.c, procfs.c, dispatch.c LNR_readlinkat):
+- A relative name becomes realpath() of the loaded image, in guest terms:
+  lxrt_mounts_untranslate (LXRT_ROOT or a bind) or, outside both, the host
+  path (which is then also the guest path). Symlinks resolved, as Linux.
+- The procfs link points at the image's host path whenever the guest's name
+  is not one (relative names; guest paths under LXRT_ROOT or a bind), so the
+  host kernel's open() reaches the file.
+- readlink of this process's procfs exe link answers with the guest's name,
+  so an absolute name reads back exactly as before, and what a re-exec of
+  /proc/self/exe runs (lxrt_proc_exe_path, FEX) is unchanged for absolute
+  names. Other processes' /proc/<pid>/exe follow the link target through
+  readlinkat's usual root/bind untranslation.
+
+Tests (tests/elf/run.sh), MEASURED main -> new, "== proc self exe: ok"
+means readlink absolute and as expected, realpath equal, open of
+/proc/self/exe and of the returned name both read an ELF header:
+  build/proc_self_exe                   (relative)          134 -> 0
+  ./build/../build/proc_self_exe        ("..")              134 -> 0
+  $PWD/build/proc_self_exe              (absolute, control)   0 -> 0
+  LXRT_ROOT=<r>, cwd <r>/tmp, ./proc_self_exe  -> /tmp/...  134 -> 0
+  LXRT_ROOT=<r>, /tmp/proc_self_exe     (open failed)          1 -> 0
+  stack_bounds by a relative path (the former xfail)        134 -> 0
+
+
+Regression (new, this worktree)
+-------------------------------
+All MEASURED on the final build (make lxrt: 0 warnings):
+  tests/elf/run.sh              63 passed, 0 failed, 0 xfail (1 skip:
+                                vulkaninfo not in /tmp/lxrt-root, as main)
+                                main in this worktree: 55 / 0 / 2 xfail
+  tests/elf/run_i386.sh         18 passed, 0 failed (smc_subpage: its xfail)
+  make test-arm64               4 passed, 0 failed
+  tests/elf/run_vk_device.sh    2 passed, 0 failed
+  make test-launcher-core       all passed (22/0, 23/0, 7/0, application core)
+  tests/win/run.sh              11 passed, 0 failed; d3d11 159.4, d3d12 159.7,
+                                d3d9 158.9, d3d9_32 161.0, d3d11_32 160.7,
+                                d3d12_32 161.8 fps (stage brief: 159-162)
+  tests/win/run_steam_path.sh   2 passed, 0 failed (tone, xinput; the real
+                                steamarm-inputd was not running)
+  tests/win/run.sh tick d3d11_32 with LXRT_SUBPAGE_LOG=1000000: 0 emulated
+  stores, 0 flips, 0 refusals in either log (81 and 97 runtime lines reach
+  them), i.e. the x86-64 and i386 Wine routes do not reach the new code.
+
+
+Notes
+-----
+- The /dev/input evdev test of tests/elf/run.sh failed 4 times in a row at
+  08:12-08:15 and passed on every run after; main's build failed the same
+  test 2 of 5 times in the same window, passes otherwise. It shares
+  /tmp/lxrt-input with every other checkout's test run; HYPOTHESIS: other
+  agents' concurrent runs. Not related to this change (both builds).
+- make 3.81 compares mtimes to the second: two builds within one second of
+  an edit keep the old binary. The mutation check deleted build/lxrun before
+  each build (a first attempt without that measured nothing).
+- Scratch probes (not committed): perf4k.S (timing), monitor.S (exclusive
+  monitor across a fault), mutate.py (mutation check).
