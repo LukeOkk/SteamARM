@@ -582,10 +582,15 @@ static void host_handler(int dsig, siginfo_t *dinfo, void *uap)
     pthread_mutex_unlock(&g_actions_lock);
 
     if (act.handler == 0 || act.handler == 1) {
-        if (act.handler == 0 && getenv("LXRT_DEBUG_DEFAULT_FAULTS") &&
-            (dsig == SIGSEGV || dsig == SIGBUS || dsig == SIGILL || dsig == SIGFPE)) {
-            fprintf(lxrt_trace_stream(), "[lxrt] default guest fault: darwin %d addr %p\n",
-                    dsig, dinfo ? dinfo->si_addr : NULL);
+        // A fault the runtime did not absorb, on a signal the guest left at
+        // its default: die of it, as Linux would. (SIGSEGV and SIGBUS keep
+        // this handler even then -- see lxrt_rt_sigaction.)
+        if (act.handler == 0 &&
+            (dsig == SIGSEGV || dsig == SIGBUS ||
+             (getenv("LXRT_DEBUG_DEFAULT_FAULTS") && (dsig == SIGILL || dsig == SIGFPE)))) {
+            if (lxrt_trace_on() || getenv("LXRT_DEBUG_DEFAULT_FAULTS"))
+                fprintf(lxrt_trace_stream(), "[lxrt] default guest fault: darwin %d addr %p\n",
+                        dsig, dinfo ? dinfo->si_addr : NULL);
             signal(dsig, SIG_DFL);
             raise(dsig);
             return;
@@ -1134,9 +1139,21 @@ long lxrt_rt_sigaction(int lsig, const void *uact, void *uoldact, size_t sigsets
         // action to any other SIGTRAP.
         sa.sa_sigaction = host_handler;
         sa.sa_flags = SA_SIGINFO | SA_ONSTACK | SA_NODEFER;
+    } else if (g_actions[lsig].handler == 0 && (dsig == SIGSEGV || dsig == SIGBUS)) {
+        // The runtime's own faults arrive as SIGSEGV/SIGBUS whatever the
+        // guest's disposition: MAP_JIT and W^X flips (jit.c, wxsplit.c,
+        // subpage.c), copy-on-write of private shared memory (privmap.c).
+        // With the host at SIG_DFL each of them killed the process instead:
+        // every webhelper renderer (forked from the zygote, SIGBUS/SIGSEGV
+        // at their default) died on its first JIT page, killed by the
+        // kernel with no runtime report (stage 22 E11 "No lxrun report
+        // precedes it"; MEASURED again here). host_handler applies the
+        // default action itself to a fault none of them absorbs.
+        sa.sa_sigaction = host_handler;
+        sa.sa_flags = SA_SIGINFO | SA_ONSTACK | SA_NODEFER;
     } else if (g_actions[lsig].handler == 0 &&
                (!getenv("LXRT_DEBUG_DEFAULT_FAULTS") ||
-                !(dsig == SIGSEGV || dsig == SIGBUS || dsig == SIGILL || dsig == SIGFPE))) {
+                !(dsig == SIGILL || dsig == SIGFPE))) {
         sa.sa_handler = SIG_DFL;
     } else if (g_actions[lsig].handler == 1) {
         sa.sa_handler = SIG_IGN;
