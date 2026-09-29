@@ -17,3 +17,9 @@ if [ -e "$R/arm64root" ]; then
     ln -sfn "$R/arm64root" /tmp/lxrt-arm64root
     ls -la /tmp/lxrt-arm64root
 fi
+# The ARM64 root of scripts/mkarmroot.sh (Fedora 43 aarch64): the native arm64
+# Steam client lives in it (benchmarks/stage21). Linked only when it exists.
+if [ -e "$R/armroot" ]; then
+    ln -sfn "$R/armroot" /tmp/lxrt-armroot
+    ls -la /tmp/lxrt-armroot
+fi
