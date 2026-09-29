@@ -193,6 +193,24 @@ bool lxrt_jit_stub_trap(void *uap);
 long lxrt_jit_set_write(int enable, uint64_t addr, uint64_t len);
 bool lxrt_jit_thread_writable(void);
 
+// wxsplit.c -- read-write-execute ranges of NATIVE aarch64 guests (V8's code
+// range), split W^X per host page by the fault handler: a store makes a page
+// read-write, a fetch scans it read-only and makes it read-execute. FEX keeps
+// the read-write grant (its guest's RWX pages hold x86 code).
+void lxrt_wx_set_program(const char *path);
+bool lxrt_wx_enabled(void);
+int  lxrt_wx_protect(uint64_t addr, uint64_t len, long *ret);
+void lxrt_wx_forget(uint64_t addr, uint64_t len);
+void lxrt_wx_moved(uint64_t old, uint64_t olen, uint64_t neu, uint64_t nlen);
+bool lxrt_wx_contains(uint64_t addr);
+bool lxrt_wx_covered(uint64_t addr, uint64_t len);
+int  lxrt_wx_count(void);
+bool lxrt_wx_handle_fault(uint64_t pc, uint64_t addr, uint32_t esr);
+bool lxrt_wx_scan_for_exec(uint64_t hpage, const struct lxrt_range *r, int nr);
+void lxrt_wx_stats_flush(void);
+// rewrite.c: read-only count of the words lxrt_rewrite_range would replace.
+size_t lxrt_rewrite_count(uint64_t start, uint64_t end);
+
 // Syscall families that are large enough to own a file each. Their headers
 // declare their own API; nothing here duplicates it.
 #include "epoll_eventfd.h"

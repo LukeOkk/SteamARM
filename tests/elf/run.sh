@@ -872,6 +872,33 @@ else
     echo "  skip  NEAR_CODE_TRAMPOLINE_ALLOCATION (no $STAGE)"
 fi
 
+# JIT_RWX_NATIVE: V8's read-write-execute code pages with no help from the
+# guest (runtime/wxsplit.c): a 256 MiB reservation committed RWX in chunks,
+# code rewritten and re-run, a second thread calling while this one writes
+# (also into its own 16 KiB page), 8 threads on one page's first fetch, a
+# live svc and an mrs tpidr_el0 in generated code (rewritten before they can
+# run), RWX -> RX -> RWX, munmap + recommit, DONTNEED, PROT_NONE inside, 5000
+# separate commits, a 4 KiB commit (subpage.c) and V8's whole-range pattern.
+# At the default 16 KiB and at LXRT_GUEST_PAGE=4096; LXRT_WX_SPLIT=0 (the old
+# read-write grant) must fail on the first call.
+if [ -f "$STAGE/usr/lib64/libc.a" ] && [ -n "$GCCDIR" ]; then
+    if err=$(glibc_cc -static-pie -O2 -pthread -o build/jit_rwx tests/elf/jit_rwx.c); then
+        out16=$(deadline 120 ./build/lxrun "$PWD/build/jit_rwx" 2>&1); rc16=$?
+        out4=$(LXRT_GUEST_PAGE=4096 deadline 120 ./build/lxrun "$PWD/build/jit_rwx" 2>&1); rc4=$?
+        control=$(LXRT_WX_SPLIT=0 deadline 30 ./build/lxrun "$PWD/build/jit_rwx" 2>&1); control_rc=$?
+        n_svc=$(grep -c "JIT output: 1 svc sites rewritten" <<<"$out16")
+        n_tls=$(grep -c "JIT output: 0 svc sites rewritten, 0 poisoned (W^X page 0x[0-9a-f]*: tls 1" <<<"$out16")
+        if [ "$rc16" -eq 0 ] && [ "$rc4" -eq 0 ] &&
+           grep -q '== jit_rwx: ok' <<<"$out16" && grep -q '== jit_rwx: ok' <<<"$out4" &&
+           [ "$n_svc" -ge 2 ] && [ "$n_tls" -ge 1 ] &&
+           [ "$control_rc" -ne 0 ] && ! grep -q '== jit_rwx: ok' <<<"$control"; then
+            ok "JIT_RWX_NATIVE: $(grep -o '[0-9]* ok, 0 mal' <<<"$out16") at 16 and 4 KiB pages, svc/TLS in generated code rewritten before execution ($n_svc+$n_tls scans), old RW grant fails (rc=$control_rc)"
+        else bad "JIT_RWX_NATIVE" "rc=$rc16/$rc4/control $control_rc svc=$n_svc tls=$n_tls $(grep -E 'MAL|memlog|SIG' <<<"$out16" | head -3; grep -E 'MAL|memlog|SIG' <<<"$out4" | head -3)"; fi
+    else bad "build jit_rwx" "$err"; fi
+else
+    echo "  skip  JIT_RWX_NATIVE (no $STAGE)"
+fi
+
 echo
 summary="== $PASS passed, $FAIL failed"
 [ "$XFAIL" -eq 0 ] || summary="$summary ($XFAIL expected failures)"

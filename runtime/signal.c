@@ -368,6 +368,7 @@ static void sigstats_print(const char *when)
 // exit_group: whatever the last 5 s window collected.
 void lxrt_sigstats_flush(void)
 {
+    lxrt_wx_stats_flush();
     if (sigstats_on())
         sigstats_print(" at exit");
 }
@@ -526,6 +527,9 @@ static void host_handler(int dsig, siginfo_t *dinfo, void *uap)
             repeats = 0;
         }
         if (lxrt_jit_handle_fault(fpc, faddr, uap))
+            return;
+        // A native guest's RWX page (V8's code range): the W^X flip.
+        if (lxrt_wx_handle_fault(fpc, faddr, u->uc_mcontext->__es.__esr))
             return;
         lxrt_jit_report_freed(fpc, faddr, uap);
         // A store into a copy-on-write page of a private shared-memory

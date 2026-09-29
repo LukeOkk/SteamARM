@@ -841,6 +841,7 @@ static long do_munmap(uint64_t addr, uint64_t len)
     uint64_t hend = LXRT_ALIGN_DOWN(end, LXRT_HOST_PAGE);
     lxrt_subpage_forget(addr, len);
     lxrt_jit_forget(addr, len);
+    lxrt_wx_forget(addr, len);
     lxrt_privmap_forget(addr, len);
     if (hstart < hend && munmap((void *)hstart, (size_t)(hend - hstart)) != 0)
         return LERR(errno);
@@ -961,6 +962,7 @@ static long do_mmap(uint64_t addr, uint64_t len, long prot, long lflags,
     if (flags & MAP_FIXED) {
         lxrt_privmap_forget(addr, len);
         lxrt_shmirror_forget(addr, len);
+        lxrt_wx_forget(addr, len);     // a new mapping is not the old RWX range
     }
     // A private mapping of a shared-memory file keeps seeing the file's
     // updates until the guest writes, as on Linux (privmap.c: wine's session
@@ -1317,6 +1319,24 @@ static long do_mprotect_inner(uint64_t addr, uint64_t len, long prot)
     if (lxrt_jit_contains(addr))
         return 0;
 
+    // A native aarch64 guest's read-write-execute range is split W^X page by
+    // page (wxsplit.c): V8 makes its whole code range RWX with one call. Any
+    // other protection ends the split for that range, and the paths below
+    // treat it as the ordinary memory it becomes (an RX request is scanned by
+    // rewrite_and_seal, PROT_NONE is PROT_NONE). Sub-page ranges go through
+    // subpage.c, whose union flips scan the RWX guest pages the same way.
+    bool rwx = (prot & PROT_WRITE) && (prot & PROT_EXEC);
+    if (lxrt_wx_enabled()) {
+        if (!rwx)
+            lxrt_wx_forget(addr, len);
+        else if ((addr % LXRT_HOST_PAGE) == 0 && (len % LXRT_HOST_PAGE) == 0 &&
+                 !lxrt_subpage_tracked(addr, len)) {
+            long wret;
+            if (lxrt_wx_protect(addr, len, &wret))
+                return wret;
+        }
+    }
+
     // Sub-page mappings have to go through the union bookkeeping, or one guest
     // page's mprotect silently changes its 16 KiB neighbours. A partial LENGTH
     // is the same hazard as an unaligned address: glibc's RELRO makes the
@@ -1327,20 +1347,22 @@ static long do_mprotect_inner(uint64_t addr, uint64_t len, long prot)
         lxrt_subpage_tracked(addr, len))
         return lxrt_subpage_mprotect(addr, len, (int)prot);
 
-    // Read-write-execute outside MAP_JIT: Darwin refuses it (EACCES), and a
-    // region cannot be turned into MAP_JIT in place. The one guest that asks
-    // is V8 under FEX, making its 512 MiB code range RWX -- x86 code the host
-    // never executes (FEX translates it), so the host protection it needs is
-    // read-write. Without this, every steamwebhelper renderer died with "V8
-    // process OOM (Failed to reserve virtual memory for CodeRange)" (MEASURED).
-    // A native aarch64 guest executing such a page would fault, as it would
-    // have failed the mprotect before.
-    if ((prot & PROT_WRITE) && (prot & PROT_EXEC)) {
+    // Read-write-execute outside MAP_JIT under FEX: Darwin refuses it
+    // (EACCES), and a region cannot be turned into MAP_JIT in place. The
+    // guest that asks is x86 V8, making its code range RWX -- x86 code the
+    // host never executes (FEX translates it), so the host protection it
+    // needs is read-write. Without this, every steamwebhelper renderer died
+    // with "V8 process OOM (Failed to reserve virtual memory for CodeRange)"
+    // (MEASURED). A native guest reaches this only for memory the W^X split
+    // does not take (file-backed or shared); executing it faults.
+    if (rwx) {
         static _Atomic int said;
         if (!atomic_fetch_add(&said, 1) && g_trace)
             fprintf(lxrt_trace_stream(), "[lxrt] mprotect 0x%llx+0x%llx RWX outside MAP_JIT: "
-                    "granted as RW (host never executes guest x86 code)\n",
-                    (unsigned long long)addr, (unsigned long long)len);
+                    "granted as RW (%s)\n",
+                    (unsigned long long)addr, (unsigned long long)len,
+                    lxrt_wx_enabled() ? "native guest, not private anonymous memory"
+                                      : "host never executes guest x86 code");
         return ret_of(mprotect((void *)addr, (size_t)len, (int)(prot & ~PROT_EXEC)));
     }
 
@@ -2880,6 +2902,8 @@ restart:
         }
         lxrt_privmap_forget(a0, a1);
         ret = lxrt_mremap(a0, a1, a2, (int)a3, a4);
+        if (ret >= 0)
+            lxrt_wx_moved(a0, a1, (uint64_t)ret, a2);
         lxrt_memlog('r', a0, a1, (long)a2, (long)a3, ret);
         if (ret >= 0)
             lxrt_memlog('r', (uint64_t)ret, a2, (long)a2, (long)a3, ret);

@@ -76,6 +76,7 @@ static void fault_report(int sig, siginfo_t *info, void *uap)
         uint32_t esr = uc->uc_mcontext->__es.__esr;
         bool write = ((esr >> 26) == 0x24 || (esr >> 26) == 0x25) && (esr & (1u << 6));
         if (lxrt_jit_handle_fault(pc, faddr, uap) ||
+            lxrt_wx_handle_fault(pc, faddr, esr) ||
             lxrt_privmap_handle_fault(faddr, write) ||
             lxrt_lowptr_fixup(uap, faddr) ||
             lxrt_subpage_handle_fault(pc, faddr))
@@ -418,6 +419,10 @@ int main(int argc, char **argv)
             path = resolve_program(argv[i]);
         }
     }
+
+    // What the process is decides what a read-write-execute mprotect means:
+    // x86 code under FEX (read-write is enough) or native code (wxsplit.c).
+    lxrt_wx_set_program(path);
 
     // Must precede any rewriting: the TLS trampolines encode the slot offset.
     if (lxrt_tls_init() != 0) {
