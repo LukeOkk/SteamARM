@@ -1,0 +1,459 @@
+Stage 25 -- x86-64 Android's ART under FEX: Java runs, zero VM (2026-09-29)
+=============================================================================
+
+ZERO-VM. No virtual machine, no guest kernel. Host: Mac mini M4, 16 GB,
+macOS 27.0 (26A428). Base commit 37f5bce. Every Android binary below is an
+unmodified x86-64 (or i386) file from Waydroid's LineageOS 18.1 x86_64 image,
+run by SteamARM's FEX (an aarch64 Linux program) under lxrun, as an ordinary
+macOS process. Nothing was signed in to, no Google component was downloaded,
+no Steam client was started, scripts/run-app.sh was not called. The arm64
+Android root (/Volumes/SteamARMAndroid/root, in use by another agent's binder
+tests) was not modified; the only thing run from it was `toybox true`, for a
+memory figure (it writes nothing). The shared FEXServer (Ubuntu rootfs) was
+used read-only by the i386 and Steam-root regression runs; the x86_64 root
+has a FEXServer of its own, started and stopped by this session's scripts.
+Home paths are written as ~. Labels: MEASURED, VERIFIED IN SOURCE, UPSTREAM
+DOCUMENTED, HYPOTHESIS, UNKNOWN.
+
+The question
+------------
+Native arm64 ART cannot start under lxrun: it keeps object references in 32
+bits, so its heap and boot image must be mapped below 4 GiB, and macOS maps
+nothing there in an arm64 process (stage25-android-userspace.txt). FEX
+translates every guest address, and SteamARM's FEX already has a "64-bit low
+window" (guest 0 < x < 4 GiB at host 0x8000000000 + x; stage7-guest-base.txt).
+HYPOTHESIS tested: x86-64 ART, from the x86_64 build of the same Android,
+maps its heap below 4 GiB of GUEST address space under FEX and runs a dex.
+
+Result (MEASURED)
+-----------------
+1. Yes. dalvikvm64 (x86-64 ART, Android 11) runs Java under FEX with the low
+   window forced on (FEX_LOWWINDOW=1): "Hello from Java on ART, no VM",
+   java.vm.name=Dalvik, os.arch=x86_64. Objects live at guest 0x12c03c50
+   (ART's own preferred heap base, 0x12c00000), a 4 MiB array at
+   0x7bbfa000, and Object.class, a boot-image object, at 0x708d01e0 and
+   0x6f14f1e0 in two runs (ART_BASE_ADDRESS 0x70000000 plus its random
+   delta); tests/android/java/HeapRef.java reads the 32-bit references.
+   Without the window (FEX_LOWWINDOW=0) the same run fails exactly as native
+   arm64 ART does ("heap.cc:493 ... Failed anonymous mmap(0x0, 67108864 ...):
+   Out of memory").
+2. Interpreter and JIT both give the Mac JVM's results: Loop (-Xint, 2 M
+   steps) -6435145747647352456 and Loop (JIT, 20 M steps)
+   6336216350770228723 in every round; a JIT code cache that is collected and
+   reused (128 KiB) gives the JVM's checksum -1445667666822057310. dex2oat64
+   compiles hello.dex to an odex (0.85 s) and the AOT code runs correctly.
+3. Costs: toybox start 0.12 s (native arm64: 0.03-0.06 s); dalvikvm64 Hello
+   0.98 s and 222 MB peak RSS; ART's JIT code runs the Loop at 77 ms/round
+   against 62 ms for HotSpot C2 on the same M4; the interpreter at 156
+   ms/round against 46 ms for HotSpot's.
+4. It took six runtime changes (R1-R6), a passwd entry in the root (R7), a
+   script to build the root (--arch x86_64), a runner, the image's own
+   linkerconfig run under FEX, and three FEX patches (P1-P3). Two of the FEX patches fix latent bugs that
+   affect every FEX guest on SteamARM, not only Android: deferred signals
+   were never delivered (P3), and SMC tracking missed writes through a
+   second view of shared memory (P2).
+5. The trade-off (section T): this path runs Java/Kotlin apps and apps with
+   x86-64 (or, untested, x86) native code. An APK whose only native code is
+   arm64-v8a has nothing to run here: the x86_64 image has no
+   arm64-to-x86 native bridge (ro.dalvik.vm.native.bridge=0; Intel's Houdini
+   and Google's libndk_translation are proprietary and absent). ARM64-first
+   stays the mission: arm64 native Android still needs the ART heap fix of
+   docs/ANDROID_RUNTIME_ARCHITECTURE.md for the native root.
+
+Downloads (Waydroid's official index and host; sha256 computed here)
+---------------------------------------------------------------------
+Index: https://ota.waydro.id/system/lineage/waydroid_x86_64/VANILLA.json and
+https://ota.waydro.id/vendor/waydroid_x86_64/MAINLINE.json, fetched
+2026-09-29T20:51Z (kept as ota-system-VANILLA-x86_64.json and
+ota-vendor-MAINLINE-x86_64.json, mode 0444). The last 18.1 entries are
+2025-06-28, the same date as the arm64 pair. Each entry's "id" is the zip's
+sha256, and it matched:
+- system: lineage-18.1-20250628-VANILLA-waydroid_x86_64-system.zip
+  https://sourceforge.net/projects/waydroid/files/images/system/lineage/waydroid_x86_64/lineage-18.1-20250628-VANILLA-waydroid_x86_64-system.zip/download
+  796,126,122 bytes, sha256 662562aa718da1a584520367b39db68f001db5353ebcbf0cf93005088d284097
+- vendor: lineage-18.1-20250628-MAINLINE-waydroid_x86_64-vendor.zip
+  https://sourceforge.net/projects/waydroid/files/images/vendor/waydroid_x86_64/lineage-18.1-20250628-MAINLINE-waydroid_x86_64-vendor.zip/download
+  197,610,284 bytes, sha256 5414a273ac972aa1a65bcca597d5d32933d846dd1628cfdc92413b7da5332189
+The mirror SourceForge picked (sitsa) closed every transfer after ~10 MB
+("curl: (18) transfer closed with 785640636 bytes remaining"); resumed with
+-C -, then the system zip in 16 parallel byte ranges; ~16 min in all.
+scripts/mkandroidroot.sh's fetch now resumes. Stored in
+~/SteamARM-roots/android/images/ (0444), raw images in extracted-x86_64/
+(system.img 1,800,851,456 bytes, vendor.img 585,555,968, both ext4, 0444).
+Licence: LineageOS 18.1 / AOSP, Apache-2.0 for most of it, other licences
+per component in NOTICE.xml.gz inside the images; VANILLA: no Google apps
+(no GMS, Phonesky, Vending or GSF package in system/app or priv-app).
+Build: ro.build.display.id "lineage_waydroid_x86_64-userdebug 11
+RQ3A.211001.001 147 test-keys", ro.lineage.version
+18.1-20250628-VANILLA-waydroid_x86_64, security patch 2024-02-05,
+ro.product.cpu.abilist=x86_64,x86, ro.dalvik.vm.native.bridge=0,
+dalvik.vm.isa.x86_64.variant=x86_64, features=default.
+
+The root (scripts/mkandroidroot.sh --arch x86_64)
+-------------------------------------------------
+/Volumes/SteamARMAndroid/root-x86_64, next to the arm64 root on the same
+case-sensitive APFS volume, made the same way (debugfs rdump, APEXes cloned
+to /apex/<name>, /data kept by --rebuild): 2.5 GB, 5,053 files; first build
+18.6 s including the unzip, --rebuild 5.6 s. Inventory (androidroot.py): 1,797
+x86-64 ELF, 1,217 i386 ELF, 4 eBPF; linker64, libc.so, toybox, sh, libart.so
+are ET_DYN with p_align 0x1000. system/bin/linkerconfig is a static x86-64
+ET_EXEC.
+Additions to the image's tree:
+- /usr/lib/lxrt-emu: FEX-emu as FEX (PT_INTERP and DT_RPATH there),
+  FEXServer, and the aarch64 ld-linux, libc, libm, libgcc_s, libstdc++ from
+  /tmp/lxrt-root, as scripts/mksteamroot.sh does for the Steam root. The
+  runtime runs every x86 ELF under /usr/lib/lxrt-emu/FEX (its binfmt).
+  --emu reinstalls only this (after a FEX rebuild).
+- /system/etc/passwd and group (empty in the image): system_steamarm for the
+  Mac's uid/gid (R7 below). Both arches, on their next build.
+- /linkerconfig/ld.config.txt: written by the image's own linkerconfig on
+  first use (scripts/run-android-x86.sh).
+
+How it runs (scripts/run-android-x86.sh)
+----------------------------------------
+env -i; LXRT_ROOT=<root>; TMPDIR=/tmp (the HOST directory where the runtime
+materialises Linux abstract sockets); XDG_RUNTIME_DIR=/data/local/tmp;
+HOME=/data/local/tmp; FEX_ROOTFS=/ (the root IS the x86 tree);
+FEX_GUESTBASE=1 FEX_LOWWINDOW=1 FEX_SMCCHECKS=mtrack;
+FEX_SERVERSOCKETPATH=steamarm-android-<12 hex of the root path's
+sha1>.FEXServer.Socket; then init.environ.rc's ANDROID_*, BOOTCLASSPATH,
+DEX2OATBOOTCLASSPATH.
+FEXServer: a FEX client takes its rootfs from the server it connects to
+(VERIFIED IN SOURCE, Source/Common/FEXServerClient.cpp SetupClient), and the
+shared server serves the Ubuntu rootfs. So this root has its own server: own
+socket name, own lock (Server.lock under HOME), started through the lxrt-emu
+loader (ld-linux-aarch64.so.1 --library-path /usr/lib/lxrt-emu FEXServer),
+detached, --persistent=60, its PID in /data/local/tmp/.fexserver.pid;
+--server-stop acts only on a PID whose process is an lxrt-emu FEXServer
+with this root as its LXRT_ROOT.
+FEX_LOWWINDOW=1: SteamARM's FEX gives the low window only to ET_EXEC and
+wine processes; Android's programs are PIE, so it is forced. The FEX log
+then says "GuestBase: 64-bit guest (ET_EXEC), low window at host
+0x8000000000" for a PIE too (the message's wording, not a mistake in the
+mode).
+
+Runs (MEASURED; chronological; each fix named where it went in)
+----------------------------------------------------------------
+X1  toybox ls / under FEX, the first try: the root's 37 entries, 1.2 s
+    including the FEXServer start. uname -a: "Linux lxrt 6.6.0
+    #FEX-2609-113-g08f451d SMP ... x86_64"; mksh arithmetic, $(echo), pipes
+    with toybox; sha256sum of framework.jar = the Mac's shasum (25746a9b...;
+    the same jar as arm64's); dexdump reads the D8 output; getprop is empty.
+    toybox id: "bad uid 501" (then R7), then "getgroups: Function not
+    implemented" (then R6).
+X2  dalvikvm64 -cp hello.dex Hello: "pthread_getattr_np failed for
+    GetThreadStack: Function not implemented". LXRT_TRACE: "unimplemented
+    syscall 163" -- FEX passes an x86-64 guest's getrlimit (97) through as
+    the asm-generic getrlimit, which aarch64 glibc and bionic never use.
+    -> R1. The abort then hung until a 120 s deadline (X12: HYPOTHESIS, the
+    same lost deferred signal; after P3 every abort seen here ended within
+    0.2 s, MEASURED).
+X3  "Stack not found in /proc/self/maps": bionic's pthread_getattr_np of the
+    main thread looks up /proc/self/stat's startstack (field 28) in
+    /proc/self/maps; the runtime printed 0 there. -> R2.
+X4  "Error preloading public library libandroid.so: dlopen failed: library
+    "libstatssocket.so" not found: needed by /system/lib64/libandroid_runtime.so
+    in namespace system": no linker namespace config. The image's
+    linkerconfig (static x86-64 ET_EXEC) runs under FEX: it wrote
+    /linkerconfig/ld.config.txt (16,019 bytes, the "legacy" layout, since
+    ro.vndk.version reads empty with no property service) and three APEX
+    configs, then aborted: "context.cc:115] Check failed: !"undefined var"
+    VENDOR_VNDK_VERSION is not defined". The main file is enough for ART;
+    run-android-x86.sh runs linkerconfig once when the file is missing.
+X5  "fdsan: mmap failed: Invalid argument": trace -> getrlimit(RLIMIT_NOFILE)
+    then mmap(0, 0, ...). bionic's fdsan sizes its overflow table from
+    rlim_max unless it is RLIM_INFINITY; the runtime handed Darwin's
+    RLIM_INFINITY (2^63-1) through, the size wrapped to 0. -> R3.
+X6  ART's abort messages arrived cut (only the tail of the stack). Darwin
+    caps an AF_UNIX datagram at 2048 bytes (net.local.dgram.maxdgram) and
+    queues 4096 (recvspace) (sysctl, MEASURED); liblog records reach 4068.
+    -> R4, and tests/android/logd.py asks for a 4 MiB receive buffer; then
+    whole records arrived (the mechanism inferred from the sysctls and the
+    fix; tests/elf's 4068-byte and 60 KiB datagram checks fail on HEAD's
+    runtime and pass after R4).
+X7  With whole records: "Ljava/lang/System; failed initialization:
+    java.lang.AssertionError: android.system.ErrnoException: getpwuid_r
+    failed: ENOENT" (System.initUnchangeableSystemProperties). bionic knows
+    Android's ids and app ids, and reads /system/etc/passwd for names
+    starting with "system_" (VERIFIED: the strings of libc.so; empty file in
+    the image). -> R7 (a passwd entry, written by mkandroidroot.sh).
+X8  dalvikvm64 Hello: "Hello from Java on ART, no VM / java.vm.name=Dalvik
+    java.vm.version=2.1.0 os.arch=x86_64 / args=0", rc 0, 3.27 s. ART ran
+    WITHOUT its boot image: "Could not create image space ... Failed to mmap
+    at expected address, mapped at 0x10e4e8000 instead of 0x6f7a0000" (X10).
+    The heap itself was fine: MAP_32BIT goes to FEX's 32-bit allocator in the
+    window (VERIFIED IN SOURCE, LineageOS/android_art 7f2b489: ART's low-4 GiB
+    allocator is for aarch64 and Apple only, libartbase/base/mem_map.h:32-39;
+    on x86-64 MemMap::MapInternal adds MAP_32BIT for low_4gb,
+    mem_map.cc:1188-1189; FEX's GuestMmap sends MAP_32BIT to its 32-bit
+    allocator, which lives in the window).
+    Loop -Xint 2000000 2: result=-6435145747647352456 both rounds, LOOP OK;
+    Loop (JIT) 20000000 5: 6336216350770228723 every round, 74-75 ms after
+    warm-up: the first JIT'd x86-64 code, translated by FEX, correct.
+X9  tests/android/x86_lowwin.c (a freestanding x86-64 probe): MAP_32BIT
+    memory below 4 GiB ok, but madvise(MADV_DONTNEED) there left the old
+    bytes: FEX passes madvise's guest address through untranslated
+    (GuestBaseThunk.h excludes it), and below 4 GiB the runtime cleared
+    nothing. ART clears heap regions that way and relies on the zeros
+    (kMadviseZeroes, libartbase/base/mem_map.h:42). -> R5. (Also true for
+    i386 guests.)
+X10 The boot image: ART reserves it with a plain mmap hint at
+    ART_BASE_ADDRESS (0x70000000) plus a random delta; FEX sent a non-fixed
+    hint to the host, and Darwin put it above 4 GiB. -> P1. Then no
+    image-space error, no "Could not reserve sentinel fault page" (the same
+    cause), Hello in 1.07 s.
+X11 JIT code cache churn (tests/android/gen_jitchurn.py: 400 small hot
+    methods; dalvikvm64 -Xjitinitialsize:64K -Xjitmaxsize:128K
+    -Xjitthreshold:100, 6 rounds): rounds 4 and 5 wrong, totals
+    -2499218480670514815, -220755328147192225, -3974587639715350189 in 3
+    runs (want -1445667666822057310, the Mac JVM's); correct with the
+    default cache (no collection) and with FEX_SMCCHECKS=full (6.7 s instead
+    of 2.0 s). ART's code cache is a memfd mapped twice (trace: memfd_create
+    "jit-cache", the executable view at guest 0x7dffc000 in the window, the
+    second view of the code above 4 GiB; VERIFIED IN SOURCE:
+    runtime/jit/jit_memory_region.cc:76 memfd_create, :164 data and code
+    with low_4gb, :183 the executable view, :202 the second view, read-only)
+    and ScopedCodeCacheWrite mprotects that second view read-write before
+    every code write and read-only after (jit_scoped_code_cache_write.h:
+    36-54). -> P2.
+    tests/android/x86_dualview.c reproduces it without ART (below).
+X12 mksh: `x=$(toybox echo x)` never returned (4 of 4), even to SIGTERM or
+    SIGALRM; the child was a zombie, the parent (FEX) in rt_sigsuspend
+    (sample(1): lxrt_dispatch -> __sigsuspend). The trace: SIGCHLD arrived
+    while FEX was in one of its own signal-deferring sections; FEX queued it
+    and mprotect()ed its 4 KiB InterruptFaultPage PROT_NONE (mprotect(
+    0x7effc0c03000, 0x1000, 0)) so that the section's end would fault and
+    deliver it; no SIGSEGV followed. A 16 KiB host page carries the union of
+    its 4 KiB pages' protections (runtime/subpage.c), so that page never
+    became inaccessible. -> P3: afterwards mprotect(0x7effc0c08000, 0x4000,
+    0), the SIGSEGV, the SIGCHLD delivered, "got x". (The deferral path:
+    VERIFIED IN SOURCE, FEX's SignalDelegator.cpp, HandleGuestSignal, the
+    MustDeferSignal branch; the page: FEXCore/include/FEXCore/Debug/
+    InternalThreadState.h, alignas(FEX_PAGE_SIZE) uint8_t
+    InterruptFaultPage[FEX_PAGE_SIZE].)
+X13 getgroups ENOSYS (toybox id). -> R6. toybox id then:
+    uid=501(system_steamarm) gid=20(system_steamarm) groups=...
+
+Changes
+-------
+Runtime (runtime/, commit "runtime: what x86-64 Android's bionic and ART
+need under FEX"):
+R1  getrlimit/setrlimit, asm-generic 163/164, as prlimit64 of pid 0.
+R2  /proc/self/stat field 28 (startstack): the initial stack pointer the
+    runtime built (main.c), or, when a writable MAP_GROWSDOWN mapping is made
+    (FEX's stack for the x86 program, ELFCodeLoader.h), an address in it,
+    the guest's view under a guest base. Linux shows the process its own
+    startstack; the runtime printed 0.
+R3  prlimit64 (and so R1): Darwin's RLIM_INFINITY is reported as Linux's
+    (~0) and taken back from it; the new limit is read before the old one is
+    written (Linux allows the same buffer for both).
+R4  AF_UNIX SOCK_DGRAM (and SEQPACKET, a datagram pair here) sockets get
+    212992-byte send and receive buffers, Linux's net.core defaults.
+R5  madvise with a guest base and an address below 4 GiB acts on base +
+    address (the same unambiguous rule gbase.c applies to pointer arguments:
+    no host memory lives below 4 GiB); a range running past 4 GiB is split
+    at 4 GiB (the window's part, then identity).
+R6  getgroups/setgroups.
+R7  (scripts/mkandroidroot.sh) /system/etc/passwd and group entries
+    "system_steamarm" for the Mac's uid and gid.
+
+FEX (patches/, applied by scripts/build-fex-host.sh after the existing
+eight; built for this record in a private work dir, STEAMARM_BUILD=<scratch>,
+Release only, 19-23 s per build on the M4; reproducible: the same inputs gave
+the same FEX-emu sha256 twice):
+P1  fex-lxrt-lowwin-hint.patch: in the 64-bit low window a plain hint below
+    4 GiB is tried as MAP_FIXED_NOREPLACE in the window before the host.
+P2  fex-lxrt-smc-mprotect-mirrors.patch, two parts:
+    1. a guest mprotect making a shared view writable while another view of
+       the same memory is executable leaves that view's host pages read-only
+       (the guest sees them writable; the range goes read-only first and
+       only the rest is opened, so no page is ever writable unseen); each
+       first write faults and is flushed precisely;
+    2. the fault handler's shared-memory branch flushes and unprotects the
+       whole 16 KiB SMC page of every mirror, not 4 KiB (unprotecting 4 KiB
+       made the whole host page writable).
+    A first version invalidated every mirror's translations at each such
+    mprotect: correct, but JitChurn with the default cache went from 1.72 s
+    to 7.61 s (5 runs, median), since ART flips the whole cache's view for
+    every compiled method. Replaced by the above (1.74 s).
+P3  fex-lxrt-interrupt-page.patch: InterruptFaultPage (and the thread
+    object's alignment) 16 KiB instead of FEX_PAGE_SIZE.
+A read-only review of the diff (Codex) found, and this record's last FEX
+build fixes: an overflow in P1's below-4 GiB test (addr + length for a hint
+near 2^64), the order of P2 part 1 (it first opened the range and then
+re-protected it, leaving a window), madvise ranges across 4 GiB (R5), and
+one FEXServer socket name for every root (run-android-x86.sh). Only the
+x86_64 root carries this FEX (/usr/lib/lxrt-emu/FEX, FEX-emu sha256
+08daa48ab5e9...; FEX 8787aad9988f...). /tmp/lxrt-root, the Steam root and
+~/SteamARM-build/out were not rebuilt or reinstalled.
+
+Probes (tests/android/, MEASURED before -> after)
+------------------------------------------------
+x86_lowwin (5 checks), FEX_LOWWINDOW=1:
+  HEAD's runtime + P1-P3 FEX:   2 ok, 3 mal (madvise zero, startstack 0,
+                                getrlimit failed)
+  final runtime + unpatched FEX: 4 ok, 1 mal (the hint)
+  final runtime + P1-P3 FEX:    5 ok, 0 mal
+  final, FEX_LOWWINDOW=0:       MAP_32BIT -> ENOMEM (-12), the hint above
+                                4 GiB (the window is what makes ART work)
+x86_dualview (a memfd mapped as an executable view and a writable view;
+code written through one, run from the other, rewritten in place; two
+rewrites per window in neighbouring 4 KiB pages of one 16 KiB host page),
+stale results out of 2304:
+                          plain   low   low+toggle   toggle
+  unpatched FEX:            89     89       2112       2112
+  P1, P2 part 1, P3:        89     89         89         89
+  P1-P3:                     0      0          0          0
+tests/elf/android_bionic_rt.c, the native side of R1-R4 (8 new checks):
+HEAD's runtime 7 MAL; final runtime 0 MAL (27 checks, host and 4 KiB pages).
+
+Measurements (MEASURED; direct lxrun with run-android-x86.sh's environment,
+the FEXServer already running; wall clock of the whole process; max RSS of
+the lxrun process from /usr/bin/time -l, i.e. FEX plus the guest)
+------------------------------------------------------------------------------
+Two sets. The tables are the first (FEX-emu aa5d15670d5c, P2 before the
+review fix; system load not recorded). The second, with the final build
+(08daa48ab5e9), ran while a VMware Fusion vmware-vmx process -- not
+SteamARM's, not started by this session, not touched -- used ~155% CPU (load
+average 3.7): Hello 1.031 s (0.989-1.269), -Xint Hello 1.042 s, no boot
+image 1.188 s, -Xint Loop 160.6 ms/round, JIT Loop 79.0-79.4 ms/round after
+warm-up, JitChurn default 1.739 s, 128 KiB 2.013 s (checksum correct),
+128 KiB with SMC full 7.735 s; toybox true 0.143 s, sh -c true 0.128 s,
+$(toybox echo x) 0.274 s, sha256sum 0.252 s, dexdump 0.149 s. So 3-15 %
+slower under that load, with the same results.
+Start-up, 10 runs, median (min-max):
+  toybox true                     0.125 s (0.123-0.136)  35 MB
+  linker64 /system/bin/toybox true 0.123 s (0.122-0.144) 36 MB
+  sh -c true (mksh)               0.127 s (0.112-0.174)  32 MB
+  sh -c 'x=$(toybox echo x)'      0.249 s (0.245-0.368)  fork + exec: two FEX starts
+  toybox sha256sum framework.jar  0.253 s (0.235-0.618)  27,447,682 bytes
+  dexdump -d hello.dex            0.147 s (0.137-0.178)
+  native arm64 toybox true (same Mac, arm64 root, read-only): 0.03-0.06 s,
+  19 MB (5 runs); stage 25 recorded 58 ms median for it.
+  FEXServer (idle): 10 MB RSS.
+ART, FEX with P1-P3 (Hello: 10 runs; the rest 5, SMC-full 3):
+  dalvikvm64 Hello                    0.978 s (0.950-1.257)  222 MB
+  dalvikvm64 -Xint Hello              0.922 s (0.899-0.969)  213 MB
+  dalvikvm64 Hello, no boot image     1.091 s (1.068-1.119)  208 MB
+    (-Ximage:/data/local/tmp/none.art: "Only the zygote can create the
+    global boot image", imageless; the 3.27 s of X8 was measured before R5,
+    P2 and P3, and was not reproduced here)
+  -Xint Loop 2000000 2                1.476 s total, 155.8 ms/round
+  JIT Loop 20000000 5                 1.462 s total; rounds 181.6, 94.1,
+                                      76.7, 76.7, 76.7 ms
+  JitChurn 6 300, default cache       1.742 s  (unpatched FEX: 1.72 s, one
+                                      run earlier; correct: no collection)
+  JitChurn, 128 KiB cache             1.886 s  (checksum correct)
+  JitChurn, 128 KiB, FEX_SMCCHECKS=full 7.216 s, 327 MB
+  AOT (dex2oat64 --compiler-filter=speed, odex in oat/x86_64/): Loop
+  79-80 ms/round from round 0, 79.6 ms with -Xusejit:false; dex2oat64
+  itself 0.85 s ("dex2oat took 849.777ms (955.147ms cpu) (threads: 10)").
+The Mac's JVM on the same M4 (Temurin 17.0.20): Loop -Xint 45-47 ms/round,
+HotSpot C2 62.5 ms/round, JitChurn 0.13 s wall.
+So on this workload: x86-64 ART's JIT code through FEX is 1.23x HotSpot C2
+natively; ART's x86-64 interpreter through FEX is 3.4x HotSpot's
+interpreter. Every Android process start pays ~0.1 s of FEX start-up and
+~15 MB over native.
+
+CPU features (MEASURED)
+-----------------------
+FEX's /proc/cpuinfo for the guest: GenuineIntel, family 6 model 166, flags
+include sse4_1 sse4_2 ssse3 popcnt avx avx2 fma f16c bmi1 bmi2 aes
+pclmulqdq sha_ni vaes vpclmulqdq avx_vnni movbe; no avx512 flag. (It also
+lists "hypervisor".) M4 has no SVE, so FEX runs 256-bit AVX as pairs of
+128-bit operations (VERIFIED IN SOURCE: the AVX128_* paths of
+FEXCore/Source/Interface/Core/OpcodeDispatcher.h at 08f451d3b; not timed
+here).
+llvm-objdump over the image's 1,055 distinct x86-64 ELF files:
+  linker64, libc.so, libm.so, libart.so, libart-compiler.so,
+  libandroid_runtime.so, toybox, boot.oat's 698,698 instructions: no ymm
+  and no AVX-512 register; SSSE3, SSE4.x and POPCNT yes (all in FEX's set).
+  dex2oat64 logs ART's compile-time features: "ssse3,sse4.1,sse4.2,-avx,
+  -avx2,popcnt".
+  ymm (AVX/AVX2): 82,971 instructions in 24 files (libavutil, libavcodec,
+  camera.v4l2, libcrypto, libjpeg, libswscale, Mesa/LLVM in vendor);
+  AVX-512 (zmm or opmask): 10,941 in 10 files (libhwui.so 1,653; the Mesa
+  and LLVM vendor libraries 1,032 each); AES-NI 507 in libcrypto.
+  HYPOTHESIS: these sit behind runtime CPU dispatch (Skia's SkOpts,
+  BoringSSL's OPENSSL_ia32cap, FFmpeg's and libjpeg-turbo's cpu checks), so
+  with no avx512 flag the AVX-512 paths are not taken; not verified in their
+  sources, and nothing here exercised libhwui or the codecs.
+
+Which apps this covers (MEASURED on the 10 F-Droid APKs of stage 25,
+scripts/apk-inspect.py)
+-------------------------------------------------------------------------
+  de.tobiasbielefeld.solitaire: no native code          -> x86_64 ART (Java)
+  com.termux, com.shatteredpixel.shatteredpixeldungeon, org.fdroid.fdroid
+  (2): arm64-v8a, armeabi-v7a, x86, x86_64               -> x86_64 libs exist
+  org.fcitx.fcitx5.android.plugin.sayura: one APK per ABI, x86_64 among them
+  net.asceai.meritous: armeabi only                     -> neither path
+None of them was run (no zygote, no binder, no framework process yet).
+
+T. The trade-off
+----------------
+- What it makes possible: Java/Kotlin apps (dex runs on x86-64 ART), and
+  apps that ship x86-64 native libraries, all zero-VM, all through the
+  existing FEX. The image's 1,217 i386 files (the x86 half of zygote64_32)
+  could run under FEX's 32-bit mode as well (UNTESTED).
+- What it does not: apps whose native code is arm64-v8a only. The x86 image
+  has no native bridge (ro.dalvik.vm.native.bridge=0, no Houdini or
+  libndk_translation file); both translators are proprietary and SteamARM
+  must not bundle them. On a Mac that is the painful part: the CPU is arm64
+  and the app's arm64 code would have to be translated to x86 to be
+  translated back by FEX. How many Play apps ship ARM ABIs only is UNKNOWN
+  here (HYPOTHESIS: many games do); the F-Droid sample above is not
+  representative of Play.
+- Costs: every Android process is a FEX process (~0.1 s start, ~15 MB, a
+  JIT on top of ART's JIT), and ART's generated code is translated again;
+  measured 1.23x HotSpot for JIT'd code and 3.4x for the interpreter.
+- ARM64-first: the native arm64 root stays the target for arm64 apps and
+  needs the ART heap work in docs/ANDROID_RUNTIME_ARCHITECTURE.md. This path
+  is the zero-VM way to run Java today, and a way to develop binder,
+  properties, init and zygote against a working ART while that happens.
+
+Tests
+-----
+tests/android/run.sh: the arm64 section as before; the x86_64 section skips
+without its root. Final run (x86_64 section; the arm64 section skipped with
+ANDROID_ROOT_DIR, because another agent's binder tests use that root and the
+section writes there and rebinds its logd socket): see "Final checks".
+tests/elf/run.sh: ANDROID_BIONIC_RT gains R1-R4's checks.
+Regression: tests/elf/run_i386.sh 18 passed, 0 failed (smc_subpage xfail
+as before) with the final runtime and the shared, unpatched FEX, and again
+with the final runtime and P1-P3 (FEXDIR pointing at the private build);
+with that FEX the Steam root's x86-64 bash and python3 (hashlib) run,
+`ulimit -Hn` reads "unlimited" (R3: HEAD's runtime handed Darwin's 2^63-1
+through, tests/elf's check fails there), and startstack is the x86 stack.
+Not re-run with this FEX: the Steam client, Proton, wine (P1 changes low
+hints for wine processes too: Linux's behaviour, but UNTESTED there).
+
+What was not done
+-----------------
+- No zygote, system_server, binder, property service or init: dalvikvm64
+  and dex2oat64 only. linkerconfig's output is the "legacy" layout.
+- Graphics, input, audio: nothing (the vendor image's Mesa is for x86 GPUs).
+- FEX was not installed for the Steam side; building it with
+  scripts/build-fex-host.sh now applies P1-P3, and install-fex-host.sh would
+  put it in the shared roots: run the Steam/Proton smoke tests first.
+- P2's cost is one fault per 16 KiB page written after each mprotect that
+  makes such a view writable; not measured separately (JitChurn with the
+  default cache: 1.72 s unpatched, 1.74 s with P2).
+- Not changed after the review: a Linux limit value from 2^63-1 up is
+  "no limit" on Darwin and reads back as RLIM_INFINITY (R3).
+- 32-bit guests: P3 applies to them too (the same thread object); P2 part 2
+  does not (their SMC page stays 4 KiB; tests/elf/i386_smc_subpage.c is
+  still an expected failure).
+
+Final checks (MEASURED, at d57e78a, default lxrun build)
+--------------------------------------------------------
+make lxrt launcher: rc 0 (23 s when lxrun was rebuilt; 1 s up to date).
+make test-launcher-core: rc 0, 60 s -- application core: all checks
+  passed; app entry: all checks passed; 39/0; 32/0; 10/0; guest_env 26/0;
+  mkarmroot 25/0; run_steam_arm64 10/0; 35/0.
+tests/elf/run.sh: 74 passed, 0 failed, 26 s (vulkaninfo skipped, as before).
+tests/android/run.sh with ANDROID_ROOT_DIR=/nonexistent (the arm64 section
+  skipped, see Tests): 13 passed, 0 failed, 21 s. Its timings in that run
+  (-Xint 290 ms/round, JIT 98 ms/round) were taken under the VMware load
+  above and are not measurements.
+tests/elf/run_i386.sh: 18 passed, 0 failed (shared FEX and final P1-P3).
+python3 -m unittest tests/test_docs_records.py: OK (6 tests).

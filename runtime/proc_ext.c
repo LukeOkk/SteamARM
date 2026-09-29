@@ -976,17 +976,22 @@ static size_t gen_self_stat(char *b, size_t cap)
     // Field 38, exit_signal: Linux's SIGCHLD is 17, Darwin's is 20. The Linux
     // number goes in the Linux file. Field 41, policy: Linux SCHED_OTHER is 0,
     // Darwin's is 1 (measured), so again the Linux number.
-    // Fields 26-30 (startcode, endcode, startstack, kstkesp, kstkeip) are 0:
-    // the guest's text and stack extents are known to elf.c and stack.c, not
-    // here, and Linux itself zeroes them for a process the reader may not
-    // ptrace.
+    // Fields 26, 27, 29 and 30 (startcode, endcode, kstkesp, kstkeip) are 0,
+    // as Linux shows them to a reader that may not ptrace the process.
+    // Field 28, startstack, is not: bionic's pthread_getattr_np() of the main
+    // thread finds its stack by looking this address up in /proc/self/maps
+    // and aborts when nothing contains it ("Stack not found in
+    // /proc/self/maps": ART, benchmarks/stage25-art-x86-fex.txt). Linux shows
+    // it to the process itself: the initial stack pointer (main.c), or, for
+    // an x86 program under FEX, an address in FEX's stack for it (dispatch.c,
+    // lxrt_note_growsdown).
     sbf(&s,
         "%d (%s) R %d %d %d 0 -1 0 "          // 1-9
         "%llu 0 %llu 0 "                      // 10-13 minflt cminflt majflt cmajflt
         "%llu %llu 0 0 "                      // 14-17 utime stime cutime cstime
         "20 0 %u 0 %llu "                     // 18-22 prio nice threads itreal start
         "%llu %llu %llu "                     // 23-25 vsize rss rsslim
-        "0 0 0 0 0 "                          // 26-30
+        "0 0 %llu 0 0 "                       // 26-30 (28 startstack)
         "0 0 0 0 0 "                          // 31-35 signal..wchan
         "0 0 17 0 0 0 "                       // 36-41 nswap cnswap exit_signal
                                               //       processor rt_prio policy
@@ -997,7 +1002,8 @@ static size_t gen_self_stat(char *b, size_t cap)
         (unsigned long long)utime, (unsigned long long)stime,
         thread_count(), (unsigned long long)start_ticks(),
         (unsigned long long)virtual_size_linuxish(),
-        (unsigned long long)(tb.resident_size / ps), rsslim);
+        (unsigned long long)(tb.resident_size / ps), rsslim,
+        (unsigned long long)lxrt_start_stack);
     return sb_done(&s);
 }
 

@@ -67,6 +67,9 @@ def main(argv):
     # SIGTERM (the test's kill) ends it like ^C: the socket file goes too.
     signal.signal(signal.SIGTERM, lambda *_: (_ for _ in ()).throw(KeyboardInterrupt()))
     s = socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM)
+    # Darwin queues 4096 bytes on a datagram socket by default; one ART abort
+    # record alone is up to 4068.
+    s.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 4 << 20)
     s.bind(path)
     os.chmod(path, 0o666)
     if seconds:

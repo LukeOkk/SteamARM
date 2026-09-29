@@ -105,6 +105,9 @@ Independent of that order:
   bionic's linker, toybox and mksh run. ART does not: its heap must be
   mapped below 4 GiB, which macOS forbids
   (`docs/ANDROID_RUNTIME_ARCHITECTURE.md`); binder is the other open layer.
+  The x86_64 build of the same image runs Java on x86-64 ART under FEX's
+  low window (stage 25, MEASURED): a zero-VM path for Java and x86-64 apps,
+  not for arm64-v8a-only ones (no native bridge in the x86 image).
   The Frame root has `usr/share/guestos/android` (57 MB) and podman 5.5.2
   (MEASURED).
   The component-by-component plan and its six stages are in

@@ -136,6 +136,7 @@ enum {
     LNR_gettid = 178, LNR_brk = 214, LNR_munmap = 215, LNR_mmap = 222,
     LNR_capget = 90, LNR_capset = 91,
     LNR_mprotect = 226, LNR_prlimit64 = 261, LNR_getrandom = 278,
+    LNR_getrlimit = 163, LNR_setrlimit = 164, LNR_getgroups = 158, LNR_setgroups = 159,
     LNR_fstat = 80, LNR_fstatat = 79,
 };
 
@@ -609,6 +610,7 @@ static long do_clock_gettime(long clk, uint64_t user_ts)
 #define LINUX_MAP_NORESERVE 0x4000
 #define LINUX_MAP_DENYWRITE 0x800
 #define LINUX_MAP_STACK     0x20000
+#define LINUX_MAP_GROWSDOWN 0x0100
 // Reserve at exactly this address, and FAIL rather than replace what is there.
 // Darwin's mmap has no equivalent; mach_vm_allocate(VM_FLAGS_FIXED) does.
 #define LINUX_MAP_FIXED_NOREPLACE 0x100000
@@ -992,6 +994,30 @@ static uint64_t topdown_candidate(uint64_t len)
     return 0;
 }
 
+// MAP_GROWSDOWN (Darwin has no such flag; the mapping is an ordinary one).
+// The only user seen is FEX, for the x86 program's main-thread stack
+// (ELFCodeLoader.h: a PROT_NONE reservation, then the 8 MiB read-write top
+// of it). That stack, not the one the runtime built for FEX, is what the x86
+// program means by "my stack": x86-64 bionic's pthread_getattr_np() of the
+// main thread looks up /proc/self/stat's startstack in /proc/self/maps, and
+// with 0 there ART aborted ("Stack not found in /proc/self/maps", MEASURED,
+// benchmarks/stage25-art-x86-fex.txt). The first writable one wins; under a
+// guest base (a 32-bit guest, or a 64-bit low window) the guest's address.
+void lxrt_note_growsdown(uint64_t addr, uint64_t len, long prot)
+{
+    static _Atomic int noted;
+    if (!(prot & PROT_WRITE) || !len || atomic_exchange(&noted, 1))
+        return;
+    uint64_t top = addr + len - 16;
+    uint64_t gb = lxrt_gbase();
+    if (gb && top >= gb && top < gb + (1ull << 32))
+        top -= gb;
+    lxrt_start_stack = top;
+    if (g_trace)
+        fprintf(lxrt_trace_stream(), "[lxrt] MAP_GROWSDOWN stack 0x%llx+0x%llx: startstack 0x%llx\n",
+                (unsigned long long)addr, (unsigned long long)len, (unsigned long long)top);
+}
+
 static long do_mmap(uint64_t addr, uint64_t len, long prot, long lflags,
                     long fd, long off)
 {
@@ -1013,7 +1039,8 @@ static long do_mmap(uint64_t addr, uint64_t len, long prot, long lflags,
     long unknown = lflags & ~(LINUX_MAP_SHARED | LINUX_MAP_PRIVATE |
                               LINUX_MAP_FIXED | LINUX_MAP_ANONYMOUS |
                               LINUX_MAP_NORESERVE | LINUX_MAP_DENYWRITE |
-                              LINUX_MAP_STACK | LINUX_MAP_FIXED_NOREPLACE);
+                              LINUX_MAP_STACK | LINUX_MAP_FIXED_NOREPLACE |
+                              LINUX_MAP_GROWSDOWN);
     if (unknown && g_trace)
         fprintf(lxrt_trace_stream(), "[lxrt] mmap: dropping unhandled Linux flags 0x%lx\n", unknown);
 
@@ -2156,18 +2183,35 @@ static long do_prlimit64(long pid, long res, uint64_t newp, uint64_t oldp)
     // Electron's main process died at start on the runtime's own store
     // (MEASURED, benchmarks/stage24-heroic.txt). The first getrlimit above
     // only checks the resource; the values are the same.
+    // The new limit is read before the old one is written: the two may be
+    // the same buffer.
+    struct rlimit set = { 0, 0 };
+    if (newp) {
+        const struct linux_rlimit *n = (const struct linux_rlimit *)newp;
+        set.rlim_cur = n->rlim_cur >= (uint64_t)RLIM_INFINITY ? RLIM_INFINITY : (rlim_t)n->rlim_cur;
+        set.rlim_max = n->rlim_max >= (uint64_t)RLIM_INFINITY ? RLIM_INFINITY : (rlim_t)n->rlim_max;
+    }
     bool old_fault = false;
     if (oldp && getrlimit(dres, (struct rlimit *)oldp) != 0) {
         if (errno != EFAULT)
             return LERR(errno);
         old_fault = true;
     }
-    if (newp) {
-        const struct linux_rlimit *n = (const struct linux_rlimit *)newp;
-        struct rlimit set = { n->rlim_cur, n->rlim_max };
-        if (setrlimit(dres, &set) != 0)
-            return LERR(errno);
+    // "No limit" is a different number on the two systems: Darwin's
+    // RLIM_INFINITY is INT64_MAX, Linux's is UINT64_MAX (see proc_ext.c,
+    // rsslim). Passed through, Darwin's reads as a finite limit of 2^63-1:
+    // bionic's fdsan sizes its overflow table from RLIMIT_NOFILE's rlim_max
+    // unless it is RLIM_INFINITY, the size wrapped to 0 and every Android
+    // program that used an fd above 127 aborted in "fdsan: mmap failed:
+    // Invalid argument" (ART, MEASURED, benchmarks/stage25-art-x86-fex.txt).
+    // The buffer is writable here (getrlimit just wrote it).
+    if (oldp && !old_fault) {
+        struct linux_rlimit *o = (struct linux_rlimit *)oldp;
+        if (o->rlim_cur == (uint64_t)RLIM_INFINITY) o->rlim_cur = ~0ull;
+        if (o->rlim_max == (uint64_t)RLIM_INFINITY) o->rlim_max = ~0ull;
     }
+    if (newp && setrlimit(dres, &set) != 0)
+        return LERR(errno);
     // Linux sets the new limit first and reports the old one's EFAULT after.
     return old_fault ? LERR(EFAULT) : 0;
 }
@@ -2577,6 +2621,8 @@ restart:
             break;
         }
         ret = do_mmap(a0, a1, (long)a2, (long)a3, (long)a4, (long)a5);
+        if (ret >= 0 && ((long)a3 & LINUX_MAP_GROWSDOWN))
+            lxrt_note_growsdown((uint64_t)ret, a1, (long)a2);
         lxrt_memlog('m', ret >= 0 && !a0 ? (uint64_t)ret : a0, a1, (long)a2, (long)a3, ret);
         if (ret >= 0 && !((long)a3 & 0x20))     // file-backed (not MAP_ANONYMOUS)
             lxrt_memlog_file((uint64_t)ret, a1, (uint64_t)a5, (int)a4);
@@ -2691,10 +2737,16 @@ restart:
     case LNR_prlimit64:
         ret = do_prlimit64((long)a0, (long)a1, a2, a3);
         break;
-    case 163:   // getrlimit: struct rlimit is prlimit64's layout on LP64.
-        ret = do_prlimit64(0, (long)a0, 0, a1);   // bionic's Parcel reads RLIMIT_NOFILE
+    // The asm-generic getrlimit/setrlimit. aarch64 glibc and bionic use
+    // prlimit64, but FEX passes an x86-64 guest's getrlimit (97) and
+    // setrlimit (160) straight through as these: x86-64 bionic's
+    // pthread_getattr_np() of the main thread calls getrlimit(RLIMIT_STACK),
+    // and ART aborted on the ENOSYS ("pthread_getattr_np failed for
+    // GetThreadStack", MEASURED, benchmarks/stage25-art-x86-fex.txt).
+    case LNR_getrlimit:
+        ret = do_prlimit64(0, (long)a0, 0, a1);
         break;
-    case 164:   // setrlimit
+    case LNR_setrlimit:
         ret = do_prlimit64(0, (long)a0, a1, 0);
         break;
     case LNR_getrandom:
@@ -3190,6 +3242,17 @@ restart:
     case LNR_getuid:
         ret = getuid();
         break;
+    // Supplementary groups: the same call and the same 32-bit gid_t array
+    // on both systems (0 asks for the count; too small a buffer is EINVAL).
+    // toybox id (x86-64 Android under FEX) failed on the ENOSYS.
+    case LNR_getgroups: {
+        int n = getgroups((int)a0, a0 ? (gid_t *)a1 : NULL);
+        ret = n < 0 ? LERR(errno) : n;
+        break;
+    }
+    case LNR_setgroups:
+        ret = setgroups((int)a0, (const gid_t *)a1) != 0 ? LERR(errno) : 0;
+        break;
     case LNR_geteuid:
         ret = geteuid();
         break;
@@ -3639,6 +3702,26 @@ restart:
         ret = lxrt_clone3((const void *)a0, a1, r);
         break;
     case LNR_madvise:
+        // FEX hands a guest's madvise straight through with the guest's
+        // address (its handler is excluded from the guest-base argument
+        // translation, GuestBaseThunk.h, as if its allocator owned it; it
+        // does not). Below 4 GiB that is a guest address -- no host memory
+        // lives there -- so it is the window's: base + address, as for the
+        // pointer arguments in gbase.c. Without this MADV_DONTNEED on a
+        // 32-bit guest's or a 64-bit low-window mapping was a silent no-op,
+        // and ART, which clears heap regions that way, read old objects back
+        // where Linux gives zeros (MEASURED with tests/android/x86_lowwin.c,
+        // benchmarks/stage25-art-x86-fex.txt).
+        // A range that runs past 4 GiB (64-bit window) is two host ranges:
+        // the window's part, then the identity part from 4 GiB on.
+        if (lxrt_gbase() && a0 && a0 < (1ull << 32)) {
+            uint64_t low = a1 <= (1ull << 32) - a0 ? a1 : (1ull << 32) - a0;
+            ret = do_madvise(a0 + lxrt_gbase(), low, (int)a2);
+            if (ret == 0 && a1 > low)
+                ret = do_madvise(1ull << 32, a1 - low, (int)a2);
+            lxrt_memlog('a', a0 + lxrt_gbase(), a1, (long)a2, 0, ret);
+            break;
+        }
         ret = do_madvise(a0, a1, (int)a2);
         lxrt_memlog('a', a0, a1, (long)a2, 0, ret);
         break;

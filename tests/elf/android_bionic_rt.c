@@ -18,6 +18,16 @@
 //            cannot have its own descriptor table)
 //   sigqueue rt_tgsigqueueinfo to this thread runs the handler (bionic's
 //            abort raises SIGABRT that way)
+//   rlimit   getrlimit/setrlimit (asm-generic 163/164, what FEX passes an
+//            x86-64 guest's through as) agree with prlimit64; "no limit"
+//            reads as Linux's RLIM_INFINITY (bionic's fdsan sized a table
+//            from Darwin's 2^63-1 and aborted); prlimit64 with the same
+//            buffer for the new and the old limit sets the new one
+//   stack    /proc/self/stat's startstack lies in the /proc/self/maps entry
+//            of the main thread's stack (bionic's pthread_getattr_np)
+//   dgram    an AF_UNIX datagram of 4068 bytes (liblog's largest record to
+//            logd) and one of 60 KiB go through: Darwin's default is 2048
+//   (the last three: benchmarks/stage25-art-x86-fex.txt)
 //   tlskeep  (argument "tlskeep") a TPIDR_EL0 read inside
 //            [BORINGSSL_bcm_text_start, BORINGSSL_bcm_text_end) is left as
 //            it is (the word is still `mrs x9, tpidr_el0`), and loads
@@ -36,6 +46,8 @@
 #include <string.h>
 #include <sys/mman.h>
 #include <sys/prctl.h>
+#include <sys/resource.h>
+#include <sys/socket.h>
 #include <sys/syscall.h>
 #include <signal.h>
 #include <linux/futex.h>
@@ -225,6 +237,64 @@ int main(int argc, char **argv)
     for (int i = 0; i < 100 && !got_usr1; i++)
         usleep(1000);
     check(qr == 0 && got_usr1, "rt_tgsigqueueinfo(self, SIGUSR1) runs the handler");
+
+    // rlimit
+    struct { uint64_t cur, max; } rl = { 1, 1 }, rl2 = { 2, 2 }, rs = { 0, 0 };
+    long gr = syscall(163 /* asm-generic getrlimit */, RLIMIT_NOFILE, &rl);
+    long pr = syscall(SYS_prlimit64, 0, RLIMIT_NOFILE, NULL, &rl2);
+    check(gr == 0 && pr == 0 && rl.cur == rl2.cur && rl.max == rl2.max,
+          "getrlimit (163) of RLIMIT_NOFILE equals prlimit64's");
+    check(pr == 0 && rl2.max != 0x7fffffffffffffffull && rl2.cur != 0x7fffffffffffffffull,
+          "no limit reads as Linux's RLIM_INFINITY (~0), never Darwin's 2^63-1");
+    check(syscall(163, RLIMIT_STACK, &rs) == 0 && syscall(164 /* setrlimit */, RLIMIT_STACK, &rs) == 0,
+          "setrlimit (164) of RLIMIT_STACK to its own value -> 0");
+    if (pr == 0 && rl2.cur > 64) {
+        struct { uint64_t cur, max; } same = { rl2.cur - 1, rl2.max };
+        long ar = syscall(SYS_prlimit64, 0, RLIMIT_NOFILE, &same, &same);
+        struct { uint64_t cur, max; } now = { 0, 0 };
+        syscall(SYS_prlimit64, 0, RLIMIT_NOFILE, NULL, &now);
+        check(ar == 0 && same.cur == rl2.cur && now.cur == rl2.cur - 1,
+              "prlimit64 with one buffer for new and old: the new limit is set, the old one returned");
+        syscall(SYS_prlimit64, 0, RLIMIT_NOFILE, &rl2, NULL);
+    }
+
+    // stack: field 28 of /proc/self/stat inside the maps entry holding a local
+    int local = 0;
+    unsigned long long startstack = 0;
+    char buf[8192];
+    FILE *f = fopen("/proc/self/stat", "r");
+    if (f && fgets(buf, sizeof buf, f)) {
+        char *q = strrchr(buf, ')');
+        int field = 2;
+        for (; q && *q; q++)
+            if (*q == ' ' && ++field == 28) {
+                startstack = strtoull(q + 1, NULL, 10);
+                break;
+            }
+    }
+    if (f) fclose(f);
+    int found = 0;
+    f = fopen("/proc/self/maps", "r");
+    while (f && startstack && fgets(buf, sizeof buf, f)) {
+        unsigned long long lo, hi;
+        if (sscanf(buf, "%llx-%llx", &lo, &hi) == 2 && lo <= startstack && startstack <= hi) {
+            found = (uintptr_t)&local >= lo && (uintptr_t)&local < hi;
+            break;
+        }
+    }
+    if (f) fclose(f);
+    check(found, "/proc/self/stat startstack is in the maps entry of the main thread's stack");
+
+    // dgram
+    int sv[2];
+    static char big[60 * 1024], back[60 * 1024];
+    memset(big, 0x5c, sizeof big);
+    int dg = socketpair(AF_UNIX, SOCK_DGRAM, 0, sv) == 0;
+    check(dg && send(sv[0], big, 4068, 0) == 4068 && recv(sv[1], back, sizeof back, 0) == 4068,
+          "AF_UNIX datagram of 4068 bytes (liblog's largest record)");
+    check(dg && send(sv[0], big, sizeof big, 0) == (ssize_t)sizeof big &&
+          recv(sv[1], back, sizeof back, 0) == (ssize_t)sizeof big && back[sizeof big - 1] == 0x5c,
+          "AF_UNIX datagram of 60 KiB");
 
     printf(bad ? "== android bionic runtime: FAIL (%d)\n" : "== android bionic runtime: ok\n", bad);
     return bad ? 1 : 0;

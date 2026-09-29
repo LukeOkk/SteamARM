@@ -14,9 +14,10 @@
 #                with bsdtar. No rpm, no dnf. 65 MB unpacked.
 #   2. toolchain Homebrew clang + lld cross-compile for aarch64-redhat-linux-gnu
 #                against that sysroot: scripts/toolchain-aarch64-linux-fedora.cmake
-#   3. FEX       upstream at the pinned commit, patches/fex-lxrt-x18.patch,
-#                fex-lxrt-guest-base.patch, fex-lxrt-wx.patch,
-#                fex-lxrt-arch-prctl.patch (that order) and patches/LxrtJit.h;
+#   3. FEX       upstream at the pinned commit, the patches/ files in the
+#                PATCHES list below (that order; the newest,
+#                fex-lxrt-lowwin-hint.patch, is for x86-64 Android's ART) and
+#                patches/LxrtJit.h;
 #                CMake + Ninja; targets FEX, FEXServer,
 #                FEXGetConfig; Release (the VM's Build/) and RelWithDebInfo
 #                (the VM's Build-dbg/), both with -ffixed-x18 as on the VM.
@@ -76,7 +77,7 @@ FEX_COMMIT=08f451d3bce62a68aa6307dced5a8eaeb85c39bc      # FEX-2609-113-g08f451d
 # tracy, jemalloc_glibc): the posixtest/gvisor/gcc test-bin repos are skipped.
 FEX_SUBMODULES=(External/fmt External/range-v3 External/rpmalloc External/drm-headers
                 External/xxhash External/unordered_dense Source/Common/cpp-optparse)
-PATCHES=(fex-lxrt-x18.patch fex-lxrt-guest-base.patch fex-lxrt-wx.patch fex-lxrt-hide-hypervisor.patch fex-lxrt-shebang.patch fex-lxrt-guest-reserve.patch fex-lxrt-thunk-args.patch fex-lxrt-arch-prctl.patch)
+PATCHES=(fex-lxrt-x18.patch fex-lxrt-guest-base.patch fex-lxrt-wx.patch fex-lxrt-hide-hypervisor.patch fex-lxrt-shebang.patch fex-lxrt-guest-reserve.patch fex-lxrt-thunk-args.patch fex-lxrt-arch-prctl.patch fex-lxrt-lowwin-hint.patch fex-lxrt-smc-mprotect-mirrors.patch fex-lxrt-interrupt-page.patch)
 TARGETS=(FEX FEXServer FEXGetConfig)
 EMU_PREFIX=/usr/lib/lxrt-emu
 
