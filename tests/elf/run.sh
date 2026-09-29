@@ -1003,6 +1003,40 @@ else
     echo "  skip  JIT_RWX_NATIVE (no $STAGE)"
 fi
 
+# WX_ONE_OWNER: one owner and one scan for every split host page, and fault
+# handling a guest signal handler cannot deadlock (tests/elf/wx_owner.c; the
+# stage 23 review's sequences). A mixed page (W^X table + a 4 KiB RWX page
+# only subpage.c knew), a 4 KiB guard over written code, RW -> RX sealed
+# 4 KiB at a time, generated code beside a store the runtime performs, and a
+# tgkill'd handler running split-page code: every svc must come back
+# rewritten (Linux getppid, not a live Darwin getpid), at 16 and 4 KiB pages.
+# LXRT_NO_RESCAN=1 is the control: the same svcs run live. SIGSEGV/SIGBUS
+# ignored: the runtime's own flips still happen, a sent SIGSEGV is ignored, a
+# real fault kills (Linux force_sig). No SIGBUS action: a misaligned
+# store-release into a W^X page and a misaligned CASAL into a split page are
+# reported (lxrun's SIGBUS, 138), not retried forever (142).
+if [ -f "$STAGE/usr/lib64/libc.a" ] && [ -n "$GCCDIR" ]; then
+    if err=$(glibc_cc -static-pie -O2 -pthread -o build/wx_owner tests/elf/wx_owner.c); then
+        out16=$(deadline 60 ./build/lxrun "$PWD/build/wx_owner" 2>&1); rc16=$?
+        out4=$(LXRT_GUEST_PAGE=4096 deadline 60 ./build/lxrun "$PWD/build/wx_owner" 2>&1); rc4=$?
+        control=$(LXRT_NO_RESCAN=1 deadline 60 ./build/lxrun "$PWD/build/wx_owner" 2>&1); crc=$?
+        n_live=$(grep -c 'MAL .*LIVE Darwin getpid' <<<"$control")
+        ign=$(deadline 20 ./build/lxrun "$PWD/build/wx_owner" sigign 2>&1); irc=$?
+        stlr=$(deadline 10 ./build/lxrun "$PWD/build/wx_owner" misaligned stlr 2>&1); src=$?
+        casal=$(deadline 10 ./build/lxrun "$PWD/build/wx_owner" misaligned casal 2>&1); arc=$?
+        if [ "$rc16" -eq 0 ] && [ "$rc4" -eq 0 ] &&
+           grep -q '== wx_owner: ok' <<<"$out16" && grep -q '== wx_owner: ok' <<<"$out4" &&
+           [ "$crc" -ne 0 ] && [ "$n_live" -ge 5 ] &&
+           [ "$irc" -eq 0 ] && grep -q '== wx_owner sigign: ok' <<<"$ign" &&
+           [ "$src" -eq 138 ] && grep -q 'SIGBUS at pc' <<<"$stlr" &&
+           [ "$arc" -eq 138 ] && grep -q 'SIGBUS at pc' <<<"$casal"; then
+            ok "WX_ONE_OWNER: $(grep -o '[0-9]* ok, 0 mal' <<<"$out16") at 16 and 4 KiB pages (control: $n_live live svcs), SIG_IGN flips + force_sig, misaligned stlr/casal reported"
+        else bad "WX_ONE_OWNER" "rc=$rc16/$rc4 control=$crc live=$n_live sigign=$irc stlr=$src casal=$arc (142: retried forever) $(grep -E 'MAL|SIG' <<<"$out16" | head -3; grep -E 'MAL|SIG' <<<"$out4" | head -3; grep -E 'MAL' <<<"$ign" | head -2)"; fi
+    else bad "build wx_owner" "$err"; fi
+else
+    echo "  skip  WX_ONE_OWNER (no $STAGE)"
+fi
+
 echo
 summary="== $PASS passed, $FAIL failed"
 [ "$XFAIL" -eq 0 ] || summary="$summary ($XFAIL expected failures)"
