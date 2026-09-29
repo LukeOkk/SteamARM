@@ -107,6 +107,56 @@ struct ApplicationCoreTests {
         check(SessionFiles.arch("aarch64 none")?.architecture == .aarch64 && SessionFiles.arch("aarch64 none")?.translator == "none", "running.arch aarch64")
         check(SessionFiles.arch("") == nil, "empty running.arch")
 
+        // What run-app.sh did: its last "session=" line, never the app's name.
+        check(SessionFiles.launchKind("Steam (x86_64, translator: FEX) starting on :2 (log l).\nsession=started\n") == .started, "started")
+        check(SessionFiles.launchKind("Steam is already running.\nsession=reshown\n") == .reshown,
+              "the x86 Steam of run-app.sh shown again is not an adoption")
+        check(SessionFiles.launchKind("Steam is already running.\nsession=adopted") == .adopted, "run-steam.sh Steam adopted")
+        check(SessionFiles.launchKind("Heroic Steam is already running.\nsession=reshown") == .reshown, "a name ending in Steam")
+        check(SessionFiles.launchKind("Steam is already running.") == nil, "no marker: nothing guessed from the text")
+        check(SessionFiles.launchKind("session=adopted is already running.\nsession=started") == .started, "only a whole line counts")
+        check(SessionFiles.launchKind("session=bogus") == nil, "unknown kind")
+
+        // When a session is over: its own leader, status and group decide.
+        typealias Probe = SessionLiveness.Probe
+        let orphansOnly = Probe(leaderAlive: false, statusWritten: true, groupAlive: false, anyGuest: true)
+        check(!SessionLiveness.alive(orphansOnly, wrapped: true),
+              "wrapper gone after the status: over, whatever guests (orphaned zygotes) remain")
+        check(SessionLiveness.alive(Probe(leaderAlive: true, statusWritten: true, groupAlive: false, anyGuest: false), wrapped: true),
+              "wrapper still clearing its group: running")
+        check(SessionLiveness.alive(Probe(leaderAlive: false, statusWritten: false, groupAlive: true, anyGuest: true), wrapped: true),
+              "wrapper killed, program's group alive: running")
+        check(!SessionLiveness.alive(Probe(leaderAlive: false, statusWritten: false, groupAlive: false, anyGuest: true), wrapped: true),
+              "wrapper killed, group empty: over")
+        check(SessionLiveness.alive(orphansOnly, wrapped: false), "adopted Steam without a wrapper: any guest keeps it")
+        check(!SessionLiveness.alive(Probe(leaderAlive: false, statusWritten: false, groupAlive: false, anyGuest: false), wrapped: false),
+              "adopted Steam: no guest left")
+        check(SessionLiveness.isLeader(command: "/usr/bin/python3 scripts/session.py run /x/launcher scripts/run-native.sh", wrapped: true),
+              "the wrapper leads")
+        check(!SessionLiveness.isLeader(command: "/Applications/Other.app/Contents/MacOS/Other", wrapped: true),
+              "a reused PID is not the session")
+        check(SessionLiveness.isLeader(command: "/x/build/lxrun /tmp/fexhome/.local/share/Steam/ubuntu12_32/steam -x", wrapped: false),
+              "an adopted Steam's runtime process")
+        check(SessionLiveness.isLeader(command: nil, wrapped: true), "unreadable command: not taken for a reused PID")
+
+        // A root that is not there: never made, or a link into a volume that is not attached.
+        let fm = FileManager.default
+        let absent = dir.appendingPathComponent("absent-root").path
+        check(RootPresence.of(absent) == .missing, "no root at all")
+        check(RootPresence.of(dir.path) == .present, "a directory")
+        let volume = "SteamARM-test-volume-\(getpid())"
+        let intoVolume = dir.appendingPathComponent("arm64root").path
+        try fm.createSymbolicLink(atPath: intoVolume, withDestinationPath: "/Volumes/\(volume)/arm64root")
+        check(RootPresence.of(intoVolume) == .volumeNotAttached(volume: volume, target: "/Volumes/\(volume)/arm64root"),
+              "link into a volume that is not attached: \(RootPresence.of(intoVolume))")
+        let dangling = dir.appendingPathComponent("armroot").path
+        try fm.createSymbolicLink(atPath: dangling, withDestinationPath: "gone/armroot")
+        check(RootPresence.of(dangling) == .danglingLink(target: dir.appendingPathComponent("gone/armroot").path),
+              "relative link to nothing: \(RootPresence.of(dangling))")
+        let live = dir.appendingPathComponent("liveroot").path
+        try fm.createSymbolicLink(atPath: live, withDestinationPath: dir.path)
+        check(RootPresence.of(live) == .present, "a link that resolves")
+
         // Per-app stats (library.json): optional fields, partial files decode.
         let partial = try JSONDecoder().decode([String: AppStats].self, from: Data(#"{"steam":{"favorite":true},"x":{}}"#.utf8))
         check(partial["steam"]?.favorite == true && partial["steam"]?.launchCount == nil && partial["x"] == AppStats(), "partial library.json")
@@ -220,8 +270,18 @@ struct ApplicationCoreTests {
         check(d.effectiveGraphics(.auto) == .vulkanMoltenVK && d.effectiveGraphics(.vulkanKosmicKrisp) == .vulkanKosmicKrisp, "AUTO stays on MoltenVK")
         probe.kosmickrisp?.osOK = false
         check(RuntimeCapabilities.detect(from: probe).graphics[.vulkanKosmicKrisp]?.state == .unavailable, "KosmicKrisp needs macOS 26")
+        probe.kosmickrisp = .init(foundElsewhere: "/opt/mesa-src/lib/libvulkan_kosmickrisp.dylib")
+        let elsewhere = RuntimeCapabilities.detect(from: probe).graphics[.vulkanKosmicKrisp]
+        check(elsewhere?.state == .unavailable && elsewhere?.reason.contains("/opt/mesa-src/lib") == true
+              && elsewhere?.reason.contains("/opt/homebrew/lib") == true, "KosmicKrisp the shim does not load: says where it is")
+        let kkJSON = #"{"icd_json":"","library":"","version":"","os_ok":true,"exports_icd":false,"found_elsewhere":"/e/k.dylib"}"#
+        check(try JSONDecoder().decode(RuntimeProbe.KosmicKrisp.self, from: Data(kkJSON.utf8)).foundElsewhere == "/e/k.dylib",
+              "found_elsewhere decodes")
         probe.kosmickrisp = nil
         check(RuntimeCapabilities.detect(from: probe).graphics[.vulkanKosmicKrisp]?.reason.contains("no está instalado") == true, "no KosmicKrisp")
+        let undetected = RuntimeCapabilities.undetected
+        check(undetected.graphics[.vulkanKosmicKrisp]?.usable == false
+              && undetected.graphics[.vulkanKosmicKrisp]?.reason.contains("compat-status.py") == true, "no answer: says so")
         probe.protons = [.init(name: "Proton - Experimental", fsync: true, ntsync: true)]
         probe.moltenvk = .init(path: "", version: "no instalado")
         probe.presentation = .init(nativeX: false, xvnc: true, screenSharing: false)
@@ -243,6 +303,11 @@ struct ApplicationCoreTests {
         check(FallbackPolicy.auto.decision(for: bad) == .proceed && FallbackPolicy.strict.decision(for: bad) == .refuse
               && FallbackPolicy.ask.decision(for: bad) == .ask, "policy decisions")
         check(FallbackPolicy.strict.decision(for: []) == .proceed, "no issue: every policy launches")
+        // Every announced fallback reaches run-app.sh (settings-env.py fallback_overrides).
+        check(FallbackPolicy.environment(for: bad) == ["STEAMARM_SYNCHRONIZATION": "wineserver",
+                                                        "STEAMARM_GRAPHICS_BACKEND": "vulkanMoltenVK"], "fallbacks as variables")
+        check(FallbackPolicy.environment(for: vncArm) == ["STEAMARM_DISPLAY": "native"], "display fallback")
+        check(FallbackPolicy.environment(for: []).isEmpty, "nothing to hand over")
 
         // settings.json from before the selectors keeps what it ran.
         check(SettingsMigration.synchronization(stored: nil, esync: true, fsync: true) == "esync", "esync+fsync -> esync")

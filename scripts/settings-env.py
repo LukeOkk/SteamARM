@@ -59,6 +59,20 @@ def with_overrides(s, overrides):
     return merged
 
 
+# Set by the launcher (FallbackPolicy.environment, launcher/ApplicationCore.swift)
+# when its fallback policy lets a launch go ahead without a setting that cannot
+# work on this Mac; run-app.sh puts them over the settings, so the fallback the
+# launcher announced is the one that runs. (The display's, STEAMARM_DISPLAY,
+# run-app.sh reads itself.)
+FALLBACK_VARIABLES = {"STEAMARM_SYNCHRONIZATION": "synchronization",
+                      "STEAMARM_GRAPHICS_BACKEND": "graphicsBackend"}
+
+
+def fallback_overrides(environ):
+    """The launcher's fallbacks in `environ`, as overrides for with_overrides()."""
+    return {key: environ[name] for name, key in FALLBACK_VARIABLES.items() if environ.get(name)}
+
+
 def total_ram_gb():
     try:
         out = subprocess.run(["/usr/sbin/sysctl", "-n", "hw.memsize"],

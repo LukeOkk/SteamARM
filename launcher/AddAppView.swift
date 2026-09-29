@@ -153,7 +153,7 @@ struct AddAppView: View {
             LabeledContent("Arquitectura", value: architectureDescription)
             LabeledContent("Se instalará en", value: targetEnvironment.map { "\($0.name)  ·  opt/apps" } ?? "No disponible")
             if stagedELF?.architecture == .aarch64 {
-                Text("La raíz ARM64 se borra al reconstruirla con scripts/mkarmroot.sh: las apps instaladas en ella se pierden.")
+                Text("Reconstruir la raíz ARM64 con scripts/mkarmroot.sh conserva sus apps: se queda con opt/apps y tmp/ de la raíz anterior.")
                     .font(.caption).foregroundStyle(.secondary)
                 if !FileManager.default.fileExists(atPath: Paths.armRoot.path) {
                     Text("No hay raíz ARM64 instalada (scripts/mkarmroot.sh).")

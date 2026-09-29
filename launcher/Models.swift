@@ -325,6 +325,24 @@ enum Shell {
         pid > 0 && (kill(pid, 0) == 0 || errno == EPERM)
     }
 
+    /// Whether process group `pgid` still has a process in it.
+    static func groupAlive(_ pgid: Int32) -> Bool {
+        pgid > 1 && (killpg(pgid, 0) == 0 || errno == EPERM)
+    }
+
+    /// A PID file (running.pid, running.pgid): one number.
+    static func readPID(_ url: URL) -> Int32? {
+        (try? String(contentsOf: url, encoding: .utf8))
+            .flatMap { Int32($0.trimmingCharacters(in: .whitespacesAndNewlines)) }
+    }
+
+    /// The command line of `pid`; nil when ps cannot tell.
+    static func command(of pid: Int32) -> String? {
+        let r = runSync("/bin/ps", ["-o", "command=", "-p", String(pid)])
+        let text = r.output.trimmingCharacters(in: .whitespacesAndNewlines)
+        return r.status == 0 && !text.isEmpty ? text : nil
+    }
+
     /// PIDs of runtime processes that are guest programs (not Xvnc/FEXServer).
     static func guestProcesses() -> [(pid: Int32, command: String)] {
         let r = runSync("/bin/ps", ["-axo", "pid=,command="])

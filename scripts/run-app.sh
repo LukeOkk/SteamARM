@@ -10,8 +10,14 @@
 #                                          scripts/builtin-apps.json defines "steam"
 #                                          (x86), "steam-arm64" and "steam-arm64-frame" (experimental)
 #   scripts/run-app.sh --stop              stop the guest processes (X keeps running)
+#   scripts/run-app.sh --reap [SID]        stop what a finished session left behind
+#                                          (default: the session in running.pgid)
 #   scripts/run-app.sh --dry-run <app-id>  print what would run; start nothing
 #   scripts/run-app.sh --help
+#
+# On success the last line says what happened: "session=started", or
+# "session=reshown" (the app was already running), or "session=adopted" (a
+# Steam that scripts/run-steam.sh started: no session wrapper).
 #
 # Display ("display" in settings, or STEAMARM_DISPLAY which overrides it):
 #   native (default)  the native rootless X server (scripts/run-x11-native.sh,
@@ -26,6 +32,18 @@
 # running.arch, the group to running.pgid), the program's exit status to
 # running.status when it ends, and its output to $STATE/logs/<id>-<time>.log.
 # --stop signals that group first; leftover guest processes are killed after.
+# The wrapper also leads a session of its own. A helper the program puts in
+# a process group of its own leaves the group but not the session, and can
+# outlive the program with parent 1: the native client's webhelper zygotes
+# do (MEASURED, benchmarks/stage23-frame-root.txt C2 and F7; that they keep
+# the session is the POSIX rule, not measured on them). Once the wrapper has
+# exited, the guest programs still in its session get SIGTERM, then SIGKILL
+# 2 s later (--reap; a watcher started with the session runs it, and so does
+# the launcher). Nothing outside that session is touched; a program that
+# starts a session of its own (setsid) is not in it, and only --stop stops it.
+# STEAMARM_GRAPHICS_BACKEND and STEAMARM_SYNCHRONIZATION, set by the launcher
+# when its fallback policy launches without a setting that cannot work here,
+# go over the settings (scripts/settings-env.py fallback_overrides).
 set -u
 cd "$(dirname "$0")/.." || exit 1
 ROOT=/tmp/lxrt-steamroot
@@ -41,7 +59,7 @@ STATUSFILE="$LDIR/running.status"   # read and removed by the launcher, not here
 X11_BUNDLE_ID=org.steamarm.X11
 STEAM_PATTERN='build/lxrun .*ubuntu12_32/steam '
 
-usage() { sed -n '2,27p' "$0" | sed 's/^# \{0,1\}//'; }
+usage() { awk 'NR > 1 { if ($0 !~ /^#/) exit; print }' "$0" | sed 's/^# \{0,1\}//'; }
 
 # Runtime processes that are guest programs: everything but Xvnc and FEXServer.
 # (The pattern must name build/lxrun: a bare word would match this shell. The
@@ -61,6 +79,50 @@ stop_guests() {
     /usr/bin/python3 scripts/session.py stop "$LDIR" 3
     for p in $(guest_pids); do kill -9 "$p" 2>/dev/null; done
     rm -f "$ROOT/tmp/fexhome/.steam/steam.pid" "$PIDFILE" "$IDFILE" "$MODEFILE" "$ARCHFILE" "$PGIDFILE"
+}
+
+# Guest programs (as guest_pids) in session $1: the session a launcher
+# session's wrapper (scripts/session.py run) leads, so it is also the
+# wrapper's PID and running.pgid.
+session_guests() {
+    local pids
+    pids="$(guest_pids)"
+    [ -n "$pids" ] || return 0
+    # shellcheck disable=SC2086
+    /usr/bin/python3 -c '
+import os, sys
+sid = int(sys.argv[1])
+for pid in sys.argv[2:]:
+    try:
+        if os.getsid(int(pid)) == sid:
+            print(pid)
+    except OSError:
+        pass
+' "$1" $pids
+}
+
+# What session $1 left behind once its wrapper is gone: SIGTERM, then SIGKILL
+# for what is still there after 2 s (scripts/session.py's KILL_AFTER). Does
+# nothing while a process with that PID lives: the session is still running,
+# or the number is another process's now.
+reap_session() {
+    local sid="$1" left
+    case "$sid" in ''|*[!0-9]*) return 0 ;; esac
+    [ "$sid" -gt 1 ] || return 0
+    kill -0 "$sid" 2>/dev/null && return 0
+    left="$(session_guests "$sid")"
+    [ -n "$left" ] || return 0
+    echo "run-app: stopping what session $sid left behind: $(echo $left)"
+    # shellcheck disable=SC2086
+    kill -TERM $left 2>/dev/null
+    for _ in 1 2 3 4 5 6 7 8 9 10; do
+        sleep 0.2
+        left="$(session_guests "$sid")"
+        [ -n "$left" ] || return 0
+    done
+    # shellcheck disable=SC2086
+    kill -KILL $left 2>/dev/null
+    return 0
 }
 
 # Prints shell assignments (APP_NAME, APP_ARCH, APP_ROOT, APP_IN_X86_ROOT, APP_FEXROOTFS, GEOMETRY, DMODE
@@ -122,6 +184,8 @@ spec = importlib.util.spec_from_file_location(
 senv = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(senv)
 settings = senv.with_overrides(settings, app.get("overrides"))
+# The launcher's fallbacks for this launch go over the app's own choices.
+settings = senv.with_overrides(settings, senv.fallback_overrides(os.environ))
 # Steam's Linux fossilize replay stalls here while processing Schedule I.
 # This flag affects Valve's pre-cache only; DXVK/VKD3D and Metal cache remain.
 env = {"STEAM_ENABLE_SHADER_CACHE_MANAGEMENT":
@@ -161,7 +225,8 @@ if mode not in ("native", "vnc"):
     mode = "native"
 
 q = shlex.quote
-print("APP_NAME=%s" % q(str(app.get("name") or app_id)))
+# One line: the launcher reads this script's last line ("session=...").
+print("APP_NAME=%s" % q(re.sub(r"[\x00-\x1f\x7f]+", " ", str(app.get("name") or app_id))))
 print("APP_ARCH=%s" % q(arch))
 ARM64_ROOT, X86_ROOT = "/tmp/lxrt-arm64root", "/tmp/lxrt-steamroot"
 root = str(app.get("root") or (ARM64_ROOT if arch == "aarch64" else X86_ROOT))
@@ -261,6 +326,13 @@ DRY=0
 case "${1:-}" in
     ""|-h|--help) usage; [ -n "${1:-}" ]; exit $? ;;
     --stop) stop_guests; exit 0 ;;
+    --reap) reap_session "${2:-$(cat "$PGIDFILE" 2>/dev/null)}"; exit 0 ;;
+    --reap-after)
+        # The watcher each session gets (below): once the wrapper $2 has
+        # exited, what its session left behind.
+        case "${2:-}" in ''|*[!0-9]*) usage >&2; exit 2 ;; esac
+        while kill -0 "$2" 2>/dev/null; do sleep 1; done
+        reap_session "$2"; exit 0 ;;
     --dry-run) DRY=1; shift ;;
 esac
 [ $# -ge 1 ] || { usage >&2; exit 2; }
@@ -269,6 +341,8 @@ mkdir -p "$LOGS" "$LDIR"
 
 SPEC="$(resolve_app "$ID")" || exit 2
 eval "$SPEC"
+# Applied to the settings above; not for the program's environment.
+unset STEAMARM_GRAPHICS_BACKEND STEAMARM_SYNCHRONIZATION
 if [ "$APP_ARCH" = aarch64 ]; then
     RUNNER=scripts/run-native.sh; TRANSLATOR=none
 else
@@ -311,6 +385,9 @@ if [ "$DRY" = 1 ]; then
     exit 0
 fi
 
+# What a finished session left behind (its watcher normally got there first).
+reap_session "$(cat "$PGIDFILE" 2>/dev/null)"
+
 # One app at a time. Re-show the display when this app is already running (on
 # the display it was started on, whatever the setting says now).
 if [ -n "$(guest_pids)" ]; then
@@ -320,6 +397,7 @@ if [ -n "$(guest_pids)" ]; then
     if [ "$rid" = "$ID" ] && [ -n "$rpid" ] && kill -0 "$rpid" 2>/dev/null; then
         show_display "${rmode:-$MODE}"
         echo "$APP_NAME is already running."
+        echo "session=reshown"
         exit 0
     fi
     if [ "$ID" = steam ] && spid="$(pgrep -f "$STEAM_PATTERN" | head -1)" && [ -n "$spid" ]; then
@@ -329,13 +407,15 @@ if [ -n "$(guest_pids)" ]; then
             *" DISPLAY=:2"*) rmode=native ;;
             *) rmode="$MODE" ;;
         esac
-        # No wrapper: a status or group from an earlier session is not this one's.
-        rm -f "$STATUSFILE" "$PGIDFILE"
+        # No wrapper: a status, group or architecture from an earlier
+        # session is not this one's.
+        rm -f "$STATUSFILE" "$PGIDFILE" "$ARCHFILE"
         echo "$spid" > "$PIDFILE"
         echo steam > "$IDFILE"
         echo "$rmode" > "$MODEFILE"
         show_display "$rmode"
         echo "Steam is already running."
+        echo "session=adopted"
         exit 0
     fi
     echo "Another Linux program is running (scripts/run-app.sh --stop stops it)." >&2
@@ -363,18 +443,26 @@ rm -f "$STATUSFILE" "$PGIDFILE"
 # It lives while the program does, plus up to 8 s while it clears what the
 # program left in its group (scripts/session.py). The runner execs build/lxrun
 # under it. PYTHONCOERCECLOCALE: see session.py (no Python locale for guests).
+# The log is opened for appending: the session's watcher writes to it too.
 SESSION=(env PYTHONCOERCECLOCALE=0 STEAMARM_SESSION_PY=1 /usr/bin/python3 scripts/session.py run "$LDIR" "$RUNNER")
 if [ "$APP_ARCH" = aarch64 ]; then
     env ${APP_ENV[@]+"${APP_ENV[@]}"} DISPLAY=$DISP LXRT_ROOT="$APP_ROOT" \
-        nohup "${SESSION[@]}" "${APP_CMD[@]}" > "$L" 2>&1 < /dev/null &
+        nohup "${SESSION[@]}" "${APP_CMD[@]}" >> "$L" 2>&1 < /dev/null &
 else
     env ${APP_ENV[@]+"${APP_ENV[@]}"} DISPLAY=$DISP LXRT_ROOT="$APP_ROOT" FEX_ROOTFS="$APP_FEXROOTFS" \
-        nohup "${SESSION[@]}" "${APP_CMD[@]}" > "$L" 2>&1 < /dev/null &
+        nohup "${SESSION[@]}" "${APP_CMD[@]}" >> "$L" 2>&1 < /dev/null &
 fi
-echo $! > "$PIDFILE"
+LEADER=$!
+echo "$LEADER" > "$PIDFILE"
 echo "$ID" > "$IDFILE"
 echo "$MODE" > "$MODEFILE"
 echo "$APP_ARCH $TRANSLATOR" > "$ARCHFILE"
+# The session's watcher: whoever else is watching (the launcher may be
+# closed), what the session leaves behind is stopped once its wrapper exits.
+# The wrapper is a background job of this non-interactive shell, never a group
+# leader, so its setsid succeeds and the session's ID is its PID
+# (scripts/session.py own_group).
+nohup /bin/bash scripts/run-app.sh --reap-after "$LEADER" >> "$L" 2>&1 < /dev/null &
 echo "$APP_NAME ($APP_ARCH, translator: $TRANSLATOR) starting on $DISP (log $L)."
 
 if [ "$MODE" = vnc ]; then
@@ -383,3 +471,4 @@ if [ "$MODE" = vnc ]; then
 else
     echo "Its windows open as native macOS windows."
 fi
+echo "session=started"

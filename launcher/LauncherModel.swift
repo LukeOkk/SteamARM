@@ -25,6 +25,11 @@ final class LauncherModel: ObservableObject {
     /// What this Mac can run: the static table until scripts/compat-status.py answers.
     @Published private(set) var capabilities = RuntimeCapabilities.current
     @Published private(set) var compatibility: CompatibilityStatus?
+    /// scripts/compat-status.py has not answered yet: a launch waits for it.
+    private var detection: Task<Void, Never>?
+    private var detectionRun = 0
+    /// A launch is waiting for that answer.
+    private var launchQueued = false
     /// One session at a time; its lock is taken before run-app.sh starts anything.
     @Published private(set) var session = SessionMachine()
     @Published private(set) var running: AppEntry?
@@ -77,12 +82,21 @@ final class LauncherModel: ObservableObject {
     }
 
     /// Re-reads what is installed (scripts/compat-status.py, in a subprocess).
+    /// Launches wait for the answer: the fallback policy is decided on what
+    /// this Mac has, never on the static table (whose KosmicKrisp, say, is
+    /// "not detected yet").
     func refreshCapabilities() {
         let project = projectDir
-        Task {
-            guard let c = await CompatibilityStatus.load(project: project) else { return }
-            self.compatibility = c
-            self.capabilities = RuntimeCapabilities.detect(from: c.runtime)
+        detectionRun += 1
+        let run = detectionRun
+        detection = Task {
+            if let c = await CompatibilityStatus.load(project: project) {
+                self.compatibility = c
+                self.capabilities = RuntimeCapabilities.detect(from: c.runtime)
+            } else if self.compatibility == nil {
+                self.capabilities = .undetected
+            }
+            if self.detectionRun == run { self.detection = nil }
         }
     }
 
@@ -256,7 +270,29 @@ final class LauncherModel: ObservableObject {
         guard !app.isWindows, !Paths.isX86Root(app.root) else { return nil }
         let host = Paths.hostRoot(forGuestRoot: app.root)
         let shown = (host.path as NSString).abbreviatingWithTildeInPath
-        guard FileManager.default.fileExists(atPath: host.path) else {
+        let created: String
+        switch app.root {
+        case LinuxBaseEnvironment.armroot.guestRoot:
+            created = "la raíz ARM64 se crea con scripts/mkarmroot.sh"
+        case LinuxBaseEnvironment.arm64.guestRoot:
+            created = "la raíz de Steam Frame se crea con scripts/mkframeroot.sh "
+                + "a partir de la imagen de recuperación (docs/STEAM_FRAME_IMAGE.md)"
+        default:
+            created = ""
+        }
+        switch RootPresence.of(host.path) {
+        case .present:
+            break
+        case .volumeNotAttached(let volume, let target):
+            // The root exists on that volume: attaching it is all it takes.
+            let bundle = Paths.state.appendingPathComponent("steamframe-root.sparsebundle")
+            let how = volume == "SteamFrameRoot" && FileManager.default.fileExists(atPath: bundle.path)
+                ? "conéctalo con hdiutil attach \((bundle.path as NSString).abbreviatingWithTildeInPath)"
+                : "conéctalo" + (app.root == LinuxBaseEnvironment.arm64.guestRoot ? " (docs/STEAM_FRAME_IMAGE.md)" : "")
+            return "el volumen «\(volume)» no está conectado (\(shown) apunta a \(target)); \(how)"
+        case .danglingLink(let target):
+            return "\(shown) apunta a \(target), que no existe" + (created.isEmpty ? "" : "; \(created)")
+        case .missing:
             if app.root == LinuxBaseEnvironment.armroot.guestRoot {
                 return "falta la raíz ARM64 (\(shown)); se crea con scripts/mkarmroot.sh"
             }
@@ -330,8 +366,27 @@ final class LauncherModel: ObservableObject {
                                    synchronization: sync, graphics: gfx, appInX86Root: Paths.isX86Root(app.root))
     }
 
-    func launch(_ app: AppEntry) {
-        guard session.canLaunch else { return }
+    func launch(_ app: AppEntry) { launch(app, waitedForDetection: false) }
+
+    private func launch(_ app: AppEntry, waitedForDetection: Bool) {
+        guard session.canLaunch, !launchQueued else { return }
+        // The fallback policy below is decided on what this Mac has: wait for
+        // scripts/compat-status.py (a launchSteamOnStart launch always comes
+        // before it has answered), 10 s at most.
+        if detection != nil && !waitedForDetection {
+            launchQueued = true
+            Task {
+                var tenths = 0
+                while self.detection != nil && tenths < 100 {
+                    try? await Task.sleep(nanoseconds: 100_000_000)
+                    tenths += 1
+                }
+                if self.detection != nil && self.compatibility == nil { self.capabilities = .undetected }
+                self.launchQueued = false
+                self.launch(app, waitedForDetection: true)
+            }
+            return
+        }
         guard FileManager.default.isExecutableFile(atPath: runAppScript.path)
                 || FileManager.default.fileExists(atPath: runAppScript.path) else {
             alert = "No se encuentra \(runAppScript.path). Revisa el directorio del proyecto en Ajustes."
@@ -353,12 +408,11 @@ final class LauncherModel: ObservableObject {
         case .ask:
             guard confirmFallback(app, issues) else { return }
         }
-        var env: [String: String] = [:]
+        // Every fallback goes to run-app.sh, which puts it over the settings:
+        // what the policy announced is what runs.
+        let env = FallbackPolicy.environment(for: issues)
         var mode = requestedDisplay(app)
-        if issues.contains(where: { $0.setting == "display" }) {
-            mode = .native
-            env["STEAMARM_DISPLAY"] = DisplayMode.native.rawValue   // run-app.sh honours it
-        }
+        if let display = env["STEAMARM_DISPLAY"], let fallback = DisplayMode(rawValue: display) { mode = fallback }
         // The lock, before any process exists.
         do { try session.begin(app.id) } catch { return }
         runningDisplay = mode
@@ -392,14 +446,21 @@ final class LauncherModel: ObservableObject {
             }
             // run-app.sh re-shows a running app on the display it started on,
             // and adopts a Steam started by run-steam.sh: neither is a launch.
-            let reshown = r.output.contains(" is already running.")
-            if r.output.contains("Steam is already running.") { self.adoptedWithoutWrapper = true }
+            // Its last line says which ("session=..."), whatever the app is called.
+            let kind = SessionFiles.launchKind(r.output) ?? .started
+            let reshown = kind != .started
+            // Shown again, the running app keeps what it had: a session
+            // wrapper (running.pgid) or none (a Steam adopted earlier).
+            self.adoptedWithoutWrapper = kind == .adopted
+                || (kind == .reshown && !FileManager.default.fileExists(atPath: Paths.pgidFile.path))
             self.runtimeUnknown = reshown
             if let m = Self.recordedDisplay() { self.runningDisplay = m }
             self.openedScreenSharing = self.runningDisplay == .vnc
             self.logPath = (try? String(contentsOf: Paths.logs.appendingPathComponent("current"),
                                         encoding: .utf8))?.trimmingCharacters(in: .whitespacesAndNewlines)
-            self.runningArch = Self.recordedArch()
+            // An adopted Steam has no record of how it runs (run-app.sh
+            // removes running.arch there): the entry says it, marked as such.
+            self.runningArch = kind == .adopted ? nil : Self.recordedArch()
             let wasStopping = self.session.phase == .stopping
             if self.session.phase == .starting { try? self.session.started() }
             if !reshown, let at = self.session.startedAt {
@@ -509,19 +570,22 @@ final class LauncherModel: ObservableObject {
     private func adoptRunningApp() {
         let id: String
         var start: Date?
-        if let s = try? String(contentsOf: Paths.pidFile, encoding: .utf8),
-           let pid = Int32(s.trimmingCharacters(in: .whitespacesAndNewlines)), Shell.isAlive(pid) {
+        // session.py writes running.pgid, which an adopted run-steam.sh lacks.
+        let wrapped = FileManager.default.fileExists(atPath: Paths.pgidFile.path)
+        if let pid = Shell.readPID(Paths.pidFile), Shell.isAlive(pid),
+           SessionLiveness.isLeader(command: Shell.command(of: pid), wrapped: wrapped) {
             id = ((try? String(contentsOf: Paths.idFile, encoding: .utf8)) ?? "steam")
                 .trimmingCharacters(in: .whitespacesAndNewlines)
-            // run-app.sh wrote running.pid when it started the session;
-            // session.py writes running.pgid, which an adopted run-steam.sh lacks.
+            // run-app.sh wrote running.pid when it started the session.
             start = (try? FileManager.default.attributesOfItem(atPath: Paths.pidFile.path))?[.modificationDate] as? Date
-            adoptedWithoutWrapper = !FileManager.default.fileExists(atPath: Paths.pgidFile.path)
+            adoptedWithoutWrapper = !wrapped
         } else if Shell.guestProcesses().contains(where: { $0.command.contains("ubuntu12_32/steam ") }) {
             id = "steam"   // started by scripts/run-steam.sh
-            // No session wrapper: a status or group on disk is an earlier session's.
-            try? FileManager.default.removeItem(at: Paths.statusFile)
-            try? FileManager.default.removeItem(at: Paths.pgidFile)
+            // No session wrapper: a status, group or architecture on disk is
+            // an earlier session's, not this Steam's.
+            for f in [Paths.statusFile, Paths.pgidFile, Paths.archFile] {
+                try? FileManager.default.removeItem(at: f)
+            }
             adoptedWithoutWrapper = true
         } else {
             return
@@ -552,19 +616,34 @@ final class LauncherModel: ObservableObject {
         // exist yet: "nothing alive" would end a session that is beginning.
         guard !polling, !launchInFlight, session.phase == .running || session.phase == .stopping else { return }
         polling = true
+        let wrapped = !adoptedWithoutWrapper
+        let script = runAppScript.path, cwd = projectDir
         Task {
-            let alive: Bool = await withCheckedContinuation { cont in
+            // The session's own leader, status and group decide (SessionLiveness);
+            // other guest programs on the Mac only for a Steam without a wrapper.
+            let (alive, group): (Bool, Int32?) = await withCheckedContinuation { cont in
                 DispatchQueue.global().async {
-                    var pidAlive = false
-                    if let s = try? String(contentsOf: Paths.pidFile, encoding: .utf8),
-                       let pid = Int32(s.trimmingCharacters(in: .whitespacesAndNewlines)) {
-                        pidAlive = Shell.isAlive(pid)
-                    }
-                    cont.resume(returning: pidAlive || !Shell.guestProcesses().isEmpty)
+                    let group = Shell.readPID(Paths.pgidFile)
+                    let leader = Shell.readPID(Paths.pidFile).map {
+                        Shell.isAlive($0) && SessionLiveness.isLeader(command: Shell.command(of: $0), wrapped: wrapped)
+                    } ?? false
+                    let probe = SessionLiveness.Probe(
+                        leaderAlive: leader,
+                        statusWritten: FileManager.default.fileExists(atPath: Paths.statusFile.path),
+                        groupAlive: group.map(Shell.groupAlive) ?? false,
+                        anyGuest: !wrapped && !leader && !Shell.guestProcesses().isEmpty)
+                    cont.resume(returning: (SessionLiveness.alive(probe, wrapped: wrapped), group))
                 }
             }
+            if alive { self.polling = false; return }
+            if wrapped, let group {
+                // What the program left in its session outside its group
+                // (helpers in groups of their own, reparented to launchd)
+                // would outlive it and refuse the next launch: stopped first.
+                _ = await Shell.run("/bin/bash", [script, "--reap", String(group)], cwd: cwd)
+            }
             self.polling = false
-            if !alive { self.finish() }
+            self.finish()
         }
     }
 

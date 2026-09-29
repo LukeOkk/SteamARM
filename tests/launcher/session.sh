@@ -138,5 +138,64 @@ fresh
 "${PY[@]}" run "$W/ldir" "$W/does-not-exist" >"$W/log9" 2>&1
 [ "$?" = 127 ] && [ "$(status)" = 127 ] && ok "missing program: status 127" || bad "missing program"
 
+echo "== run-app.sh --reap: what a finished session left in its session, and nothing else"
+# The native client's webhelper zygotes leave the program's process group and
+# outlive it with parent 1 (benchmarks/stage23-frame-root.txt C2, F7). Fake
+# guests stand in for them: only their command line names build/lxrun.
+R="$W/state"
+mkdir -p "$R/launcher"
+export FAKE_LX="$W/build/lxrun"
+# The program leaves a helper in a process group of its own that ignores
+# SIGTERM, and exits (or, with "stay", keeps running).
+cat > "$W/runner-zygote" <<'EOF'
+#!/bin/bash
+python3 - "$FAKE_LX session-test-marker-zygote" <<'PY' &
+import os, signal, sys
+os.setpgid(0, 0)
+signal.signal(signal.SIGTERM, signal.SIG_IGN)
+os.execvp("sleep", [sys.argv[1], "300"])
+PY
+sleep 0.5
+[ "${1:-}" = stay ] && exec -a session-test-marker-program sleep 300
+exit 0
+EOF
+chmod +x "$W/runner-zygote"
+zygote() { pgrep -f "session-test-marker-zygote"; }
+# A guest of another session (a terminal's run-steam.sh, say): never touched.
+"${PY[@]}" detach bash -c 'exec -a "$0" sleep 300' "$FAKE_LX session-test-marker-other" &
+other=$!
+"${PY[@]}" run "$R/launcher" "$W/runner-zygote" >"$W/log10" 2>&1 &
+wrapper=$!
+wait "$wrapper"
+sid=$(cat "$R/launcher/running.pgid" 2>/dev/null)
+z=$(zygote)
+[ -n "$z" ] && [ "$(ps -o pgid= -p "$z" | tr -d ' ')" != "$sid" ] \
+    && ok "the helper outlived the wrapper, outside its group" || bad "no helper left ($z) or in group $sid"
+t0=$(date +%s)
+STEAMARM_STATE="$R" scripts/run-app.sh --reap "$sid" >"$W/log11" 2>&1
+[ -z "$(zygote)" ] && ok "--reap: the session's helper is gone (SIGKILL after SIGTERM)" || bad "--reap left $(zygote)"
+e=$(elapsed $t0); [ "$e" -le 5 ] && ok "--reap took ${e}s" || bad "--reap took ${e}s"
+grep -q "left behind: $z" "$W/log11" && ok "--reap names what it stopped" || { bad "--reap output"; cat "$W/log11"; }
+kill -0 "$other" 2>/dev/null && ok "another session's guest untouched" || bad "another session's guest was stopped"
+
+echo "== --reap waits for the wrapper; the session's watcher reaps after it"
+rm -f "$R/launcher/running.status" "$R/launcher/running.pgid"
+"${PY[@]}" run "$R/launcher" "$W/runner-zygote" stay >"$W/log12" 2>&1 &
+wrapper=$!
+await 3 "$R/launcher/running.pgid" || bad "no pgid file"
+sleep 1
+z=$(zygote)
+STEAMARM_STATE="$R" scripts/run-app.sh --reap >"$W/log13" 2>&1
+[ -n "$z" ] && kill -0 "$z" 2>/dev/null && ok "--reap of a running session: nothing" || bad "a running session was reaped"
+STEAMARM_STATE="$R" scripts/run-app.sh --reap-after "$wrapper" >"$W/log14" 2>&1 &
+watcher=$!
+"${PY[@]}" stop "$R/launcher" 1
+wait "$wrapper" 2>/dev/null
+kill -0 "$z" 2>/dev/null && ok "a stop signals the group: the helper outside it survives" || bad "helper gone at stop"
+wait "$watcher"
+[ -z "$(zygote)" ] && ok "the watcher reaped it once the wrapper exited" || bad "watcher left $(zygote)"
+kill -0 "$other" 2>/dev/null && ok "another session's guest still untouched" || bad "another session's guest was stopped"
+kill "$other" 2>/dev/null; wait "$other" 2>/dev/null
+
 echo "$pass passed, $fail failed"
 [ "$fail" -eq 0 ]
