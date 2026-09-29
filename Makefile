@@ -132,6 +132,17 @@ $(LAUNCHER_BIN): $(LAUNCHER_SRCS) launcher/SDLShim.h
 	@install_name_tool -change "$$(otool -D $(SDL2_DYLIB) | tail -1)" \
 	    @rpath/libSDL2-2.0.0.dylib $@
 
+# The launcher's application core without UI (launcher/ApplicationCore.swift),
+# and run-app.sh's runner choice. Both also run on Linux.
+.PHONY: test-launcher-core
+test-launcher-core:
+	@mkdir -p build
+	swiftc -parse-as-library -swift-version 5 launcher/ApplicationCore.swift \
+	    launcher/tests/ApplicationCoreTests.swift -o build/application-core-tests
+	build/application-core-tests
+	tests/launcher/run_app_dispatch.sh
+	tests/launcher/session.sh
+
 .PHONY: launcher
 launcher: $(LAUNCHER_BIN) launcher/Info.plist.in
 	@rm -rf $(LAUNCHER_APP)

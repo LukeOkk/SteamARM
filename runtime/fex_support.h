@@ -41,17 +41,16 @@ long lxrt_memfd_fcntl(int fd, int lcmd, unsigned long arg, bool *handled);
 // WHICH OF THESE ARE ACTUALLY WIRED, because a gate nobody calls is a seal that
 // only looks enforced. Audited against dispatch.c:
 //
-//   lxrt_memfd_check_ftruncate  WIRED    (ftruncate)
-//   lxrt_memfd_check_write      PARTIAL  (write only -- pwrite, writev and
-//                                         pwritev reach the file with no gate)
-//   lxrt_memfd_check_mmap       NOT WIRED -- no caller anywhere in the tree
-//   lxrt_memfd_is               NOT WIRED -- no caller anywhere in the tree
+//   lxrt_memfd_check_ftruncate  WIRED  (ftruncate, dispatch.c:2486-2489)
+//   lxrt_memfd_check_write      WIRED  (write dispatch.c:1966, writev :2002,
+//                                       pwrite64 :2563; pwritev and pwritev2
+//                                       have no case and return -ENOSYS)
+//   lxrt_memfd_check_mmap       WIRED  (every fd-backed mmap, dispatch.c:944)
+//   lxrt_memfd_is               NOT WIRED -- no caller anywhere in the tree;
+//                                       privmap.c:51 calls lxrt_memfd_path_is
 //
-// So today F_SEAL_WRITE stops write() and ftruncate() and does NOT stop
-// mmap(PROT_WRITE, MAP_SHARED), which is precisely the path the security note
-// above says a caller may be trusting, nor the other three write syscalls.
-// These are dispatcher changes, not changes to this module. Until they are
-// made, treat F_SEAL_WRITE here as advisory against write()/ftruncate() only.
+// So F_SEAL_WRITE stops write(), writev(), pwrite64(), ftruncate() and a
+// writable shared mmap of the memfd.
 long lxrt_memfd_check_ftruncate(int fd, int64_t length);
 // offset < 0 means "wherever the fd is positioned"; count is the byte count.
 long lxrt_memfd_check_write(int fd, int64_t offset, uint64_t count);

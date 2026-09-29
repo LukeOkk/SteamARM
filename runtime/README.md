@@ -167,11 +167,19 @@ rewriter cannot reach is poisoned with `brk #1` instead of being left alone.
   through the runtime (`benchmarks/stage3-signals.txt`).
 - **Signal deviations, documented not hidden:** `uc_mcontext.pc` is a host
   address when the signal arrives inside a syscall; `x16` is not restored by
-  `rt_sigreturn`; realtime signals (32–64) have no Darwin carrier, which blocks
-  glibc thread cancellation.
-- **No `FUTEX_REQUEUE`, `FUTEX_WAKE_OP` or PI futexes.** Darwin has no
-  equivalent primitive; they return `-ENOSYS` rather than a wrong answer.
-- **No `fork`.** `clone` without `CLONE_VM` is refused.
+  `rt_sigreturn`. Realtime signals (32–64) have no Darwin number of their own:
+  they are carried on Darwin's `SIGEMT`, which Linux's numbering leaves
+  unclaimed, with their Linux mask bits kept per thread (`signal.c:84-100`).
+  One aimed at a thread of another process goes through that process's
+  mailbox in `/tmp/lxrt-sig` (`signal.c:1296-1308`).
+- **Futex requeue and `WAKE_OP` are emulated; PI futexes are not.** Darwin
+  has no requeue, so `FUTEX_REQUEUE`/`FUTEX_CMP_REQUEUE` wake the waiters
+  Linux would have moved, never fewer (`futex_ops.c:10-15`, `:897-906`), and
+  `FUTEX_WAKE_OP` is implemented (`futex_ops.c:907-908`). The PI operations
+  return `-ENOSYS` rather than a wrong answer (`futex_ops.c:759-779`, `:912-918`).
+- **`fork` is Darwin's `fork`.** `clone` without `CLONE_VM` or `CLONE_THREAD`
+  becomes one (`thread.c:467-470`, `process.c:58-80`), and `execve`
+  re-executes `lxrun` with the new image (`process.c:122-133`).
 - **Three number spaces differ between Linux and Darwin, and all three are
   silent when wrong:** errno values, `open()`/`*at()` flags, and `sockaddr`
   layout with the address families. Linux `O_APPEND` passed through reads as

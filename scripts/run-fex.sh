@@ -62,8 +62,11 @@ if ! pgrep -f 'lxrun .*FEXServer' >/dev/null 2>&1; then
     # In a subshell: the server must not be a child of this shell, which is
     # about to exec the guest -- a program that reaps all its children (pressure-
     # vessel's pv-adverb) then waited for FEXServer forever (MEASURED).
+    # In its own session too (session.py detach): the server serves every x86
+    # program of this user, so it must not die with one app's process group.
     ( TMPDIR=/tmp LXRT_ROOT=/tmp/lxrt-root FEX_ROOTFS=/tmp/fexhome/.local/share/fex-emu/RootFS/Ubuntu_24_04 \
-        nohup ./build/lxrun "$FEXDIR"/FEXServer --foreground --persistent=0 >"$FEXSERVER_LOG" 2>&1 & )
+        nohup /usr/bin/python3 scripts/session.py detach \
+        ./build/lxrun "$FEXDIR"/FEXServer --foreground --persistent=0 >"$FEXSERVER_LOG" 2>&1 & )
     sleep 4
     if ! pgrep -f 'lxrun .*FEXServer' >/dev/null 2>&1; then
         echo "run-fex: FEXServer did not start (see $FEXSERVER_LOG); not starting the guest" >&2

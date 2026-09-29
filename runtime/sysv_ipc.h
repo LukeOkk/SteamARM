@@ -13,22 +13,14 @@
 // and `__SYSCALL(__NR_semtimedop_time64, sys_semtimedop)` at 420), and musl
 // issues 420. Both numbers must reach lxrt_semtimedop unchanged.
 //
-// WIRING. This module answers nothing until the dispatcher calls it. As of
-// this writing it is not called from anywhere: runtime/dispatch.c has no cases
-// for 190..197 or 420, so a guest semget/semop/shmget still falls through to
-// -ENOSYS, and runtime/sysv_ipc.c is not in the Makefile's LXRT_SRCS so it is
-// not even linked. Both of those files belong to other modules and are not
-// edited from here. What the integrator has to add, once:
-//
-//   * Makefile: append runtime/sysv_ipc.c to LXRT_SRCS.
-//   * dispatch.c: LNR_semget=190, LNR_semctl=191, LNR_semtimedop=192,
-//     LNR_semop=193, LNR_shmget=194, LNR_shmctl=195, LNR_shmat=196,
-//     LNR_shmdt=197, LNR_semtimedop_time64=420, each dispatched to the
-//     function below with x0..x4 passed through unmodified. Three of them
-//     have argument rules that a normal (int)-truncating wrapper breaks:
-//     semctl's fourth argument must be the RAW 64-bit x3 (it is a union
-//     passed by value), shmget's size is a 64-bit x1, and shmat RETURNS an
-//     address, so its result must not be narrowed to int.
+// WIRING. runtime/sysv_ipc.c is in the Makefile's LXRT_SRCS (Makefile:35-38),
+// and dispatch.c routes 190..197 here (LNR_* at dispatch.c:81-82, cases at
+// dispatch.c:2859-2903) with the argument rules below: semctl gets the RAW
+// 64-bit x3 (a union passed by value), shmget a 64-bit size, and shmat's
+// returned address is not narrowed to int. 420 (semtimedop_time64) is NOT
+// wired: it has no case in dispatch.c and falls to its -ENOSYS default
+// (dispatch.c:3263-3283). glibc on aarch64 issues 192; a musl guest would hit
+// the gap. Wiring it is one more case calling lxrt_semtimedop.
 //
 // Message queues (186..189) are deliberately absent: nothing in the measured
 // Steam stack imports msgget/msgsnd/msgrcv, and Darwin's msg limits are even

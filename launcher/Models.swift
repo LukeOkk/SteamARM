@@ -20,6 +20,9 @@ enum Paths {
     static var pidFile: URL { launcherDir.appendingPathComponent("running.pid") }
     static var idFile: URL { launcherDir.appendingPathComponent("running.id") }
     static var displayFile: URL { launcherDir.appendingPathComponent("running.display") }
+    static var archFile: URL { launcherDir.appendingPathComponent("running.arch") }   // "<arch> <translator>"
+    static var pgidFile: URL { launcherDir.appendingPathComponent("running.pgid") }   // the session's process group
+    static var statusFile: URL { launcherDir.appendingPathComponent("running.status") } // exit status, or 128 + signal
     static var vncPasswordFile: URL { state.appendingPathComponent("vncpasswd.txt") }
 
     /// Host directory of the x86-64 Steam root (guest "/").
@@ -62,11 +65,18 @@ struct AppEntry: Codable, Identifiable, Hashable {
     var env: [String: String] = [:]
     var kind: String = "custom"  // steam | heroic | prism | custom
     var installDir: String?      // host directory removed on delete
+    /// ISA of the program (GuestArchitecture raw value: aarch64 | x86_64 |
+    /// i386), read from its ELF header when it is added. nil = x86_64, the
+    /// FEX path every entry took before this field existed.
+    var architecture: String? = nil
 
+    /// The x86 client under FEX: TRANSITIONAL_COMPATIBILITY until the ARM64
+    /// client runs (docs/APPLICATION_MANAGER.md).
     static let steam = AppEntry(
         id: "steam", name: "Steam", icon: nil,
         command: ["/bin/bash", "/tmp/fexhome/.local/share/Steam/steam.sh", "-noverifyfiles"],
-        root: Paths.guestRoot, fexRootfs: "/", env: ["LXRT_GUEST_FAULTS": "1"], kind: "steam")
+        root: Paths.guestRoot, fexRootfs: "/", env: ["LXRT_GUEST_FAULTS": "1"], kind: "steam",
+        architecture: GuestArchitecture.x86_64.rawValue)
 
     var isBuiltIn: Bool { id == "steam" }
 }

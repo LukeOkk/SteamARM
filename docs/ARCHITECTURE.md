@@ -51,7 +51,11 @@ patches it for Darwin's constraints:
   is placed at a base with a low window for 32-bit programs;
 - the x18 register is reserved on macOS;
 - the JIT follows the W^X (write-xor-execute) rules;
-- memory ordering: macOS runs with the x86-compatible TSO mode.
+- memory ordering: FEX emulates x86 ordering in software. Apple silicon's
+  hardware TSO mode cannot be switched on from user space, so the runtime
+  refuses FEX's request for it (`PR_SET_MEM_MODEL`). When the request
+  seemed to succeed, the Steam client's lock-free lists corrupted themselves
+  (benchmarks/stage8-steam-zero-vm.txt).
 
 **Thunks** let x86 programs call the host's native libraries instead of
 emulating them. SteamARM uses them for Vulkan, in 64-bit and 32-bit, with

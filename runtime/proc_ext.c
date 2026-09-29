@@ -96,15 +96,17 @@
 // hw.memsize/16384 = 1048576, the shortfall being the firmware carveout.
 //
 // Today the two are the same number, so nothing observable depends on the
-// distinction. They are split anyway because this project has a live
-// 4 KiB / 16 KiB page-size conflict -- FEX wants 4 KiB guest pages, hv_vm_map
-// wants 16 KiB -- and the day LXRT_HOST_PAGE moves to 4096 a single
-// page_bytes() reading vm_kernel_page_size would put statm, stat's rss,
-// vmstat's nr_* and the auxv fallback's AT_PAGESZ 4x away from the guest's own
-// sysconf(_SC_PAGESIZE), silently. Converting instead of warning is the fix:
-// the numbers stay right on either granule, so there is nothing left to warn
-// about, and a per-read fprintf into the guest's stderr would be worse than
-// the divergence it announced.
+// distinction. They are split anyway because guest and host page sizes need
+// not agree: x86 guests under FEX use 4 KiB pages inside the 16 KiB host pages
+// (runtime/subpage.c), while the host page itself cannot be 4 KiB on Apple
+// Silicon Darwin (LXRT_HOST_PAGE is 16384, lxrt.h:19; "the host page cannot be
+// subdivided", subpage.c:12). Were the guest granule ever to differ from the
+// host's, a single page_bytes() reading vm_kernel_page_size would put statm,
+// stat's rss, vmstat's nr_* and the auxv fallback's AT_PAGESZ 4x away from the
+// guest's own sysconf(_SC_PAGESIZE), silently. Converting instead of warning
+// is the fix: the numbers stay right on either granule, so there is nothing
+// left to warn about, and a per-read fprintf into the guest's stderr would be
+// worse than the divergence it announced.
 static uint64_t guest_page_bytes(void)
 {
     return (uint64_t)LXRT_HOST_PAGE;
@@ -224,7 +226,7 @@ static mach_port_t host_port(void)
 // reported 0 instead of a stack leak into a guest-readable file. Measured on
 // this machine: the kernel returns the full 104, so nothing in use is
 // currently short.
-static bool vm_stats(vm_statistics64_data_t *out)
+static bool host_vm_stats(vm_statistics64_data_t *out)
 {
     memset(out, 0, sizeof *out);
     mach_msg_type_number_t count = HOST_VM_INFO64_COUNT;
@@ -474,7 +476,7 @@ static size_t gen_meminfo(char *b, size_t cap)
 {
     struct sb s = { b, cap, 0, false };
     vm_statistics64_data_t vm;
-    bool have = vm_stats(&vm);
+    bool have = host_vm_stats(&vm);
     // The vm_statistics64 counters are in the HOST granule; these figures are
     // emitted in bytes, so the host unit is the right one throughout.
     uint64_t ps = host_page_bytes();
@@ -726,7 +728,7 @@ static size_t gen_vmstat(char *b, size_t cap)
 {
     struct sb s = { b, cap, 0, false };
     vm_statistics64_data_t vm;
-    vm_stats(&vm);                      // zeroes the struct on failure too
+    host_vm_stats(&vm);                 // zeroes the struct on failure too
     uint64_t ps = host_page_bytes();
 
     // nr_* are page counts that the guest converts with sysconf(_SC_PAGESIZE),

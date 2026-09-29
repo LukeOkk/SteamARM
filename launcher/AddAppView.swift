@@ -200,8 +200,11 @@ struct AddAppView: View {
             icon = ip.hasPrefix(sp) ? final.path + ip.dropFirst(sp.count) : ip
         }
         let guest = Paths.guestPath(for: final.appendingPathComponent(chosenExec))
+        // The program's ISA from its ELF header (a script keeps the x86 default).
+        let arch = ELFInspector.inspect(final.appendingPathComponent(chosenExec))?.architecture
         model.upsert(AppEntry(id: id, name: name, icon: icon, command: [guest],
-                              kind: "custom", installDir: final.path))
+                              kind: "custom", installDir: final.path,
+                              architecture: arch?.rawValue))
         status = "\(name) añadida."
         step = .done
     }

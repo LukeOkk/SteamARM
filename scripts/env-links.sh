@@ -10,3 +10,10 @@ ln -sfn "$R/lxrt-root" /tmp/lxrt-root
 ln -sfn "$R/steamroot" /tmp/lxrt-steamroot
 ln -sfn "$R/samples"   /tmp/lxrt-samples
 ls -la /tmp/lxrt-root /tmp/lxrt-steamroot /tmp/lxrt-samples
+# The ARM64 base (docs/STEAM_FRAME_IMAGE.md): $R/arm64root points at the root
+# derived from the Steam Frame image. Linked only while it is reachable (it can
+# live on a sparsebundle that is not attached); scripts/run-native.sh needs it.
+if [ -e "$R/arm64root" ]; then
+    ln -sfn "$R/arm64root" /tmp/lxrt-arm64root
+    ls -la /tmp/lxrt-arm64root
+fi

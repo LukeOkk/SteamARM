@@ -321,7 +321,8 @@ enum Installer {
         let icon = icons(in: dest.appendingPathComponent(dir)).first
         return AppEntry(id: "heroic", name: "Heroic Games Launcher", icon: icon?.path,
                         command: ["/opt/apps/heroic/\(dir)/heroic", "--no-sandbox"],
-                        kind: "heroic", installDir: dest.path)
+                        kind: "heroic", installDir: dest.path,
+                        architecture: GuestArchitecture.x86_64.rawValue)
     }
 
     static func installPrism(report: @escaping Report,
@@ -342,6 +343,7 @@ enum Installer {
         return AppEntry(id: "prismlauncher", name: "Minecraft (Prism Launcher)",
                         icon: icons(in: dest).first?.path,
                         command: ["/opt/apps/prismlauncher/AppRun"],
-                        kind: "prism", installDir: dest.path)
+                        kind: "prism", installDir: dest.path,
+                        architecture: GuestArchitecture.x86_64.rawValue)
     }
 }

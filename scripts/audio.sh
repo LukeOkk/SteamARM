@@ -1,11 +1,12 @@
 #!/bin/bash
-# Sound for guest programs, no VM: a PulseAudio server on the Mac (Homebrew's,
-# playing through CoreAudio) whose socket lives inside the Steam root, where
-# guests reach it as unix:/tmp/pulse/native (scripts/settings-env.py exports
-# PULSE_SERVER). The guests' own libpulse speaks to it; pressure-vessel binds
-# the socket into its container like on Linux.
+# Sound for guest programs, no VM: one PulseAudio server on the Mac (Homebrew's,
+# playing through CoreAudio). Each guest root gets a socket on it at
+# <root>/tmp/pulse/native, where guests reach it as unix:/tmp/pulse/native
+# (scripts/settings-env.py exports PULSE_SERVER). The guests' own libpulse
+# speaks to it; pressure-vessel binds the socket into its container like on
+# Linux. LXRT_ROOT names the root (default: the Steam root).
 #
-#   scripts/audio.sh start [volume%]   start (idempotent) and set the volume
+#   scripts/audio.sh start [volume%]   start (idempotent), socket in LXRT_ROOT, set the volume
 #   scripts/audio.sh volume N          set the output volume (0-100)
 #   scripts/audio.sh stop | status
 set -u
@@ -16,27 +17,43 @@ DIR="$ROOT/tmp/pulse"
 SOCK="$DIR/native"
 LOG="$STATE/logs/pulseaudio.log"
 CONF="$STATE/launcher/pulse.pa"
-pactl_() { "$PA/pactl" -s "unix:$SOCK" "$@"; }
+SRVFILE="$STATE/launcher/pulse.socket"     # the socket the server was started with
 
-running() { [ -S "$SOCK" ] && pactl_ info >/dev/null 2>&1; }
+live() { [ -S "$1" ] && "$PA/pactl" -s "unix:$1" info >/dev/null 2>&1; }
+# A socket of the running server: its own, else this root's.
+server() {
+    local s
+    s="$(cat "$SRVFILE" 2>/dev/null)"
+    if [ -n "$s" ] && live "$s"; then echo "$s"; elif live "$SOCK"; then echo "$SOCK"; fi
+}
+pactl_() { "$PA/pactl" -s "unix:$(server)" "$@"; }
+running() { [ -n "$(server)" ]; }
 
 start() {
     [ -x "$PA/pulseaudio" ] || { echo "audio: PulseAudio not installed (brew install pulseaudio)" >&2; return 1; }
-    if ! running; then
+    if ! live "$SOCK"; then
         mkdir -p "$DIR" "$STATE/logs" "$(dirname "$CONF")"
         rm -f "$SOCK"
-        # Only what is needed: the Mac's outputs and the guests' socket
-        # (anonymous: the socket is only reachable from this user's Steam root).
-        cat > "$CONF" <<EOF
+        if running; then
+            # Already serving another root (the Steam root and the ARM64 root
+            # are separate trees): one server, one more socket on it.
+            pactl_ load-module module-native-protocol-unix socket="$SOCK" auth-anonymous=1 >/dev/null \
+                || { echo "audio: cannot add a socket at $SOCK (log $LOG)" >&2; return 1; }
+        else
+            # Only what is needed: the Mac's outputs and the guests' socket
+            # (anonymous: the socket is only reachable from this user's roots).
+            cat > "$CONF" <<EOF
 load-module module-coreaudio-detect
 load-module module-native-protocol-unix socket=$SOCK auth-anonymous=1
 load-module module-always-sink
 EOF
-        "$PA/pulseaudio" --daemonize=yes --exit-idle-time=-1 --use-pid-file=no \
-            --disallow-exit --disable-shm=yes -n -F "$CONF" --log-target=file:"$LOG" \
-            || { echo "audio: PulseAudio did not start (log $LOG)" >&2; return 1; }
-        for _ in $(seq 1 50); do running && break; sleep 0.1; done
-        running || { echo "audio: no socket at $SOCK (log $LOG)" >&2; return 1; }
+            "$PA/pulseaudio" --daemonize=yes --exit-idle-time=-1 --use-pid-file=no \
+                --disallow-exit --disable-shm=yes -n -F "$CONF" --log-target=file:"$LOG" \
+                || { echo "audio: PulseAudio did not start (log $LOG)" >&2; return 1; }
+            echo "$SOCK" > "$SRVFILE"
+        fi
+        for _ in $(seq 1 50); do live "$SOCK" && break; sleep 0.1; done
+        live "$SOCK" || { echo "audio: no socket at $SOCK (log $LOG)" >&2; return 1; }
     fi
     follow_default
     [ -n "${1:-}" ] && volume "$1"
@@ -66,8 +83,9 @@ volume() {
 case "${1:-status}" in
     start)  start "${2:-}" ;;
     volume) running || start; volume "${2:-100}" ;;
-    stop)   running && pactl_ exit 2>/dev/null; pkill -f "pulseaudio.*$CONF" 2>/dev/null; rm -f "$SOCK"; true ;;
+    stop)   running && pactl_ exit 2>/dev/null; pkill -f "pulseaudio.*$CONF" 2>/dev/null
+            rm -f "$SOCK" "$SRVFILE"; true ;;
     follow) running && follow_default ;;
-    status) if running; then echo "audio: running ($SOCK), default sink $(pactl_ get-default-sink)"; else echo "audio: stopped"; fi ;;
-    *) sed -n '2,12p' "$0" | sed 's/^# \{0,1\}//'; exit 2 ;;
+    status) if running; then echo "audio: running ($(server)), default sink $(pactl_ get-default-sink)"; else echo "audio: stopped"; fi ;;
+    *) sed -n '2,13p' "$0" | sed 's/^# \{0,1\}//'; exit 2 ;;
 esac

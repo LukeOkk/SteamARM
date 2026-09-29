@@ -329,15 +329,27 @@ final class LauncherModel: ObservableObject {
     private func finish() {
         timer?.invalidate()
         timer = nil
+        // scripts/session.py records how the program ended (exit code, or
+        // 128 + signal). Without it (a run adopted from run-steam.sh), the
+        // only signal of a crash is that it was gone within 15 s.
+        let status = (try? String(contentsOf: Paths.statusFile, encoding: .utf8))
+            .flatMap { Int32($0.trimmingCharacters(in: .whitespacesAndNewlines)) }
+        let stopped = phase == .stopping
         let quick = phase == .running && Date().timeIntervalSince(startedAt) < 15
         if runningDisplay == .vnc && openedScreenSharing && !screenSharingWasRunning {
             _ = Shell.runSync("/usr/bin/osascript", ["-e", "quit app \"Screen Sharing\""])
         }
-        try? FileManager.default.removeItem(at: Paths.pidFile)
-        try? FileManager.default.removeItem(at: Paths.idFile)
-        try? FileManager.default.removeItem(at: Paths.displayFile)
-        if quick, let name = running?.name {
-            alert = "\(name) terminó enseguida. Revisa el registro en \(logPath ?? Paths.logs.path)."
+        for f in [Paths.pidFile, Paths.idFile, Paths.displayFile, Paths.archFile, Paths.pgidFile, Paths.statusFile] {
+            try? FileManager.default.removeItem(at: f)
+        }
+        let logAt = logPath ?? Paths.logs.path
+        if !stopped, let name = running?.name {
+            if let s = status, s != 0 {
+                let how = s > 128 ? "la señal \(s - 128)" : "el código \(s)"
+                alert = "\(name) terminó con \(how). Revisa el registro en \(logAt)."
+            } else if status == nil, quick {
+                alert = "\(name) terminó enseguida. Revisa el registro en \(logAt)."
+            }
         }
         running = nil
         phase = .idle

@@ -6,9 +6,10 @@
 // and a 10 805 760-byte shared segment created by steamwebhelper; semtimedop
 // is measured at 131 calls per 10 s from the `steam` process itself.
 //
-// The dispatcher does not call any of this yet. sysv_ipc.h says exactly what
-// has to be added to dispatch.c and the Makefile, including the second
-// syscall number (420, semtimedop_time64) that is easy to miss.
+// Wired: dispatch.c routes 190-197 here (LNR_* at dispatch.c:81-82, cases at
+// dispatch.c:2859-2903), and this file is in the Makefile's LXRT_SRCS
+// (Makefile:35-38). Still missing: the second semtimedop number, 420
+// (semtimedop_time64), which has no case and returns -ENOSYS; see sysv_ipc.h.
 //
 // Darwin has SysV IPC, so most of this is translation rather than emulation.
 // The translation is not thin, because five number spaces disagree and four of

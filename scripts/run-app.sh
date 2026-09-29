@@ -1,6 +1,8 @@
 #!/bin/bash
 # Start one app of the SteamARM launcher, no VM: the X server if it is not
-# running, then the app's guest command under FEX and the runtime. The
+# running, then the app's guest command under the runtime -- directly for an
+# aarch64 program (scripts/run-native.sh), through FEX for an x86 one
+# (scripts/run-fex.sh), by the entry's "architecture" (default x86_64). The
 # launcher's counterpart of scripts/run-steam.sh (see launcher/SPEC.md).
 #
 #   scripts/run-app.sh <app-id>            start (or re-show) an app from
@@ -17,9 +19,12 @@
 # Settings ($STATE/launcher/settings.json): "display" as above; "resolution"
 # is the Xvnc geometry (vnc only), applied when Xvnc is (re)started with no app
 # running; "metalHud" exports MTL_HUD_ENABLED=1; "extraEnv" goes to every app.
-# The PID of the launched program goes to $STATE/launcher/running.pid (its id
-# to running.id, its display mode to running.display) and its output to
-# $STATE/logs/<id>-<time>.log.
+# Every app runs in a process group of its own (scripts/session.py): the PID
+# of that group's leader goes to $STATE/launcher/running.pid (its id to
+# running.id, its display mode to running.display, "<arch> <translator>" to
+# running.arch, the group to running.pgid), the program's exit status to
+# running.status when it ends, and its output to $STATE/logs/<id>-<time>.log.
+# --stop signals that group first; leftover guest processes are killed after.
 set -u
 cd "$(dirname "$0")/.." || exit 1
 ROOT=/tmp/lxrt-steamroot
@@ -29,10 +34,13 @@ LDIR="$STATE/launcher"
 PIDFILE="$LDIR/running.pid"
 IDFILE="$LDIR/running.id"
 MODEFILE="$LDIR/running.display"
+ARCHFILE="$LDIR/running.arch"
+PGIDFILE="$LDIR/running.pgid"
+STATUSFILE="$LDIR/running.status"   # read and removed by the launcher, not here
 X11_BUNDLE_ID=org.steamarm.X11
 STEAM_PATTERN='build/lxrun .*ubuntu12_32/steam '
 
-usage() { sed -n '2,22p' "$0" | sed 's/^# \{0,1\}//'; }
+usage() { sed -n '2,24p' "$0" | sed 's/^# \{0,1\}//'; }
 
 # Runtime processes that are guest programs: everything but Xvnc and FEXServer.
 # (The pattern must name build/lxrun: a bare word would match this shell. The
@@ -47,12 +55,15 @@ guest_pids() {
 }
 
 stop_guests() {
+    # The session's group first (SIGTERM, then SIGKILL after 3 s); anything
+    # else that is a guest program afterwards, as before.
+    /usr/bin/python3 scripts/session.py stop "$LDIR" 3
     for p in $(guest_pids); do kill -9 "$p" 2>/dev/null; done
-    rm -f "$ROOT/tmp/fexhome/.steam/steam.pid" "$PIDFILE" "$IDFILE" "$MODEFILE"
+    rm -f "$ROOT/tmp/fexhome/.steam/steam.pid" "$PIDFILE" "$IDFILE" "$MODEFILE" "$ARCHFILE" "$PGIDFILE"
 }
 
-# Prints shell assignments (APP_NAME, APP_ROOT, APP_FEXROOTFS, GEOMETRY, DMODE and the
-# arrays APP_ENV, APP_CMD) for app $1, from apps.json and settings.json.
+# Prints shell assignments (APP_NAME, APP_ARCH, APP_ROOT, APP_FEXROOTFS, GEOMETRY, DMODE
+# and the arrays APP_ENV, APP_CMD) for app $1, from apps.json and settings.json.
 resolve_app() {
     /usr/bin/python3 - "$1" "$LDIR/apps.json" "$LDIR/settings.json" <<'PY'
 import json, os, re, shlex, sys
@@ -69,6 +80,8 @@ steam = {
     "id": "steam", "name": "Steam",
     "command": ["/bin/bash", "/tmp/fexhome/.local/share/Steam/steam.sh", "-noverifyfiles"],
     "root": "/tmp/lxrt-steamroot", "fexRootfs": "/", "env": {},
+    # The x86 client under FEX: TRANSITIONAL_COMPATIBILITY (docs/APPLICATION_MANAGER.md).
+    "architecture": "x86_64",
 }
 apps = load(apps_path, [])
 if isinstance(apps, dict):
@@ -86,6 +99,11 @@ if app_id == "steam" and not os.path.exists(
 if not cmd:
     sys.stderr.write("run-app: app %r has no command\n" % app_id)
     sys.exit(2)
+# ARM64-first: aarch64 runs directly under the runtime, x86 through FEX.
+arch = str(app.get("architecture") or "x86_64")
+if arch not in ("aarch64", "x86_64", "i386"):
+    sys.stderr.write("run-app: app %r has architecture %r (aarch64, x86_64 or i386)\n" % (app_id, arch))
+    sys.exit(2)
 settings = load(settings_path, {})
 if not isinstance(settings, dict):
     settings = {}
@@ -102,6 +120,9 @@ env.update(senv.env_from_settings(settings))
 senv.write_limits(settings)
 pairs = []
 for k, v in sorted(env.items()):
+    # Translator settings are for x86 payloads only, never a native program.
+    if arch == "aarch64" and str(k).startswith("FEX_"):
+        continue
     if re.match(r"^[A-Za-z_][A-Za-z0-9_]*$", str(k)):
         pairs.append("%s=%s" % (k, v))
 
@@ -115,7 +136,19 @@ if mode not in ("native", "vnc"):
 
 q = shlex.quote
 print("APP_NAME=%s" % q(str(app.get("name") or app_id)))
-print("APP_ROOT=%s" % q(str(app.get("root") or "/tmp/lxrt-steamroot")))
+print("APP_ARCH=%s" % q(arch))
+ARM64_ROOT, X86_ROOT = "/tmp/lxrt-arm64root", "/tmp/lxrt-steamroot"
+root = str(app.get("root") or (ARM64_ROOT if arch == "aarch64" else X86_ROOT))
+# The rule of LaunchPlanner (launcher/ApplicationCore.swift): the ARM64 base
+# runs aarch64 code only, the x86-64 Steam root only x86 code under FEX. An
+# aarch64 program in the x86 root would find no aarch64 loader or libraries.
+same = lambda a, b: os.path.realpath(a) == os.path.realpath(b)
+if (arch == "aarch64" and same(root, X86_ROOT)) or (arch != "aarch64" and same(root, ARM64_ROOT)):
+    want = ARM64_ROOT if arch == "aarch64" else X86_ROOT
+    sys.stderr.write("run-app: app %r is %s but its root is %s; %s programs run in %s. "
+                     "Install it there.\n" % (app_id, arch, root, arch, want))
+    sys.exit(2)
+print("APP_ROOT=%s" % q(root))
 fr = app.get("fexRootfs")
 print("APP_FEXROOTFS=%s" % q("/" if fr is None else str(fr)))
 print("GEOMETRY=%s" % q(geometry))
@@ -208,6 +241,11 @@ mkdir -p "$LOGS" "$LDIR"
 
 SPEC="$(resolve_app "$ID")" || exit 2
 eval "$SPEC"
+if [ "$APP_ARCH" = aarch64 ]; then
+    RUNNER=scripts/run-native.sh; TRANSLATOR=none
+else
+    RUNNER=scripts/run-fex.sh; TRANSLATOR=FEX
+fi
 MODE="${STEAMARM_DISPLAY:-$DMODE}"
 case "$MODE" in
     native) DISP=:2 ;;
@@ -218,9 +256,11 @@ esac
 if [ "$DRY" = 1 ]; then
     echo "app:      $ID ($APP_NAME)"
     echo "display:  $MODE (DISPLAY=$DISP)"
-    echo "root:     LXRT_ROOT=$APP_ROOT FEX_ROOTFS=$APP_FEXROOTFS DISPLAY=$DISP"
+    echo "arch:     $APP_ARCH (translator: $TRANSLATOR, session: ZERO-VM)"
+    if [ "$APP_ARCH" = aarch64 ]; then echo "root:     LXRT_ROOT=$APP_ROOT DISPLAY=$DISP"
+    else echo "root:     LXRT_ROOT=$APP_ROOT FEX_ROOTFS=$APP_FEXROOTFS DISPLAY=$DISP"; fi
     echo "env:      ${APP_ENV[*]+${APP_ENV[*]}}"
-    echo "command:  scripts/run-fex.sh ${APP_CMD[*]}"
+    echo "command:  $RUNNER ${APP_CMD[*]}"
     if [ "$MODE" = native ]; then
         if native_x_running; then echo "x11:      native X server running on :2"
         else echo "x11:      would start the native X server on :2 (scripts/run-x11-native.sh)"; fi
@@ -269,20 +309,32 @@ if [ "$MODE" = native ]; then ensure_native_x; else ensure_xvnc; fi
 
 # Sound (scripts/audio.sh) at the launcher's volume, unless it is muted.
 VOL="$(/usr/bin/python3 scripts/settings-env.py --volume "$LDIR/settings.json")"
-[ -n "$VOL" ] && { scripts/audio.sh start "$VOL" >/dev/null || echo "run-app: no sound (scripts/audio.sh)" >&2; }
+[ -n "$VOL" ] && { LXRT_ROOT="$APP_ROOT" scripts/audio.sh start "$VOL" >/dev/null || echo "run-app: no sound (scripts/audio.sh)" >&2; }
 # Controllers (scripts/input.sh): the launcher's Entrada page, as /dev/input.
 scripts/input.sh start >/dev/null || echo "run-app: no controllers for games (scripts/input.sh)" >&2
 
+# The memory guard, before the session exists: started here it stays outside
+# the app's process group, and a stop does not take it down.
+scripts/safeguard.sh start >/dev/null
+
 L="$LOGS/$ID-$(date +%Y%m%d-%H%M%S).log"
 echo "$L" > "$LOGS/current"
-# env execs nohup, which execs run-fex.sh, which execs build/lxrun: $! ends up
-# being the runtime process of the program itself.
-env ${APP_ENV[@]+"${APP_ENV[@]}"} DISPLAY=$DISP LXRT_ROOT="$APP_ROOT" FEX_ROOTFS="$APP_FEXROOTFS" \
-    nohup scripts/run-fex.sh "${APP_CMD[@]}" > "$L" 2>&1 < /dev/null &
+rm -f "$STATUSFILE" "$PGIDFILE"
+# env execs nohup, which execs session.py: $! is the session's group leader,
+# alive exactly as long as the program (the runner execs build/lxrun under it).
+SESSION=(/usr/bin/python3 scripts/session.py run "$LDIR" "$RUNNER")
+if [ "$APP_ARCH" = aarch64 ]; then
+    env ${APP_ENV[@]+"${APP_ENV[@]}"} DISPLAY=$DISP LXRT_ROOT="$APP_ROOT" \
+        nohup "${SESSION[@]}" "${APP_CMD[@]}" > "$L" 2>&1 < /dev/null &
+else
+    env ${APP_ENV[@]+"${APP_ENV[@]}"} DISPLAY=$DISP LXRT_ROOT="$APP_ROOT" FEX_ROOTFS="$APP_FEXROOTFS" \
+        nohup "${SESSION[@]}" "${APP_CMD[@]}" > "$L" 2>&1 < /dev/null &
+fi
 echo $! > "$PIDFILE"
 echo "$ID" > "$IDFILE"
 echo "$MODE" > "$MODEFILE"
-echo "$APP_NAME starting on $DISP (log $L)."
+echo "$APP_ARCH $TRANSLATOR" > "$ARCHFILE"
+echo "$APP_NAME ($APP_ARCH, translator: $TRANSLATOR) starting on $DISP (log $L)."
 
 if [ "$MODE" = vnc ]; then
     show_display vnc
