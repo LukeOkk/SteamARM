@@ -10,9 +10,19 @@ GUEST_ROOT="${LXRT_ROOT:-${GUEST_ROOT:-/tmp/lxrt-root}}"
 SAMPLES="${LXRT_SAMPLES:-/tmp/lxrt-samples}"
 unset LXRT_ROOT
 
-PASS=0; FAIL=0
+PASS=0; FAIL=0; XFAIL=0
 ok()   { echo "  ok    $1"; PASS=$((PASS+1)); }
 bad()  { echo "  FAIL  $1"; echo "        $2"; FAIL=$((FAIL+1)); }
+xfail() { echo "  xfail $1"; echo "        $2"; XFAIL=$((XFAIL+1)); }
+
+# A dry-run's x18 line with every site rewritten; sets X18_FOUND.
+x18_rewrites_ok() {
+    [[ "$1" =~ x18\ ([0-9]+)\ found\ in\ .*\ ([0-9]+)\ rewritten,\ 0\ unsupported,\ 0\ unreachable ]] || return 1
+    X18_FOUND=${BASH_REMATCH[1]}
+    [ "$X18_FOUND" -eq "${BASH_REMATCH[2]}" ]
+}
+# macOS has no timeout(1). SIGALRM survives exec: exit status 142 when it fires.
+deadline() { perl -e 'alarm shift; exec @ARGV' "$@"; }
 
 CROSS_LD=/opt/homebrew/opt/lld/bin/ld.lld
 build_guest() {
@@ -33,6 +43,191 @@ if err=$(build_guest x18_branch); then
 else
     bad "build x18_branch" "$err"
 fi
+
+# The x18 planner on the host, no guest: decoder fields, every plan's words
+# (tests/x18_check.c). Only run by hand until now.
+if out=$(make -s build/x18_check 2>&1 && build/x18_check --self-test 2>&1); then
+    ok "x18 decoder/planner self-test (host only)"
+else
+    bad "x18 decoder/planner self-test" "$(tail -5 <<<"$out")"
+fi
+
+# x18 loads and stores at sp offsets the immediate field cannot absorb
+# (Steam's stp x18, x17, [sp, #0x1f8]): addressed through a copy of the
+# original sp. Plain loads read back what the rewritten stores wrote.
+if err=$(build_guest x18_spoff); then
+    out=$(./build/lxrun --dry-run build/x18_spoff 2>&1)
+    run=$(deadline 20 ./build/lxrun build/x18_spoff 2>&1); rc=$?
+    if x18_rewrites_ok "$out" && [ "$rc" -eq 0 ]; then
+        ok "x18 stp/ldp/str/ldur at large sp offsets: $X18_FOUND sites rewritten and executed"
+    else
+        bad "x18 at large sp offsets" "rc=$rc (exit code = failed check) $(grep x18 <<<"$out")"
+    fi
+else
+    bad "build x18_spoff" "$err"
+fi
+
+# The .eh_frame FDE filter: a table in .text outside every FDE is data and
+# must stay byte-for-byte (OpenSSL's round constants, "http error 0").
+# LXRT_X18_ALL_TEXT turns the filter off for one file: the same two words
+# are then rewritten and the program sees its table corrupted.
+if err=$(build_guest x18_fde); then
+    # A here-string, not a pipe: grep -q exiting early is SIGPIPE under pipefail.
+    if ! grep -q '\.eh_frame' <<<"$(/opt/homebrew/opt/llvm/bin/llvm-readelf -S build/x18_fde)"; then
+        bad "x18 FDE filter precondition" "build/x18_fde has no .eh_frame"
+    else
+        out=$(./build/lxrun --dry-run build/x18_fde 2>&1)
+        deadline 20 ./build/lxrun build/x18_fde >/dev/null 2>&1; rc=$?
+        if x18_rewrites_ok "$out" && [ "$X18_FOUND" -eq 2 ] && [ "$rc" -eq 0 ]; then
+            ok "x18 FDE filter: 2 sites inside FDEs rewritten, the .text table outside them untouched"
+        else
+            bad "x18 FDE filter" "rc=$rc $(grep x18 <<<"$out")"
+        fi
+        out=$(LXRT_X18_ALL_TEXT=x18_fde ./build/lxrun --dry-run build/x18_fde 2>&1)
+        LXRT_X18_ALL_TEXT=x18_fde deadline 20 ./build/lxrun build/x18_fde >/dev/null 2>&1; rc=$?
+        if x18_rewrites_ok "$out" && [ "$X18_FOUND" -eq 4 ] && [ "$rc" -ne 0 ]; then
+            ok "LXRT_X18_ALL_TEXT control: 4 sites, the table words rewritten too (rc=$rc)"
+        else
+            bad "LXRT_X18_ALL_TEXT control" "expected 4 sites and a failure, rc=$rc $(grep x18 <<<"$out")"
+        fi
+    fi
+else
+    bad "build x18_fde" "$err"
+fi
+
+# X18_CALL_RETURN: blr/br/ret x18 keep x17 and sp, blr exposes the guest
+# return address, the virtual x18 keeps the target, nested calls unwind.
+if err=$(build_guest x18_callret); then
+    out=$(./build/lxrun --dry-run build/x18_callret 2>&1)
+    deadline 20 ./build/lxrun build/x18_callret >/dev/null 2>&1; rc=$?
+    if x18_rewrites_ok "$out" && [ "$rc" -eq 0 ]; then
+        ok "X18_CALL_RETURN: nested blr x18, br x18, ret x18 ($X18_FOUND sites) keep x17, sp, x30 and x18"
+    else
+        bad "X18_CALL_RETURN" "rc=$rc (exit code = failed check) $(grep x18 <<<"$out")"
+    fi
+else
+    bad "build x18_callret" "$err"
+fi
+
+# The forms refused (and poisoned) until now: ldar/stlr, mrs/msr of
+# NZCV/FPCR/FPSR, and sp computed from x18 in both directions, misaligned
+# included. A value within 16 bytes above the saved pair must trap instead.
+if err=$(build_guest x18_forms); then
+    out=$(./build/lxrun --dry-run build/x18_forms 2>&1)
+    deadline 20 ./build/lxrun build/x18_forms >/dev/null 2>&1; rc=$?
+    if x18_rewrites_ok "$out" && [ "$rc" -eq 0 ]; then
+        ok "x18 ldar/stlr, mrs/msr nzcv/fpcr/fpsr and sp writes: $X18_FOUND sites rewritten and executed"
+    else
+        bad "x18 ldar/stlr, nzcv/fpcr/fpsr, sp writes" "rc=$rc (exit code = failed check) $(grep x18 <<<"$out")"
+    fi
+    LXRT_NO_X18=1 deadline 20 ./build/lxrun build/x18_forms >/dev/null 2>&1; rc=$?
+    if [ "$rc" -ne 0 ]; then
+        ok "without the x18 pass the same program fails (LXRT_NO_X18=1: rc=$rc)"
+    else
+        bad "LXRT_NO_X18 control for x18_forms" "expected a failure, got rc=0"
+    fi
+    run=$(deadline 20 ./build/lxrun build/x18_forms trap 2>&1); rc=$?
+    if [ "$rc" -eq 133 ] && grep -q 'SIGTRAP at pc.*inside a trampoline pool' <<<"$run"; then
+        ok "sp write within 16 bytes of the saved pair traps (brk #1) instead of corrupting"
+    else
+        bad "sp write trap" "rc=$rc $(grep SIG <<<"$run")"
+    fi
+else
+    bad "build x18_forms" "$err"
+fi
+
+# A form the planner still refuses (an exclusive load: a trampoline inside
+# an LL/SC sequence can clear the monitor forever) must trap. The poison was
+# `svc #1` up to 0.3.4: with x16 = 20 it silently ran Darwin's getpid.
+if err=$(build_guest x18_poison); then
+    out=$(./build/lxrun --dry-run build/x18_poison 2>&1)
+    run=$(deadline 20 ./build/lxrun build/x18_poison 2>&1); rc=$?
+    if grep -q 'x18 1 found in .* 0 rewritten, 1 unsupported, 0 unreachable' <<<"$out" &&
+       [ "$rc" -eq 133 ] && grep -q 'SIGTRAP at pc.*insn 0xd4200020' <<<"$run"; then
+        ok "refused x18 site (ldaxr) is poisoned with brk #1 and traps (rc=133)"
+    else
+        bad "refused x18 site traps" "rc=$rc $(grep x18 <<<"$out") $(grep SIG <<<"$run")"
+    fi
+else
+    bad "build x18_poison" "$err"
+fi
+
+# A 4 KiB-aligned image (Valve's native arm64 client) through elf.c's
+# sub-page path: the end of the code and the start of the data share a
+# 16 KiB host page, flipped RW/RX on faults. The writer loop runs from
+# another host page. A store executed from the shared page itself never makes
+# progress (MEASURED: endless "jit fault" pairs) -- kept as a known failure.
+if err=$(clang -target aarch64-unknown-linux-gnu -nostdlib -static-pie -fPIE \
+               -fuse-ld=$CROSS_LD -Wl,-e,_start -Wl,-z,max-page-size=4096 \
+               -Wl,-z,common-page-size=4096 -Wl,-z,norelro \
+               -o build/subpage4k tests/elf/subpage4k.S 2>&1); then
+    headers=$(/opt/homebrew/opt/llvm/bin/llvm-readelf -lW build/subpage4k)
+    aligns=( $(awk '$1 == "LOAD" { print $NF }' <<<"$headers") )
+    read -r re_start re_size <<<"$(awk '$1 == "LOAD" && / R E / { print $3, $5; exit }' <<<"$headers")"
+    rw_start=$(awk '$1 == "LOAD" && / RW / { print $3; exit }' <<<"$headers")
+    subpage_ok=1
+    for align in "${aligns[@]}"; do [ "$align" = 0x1000 ] || subpage_ok=0; done
+    if [ "${#aligns[@]}" -eq 0 ] || [ -z "${re_start:-}" ] || [ -z "${rw_start:-}" ]; then
+        subpage_ok=0
+    elif [ $(((re_start + re_size) >> 14)) -ne $((rw_start >> 14)) ]; then
+        subpage_ok=0
+    fi
+    if [ "$subpage_ok" -ne 1 ]; then
+        bad "4 KiB ELF precondition: 4 KiB LOADs, R E end and RW start in one 16 KiB page" "$(grep LOAD <<<"$headers")"
+    else
+        out=$(./build/lxrun --dry-run build/subpage4k 2>&1)
+        deadline 20 ./build/lxrun build/subpage4k >/dev/null 2>&1; rc=$?
+        if [[ "$out" =~ svc\ ([0-9]+)\ found,\ ([0-9]+)\ rewritten,\ 0\ poisoned ]] &&
+           [ "${BASH_REMATCH[1]}" -gt 0 ] && [ "${BASH_REMATCH[1]}" -eq "${BASH_REMATCH[2]}" ] &&
+           [ "$rc" -eq 0 ]; then
+            ok "4 KiB ELF via subpage: shared code/data host page flipped RW/RX 1000 times"
+        else
+            bad "4 KiB ELF via subpage" "rc=$rc (exit code = failed check) $(grep 'svc' <<<"$out")"
+        fi
+        deadline 5 ./build/lxrun build/subpage4k selfwrite >/dev/null 2>&1; rc=$?
+        if [ "$rc" -eq 142 ]; then
+            xfail "4 KiB ELF: a store executed from the host page it writes spins forever (W/X flip livelock)" "killed after 5 s"
+        elif [ "$rc" -eq 0 ]; then
+            ok "4 KiB ELF self-write (XPASS: the W/X livelock no longer reproduces)"
+        else
+            bad "4 KiB ELF self-write" "rc=$rc"
+        fi
+    fi
+else
+    bad "build subpage4k" "$err"
+fi
+if err=$(clang -target aarch64-unknown-linux-gnu -nostdlib -static-pie -fPIE \
+               -fuse-ld=$CROSS_LD -Wl,-e,_start -Wl,-z,max-page-size=2048 \
+               -Wl,-z,common-page-size=2048 -Wl,-z,norelro \
+               -o build/subpage2k tests/elf/subpage4k.S 2>&1); then
+    out=$(deadline 20 ./build/lxrun build/subpage2k 2>&1); rc=$?
+    if [ "$rc" -ne 0 ] && grep -q 'not a multiple of 4 KiB' <<<"$out"; then
+        ok "2 KiB-aligned PT_LOAD refused with the reason"
+    else
+        bad "2 KiB-aligned PT_LOAD refused" "rc=$rc out='$out'"
+    fi
+else
+    echo "  skip  2 KiB-aligned PT_LOAD (lld refuses it: $(tail -1 <<<"$err"))"
+fi
+rm -f build/subpage2k
+
+# LARGE_EXECUTABLE_TRAMPOLINE_RANGE: `b` reaches +/-128 MiB, so each 32 MiB
+# slice of a large code segment gets its own pool (libcef's is 162 MiB).
+# Two svc sites and a TLS read 144 MiB apart. The image is ~144 MiB: removed.
+if err=$(build_guest big_text); then
+    out=$(./build/lxrun --dry-run build/big_text 2>&1)
+    deadline 20 ./build/lxrun build/big_text >/dev/null 2>&1; rc=$?
+    if [[ "$out" =~ svc\ ([0-9]+)\ found,\ ([0-9]+)\ rewritten,\ 0\ poisoned ]] &&
+       [ "${BASH_REMATCH[1]}" -eq 4 ] && [ "${BASH_REMATCH[2]}" -eq 4 ] &&
+       grep -q 'tls 1 reads + 0 writes, 1 rewritten, 0 poisoned' <<<"$out" && [ "$rc" -eq 0 ]; then
+        ok "LARGE_EXECUTABLE_TRAMPOLINE_RANGE: svc/TLS sites 144 MiB apart rewritten and executed"
+    else
+        bad "LARGE_EXECUTABLE_TRAMPOLINE_RANGE" "rc=$rc $(grep 'svc' <<<"$out")"
+    fi
+else
+    bad "build big_text" "$err"
+fi
+rm -f build/big_text
 
 # 1. The toolchain can still emit a Linux aarch64 PIE from macOS.
 if err=$(build_guest hello); then ok "build hello-linux"; else bad "build hello-linux" "$err"; fi
@@ -546,5 +741,7 @@ if [ -d "$SYSROOT" ] && [ -d "$GUEST_ROOT/tmp" ] && ! pgrep -qx steamarm-inputd;
 fi
 
 echo
-echo "== $PASS passed, $FAIL failed"
+summary="== $PASS passed, $FAIL failed"
+[ "$XFAIL" -eq 0 ] || summary="$summary ($XFAIL expected failures)"
+echo "$summary"
 [ "$FAIL" -eq 0 ]
