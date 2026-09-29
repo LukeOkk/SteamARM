@@ -1090,6 +1090,24 @@ else
     echo "  skip  WX_MPROTECT_RACE (no $STAGE)"
 fi
 
+# ELECTRON_RUNTIME: what Heroic's Electron needed (benchmarks/stage24-heroic.txt):
+# prlimit64 EFAULT on a read-only page, mprotect of a partial last page, SysV
+# IPC_RMID deferred while attached, execve ENOENT before the exec, a dup of an
+# epoll descriptor, and SOCK_SEQPACKET end of file for a blocked recvmsg/ppoll.
+# At the host's 16 KiB page only: with LXRT_GUEST_PAGE=4096 a read-only 4 KiB
+# page shares its host page with writable neighbours (runtime/subpage.c), so
+# the kernel writes into it and the prlimit checks cannot pass there.
+if [ -f "$STAGE/usr/lib64/libc.a" ] && [ -n "$GCCDIR" ]; then
+    if err=$(glibc_cc -static-pie -O2 -pthread -o build/electron_runtime tests/elf/electron_runtime.c); then
+        out=$(deadline 90 ./build/lxrun "$PWD/build/electron_runtime" 2>&1); rc=$?
+        if [ "$rc" -eq 0 ] && grep -q '== electron runtime: ok' <<<"$out"; then
+            ok "ELECTRON_RUNTIME: $(grep -o '([0-9]* checks)' <<<"$out" | tr -d '()')"
+        else bad "ELECTRON_RUNTIME" "rc=$rc $(grep -E 'MAL|SIGBUS|SIGSEGV|lxrun:' <<<"$out" | head -6)"; fi
+    else bad "build electron_runtime" "$err"; fi
+else
+    echo "  skip  ELECTRON_RUNTIME (no $STAGE)"
+fi
+
 echo
 summary="== $PASS passed, $FAIL failed"
 [ "$XFAIL" -eq 0 ] || summary="$summary ($XFAIL expected failures)"

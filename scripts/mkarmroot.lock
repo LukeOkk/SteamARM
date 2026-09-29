@@ -2,7 +2,7 @@
 # Fedora 43 aarch64 Everything, resolved 2026-09-29 from
 #   releases  repomd revision 1761190638, a29dc3fcc86b6e10fab525e6de0b97e851b5e4e7fc3691d40d72efe6757a733d-primary.xml.zst
 #   updates   repomd revision 1790641463, d24440681d986b5e983a9f500858e028ae514031f24ffbe788e6373529588ee0-primary.xml.zst
-# root seeds: glibc libgcc libstdc++ bash coreutils-single util-linux-core ca-certificates nss-softokn nss-softokn-freebl p11-kit-trust fontconfig dejavu-sans-fonts dejavu-sans-mono-fonts xkeyboard-config mesa-dri-drivers mesa-vulkan-drivers openssl mesa-libGL mesa-libEGL pciutils libX11-common glibc-common glibc-langpack-en SDL3 lsof so:libasound.so.2 so:libasyncns.so.0 so:libatk-1.0.so.0 so:libatk-bridge-2.0.so.0 so:libatspi.so.0 so:libbz2.so.1 so:libcairo.so.2 so:libcrypto.so.3 so:libcups.so.2 so:libdbus-1.so.3 so:libEGL.so.1 so:libfontconfig.so.1 so:libgdk_pixbuf-2.0.so.0 so:libgio-2.0.so.0 so:libgobject-2.0.so.0 so:libgtk-x11-2.0.so.0 so:libibus-1.0.so.5 so:libICE.so.6 so:libnm.so.0 so:libnspr4.so so:libnss3.so so:libnssutil3.so so:libopenal.so.1 so:libpango-1.0.so.0 so:libpipewire-0.3.so.0 so:libpulse.so.0 so:libSDL2-2.0.so.0 so:libSM.so.6 so:libsmime3.so so:libsndfile.so.1 so:libssh2.so.1 so:libssl.so.3 so:libsystemd.so.0 so:libudev.so.1 so:libva.so.2 so:libvdpau.so.1 so:libXcomposite.so.1 so:libXdamage.so.1 so:libXfixes.so.3 so:libXi.so.6 so:libXinerama.so.1 so:libxkbcommon.so.0 so:libXrandr.so.2 so:libXrender.so.1 so:libXtst.so.6 so:libGL.so.1 so:libvulkan.so.1 so:libdrm.so.2 so:libgbm.so.1 so:libxcb.so.1 so:libX11-xcb.so.1 + their shared-library closure
+# root seeds: glibc libgcc libstdc++ bash coreutils-single util-linux-core ca-certificates nss-softokn nss-softokn-freebl p11-kit-trust fontconfig dejavu-sans-fonts dejavu-sans-mono-fonts xkeyboard-config mesa-dri-drivers mesa-vulkan-drivers openssl mesa-libGL mesa-libEGL pciutils libX11-common glibc-common glibc-langpack-en SDL3 lsof python3 so:libasound.so.2 so:libasyncns.so.0 so:libatk-1.0.so.0 so:libatk-bridge-2.0.so.0 so:libatspi.so.0 so:libbz2.so.1 so:libcairo.so.2 so:libcrypto.so.3 so:libcups.so.2 so:libdbus-1.so.3 so:libEGL.so.1 so:libfontconfig.so.1 so:libgdk_pixbuf-2.0.so.0 so:libgio-2.0.so.0 so:libgobject-2.0.so.0 so:libgtk-x11-2.0.so.0 so:libibus-1.0.so.5 so:libICE.so.6 so:libnm.so.0 so:libnspr4.so so:libnss3.so so:libnssutil3.so so:libopenal.so.1 so:libpango-1.0.so.0 so:libpipewire-0.3.so.0 so:libpulse.so.0 so:libSDL2-2.0.so.0 so:libSM.so.6 so:libsmime3.so so:libsndfile.so.1 so:libssh2.so.1 so:libssl.so.3 so:libsystemd.so.0 so:libudev.so.1 so:libva.so.2 so:libvdpau.so.1 so:libXcomposite.so.1 so:libXdamage.so.1 so:libXfixes.so.3 so:libXi.so.6 so:libXinerama.so.1 so:libxkbcommon.so.0 so:libXrandr.so.2 so:libXrender.so.1 so:libXtst.so.6 so:libGL.so.1 so:libvulkan.so.1 so:libdrm.so.2 so:libgbm.so.1 so:libxcb.so.1 so:libX11-xcb.so.1 so:libgtk-3.so.0 so:libsecret-1.so.0 so:libnotify.so.4 + their shared-library closure
 # build (samples only, not closed over): glibc-devel glibc-static kernel-headers gcc vulkan-headers
 # NEVRA = name-epoch:version-release.arch = epoch + file name.
 #
@@ -14,12 +14,15 @@ root  at-spi2-atk-2.58.8-1.fc43.aarch64.rpm 0 23f4d1df701ed911812523cef7773b463d
 root  at-spi2-core-2.58.8-1.fc43.aarch64.rpm 0 ed18f9272dd006adc8470f04809995d52b5357a1bb107513351a6fcf18f764d0 404073 at-spi2-core-2.58.8-1.fc43.src.rpm  <- seed libatspi.so.0()(64bit)
 root  atk-2.58.8-1.fc43.aarch64.rpm 0 5abeff14759208dca9fe60097dc2c96196c6327a6956917cc198667d6dcd0d71 82009 at-spi2-core-2.58.8-1.fc43.src.rpm  <- seed libatk-1.0.so.0()(64bit)
 root  audit-libs-4.2.1-1.fc43.aarch64.rpm 0 7180f9d2029d42ff3aa1fbd6648f786c23fdc7bc86dada5eac19836af7cdc18a 144738 audit-4.2.1-1.fc43.src.rpm  <- pam-libs libaudit.so.1()(64bit)
+root  avahi-glib-0.9~rc2-6.fc43.aarch64.rpm 0 dabb2163b858bf7c9f63dcfc7f5b84cd22d4a0961c69a361e2aaaffd47ea273a 15224 avahi-0.9~rc2-6.fc43.src.rpm  <- libtinysparql libavahi-glib.so.1()(64bit)
 root  avahi-libs-0.9~rc2-6.fc43.aarch64.rpm 0 2ba2548835b7147ae56ba99b9eef32276dbea0b9d73e82206a8c71019553c027 67406 avahi-0.9~rc2-6.fc43.src.rpm  <- cups-libs libavahi-client.so.3()(64bit)
 root  bash-5.3.0-2.fc43.aarch64.rpm 0 2c335e0a00c8918516478e4d91820e00b405e60d3fc33c27a392d5b03de6819c 1928591 bash-5.3.0-2.fc43.src.rpm  <- seed
 root  bluez-libs-5.87+1.git8750129efca8-1.fc43.aarch64.rpm 0 1a80bb5cdb4456125e98b35c397370597a7f3b59496ca19340ae524d22c14dbe 91842 bluez-5.87+1.git8750129efca8-1.fc43.src.rpm  <- pipewire-libs libbluetooth.so.3()(64bit)
 root  bzip2-libs-1.0.8-21.fc43.aarch64.rpm 0 27a3519cbb6809899c491713ab52bbd7e37dcfd9ee71b8693e6f95d1fe7b8599 41879 bzip2-1.0.8-21.fc43.src.rpm  <- seed libbz2.so.1()(64bit)
 root  ca-certificates-2026.2.90_v9.0.317-1.fc43.noarch.rpm 0 eeae5f16ff5924a22954ec5410079dd757dd19773946420c16455b8a43e24cb4 996493 ca-certificates-2026.2.90_v9.0.317-1.fc43.src.rpm  <- seed
 root  cairo-1.18.4-2.fc43.aarch64.rpm 0 3dcb083be19ea644ead0c5a9f4a8ecde8faba8004dcbc33e34c760c8645097af 715855 cairo-1.18.4-2.fc43.src.rpm  <- seed libcairo.so.2()(64bit)
+root  cairo-gobject-1.18.4-2.fc43.aarch64.rpm 0 538a6ab8cb8bedb70703c8c844567c02731d63533098127a805d65a328b53497 17330 cairo-1.18.4-2.fc43.src.rpm  <- gtk3 libcairo-gobject.so.2()(64bit)
+root  colord-libs-1.4.8-2.fc43.aarch64.rpm 0 681b77855a93e0232f6882d5e23bf8cf37fdc4dd88c16b878b3948d3e8a3b7e7 228413 colord-1.4.8-2.fc43.src.rpm  <- gtk3 libcolord.so.2()(64bit)
 root  coreutils-single-9.7-10.fc43.aarch64.rpm 0 b7c658ac604a7c96f588c649501617172987350e7eade0d78c0d14a6cf0562a7 662487 coreutils-9.7-10.fc43.src.rpm  <- seed
 root  cups-libs-2.4.19-3.fc43.aarch64.rpm 1 6017698c5d07db3ea65637c19c47b8c199d05197d8f747707a372eafbb678a3f 266896 cups-2.4.19-3.fc43.src.rpm  <- seed libcups.so.2()(64bit)
 root  dbus-libs-1.16.2-1.fc43.aarch64.rpm 1 5dd5dc686f1f24d69d47606bfd2d4ae7d5801f3d9968e537e8be4343bb1b1c2c 149019 dbus-1.16.2-1.fc43.src.rpm  <- seed libdbus-1.so.3()(64bit)
@@ -34,6 +37,7 @@ root  fmt-11.2.0-3.fc43.aarch64.rpm 0 7714af6d843c104380c17efaec5d332c9ec2fe5e7c
 root  fontconfig-2.17.0-3.fc43.aarch64.rpm 0 11a0a9a07a3f4fa4b376c6771824087e44aa5c8c7a086667cbebd44f165370f1 281059 fontconfig-2.17.0-3.fc43.src.rpm  <- seed
 root  freetype-2.13.3-3.fc43.aarch64.rpm 0 8ebdde8fc4b800634c38750f91bc06b9ccf67f77d2dff06dabf1c049c1f03255 411632 freetype-2.13.3-3.fc43.src.rpm  <- fontconfig libfreetype.so.6()(64bit)
 root  fribidi-1.0.16-3.fc43.aarch64.rpm 0 7df5718d1b3ebb34210ccbb3e3c0443f3243cc64a9e5397192f97250b30ee64f 54808 fribidi-1.0.16-3.fc43.src.rpm  <- pango libfribidi.so.0()(64bit)
+root  gdbm-libs-1.23-10.fc43.aarch64.rpm 1 98d3f75018dbb020bba544fba843504d1acd3a5f4d5e87f6cdb3a75213f29fd8 57361 gdbm-1.23-10.fc43.src.rpm  <- python3-libs libgdbm.so.6()(64bit)
 root  gdk-pixbuf2-2.44.6^really2.44.4-3.fc43.aarch64.rpm 0 46e49217964a70b380162d5fb8b3876dc76b00b19cec8e1a9a581a6fcc6ecb77 496043 gdk-pixbuf2-2.44.6^really2.44.4-3.fc43.src.rpm  <- seed libgdk_pixbuf-2.0.so.0()(64bit)
 root  glib2-2.86.5-1.fc43.aarch64.rpm 0 0c4b0f7fe178e2de9cb18110e09a364ff2bdd3b9160595495db44cf596072fd3 3208570 glib2-2.86.5-1.fc43.src.rpm  <- seed libgio-2.0.so.0()(64bit)
 root  glibc-2.42-16.fc43.aarch64.rpm 0 0a6651548c09a06a74ee92598dc69e0d3d0004b05b47d2d9be4cd4d129d95d6f 1910697 glibc-2.42-16.fc43.src.rpm  <- seed
@@ -45,8 +49,10 @@ root  gnutls-3.8.13-1.fc43.aarch64.rpm 0 4bad812cdf5a9375fdaace712099d21d014217b
 root  graphite2-1.3.14-19.fc43.aarch64.rpm 0 a48836d6aa13698e31ca606cd17f816a42930ee4bb63bf0ff2f3d443ffac24ad 93931 graphite2-1.3.14-19.fc43.src.rpm  <- harfbuzz libgraphite2.so.3()(64bit)
 root  gsm-1.0.23-1.fc43.aarch64.rpm 0 eb771cfa2ae28c167c9070cee4bb1f9549ea78691a4ceed75e16e6998ee1f0af 35988 gsm-1.0.23-1.fc43.src.rpm  <- libsndfile libgsm.so.1()(64bit)
 root  gtk2-2.24.33-23.fc43.aarch64.rpm 0 b85ad7e923051884f5fa5068c7d0886c82e4e50dbd0f3cbb7a49b787dbec8d69 3443959 gtk2-2.24.33-23.fc43.src.rpm  <- seed libgtk-x11-2.0.so.0()(64bit)
+root  gtk3-3.24.52-1.fc43.aarch64.rpm 0 c9f3757e5bbe87b7fc76bdfb58e349389f9cefbcaa3c4777cb8df146d499e6f8 6190768 gtk3-3.24.52-1.fc43.src.rpm  <- seed libgtk-3.so.0()(64bit)
 root  harfbuzz-11.5.1-2.fc43.aarch64.rpm 0 f46bf23cde29e7deff86e0402679ae7f2c981125e48291e33cc9c422d3d3aa58 1101305 harfbuzz-11.5.1-2.fc43.src.rpm  <- pango libharfbuzz.so.0()(64bit)
 root  ibus-libs-1.5.33-6.fc43.aarch64.rpm 0 62edbbe150c58069dcde7ccc98806a67b4f3dcaeef1590d483d0502121d76a3f 270100 ibus-1.5.33-6.fc43.src.rpm  <- seed libibus-1.0.so.5()(64bit)
+root  json-glib-1.10.8-4.fc43.aarch64.rpm 0 d71f28f81c2b83ada03724035977559a34a22843c00b207705b87371b651b241 173713 json-glib-1.10.8-4.fc43.src.rpm  <- libtinysparql libjson-glib-1.0.so.0()(64bit)
 root  keyutils-libs-1.6.3-6.fc43.aarch64.rpm 0 75e8b2a372a453fcb585709c39920268da7ca0012639c599585997472b545976 32272 keyutils-1.6.3-6.fc43.src.rpm  <- krb5-libs libkeyutils.so.1()(64bit)
 root  kmod-libs-34.2-2.fc43.aarch64.rpm 0 fbc60dfa86b0c1d5ac0c5cf570ccf199ad26e7b30dde8497c637ed09172472f7 67858 kmod-34.2-2.fc43.src.rpm  <- pciutils libkmod.so.2()(64bit)
 root  krb5-libs-1.22.2-4.fc43.aarch64.rpm 0 94e1ff20089a43aa32a2b6ad9fefbdfa025481c8e95d3bace2e16a87241a1612 780139 krb5-1.22.2-4.fc43.src.rpm  <- cups-libs libgssapi_krb5.so.2()(64bit)
@@ -77,6 +83,7 @@ root  libblkid-2.41.5-1.fc43.aarch64.rpm 0 b8682daaa4cc35081b5c59b8e548ed9affe58
 root  libbrotli-1.2.0-1.fc43.aarch64.rpm 0 83cd8c6a2ddcee446f99b1f743c000449c5f53c97d6b45f0c9b5af17f932f6ed 358821 brotli-1.2.0-1.fc43.src.rpm  <- freetype libbrotlidec.so.1()(64bit)
 root  libcap-2.76-4.fc43.aarch64.rpm 0 e2610919d49df0df1f3bfa7ae03ed274aebe17fb46393c949941fac2ebb645e1 89200 libcap-2.76-4.fc43.src.rpm  <- coreutils-single libcap.so.2()(64bit)
 root  libcap-ng-0.9.6-1.fc43.aarch64.rpm 0 5257c043177ae1ebb9eeb5b8f6007a82c4fd0e493fe7c2139852f17ad43994f7 35898 libcap-ng-0.9.6-1.fc43.src.rpm  <- audit-libs libcap-ng.so.0()(64bit)
+root  libcloudproviders-0.3.6-2.fc43.aarch64.rpm 0 4d65ff9e780bb1390d91fa67d7e6c0269a9941626a439a4f0e17ee4b23009b81 46688 libcloudproviders-0.3.6-2.fc43.src.rpm  <- gtk3 libcloudproviders.so.0()(64bit)
 root  libcom_err-1.47.3-2.fc43.aarch64.rpm 0 0e73c39fa0b0d35bc68f227445805dd79c715fe43ba89b5983bd350952361a49 27348 e2fsprogs-1.47.3-2.fc43.src.rpm  <- libtirpc libcom_err.so.2()(64bit)
 root  libdatrie-0.2.13-12.fc43.aarch64.rpm 0 981286e3521823c4ab9499cd1af09f08d73a96dfaf852e02416a2162df84d833 32636 libdatrie-0.2.13-12.fc43.src.rpm  <- libthai libdatrie.so.1()(64bit)
 root  libdisplay-info-0.2.0-4.fc43.aarch64.rpm 0 647b08361b33238e21576529c4e8db9270c9eca4d921ddb437332b1bf7fcd8b0 89235 libdisplay-info-0.2.0-4.fc43.src.rpm  <- mesa-vulkan-drivers libdisplay-info.so.2()(64bit)
@@ -84,6 +91,7 @@ root  libdrm-2.4.134-1.fc43.aarch64.rpm 0 da5d443c2ea491f51a5433fbe705cfe2f32fd8
 root  libebur128-1.2.6-14.fc43.aarch64.rpm 0 7426778f5b8239a2386e97811b2aba155aae123ad3d24ec81b9eec7a2a0b5caf 24955 libebur128-1.2.6-14.fc43.src.rpm  <- pipewire-libs libebur128.so.1()(64bit)
 root  libeconf-0.7.9-2.fc43.aarch64.rpm 0 f6645a8d7c9f23953e83f6aa2605ccf0c5dfe15e6021a81711a3893f2e101f12 36011 libeconf-0.7.9-2.fc43.src.rpm  <- pam-libs libeconf.so.0()(64bit)
 root  libedit-3.1-58.20260512cvs.fc43.aarch64.rpm 0 fe03f71c8205aced2cc4ef22aa319aaddab643a1be6fb26878474f0e021aa012 107160 libedit-3.1-58.20260512cvs.fc43.src.rpm  <- llvm-libs libedit.so.0()(64bit)
+root  libepoxy-1.5.10-11.fc43.aarch64.rpm 0 d7789476ca2f647a88af37fc82174a0bc13059968004df6abe567417c7fb2681 246360 libepoxy-1.5.10-11.fc43.src.rpm  <- gtk3 libepoxy.so.0()(64bit)
 root  libevent-2.1.13-1.fc43.aarch64.rpm 0 7df4688c46f2663df763d9b744de353414961740365b7b947d0dde4fe16d1ce5 260565 libevent-2.1.13-1.fc43.src.rpm  <- avahi-libs libevent-2.1.so.7()(64bit)
 root  libffi-3.5.2-1.fc43.aarch64.rpm 0 a1defcf98e9146d69889ff95346c73bc5637a02c75a03abb4dc041b29106e0fc 40316 libffi-3.5.2-1.fc43.src.rpm  <- glib2 libffi.so.8()(64bit)
 root  libgcc-15.3.1-1.fc43.aarch64.rpm 0 150d21714e9e046680eed73811267e75b774cf2cf655a1f76583ce5eaff5b79d 129898 gcc-15.3.1-1.fc43.src.rpm  <- seed
@@ -91,22 +99,31 @@ root  libglvnd-1.7.0-8.fc43.aarch64.rpm 1 f01e1db78698a129657eb6d221c76673a042c7
 root  libglvnd-egl-1.7.0-8.fc43.aarch64.rpm 1 fb32d6ff132eacf18b701830b131693e92859275f514f5eb21ec5cd51e752ec9 37086 libglvnd-1.7.0-8.fc43.src.rpm  <- seed libEGL.so.1()(64bit)
 root  libglvnd-glx-1.7.0-8.fc43.aarch64.rpm 1 7608198fdb1ce15e648d7492eac0746a37a8ac434cecc726738bd8a5d8f6d612 132431 libglvnd-1.7.0-8.fc43.src.rpm  <- seed libGL.so.1()(64bit)
 root  libgomp-15.3.1-1.fc43.aarch64.rpm 0 a5a7506925d35a1708bd2f6a31c308f285f568c639894480680842d364e123a5 380993 gcc-15.3.1-1.fc43.src.rpm  <- fftw-libs-single libgomp.so.1()(64bit)
+root  libgusb-0.4.9-4.fc43.aarch64.rpm 0 f711c2b820c6fe972e77d767c7b132113f122a1bc15f330b9b633cf333ff94a8 63272 libgusb-0.4.9-4.fc43.src.rpm  <- colord-libs libgusb.so.2()(64bit)
+root  libicu-77.1-1.fc43.aarch64.rpm 0 48243f1e136ed1ff0159cc36295dbc48fd2b0063bf323db851a83ce29aa5fb11 11089496 icu-77.1-1.fc43.src.rpm  <- libtinysparql libicui18n.so.77()(64bit)
 root  libidn2-2.3.8-2.fc43.aarch64.rpm 0 b45bdd03ae4e80f580ed80a0d06f82c1172c8281cb28033f5c16f754f0d4c5e9 178840 libidn2-2.3.8-2.fc43.src.rpm  <- gnutls libidn2.so.0()(64bit)
 root  liblc3-1.1.3-5.fc43.aarch64.rpm 0 18ffd222c9680a9e9ed6a66011d990f76714ece67dad861883881d555150a4a4 104216 liblc3-1.1.3-5.fc43.src.rpm  <- pipewire-libs liblc3.so.1()(64bit)
 root  libldac-2.0.2.3-18.fc43.aarch64.rpm 0 f95c06fe78813bd9cb122037366c7b8a8e14e9027c6e48cb2fd1233d2c0fdece 42491 libldac-2.0.2.3-18.fc43.src.rpm  <- pipewire-libs libldacBT_abr.so.2()(64bit)
 root  libmount-2.41.5-1.fc43.aarch64.rpm 0 95bf1d767272057ea1e905ed35c59c9638d91710b9a9c80254cb108b1715b924 163937 util-linux-2.41.5-1.fc43.src.rpm  <- util-linux-core libmount.so.1()(64bit)
+root  libnghttp2-1.66.0-3.fc43.aarch64.rpm 0 43214575f3b74ff8a39ad6ea31b477f027713d178c1ea1c2105e84de8e5f2952 72383 nghttp2-1.66.0-3.fc43.src.rpm  <- libsoup3 libnghttp2.so.14()(64bit)
+root  libnotify-0.8.8-1.fc43.aarch64.rpm 0 0d89242db7d7cfda056208d0996010ad1a3107d3196b4f3172eaa92262af3573 56920 libnotify-0.8.8-1.fc43.src.rpm  <- seed libnotify.so.4()(64bit)
 root  libogg-1.3.6-2.fc43.aarch64.rpm 2 49481830dbef65fa71bd7221754e52c64d393f9d2822ac7570fb168caac5b3e6 34222 libogg-1.3.6-2.fc43.src.rpm  <- libsndfile libogg.so.0()(64bit)
 root  libpciaccess-0.16-16.fc43.aarch64.rpm 0 289c513d2b8adbf00f61b8985d55dad221e179ce462b506da772e4691c07ec23 26851 libpciaccess-0.16-16.fc43.src.rpm  <- libdrm libpciaccess.so.0()(64bit)
 root  libpng-1.6.58-1.fc43.aarch64.rpm 2 6be17c720a9781bacd06c4d1b0f582e03919ed3a3022cb76fdf374908643a60d 120664 libpng-1.6.58-1.fc43.src.rpm  <- cairo libpng16.so.16()(64bit)
+root  libpsl-0.21.5-6.fc43.aarch64.rpm 0 4db3933dc02b3ea47d3fd24ffbc458d9f00fc02206957bbeaa2d1d52c5fbcba7 66690 libpsl-0.21.5-6.fc43.src.rpm  <- libsoup3 libpsl.so.5()(64bit)
 root  libsbc-2.0-7.fc43.aarch64.rpm 0 13efb19d32d29a6de4f9b34ed5a30a1ae264f5d05687256c807c0f4e4c6d158f 45763 sbc-2.0-7.fc43.src.rpm  <- pipewire-libs libsbc.so.1()(64bit)
 root  libseccomp-2.6.1-2.fc43.aarch64.rpm 0 cb3271ef389e8d2b354da083bde4725d16476db4f6df01abff9e2a6076d35891 77566 libseccomp-2.6.1-2.fc43.src.rpm  <- glycin-libs libseccomp.so.2()(64bit)
+root  libsecret-0.21.7-7.fc43.aarch64.rpm 0 e483ee5b27bfc14da493b05414792f0dc3247654d04671ba1ce0b10df9886498 198160 libsecret-0.21.7-7.fc43.src.rpm  <- seed libsecret-1.so.0()(64bit)
 root  libselinux-3.9-5.fc43.aarch64.rpm 0 c3060d111b6e6ae7da90a6df65ee92cd2819b01fc357461315adcc183348c645 98943 libselinux-3.9-5.fc43.src.rpm  <- coreutils-single libselinux.so.1()(64bit)
 root  libsmartcols-2.41.5-1.fc43.aarch64.rpm 0 3e5ad1a8a41c6783f7af869fb371fa3eb093676bb8c4b69b1f98c95baae6837d 84836 util-linux-2.41.5-1.fc43.src.rpm  <- util-linux-core libsmartcols.so.1()(64bit)
 root  libsndfile-1.2.2-10.fc43.aarch64.rpm 0 932f95dacb234fa40075bbe8f48a2751e4126bc443dc1eb2564d69f5f25b08ae 222464 libsndfile-1.2.2-10.fc43.src.rpm  <- seed libsndfile.so.1()(64bit)
+root  libsoup3-3.6.6-5.fc43.aarch64.rpm 0 06345d01b55f23e90bf1c2850b8243bf2b001cd32ce866d268aff1aab33d1eb5 458068 libsoup3-3.6.6-5.fc43.src.rpm  <- libtinysparql libsoup-3.0.so.0()(64bit)
 root  libssh2-1.11.1-9.fc43.aarch64.rpm 0 b3454a976e7762595f09991924a5c758e17104ee7eccdec08dc186d3ad576355 141540 libssh2-1.11.1-9.fc43.src.rpm  <- seed libssh2.so.1()(64bit)
 root  libstdc++-15.3.1-1.fc43.aarch64.rpm 0 d0658a38e029feb227797a8549e37237a9931257be2daa8fb3bea793352afb51 882664 gcc-15.3.1-1.fc43.src.rpm  <- seed
+root  libstemmer-3.0.1-8.fc43.aarch64.rpm 0 f45cc996d4711158f579cb7ea7efe433c0350faaa97a0e4449c276a9f04e9ecc 160744 snowball-3.0.1-8.fc43.src.rpm  <- libtinysparql libstemmer.so.0()(64bit)
 root  libtasn1-4.21.0-1.fc43.aarch64.rpm 0 21d0cd7f71bfc9dde8107203223a31b7bd2ffb5e64488e37497ba9f644cadf19 75553 libtasn1-4.21.0-1.fc43.src.rpm  <- p11-kit-trust libtasn1.so.6()(64bit)
 root  libthai-0.1.29-11.fc43.aarch64.rpm 0 f2e577390dad50f485e0d287869464dd0671d9f93d50fd94c6c3a78e9690d2d7 214761 libthai-0.1.29-11.fc43.src.rpm  <- pango libthai.so.0()(64bit)
+root  libtinysparql-3.10.1-5.fc43.aarch64.rpm 0 2feea61d57e09fb99aa9550ff59e71ff4d5e325da7b5f81cd606a6c8ff298697 344112 tinysparql-3.10.1-5.fc43.src.rpm  <- gtk3 libtinysparql-3.0.so.0()(64bit)
 root  libtirpc-1.3.7-1.rc1.fc43.aarch64.rpm 0 9376e5e3ddc131992a1a59041afea56e9b264d5e6fd522eb2238e3340564833a 95914 libtirpc-1.3.7-1.rc1.fc43.src.rpm  <- lsof libtirpc.so.3()(64bit)
 root  libunistring-1.1-10.fc43.aarch64.rpm 0 9e21c2e49f0d85da696fd06af290c30a48bdd65a410c62b032816baf9996daf1 552100 libunistring-1.1-10.fc43.src.rpm  <- gnutls libunistring.so.5()(64bit)
 root  libusb1-1.0.30-1.fc43.aarch64.rpm 0 d94a613ff2042889bf1b799b9080d363c8c8821c29c2b683e08262b30b3690ca 80261 libusb1-1.0.30-1.fc43.src.rpm  <- pipewire-libs libusb-1.0.so.0()(64bit)
@@ -116,6 +133,8 @@ root  libvdpau-1.5-10.fc43.aarch64.rpm 0 c4c4c72d62ef3399592d3258a4f34d07586a87a
 root  libverto-0.3.2-11.fc43.aarch64.rpm 0 19c69beddc379b90bb04949b4a616e46b1716707e554b293c6a79a052f1fa3eb 20919 libverto-0.3.2-11.fc43.src.rpm  <- krb5-libs libverto.so.1()(64bit)
 root  libvorbis-1.3.7-13.fc43.aarch64.rpm 1 5f37ae815621cb98e518ef5062422b96ab2f885ab5ce3794ac498b2454ccfd50 188246 libvorbis-1.3.7-13.fc43.src.rpm  <- libsndfile libvorbis.so.0()(64bit)
 root  libwayland-client-1.26.0-1.fc43.aarch64.rpm 0 5054a68818eefbe263584c993779134a74916fada61041af1895650fc2e14441 34590 wayland-1.26.0-1.fc43.src.rpm  <- mesa-vulkan-drivers libwayland-client.so.0()(64bit)
+root  libwayland-cursor-1.26.0-1.fc43.aarch64.rpm 0 06e65c675517e5151b5902efd6222051110c622326b203065b87fbecfe29efb6 19461 wayland-1.26.0-1.fc43.src.rpm  <- gtk3 libwayland-cursor.so.0()(64bit)
+root  libwayland-egl-1.26.0-1.fc43.aarch64.rpm 0 ebaa8cfe2840bcf2f23a3a2c94649f3e53a4ba99a5ffe85fa1797531af6baad2 12796 wayland-1.26.0-1.fc43.src.rpm  <- gtk3 libwayland-egl.so.1()(64bit)
 root  libxcb-1.17.0-6.fc43.aarch64.rpm 0 35640438083dbe5864a0078fac0f36853e7498de528a83c3e9a3d0491c427c96 247910 libxcb-1.17.0-6.fc43.src.rpm  <- seed libxcb.so.1()(64bit)
 root  libxcrypt-4.5.2-1.fc43.aarch64.rpm 0 bfa8863d164ead67878f701b9afbf846c735824cefeaec154315feacab70fede 128220 libxcrypt-4.5.2-1.fc43.src.rpm  <- util-linux-core libcrypt.so.2()(64bit)
 root  libxkbcommon-1.11.0-1.fc43.aarch64.rpm 0 1e6691d253ec1fb1e9c10be37787e944671d454bb7ff11a7e9c94b88405d3d52 175629 libxkbcommon-1.11.0-1.fc43.src.rpm  <- seed libxkbcommon.so.0()(64bit)
@@ -131,6 +150,7 @@ root  mesa-libEGL-25.3.6-3.fc43.aarch64.rpm 0 6dce45808d70dfb32ec3e181e200b3b389
 root  mesa-libGL-25.3.6-3.fc43.aarch64.rpm 0 dd25d02cdcb8208b3e76e63411966fa2e3cd80b7baa61c226128a12973cc1ab1 121569 mesa-25.3.6-3.fc43.src.rpm  <- seed
 root  mesa-libgbm-25.3.6-3.fc43.aarch64.rpm 0 a03abd135ae614e32262c46642bc9dd294e47cf7e7cb6ca0fbfd3020abf2593c 17464 mesa-25.3.6-3.fc43.src.rpm  <- seed libgbm.so.1()(64bit)
 root  mesa-vulkan-drivers-25.3.6-3.fc43.aarch64.rpm 0 0ed00ed99677278def2921a2326a27f73c2b90d8b675bdcfa8893844fdd67f96 18199119 mesa-25.3.6-3.fc43.src.rpm  <- seed
+root  mpdecimal-4.0.1-2.fc43.aarch64.rpm 0 1e886f3daed4ed8d8c686c82e9211543fb80373d83678e846bbb5866616a93f7 98060 mpdecimal-4.0.1-2.fc43.src.rpm  <- python3-libs libmpdec.so.4()(64bit)
 root  mpg123-libs-1.32.10-2.fc43.aarch64.rpm 0 dc7ff3d09759e391360f593bf8549cd0aa1257687775361bdf8b82fdaccf7ce7 365794 mpg123-1.32.10-2.fc43.src.rpm  <- libsndfile libmpg123.so.0()(64bit)
 root  ncurses-libs-6.5-7.20250614.fc43.aarch64.rpm 0 0404a6fbf0b9b7ce20f270a4ae2474471fa1f980f250d170b9dee32f67415de8 332346 ncurses-6.5-7.20250614.fc43.src.rpm  <- bash libtinfo.so.6()(64bit)
 root  nettle-3.10.1-2.fc43.aarch64.rpm 0 2d2fbc54152074db83b3c89b2cbd40b812a54ec47067285f403ee8ded66f521e 435870 nettle-3.10.1-2.fc43.src.rpm  <- gnutls libhogweed.so.6()(64bit)
@@ -153,6 +173,9 @@ root  pcre2-10.47-1.fc43.aarch64.rpm 0 3bbee47a258d00f513fa4795d084353c88d57d3d7
 root  pipewire-libs-1.4.11-1.fc43.aarch64.rpm 0 1291a9872944558fd5a445ff79052e3e998b0deb251b53479b0fca93ffd8f3cd 2410630 pipewire-1.4.11-1.fc43.src.rpm  <- seed libpipewire-0.3.so.0()(64bit)
 root  pixman-0.46.2-2.fc43.aarch64.rpm 0 add0d889a8b533609602dcb95878294df16e2cd3f1aeba95c89ff3c56700c8af 218312 pixman-0.46.2-2.fc43.src.rpm  <- cairo libpixman-1.so.0()(64bit)
 root  pulseaudio-libs-17.0-9.fc43.aarch64.rpm 0 8a9366a2edafd96fa5483d6d95685ff67e1e70f53b0e172af880c891cb0ad61b 685573 pulseaudio-17.0-9.fc43.src.rpm  <- seed libpulse.so.0()(64bit)
+root  python3-3.14.7-1.fc43.aarch64.rpm 0 49a17b86a4fc1cb4f2a0b2fff7ffb1c5abc5f03123a7ee3c33b46cccba8d9524 29904 python3.14-3.14.7-1.fc43.src.rpm  <- seed
+root  python3-libs-3.14.7-1.fc43.aarch64.rpm 0 de7a9b6d7cc7378c77a04aafcf37dc11d121d0afd986576f85d821ddadbd6176 10247269 python3.14-3.14.7-1.fc43.src.rpm  <- python3 libpython3.14.so.1.0()(64bit)
+root  readline-8.3-2.fc43.aarch64.rpm 0 6c90a9ea425e9ea30f82d54d19e3f8f347677b5a89bae52f364a9fdff1137971 227099 readline-8.3-2.fc43.src.rpm  <- python3-libs libreadline.so.8()(64bit)
 root  sdl2-compat-2.32.72-1.fc43.aarch64.rpm 0 fe7bc3671d7947f52950d2c0ffda571ce44c968af7959c50ad3e401c2f40f260 146590 sdl2-compat-2.32.72-1.fc43.src.rpm  <- seed libSDL2-2.0.so.0()(64bit)
 root  spirv-tools-libs-2026.1-2.fc43.aarch64.rpm 0 28713cb86c900574aefb6468899da47ec88c18c5514814be97878a451d95f291 1638795 spirv-tools-2026.1-2.fc43.src.rpm  <- mesa-dri-drivers libSPIRV-Tools.so()(64bit)
 root  sqlite-libs-3.50.2-3.fc43.aarch64.rpm 0 7aebaf2ab9bdc79cd3a36bee4a92ba69c71d0d14133dd016d225c13fe045c633 758193 sqlite-3.50.2-3.fc43.src.rpm  <- nss-softokn libsqlite3.so.0()(64bit)

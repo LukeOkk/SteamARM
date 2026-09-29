@@ -310,6 +310,15 @@ final class LauncherModel: ObservableObject {
                 ? "falta el cliente ARM64 de Steam en \(app.root) (\(program)); benchmarks/stage21 explica cómo se descargó"
                 : "falta el programa \(program) en la raíz \(app.root)"
         }
+        // Heroic ARM64 (Electron) needs GTK 3 and friends in its root, which a
+        // root built before they were seeded does not have.
+        if app.kind == "heroic", app.architecture == GuestArchitecture.aarch64.rawValue {
+            let missing = HeroicARM64.missing(inRoot: host.path) { FileManager.default.fileExists(atPath: $0) }
+            if !missing.isEmpty {
+                return "a la raíz ARM64 le falta \(missing.joined(separator: ", ")) (Electron y los ayudantes de Heroic); "
+                    + "reconstrúyela con scripts/mkarmroot.sh, que conserva opt/apps y tmp/"
+            }
+        }
         return nil
     }
 

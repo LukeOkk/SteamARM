@@ -180,6 +180,9 @@ long lxrt_execve(const char *path, char *const argv[], char *const envp[])
             use_env = traced;
         }
     }
+    // exec detaches every SysV segment: the IPC_RMIDs deferred until this
+    // process's last detach (sysv_ipc.c) are due now.
+    lxrt_sysv_exit();
     execve(self, newargv, use_env);
     // Only reached on failure; Linux's execve does not return on success.
     int e = errno;

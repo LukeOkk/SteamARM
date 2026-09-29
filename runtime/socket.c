@@ -25,6 +25,7 @@
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <netinet/tcp.h>
+#include <poll.h>
 #include <sys/uio.h>
 #include <sys/ucred.h>
 #include <sys/un.h>
@@ -279,6 +280,65 @@ static int type_to_darwin(int ltype)
     return base;
 }
 
+// The end of file, then. A thread already blocked on a Darwin AF_UNIX
+// datagram socket is not woken when the peer goes away: poll(), kevent() and
+// recv() stay blocked (MEASURED on this Mac, 2026-09-29: a poll with a
+// 2000 ms timeout returned 0 although the peer was closed 300 ms in, and a
+// recv never returned). A poll made AFTER the peer is gone reports POLLIN at
+// once, and the recv then fails with ECONNRESET. Chromium's zygotes wait for
+// the browser that way (ppoll, then recvmsg, on their seqpacket socket) and
+// outlived Heroic's browser process by minutes (MEASURED,
+// benchmarks/stage24-heroic.txt). So a blocking recvmsg/recvfrom or ppoll on
+// such a socket waits in slices of SEQPKT_SLICE_MS, and ECONNRESET on it
+// reads as Linux's end of file, 0.
+//
+// Which sockets: those created as SOCK_SEQPACKET. They carry SO_LINGER
+// {1, SEQPKT_LINGER} as their mark (a linger time means nothing to a
+// datagram socket, and Darwin keeps and reports it: MEASURED), so the mark
+// travels with the socket through fork, exec and SCM_RIGHTS, where a table
+// in this process would not. A guest reading SO_LINGER sees it off.
+#define SEQPKT_LINGER   0x5e9
+#define SEQPKT_SLICE_MS 250
+
+static void seqpkt_mark(int fd, int ltype)
+{
+    if ((ltype & ~(L_SOCK_NONBLOCK | L_SOCK_CLOEXEC)) != 5 || fd < 0)
+        return;
+    struct linger l = { 1, SEQPKT_LINGER };
+    setsockopt(fd, SOL_SOCKET, SO_LINGER, &l, sizeof l);
+}
+
+bool lxrt_is_seqpacket(int fd)
+{
+    struct linger l;
+    socklen_t n = sizeof l;
+    return fd >= 0 && getsockopt(fd, SOL_SOCKET, SO_LINGER, &l, &n) == 0 &&
+           l.l_onoff && l.l_linger == SEQPKT_LINGER;
+}
+
+// Block until fd is readable, a slice at a time; 0, or -EINTR (a signal
+// ended the wait, as it ends a blocking recvmsg without SA_RESTART).
+static long seqpkt_wait(int fd)
+{
+    for (;;) {
+        struct pollfd p = { fd, POLLIN, 0 };
+        int r = poll(&p, 1, SEQPKT_SLICE_MS);
+        if (r > 0)
+            return 0;
+        if (r < 0)
+            return LERR(errno);
+    }
+}
+
+// A blocking receive on a seqpacket socket: wait in slices first.
+static long seqpkt_before_recv(int fd, int lflags)
+{
+    if ((lflags & 0x40) /* MSG_DONTWAIT */ || (fcntl(fd, F_GETFL) & O_NONBLOCK) ||
+        !lxrt_is_seqpacket(fd))
+        return 0;
+    return seqpkt_wait(fd);
+}
+
 // AF_NETLINK / NETLINK_KOBJECT_UEVENT: libudev's device monitor. Darwin has
 // no netlink, and SDL3 (sdl2-compat in Steam's runtime) refuses to start its
 // haptic subsystem -- and with it all controller support, so winebus saw no
@@ -342,6 +402,7 @@ long lxrt_socket(int ldomain, int ltype, int proto)
     if (fd < 0)
         return LERR(errno);
     apply_type_flags(fd, ltype);
+    seqpkt_mark(fd, ltype);
     return fd;
 }
 
@@ -354,6 +415,8 @@ long lxrt_socketpair(int ldomain, int ltype, int proto, int *sv)
         return LERR(errno);
     apply_type_flags(sv[0], ltype);
     apply_type_flags(sv[1], ltype);
+    seqpkt_mark(sv[0], ltype);
+    seqpkt_mark(sv[1], ltype);
     return 0;
 }
 
@@ -762,7 +825,12 @@ long lxrt_recvfrom(int fd, void *buf, size_t len, int lflags, void *laddr, uint3
     int df = lxrt_msgflags_to_darwin(lflags);
     struct sockaddr_storage ss;
     socklen_t sl = sizeof ss;
+    long w = seqpkt_before_recv(fd, lflags);
+    if (w < 0)
+        return w;
     ssize_t r = recvfrom(fd, buf, len, df, laddr ? (struct sockaddr *)&ss : NULL, laddr ? &sl : NULL);
+    if (r < 0 && errno == ECONNRESET && lxrt_is_seqpacket(fd))
+        return 0;               // the peer is gone: end of file (see above)
     if (r < 0)
         return LERR(errno);
     if (laddr && lalen)
@@ -830,7 +898,15 @@ long lxrt_recvmsg(int fd, void *lmsg, int flags)
         dm.msg_controllen = sizeof ctrl;
     }
 
+    long w = seqpkt_before_recv(fd, flags);
+    if (w < 0)
+        return w;
     ssize_t r = recvmsg(fd, &dm, lxrt_msgflags_to_darwin(flags));
+    if (r < 0 && errno == ECONNRESET && lxrt_is_seqpacket(fd)) {
+        lm->msg_controllen = 0;
+        lm->msg_flags = 0;
+        return 0;               // the peer is gone: end of file (see above)
+    }
     if (r < 0)
         return LERR(errno);
 
@@ -1076,5 +1152,9 @@ long lxrt_getsockopt(int fd, int llevel, int lopt, void *val, unsigned *len)
         return LERR(errno);
     if (len)
         *len = dl;
+    // The seqpacket mark is the runtime's, not the guest's.
+    if (dlevel == SOL_SOCKET && dopt == SO_LINGER && val && dl >= sizeof(struct linger) &&
+        ((struct linger *)val)->l_onoff && ((struct linger *)val)->l_linger == SEQPKT_LINGER)
+        memset(val, 0, sizeof(struct linger));
     return 0;
 }

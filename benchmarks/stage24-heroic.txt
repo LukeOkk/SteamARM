@@ -1,0 +1,322 @@
+Stage 24 -- Heroic Games Launcher for linux-arm64, native under lxrun (2026-09-29)
+==================================================================================
+
+ZERO-VM. No FEX for Heroic. Host: Mac mini M4, 16 GB, macOS 27.0, X on :2
+(scripts/run-x11-native.sh, XQuartz rootless, shared with other sessions).
+Root: the Fedora 43 armroot (scripts/mkarmroot.sh, /tmp/lxrt-armroot).
+Labels: MEASURED, VERIFIED IN SOURCE, UPSTREAM DOCUMENTED, HYPOTHESIS, UNKNOWN.
+No account was signed in, nothing was typed, no game was launched. Home paths
+are written as ~ below.
+
+Result (MEASURED)
+-----------------
+Heroic 2.22.3, linux-arm64 (Electron 43.1.1), runs natively from the Fedora
+armroot: its main window "Heroic Games Launcher" (1200x690) is mapped and
+viewable on :2 4.0-4.8 s after start; a click on its sidebar's Settings link
+shows the settings route (#/settings/general, tabs General, Game Defaults,
+Advanced, System Information, Log); SIGTERM to its main process ends every
+process of the session in 0.4-0.5 s with exit status 0, and so does Heroic's
+own Quit (sidebar -> "Quit" dialog -> QUIT); it starts again the same way.
+7 of 7 cycles passed in the final runs (P1-P3). About 1.7 GB resident over
+6 processes. Four of its five helpers run (legendary, gogdl, comet,
+vulkan-helper); nile (Amazon) cannot: a non-PIE binary.
+
+It needed six runtime fixes (R1-R6), GTK 3, libsecret, libnotify and python3
+in the armroot's seeds (S1), and two Chromium/V8 switches:
+--disable-gpu (G1) and --js-flags=--no-opt, because V8's TurboFan tier
+crashes under lxrun (T1-T4; cause UNKNOWN).
+
+1. Upstream facts (UPSTREAM DOCUMENTED, gh api / raw files, 2026-09-29)
+-----------------------------------------------------------------------
+- github.com/Heroic-Games-Launcher/HeroicGamesLauncher release v2.22.3
+  (2026-09-16): Linux assets are x64 only (linux-amd64.deb, linux-x64.pacman,
+  linux-x64.tar.xz, linux-x86_64.AppImage, linux-x86_64.rpm); macOS and
+  Windows have arm64 assets.
+- Flathub com.heroicgameslauncher.hgl: flathub.json {"only-arches": ["x86_64"]};
+  the manifest wraps the x86_64 AppImage.
+- Heroic's CI (.github/workflows/build-base.yml at v2.22.3) runs
+  `pnpm dist:linux AppImage --x64 --arm64` and uploads a linux-AppImage-arm64
+  workflow artifact kept 14 days; the release workflow (draft-release-linux.yml,
+  `pnpm release:linux`) publishes x64 only.
+- package.json at v2.22.3: electron ^43.1.1 (pnpm-lock: 43.1.1), electron-builder
+  26.8.1; no native Node module in dependencies (MEASURED below: no .node file
+  in app.asar).
+- meta/downloadHelperBinaries.ts at v2.22.3 fetches linux arm64 helpers:
+  legendary 0.21.1 legendary_linux_arm64, gogdl v1.3.0 gogdl_linux_arm64,
+  nile v1.2.0 nile_linux_arm64, comet v0.2.0 comet-aarch64-unknown-linux-gnu;
+  vulkan-helper for arm64 linux is committed at public/bin/arm64/linux.
+- Heroic finds its helpers at build/bin/<process.arch>/<platform> through
+  app.asar (archSpecificBinary in build/main/main.js; x64 as the fallback).
+
+2. Downloads (official release URLs; sha256 MEASURED with shasum -a 256)
+------------------------------------------------------------------------
+file                                   sha256                                                            licence
+Heroic-2.22.3-linux-x64.tar.xz         7382d719a5114c5f0761eea05cdb22f73f58fe98ec840d16b3d85a054d0d3efd  GPL-3.0 (Heroic)
+electron-v43.1.1-linux-arm64.zip       30ed0b3672dd71672f6496fa0ba0c770ac7f8c6d9b38f01f615a6923b1541311  MIT (+ LICENSES.chromium.html)
+legendary_linux_arm64 (0.21.1)         e901cb52ada10d5cef6ffb2a0985099958124457bfb455a571023d1e042143d9  GPL-3.0
+gogdl_linux_arm64 (v1.3.0)             c49e1519146523ec94f33e2d21eedcc9a167004d7da218621e6d5fb84a7a0f4c  GPL-3.0
+nile_linux_arm64 (v1.2.0)              197859c629c47e4e4d7ed1d2a290b7bef1e778f891ff8ca42ba65dbb020ba751  GPL-3.0
+comet-aarch64-unknown-linux-gnu (v0.2.0) 7eca0d84d3c0b0e563a732a6300a20c115b5d60d25e44735d18e86a773b97a2f  Apache-2.0
+vulkan-helper (Heroic tree, v2.22.3)   19cc3e7a27df3c75adb37b7474dca44991e142f5a9fe339dc94d3d90598aeea0  (Heroic's repository; upstream imLinguin/vulkan-helper-rs is MIT)
+Source tarball (for B1 only): HeroicGamesLauncher v2.22.3 archive
+  f542b2f894288df6fc3992ccc135798110ab952889a7def0c7a203d7524c9923.
+Electron's own SHASUMS256.txt lists the same sha256 for the linux-arm64 zip.
+Release-page digests (gh api) agree for every file that has one (comet's
+release lists none).
+
+3. The arm64 build
+------------------
+B1  Source build, upstream toolchain, on the Mac (scratch dir; node v24.18.0,
+    pnpm 10.28.0 through npx), from the v2.22.3 source tarball:
+      pnpm install --frozen-lockfile; pnpm download-helper-binaries;
+      pnpm run build; pnpm exec electron-builder --linux dir --arm64 --publish never
+    14 s, 20 s, 29 s, 36 s cumulative. Output dist/linux-arm64-unpacked:
+    88 files, 384 MB; heroic = Electron's electron (same sha256 90d5a237...).
+B2  Its app.asar against the official x64 release's (both extracted with
+    @electron/asar 3.2.17, sha256 of every file): 1853 files each; 1848
+    byte-identical; the 5 others are build/bin/{x64,arm64}/linux/{comet,
+    gogdl,legendary,nile,vulkan-helper}. No .node file in either.
+B3  Its Electron files against electron-v43.1.1-linux-arm64.zip: identical,
+    with electron -> heroic, LICENSE -> LICENSE.electron.txt, and the zip's
+    resources/default_app.asar and version left out.
+B4  scripts/heroic-asar.py retarget (the x64 app.asar's header re-pointed at
+    the arm64 helpers, data section copied) produced an app.asar
+    byte-identical to B1's (sha256 86782b62b5221f88d6076edb7ed695c732339e371820a0eaf437b5e485fbf8e5
+    both; cmp: identical).
+B5  scripts/install-heroic-arm64.sh --dest <scratch> --downloads <scratch>:
+    rc 0, [1/6]..[6/6], "installed: /opt/apps/heroic/Heroic-2.22.3-linux-arm64/heroic".
+    diff -r against B1's dist/linux-arm64-unpacked: no difference ("TREES
+    IDENTICAL"); 88 files, 13 executable in both.
+B6  The same script into ~/SteamARM-roots/armroot/opt/apps/heroic (the
+    install every run below used): rc 0.
+    ELF: heroic, chrome_crashpad_handler, libffmpeg.so, libEGL.so,
+    libGLESv2.so, libvk_swiftshader.so, libvulkan.so.1 are aarch64 with all
+    PT_LOAD p_align 0x10000 (llvm-readelf -lW): no LXRT_GUEST_PAGE=4096
+    needed. heroic needs GLIBC_2.25 at most; DT_NEEDED includes
+    libgtk-3.so.0.
+
+4. The root (S1)
+----------------
+Before: the armroot (built 06:47) lacked libgtk-3.so.0, libsecret-1.so.0,
+libnotify.so.4 (libffmpeg.so is Electron's own) and python3.
+Relock into a scratch lock with those three sonames as seeds: 174 root + 5
+build packages; against scripts/mkarmroot.lock only additions (19 packages:
+gtk3-3.24.52-1.fc43, libsecret-0.21.7-7, libnotify-0.8.8-1, colord-libs,
+libcloudproviders, libtinysparql, libepoxy, libwayland-cursor/-egl,
+cairo-gobject, json-glib, libgusb, libicu 77.1, libsoup3, libpsl,
+libnghttp2, libstemmer, avahi-glib); same repodata revisions (releases
+1761190638, updates 1790641463). + python3: 5 more (python3-3.14.7-1,
+python3-libs, mpdecimal, gdbm-libs, readline).
+`scripts/mkarmroot.sh` with the new seeds, 13:54:12-13:54:57 (45 s):
+relock 7 s, 184 RPMs present (24 fetched), stage 5 s, "armroot ready (9.3G)";
+tmp/armhome (8.2 GB) and opt/apps (other sessions' prism,
+steamarm-fex-proton-tests) carried over.
+
+5. Runtime fixes (each MEASURED on the Heroic run it unblocked)
+-----------------------------------------------------------------
+Runs 1-13: scratch harness, build/lxrun of this worktree, bounded by alarm or
+a timer; every process stopped by PID.
+
+run 1-2  heroic --no-sandbox: exit 139 right after "entering guest"; traced
+         (run 3): SIGSEGV at heroic+0x5e050a4, insn 0x38401643
+         (ldrb w3, [x18], #1), addr 0 -- ICU offsetTOCLookupFn
+         (ucmndata.cpp:112, breakpad symbols of electron-v43.1.1-linux-arm64).
+         heroic has 1.2 MB of .eh_frame for 149 MB of .text: x18 in functions
+         without an FDE was not rewritten ("x18 2939 found").
+         -> LXRT_X18_ALL_TEXT covering the app: "x18 78584 found in 6 code
+         windows, 78584 rewritten, 0 unsupported". Of the 78584 words, 78573
+         lie in breakpad FUNC ranges and 11 in assembly (ffi, crashpad
+         CaptureContext, BoringSSL, __init_cpu_features); none in V8's
+         embedded builtins (tools: x18scan.c with runtime/x18.c, classify.py).
+R1 run 5 SIGSEGV/SEGV_ACCERR in lxrt_dispatch writing 0x129d04000:
+         "226(0x129d04000, 0x1001a, 0x1)" then "261(0x0, 0x6, 0x0)" -- the
+         protected_memory section (0x1001a bytes) made read-only, then
+         prlimit64(0, RLIMIT_NPROC, NULL, <that page>) expecting EFAULT
+         (Chromium's ProtectedMemory check); the runtime stored the old limit
+         itself. Fix: the old limit is written by Darwin's getrlimit into the
+         guest buffer (EFAULT from the kernel). After: "syscall 261 -> -14".
+R2 run 8 then "261 -> 0" on the next check and a brk #0 (exit 133): the
+         length 0x1001a was recorded to the byte by subpage.c, so the host page
+         holding the section's tail stayed writable. Fix: an mprotect length
+         that is not a multiple of 4 KiB covers the page its last byte is in
+         (16 KiB for a native guest told 16 KiB pages, 4 KiB otherwise); a
+         multiple of 4 KiB is left as it was (the sub-page extension).
+         A first version rounded every length to 16 KiB: tests/elf/run.sh
+         64 passed, 4 failed (W/X flip rescan, guest-driven sub-page guard,
+         JIT_RWX_NATIVE, WX_ONE_OWNER: their 4 KiB guards); the final one:
+         68 passed, 0 failed.
+T  runs 10-11: SIGSEGV in V8's TurboFan (below). With --js-flags=
+         "--no-opt --no-maglev": the backend ran ("Applying migration ...",
+         "Connectivity: online") and then:
+           (heroic:43410): Gdk-WARNING **: ... The program 'heroic' received an
+           X Window System error. ... The error was 'BadAccess (attempt to
+           access private resource denied)'. (Details: serial 228 error_code 10
+           request_code 133 (MIT-SHM) minor_code 1)
+R3       Traced: shmget(IPC_PRIVATE, 0x80000) -> shmat -> shmctl(IPC_RMID) at
+         once (cairo's xlib SHM pool, no XSync before IPC_RMID on Linux); Darwin
+         refuses the X server's later shmat of a removed segment. Fix: an
+         IPC_RMID of a kernel segment this process has attached is deferred to
+         its last shmdt, exec or exit (records in /tmp/lxrt-shm-rmid for a
+         process killed first, swept at the next shmget). Run 13: window at
+         5.0 s, "Frontend Ready".
+R4       Heroic's legendary.log: "lxrun: open /usr/local/bin/python3: No such
+         file or directory" -- env (execvp along PATH) died: lxrun replaced
+         itself before finding the file missing. Fix: execve checks the file
+         first (ENOENT/EACCES to the caller; bwrap and /proc/*/exe exempt).
+         After: `legendary --version` -> legendary version "0.21.1", codename
+         "Lowlife"; `gogdl --version` -> 1.3.0 (python3 3.14.7 in the root).
+R5       `comet --version`: "thread 'main' panicked at src/main.rs:355:29:
+         Failed building the Runtime: Os { code: 22 ...}"; traced: epoll_ctl
+         (21) on fcntl(3, F_DUPFD_CLOEXEC) of the epoll descriptor -> -22
+         (tokio's try_clone). Fix: a dup of an epoll descriptor is an alias of
+         the same instance. After: "comet 0.2.0".
+R6 After SIGTERM to the main process, 2 zygotes stayed (ppid 1) for 30 s:
+         lsof: their fd 3 "unix ... ->(none)"; traced: ppoll(fd 3) and
+         recvmsg(fd 3) forever. SOCK_SEQPACKET is a Darwin DGRAM pair here,
+         and a waiter already blocked on it is not woken when the peer goes
+         away (probe on the host: poll with a 2000 ms timeout -> 0, kevent ->
+         0, recv blocked until SIGALRM), while a new poll reports POLLIN and
+         recv ECONNRESET. Fix: seqpacket sockets carry a mark (SO_LINGER
+         {1, 0x5e9}, hidden from getsockopt); a blocking recvmsg/recvfrom or
+         ppoll on one waits in 250 ms slices, and ECONNRESET reads as EOF (0).
+         After: "ok all processes gone 0.4 s after SIGTERM (main exit status 0)".
+
+tests/elf/electron_runtime.c (ELECTRON_RUNTIME in tests/elf/run.sh), one
+check per fix, 29 checks:
+  build/lxrun (this change):         == electron runtime: ok (29 checks)
+  lxrun of 611d71d (git archive, `make lxrt`), per section:
+    prlimit:   SIGBUS at lxrt_dispatch+5004 (the process dies)
+    mprotect:  MAL the partial last page is read-only too
+    shm:       MAL SHM_DEST; MAL a second process attaches after IPC_RMID;
+               MAL its write is seen (3 MAL, 6 ok)
+    execve:    "lxrun: open /nonexistent-dir/prog: No such file or directory", rc 1
+    epoll:     4 MAL (EINVAL)
+    seqpacket: MAL a recvmsg blocked before the peer closed returns 0; killed
+               by the 20 s alarm (rc 142)
+  With LXRT_GUEST_PAGE=4096 the prlimit and mprotect checks fail (4 MAL): a
+  4 KiB read-only page shares its host page with writable neighbours
+  (subpage.c's union); the suite runs it at 16 KiB only. Heroic runs at 16 KiB.
+
+6. V8's TurboFan (T1-T4) -- not fixed; Heroic runs with --js-flags=--no-opt
+-----------------------------------------------------------------------------
+T1 Heroic main, default V8 flags, after R1-R2: SIGSEGV at heroic+0x729bb5c
+   (ldr w14, [x23, #0x10], x23 = 0): v8::internal::compiler::GraphReducer::
+   ReduceNode (node.h:282), a null node input. --js-flags=--no-opt (TurboFan
+   off; Ignition, Sparkplug, Maglev on): the window. "--no-maglev" alone and
+   "--no-concurrent-recompilation --no-maglev": no window.
+T2 Reproducer without Chromium: the same binary as Node
+   (ELECTRON_RUN_AS_NODE=1; node 24.18.0, V8 15.0.245.15-electron.0, arm64),
+   `-e 'function f(x){return x*2+1}; ... 2e6 calls'`, 3 runs each:
+     default                            SIGTRAP 3/3 at +0x6c5ecf4
+                                        (CFGBuilder::ConnectBlocks, node-properties.h:92)
+     --no-concurrent-recompilation      ok 3/3 (TurboFan compiled, sum right)
+     --single-threaded                  ok 3/3
+     GC threads off (--no-concurrent-marking --no-concurrent-sweeping
+       --no-parallel-scavenge --no-parallel-marking --no-parallel-compaction)
+                                        SIGTRAP 3/3
+     --no-maglev                        SIGTRAP 3/3
+T3 A heavier script (60 functions via new Function, 3000 calls each):
+   SIGTRAP 2/2 at +0x6c54708 (EscapeAnalysisReducer::ReduceDeoptState,
+   escape-analysis-reducer.cc:185) in every mode, --single-threaded included.
+   Heroic with --js-flags=--no-concurrent-recompilation: main SIGSEGV at
+   GraphReducer::ReduceNode on the main thread (traced; tid = pid).
+T4 Excluded (same crash): LXRT_NO_MADVISE=1, LXRT_PLAIN_MUNMAP=1,
+   LXRT_NO_TOPDOWN=1; the W^X split rewrote nothing (LXRT_WX_STATS:
+   "2 ranges, 0 write flips, 1 exec flips, 0 scans with sites, 0 words
+   rewritten"). The x18 planner loads the virtual x18 before every rewritten
+   instruction (runtime/x18.c, so MOVK and other partial writes keep their
+   bits) and moves sp down before it saves its scratch pair (VERIFIED IN
+   SOURCE). Cause: UNKNOWN. HYPOTHESIS: one rewritten instruction form or
+   sequence in TurboFan's C++ misbehaves (4145 x18 sites in
+   v8::internal::compiler functions; ldp/ldr/cmp/add/mov forms dominate).
+   Whether Steam's CEF 126 hits the same with TurboFan: UNKNOWN.
+
+7. GPU (G1)
+-----------
+Without --disable-gpu the GPU process fails ANGLE on indirect GLX ("No
+matching fbConfigs or visuals found", "Cannot create an OpenGL ES platform on
+GLX without the GLX_ARB_create_context extension", "GPU process exited
+unexpectedly: exit_code=7" twice) before the software fallback. P4 below:
+window at 6.9 and 7.2 s without it, 4.0-4.8 s with it (P1-P3).
+
+8. Acceptance runs (tests/heroic/phase_b.py; X :2; HOME /tmp/heroichome)
+------------------------------------------------------------------------
+Command (as the launcher entry, plus the DevTools port the script drives):
+  scripts/run-native.sh /opt/apps/heroic/Heroic-2.22.3-linux-arm64/heroic
+    --no-sandbox --disable-gpu --js-flags=--no-opt --remote-debugging-port=9333
+  env LXRT_ROOT=/tmp/lxrt-armroot HOME_IN_GUEST=/tmp/heroichome
+      LXRT_X18_ALL_TEXT=/opt/apps/heroic/ STEAMARM_RUN_ID=<per cycle>
+Interaction: DevTools protocol on 127.0.0.1:9333 (scripts/cdp.py's client):
+Input.dispatchMouseEvent clicks on the page's own elements; the first start's
+modal dialogs (release notes; "Send Anonymous Analytics" -> close/DISABLE)
+are dismissed the same way. X has no XTEST on :2 (xdpyinfo), so no X-level
+synthetic input.
+
+P1 python3 tests/heroic/phase_b.py --cycles 3 --shots <scratch>  (14:57:43-14:58:31)
+  [14:57:47] ok window 0xe00003 1200x690 at +0+22 mapped and viewable 4.0 s after start; 6 processes, 1686 MB
+  [14:57:54] ok after click: route '#/settings/general', headings [], settings tabs ['Settings', 'General', 'Game Defaults', 'Advanced', 'System Information', 'Log']
+  [14:57:58] memory after interaction: 6 processes, 1709 MB
+  [14:57:59] ok all processes gone 0.5 s after the SIGTERM (main exit status 0)
+  [14:58:03] ok window ... 4.5 s after start; 6 processes, 1686 MB
+  [14:58:15] ok all processes gone 0.4 s after the SIGTERM (main exit status 0)
+  [14:58:19] ok window ... 4.5 s after start; 6 processes, 1684 MB
+  [14:58:31] ok all processes gone 0.4 s after the SIGTERM (main exit status 0)
+  == 3 of 3 cycles passed
+  Screenshots (Page.captureScreenshot, 1200x690, kept outside the repository):
+  library ec9bfde0..., settings 46a2d5cb...; identical in all 3 cycles.
+  Processes: main, 3 zygotes, utility (network), renderer.
+P2 --cycles 2 --close quit (14:58:35-14:58:57): window 4.8 and 4.5 s;
+  "click Heroic's sidebar Quit at (115, 600)"; "dialog 'Quit': click 'QUIT'";
+  "ok all processes gone 0.5 s after the Quit (main exit status 0)"; 2 of 2.
+  (The first attempt clicked at y 734, below the 690-pixel page: nothing
+  happened; the item is now scrolled into view first.)
+P3 --cycles 1 (15:01:23): the analytics dialog answered DISABLE; PASS.
+P4 --cycles 2 --gpu (no --disable-gpu): window 6.9 and 7.2 s; 2 of 2.
+Earlier cycles on the way (14:34:21-14:34:58, --js-flags=--no-opt, GPU on):
+window 8.2 and 7.9 s, clean SIGTERM close in 0.4 s, 2 of 2.
+
+Launcher session path (scripts/session.py as run-app.sh uses it, with a
+scratch launcher dir; run-app.sh itself not used: it holds the launcher's
+lock): `session.py run <dir> scripts/run-native.sh <entry command>`, then
+`session.py stop <dir>` ("Detener"), 2 cycles: window at 3.9 and 4.2 s;
+stop 6.3-6.4 s, running.status "137 signal 9", 0 lxrun processes left, window
+gone. The stop sends SIGTERM to the whole group at once; then Heroic's main
+process does not exit (termtest: "group: 1 left after 15.3 s", the main;
+children first, then the main: main status -5 after 3.3 s), so the stop's
+SIGKILL ends it. SIGTERM to the main process alone ends it cleanly (P1).
+run_app_dispatch.sh (--dry-run, scratch state): the heroic entry ->
+"command:  scripts/run-native.sh /opt/apps/heroic/Heroic-2.22.3-linux-arm64/heroic
+--no-sandbox --disable-gpu --js-flags=--no-opt", "LXRT_ROOT=/tmp/lxrt-armroot
+DISPLAY=:2", "HOME_IN_GUEST=/tmp/heroichome", "LXRT_X18_ALL_TEXT=/opt/apps/heroic/",
+"translator: none, session: ZERO-VM" (37 passed, 0 failed).
+
+Helpers (build/lxrun, root /tmp/lxrt-armroot, LXRT_X18_ALL_TEXT=/opt/apps/heroic/):
+  legendary --version          legendary version "0.21.1", codename "Lowlife"   rc 0
+  gogdl --version              1.3.0                                           rc 0
+  comet --version              comet 0.2.0                                     rc 0
+  vulkan-helper instance-version  [1,4,357] (the shim -> MoltenVK)             rc 0
+  nile --version               lxrun: ... nile: non-PIE (ET_EXEC) images cannot be
+                               loaded. It links at 0x401d5c, inside Darwin's 4 GiB
+                               __PAGEZERO ...                                  rc 1
+Heroic's own log at start (run 13 and later) also shows, without harm to the
+window: no D-Bus ("Failed to connect to the bus"), no netlink, no udev
+monitor, "which: command not found", GLib "g_settings_schema_source_lookup:
+assertion 'source != NULL' failed" (no compiled GSettings schemas), "Failed
+to register protocol with OS", and "shmget(4968000) exceeds kern.sysv.shmmax"
+(Chromium's X11 SHM image, served from POSIX memory the X server cannot
+attach; the window still draws).
+
+9. Not measured / not done
+--------------------------
+- Signing in to Epic or GOG, the library of a store, a download, a game:
+  not attempted (no login allowed). Games under Heroic would be x86 Windows
+  payloads through Wine; Heroic arm64 offering Wine through FEX is not wired.
+- Amazon (nile): cannot run (ET_EXEC), see above.
+- TurboFan: off (section 6).
+- The launcher UI's install button: not clicked (Installers.swift runs the
+  same script, built with `make launcher`).
+- Steam ARM64 on the rebuilt armroot: another session was running Valve's
+  native client on it (LXRT_ROOT=/tmp/lxrt-armroot, HOME=/tmp/armhome,
+  observed with ps -E at about 15:00) together with a Steam window on :2; this
+  session did not run its own check, and that session's result is not known
+  here.

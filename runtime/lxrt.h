@@ -316,6 +316,9 @@ void lxrt_futex_shared_remove(uint64_t addr, uint64_t len);
 void lxrt_gbase_apply(long nr, uint64_t *x);
 void lxrt_thread_after_fork(void);
 long lxrt_execve(const char *path, char *const argv[], char *const envp[]);
+// socket.c: a socket the guest created as SOCK_SEQPACKET (a Darwin datagram
+// socket carrying the runtime's mark); ppoll waits on one in slices.
+bool lxrt_is_seqpacket(int fd);
 long lxrt_wait4(int pid, int *status, int loptions, void *rusage);
 
 // socket.c -- sockaddr layout, address families and the SOCK_* flags Linux

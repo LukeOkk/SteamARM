@@ -74,6 +74,14 @@ of that come the pieces the Linux tools expect:
   guest-requested switch (`runtime/jit.c`) (stage 23).
 - **One process group per launcher session**, with an exit status
   (`scripts/session.py`, `docs/APPLICATION_MANAGER.md`).
+- **Linux rules Electron relies on** (Heroic, stage 24): a SysV segment
+  removed while attached stays attachable until its last detach (the X
+  server's MIT-SHM attach); `SOCK_SEQPACKET`, a Darwin datagram pair here,
+  reports end of file to a waiter already blocked on it (Chromium's
+  zygotes); `prlimit64` into a read-only buffer is `EFAULT`; a missing
+  `execve` target is `ENOENT` before the runtime replaces itself; a `dup`
+  of an epoll descriptor is the same instance
+  (`docs/HEROIC_INTEGRATION.md`).
 
 Each quirk found along the way is documented next to its code and in
 `benchmarks/stage*.txt`.

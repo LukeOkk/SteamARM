@@ -901,6 +901,7 @@ static void alias_fd(int oldfd, int newfd)
 {
     lxrt_memfd_track_dup(oldfd, newfd);    // seals follow the fd
     lxrt_eventfd_dup(oldfd, newfd);        // and so does the counter
+    lxrt_epoll_dup(oldfd, newfd);          // a dup is the same epoll instance
     lxrt_timerfd_dup(oldfd, newfd);
     lxrt_signalfd_dup(oldfd, newfd);
     lxrt_inotify_dup(oldfd, newfd);
@@ -1501,6 +1502,28 @@ static long wx_leave(uint64_t addr, uint64_t len, int prot)
 // unwritable on the host whatever the guest asks, until their first store.
 static long do_mprotect(uint64_t addr, uint64_t len, long prot)
 {
+    // Linux rounds the length up to whole pages (PAGE_ALIGN) before it looks
+    // at anything; the paths below took it to the byte, so subpage.c recorded
+    // a partial 4 KiB page and the tail of that page kept its old
+    // protection. A length that is not a multiple of 4 KiB now covers the
+    // page its last byte is in: for a native guest that sees the host's
+    // 16 KiB page (AT_PAGESZ, no LXRT_GUEST_PAGE=4096), up to that 16 KiB
+    // page's end, as a 16 KiB kernel does. Chromium makes its
+    // protected_memory section (0x1001a bytes) read-only that way and CHECKs,
+    // with prlimit64, that the page holding its last object is no longer
+    // writable; that page kept read-write here and Electron's main process
+    // died at start on a brk (MEASURED, benchmarks/stage24-heroic.txt).
+    // Everyone else (FEX, whose x86 guests have 4 KiB pages, and native
+    // guests told 4 KiB) gets 4 KiB. A multiple of 4 KiB is left as it is:
+    // 4 KiB ranges inside a 16 KiB page are the sub-page extension
+    // (subpage.c; tests/elf jit_rwx and wx_owner guards).
+    if (len % 4096) {
+        uint64_t pg = lxrt_wx_enabled() && lxrt_guest_page() == LXRT_HOST_PAGE
+                      ? LXRT_HOST_PAGE : 4096;
+        if (addr > UINT64_MAX - len || addr + len > UINT64_MAX - (pg - 1))
+            return LERR(ENOMEM);
+        len = LXRT_ALIGN_UP(addr + len, pg) - addr;
+    }
     long r = do_mprotect_inner(addr, len, prot);
     if (r == 0)
         lxrt_privmap_after_mprotect(addr, len, (int)prot);
@@ -1728,7 +1751,28 @@ static long do_ppoll(uint64_t fds, uint64_t nfds, uint64_t ts, uint64_t sigmask)
         swapped = true;
     }
 
-    int r = poll((struct pollfd *)fds, (nfds_t)nfds, timeout_ms);
+    // A seqpacket socket's peer going away does not wake a blocked poll
+    // (runtime/socket.c, SEQPKT_LINGER): with one in the set, the wait is
+    // made in slices, each a fresh poll that does see it.
+    struct pollfd *pf = (struct pollfd *)fds;
+    bool sliced = false;
+    if (timeout_ms < 0 || timeout_ms > 250)
+        for (uint64_t i = 0; i < nfds && i < 64 && !sliced; i++)
+            sliced = (pf[i].events & POLLIN) && lxrt_is_seqpacket(pf[i].fd);
+    int r;
+    if (!sliced) {
+        r = poll(pf, (nfds_t)nfds, timeout_ms);
+    } else {
+        int left = timeout_ms;
+        for (;;) {
+            int slice = left < 0 || left > 250 ? 250 : left;
+            r = poll(pf, (nfds_t)nfds, slice);
+            if (r != 0 || left == slice)
+                break;
+            if (left > 0)
+                left -= slice;
+        }
+    }
     long ret = r < 0 ? LERR(errno) : r;
 
     if (swapped)
@@ -1996,10 +2040,20 @@ static long do_prlimit64(long pid, long res, uint64_t newp, uint64_t oldp)
     struct rlimit cur;
     if (getrlimit(dres, &cur) != 0)
         return LERR(errno);
-    if (oldp) {
-        struct linux_rlimit *o = (struct linux_rlimit *)oldp;
-        o->rlim_cur = cur.rlim_cur;
-        o->rlim_max = cur.rlim_max;
+    // The old limit is written by Darwin's getrlimit straight into the
+    // guest's buffer (Darwin's struct rlimit is two 64-bit words, as Linux's
+    // struct rlimit64), so a buffer the guest cannot write gives EFAULT, as
+    // Linux's copy_to_user does, instead of a fault inside the runtime.
+    // Chromium relies on it: base::ProtectedMemory checks that its section
+    // is read-only with prlimit64(0, RLIMIT_NPROC, NULL, p) == -EFAULT, and
+    // Electron's main process died at start on the runtime's own store
+    // (MEASURED, benchmarks/stage24-heroic.txt). The first getrlimit above
+    // only checks the resource; the values are the same.
+    bool old_fault = false;
+    if (oldp && getrlimit(dres, (struct rlimit *)oldp) != 0) {
+        if (errno != EFAULT)
+            return LERR(errno);
+        old_fault = true;
     }
     if (newp) {
         const struct linux_rlimit *n = (const struct linux_rlimit *)newp;
@@ -2007,7 +2061,8 @@ static long do_prlimit64(long pid, long res, uint64_t newp, uint64_t oldp)
         if (setrlimit(dres, &set) != 0)
             return LERR(errno);
     }
-    return 0;
+    // Linux sets the new limit first and reports the old one's EFAULT after.
+    return old_fault ? LERR(EFAULT) : 0;
 }
 
 // ---------------------------------------------------------------- uname
@@ -3337,9 +3392,30 @@ restart:
         // note tls before ctid, unlike x86-64.
         ret = lxrt_clone(a0, a1, (uint32_t *)a2, a3, (uint32_t *)a4, r);
         break;
-    case LNR_execve:
-        ret = lxrt_execve((const char *)a0, (char *const *)a1, (char *const *)a2);
+    case LNR_execve: {
+        // Linux fails an execve of a missing or non-executable file with
+        // ENOENT/EACCES and the caller carries on: execvp tries the next PATH
+        // entry. The runtime replaced itself first and only the new image
+        // found the file missing ("lxrun: open ...: No such file or
+        // directory"), which ended the process: coreutils' env, running a
+        // "#!/usr/bin/env python3" script, died on /usr/local/bin/python3
+        // before it reached /usr/bin/python3 (MEASURED, Heroic's legendary,
+        // benchmarks/stage24-heroic.txt). So the file is checked here, before
+        // the exec. Not the names lxrt_execve answers itself: bwrap (there
+        // is none; its plan is interpreted) and /proc/<self>/exe.
+        const char *gp = (const char *)a0;
+        const char *gb = gp ? strrchr(gp, '/') : NULL;
+        gb = gb ? gb + 1 : gp;
+        if (gp && *gp && strcmp(gb, "bwrap") && strcmp(gb, "srt-bwrap") &&
+            strncmp(gp, "/proc/", 6)) {
+            const char *hp = translate_follow(gp);
+            struct stat est;
+            if (stat(hp, &est) != 0) { ret = LERR(errno); break; }
+            if (S_ISDIR(est.st_mode) || access(hp, X_OK) != 0) { ret = LERR(EACCES); break; }
+        }
+        ret = lxrt_execve(gp, (char *const *)a1, (char *const *)a2);
         break;
+    }
     case LNR_wait4:
         ret = lxrt_wait4((int)a0, (int *)a1, (int)a2, (void *)a3);
         break;
@@ -3531,6 +3607,7 @@ restart:
         lxrt_thread_exit((int)a0);
     case LNR_exit_group:
         lxrt_sigstats_flush();
+        lxrt_sysv_exit();
         lxrt_proc_cleanup();
         _exit((int)a0);
     default:

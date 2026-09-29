@@ -18,7 +18,11 @@ follows the layout of the [Ryujinx](https://ryujinx.app) emulator's.
   is disabled, with the reason, until they exist
   (`docs/STEAM_ARM64_BRINGUP.md`). Opening one asks for confirmation first.
 - **+** adds other Linux programs: a `.tar.gz`/`.zip`/AppImage you pick, or
-  a known installer (Heroic, Prism Launcher). The launcher reads the
+  a known installer (Heroic, Prism Launcher). **Heroic Games Launcher
+  (ARM64, experimental)** installs Heroic's linux-arm64 build into the ARM64
+  root, where it runs without FEX: its window, pages and a clean close are
+  measured; store sign-in, downloads and games are not, and Amazon Games
+  does not work yet (`docs/HEROIC_INTEGRATION.md`). The launcher reads the
   program's ELF header first: an aarch64 program goes to the ARM64 root
   and runs without FEX, anything else to the x86 root. Right-click a card
   to open it, see or change its settings (**Ajustes…**: an added app can

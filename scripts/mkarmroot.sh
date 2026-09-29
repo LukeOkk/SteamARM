@@ -33,7 +33,13 @@ SONAMES="libasound.so.2 libasyncns.so.0 libatk-1.0.so.0 libatk-bridge-2.0.so.0 l
  libSDL2-2.0.so.0 libSM.so.6 libsmime3.so libsndfile.so.1 libssh2.so.1 libssl.so.3
  libsystemd.so.0 libudev.so.1 libva.so.2 libvdpau.so.1 libXcomposite.so.1 libXdamage.so.1
  libXfixes.so.3 libXi.so.6 libXinerama.so.1 libxkbcommon.so.0 libXrandr.so.2 libXrender.so.1
- libXtst.so.6 libGL.so.1 libvulkan.so.1 libdrm.so.2 libgbm.so.1 libxcb.so.1 libX11-xcb.so.1"
+ libXtst.so.6 libGL.so.1 libvulkan.so.1 libdrm.so.2 libgbm.so.1 libxcb.so.1 libX11-xcb.so.1
+ libgtk-3.so.0 libsecret-1.so.0 libnotify.so.4"
+# The last line is for Electron apps (Heroic Games Launcher, linux-arm64;
+# docs/HEROIC_INTEGRATION.md): Electron 43's `electron` binary has
+# libgtk-3.so.0 in DT_NEEDED; libsecret (os_crypt's keyring) and libnotify
+# are what Chromium dlopens beside it. Steam's client does not link them;
+# the Steam Frame root already has all three.
 # Data and dlopen-only libraries no soname pulls in:
 #   libX11-common    /usr/share/X11/locale. Without it Xlib supports no locale:
 #                    XwcTextListToTextProperty returns -2 and leaves its
@@ -47,10 +53,13 @@ SONAMES="libasound.so.2 libasyncns.so.0 libatk-1.0.so.0 libatk-bridge-2.0.so.0 l
 #   lsof             the client runs lsof (/usr/bin, /bin, ... or PATH) to see
 #                    which process opened a WebUI transport connection; without
 #                    it every connection from the webhelper is "rejected".
+#   python3          Heroic's legendary and gogdl (linux arm64) are Python
+#                    zipapps ("#!/usr/bin/env python3"; legendary carries
+#                    cpython-314 modules, and Fedora 43's python3 is 3.14).
 SEEDS="glibc libgcc libstdc++ bash coreutils-single util-linux-core ca-certificates nss-softokn nss-softokn-freebl p11-kit-trust
  fontconfig dejavu-sans-fonts dejavu-sans-mono-fonts xkeyboard-config mesa-dri-drivers
  mesa-vulkan-drivers openssl mesa-libGL mesa-libEGL pciutils
- libX11-common glibc-common glibc-langpack-en SDL3 lsof"
+ libX11-common glibc-common glibc-langpack-en SDL3 lsof python3"
 for s in $SONAMES; do SEEDS="$SEEDS so:$s"; done
 SEEDS=$(echo $SEEDS)                  # one line: mkroot-rpm reads a single line
 STAGE="$BUILD/armstage-f43"

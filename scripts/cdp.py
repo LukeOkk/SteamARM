@@ -2,7 +2,8 @@
 """Minimal Chrome DevTools Protocol client for the Steam webhelper (no deps).
 
 Enable it with an empty file <Steam>/.cef-enable-remote-debugging; the
-webhelper then serves DevTools on 127.0.0.1:8080.
+webhelper then serves DevTools on 127.0.0.1:8080. Another Chromium started
+with --remote-debugging-port=N: CDP_PORT=N (tests/heroic/phase_b.py).
 
     scripts/cdp.py list
     scripts/cdp.py eval  <title-substring> '<js expression>'
@@ -10,7 +11,7 @@ webhelper then serves DevTools on 127.0.0.1:8080.
 """
 import base64, json, os, socket, struct, sys, time, urllib.request
 
-HOST, PORT = "127.0.0.1", 8080
+HOST, PORT = "127.0.0.1", int(os.environ.get("CDP_PORT", "8080"))
 
 
 def targets():

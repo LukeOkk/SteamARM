@@ -46,6 +46,12 @@ los juegos no están verificados, y Proton ARM64 no funciona en macOS.
 **Instalar** no las prepara: cada tarjeta sale desactivada, con el motivo,
 mientras falten su raíz o el cliente. Para jugar, usa **Steam**.
 
+Con **+ → Heroic Games Launcher (ARM64, experimental)** se instala la
+versión linux-arm64 de Heroic en la raíz ARM64, sin FEX: su ventana, sus
+páginas y el cierre están medidos; el inicio de sesión en las tiendas, las
+descargas y los juegos no están verificados, y Amazon Games aún no funciona
+(`docs/HEROIC_INTEGRATION.md`).
+
 ## Configuración
 
 La ventana de configuración sigue el diseño de Ryujinx:

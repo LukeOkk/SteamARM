@@ -136,6 +136,9 @@ void lxrt_eventfd_close(int fd);
 // that the call cannot fail under memory pressure while holding the global
 // eventfd lock, and nothing in the measured Steam census comes near it.
 void lxrt_eventfd_dup(int oldfd, int newfd);
+// The same for an epoll descriptor: a dup is the same epoll instance
+// (tokio's try_clone of its registry; up to 8 aliases per instance).
+void lxrt_epoll_dup(int oldfd, int newfd);
 
 // ----------------------------------------------------------- stated limits
 //

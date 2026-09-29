@@ -105,8 +105,12 @@ struct AddAppView: View {
 
     private var chooser: some View {
         VStack(spacing: 12) {
-            option("Heroic Games Launcher", "Epic, GOG y Amazon. Descarga la última versión para Linux x64.",
-                   "shield.lefthalf.filled") { runKnown { r, h in try await Installer.installHeroic(report: r, holder: h) } }
+            option("Heroic Games Launcher (ARM64, experimental)",
+                   "Epic y GOG. Heroic \(HeroicARM64.version) nativo para ARM64 en la raíz ARM64, armado con archivos oficiales; sin iniciar sesión ni juegos verificados. Amazon no funciona aún.",
+                   "shield.lefthalf.filled") {
+                let project = model.projectDir
+                runKnown { r, _ in try await Installer.installHeroic(project: project, report: r) }
+            }
             option("Minecraft Java (Prism Launcher)", "Descarga el AppImage x86_64 y lo extrae sin ejecutarlo.",
                    "cube.fill") { runKnown { r, h in try await Installer.installPrism(report: r, holder: h) } }
             option("Personalizada (Linux / Windows)", "AppImage, archivo tar, .deb, ELF (ARM64 o x86) o .exe x86/x86_64. Windows usa el Proton que elijas.",

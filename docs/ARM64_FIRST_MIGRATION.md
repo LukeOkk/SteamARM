@@ -77,6 +77,15 @@ Independent of that order:
   `libgtk-x11-2.0.so.0` of the client's 51 seed sonames. The root table
   above follows from it. Still UNKNOWN: the client on a root built from Holo
   packages; none was built.
+
+- **Apps other than Steam: Heroic Games Launcher.** PARTLY DONE (stage 24):
+  its linux-arm64 build runs natively in the Fedora ARM64 root and the
+  launcher installs it that way instead of the x64 build under FEX; window,
+  Settings, clean close and reopen in 7 of 7 cycles (MEASURED,
+  `benchmarks/stage24-heroic.txt`). OPEN: store sign-in, downloads and games;
+  Amazon's nile (non-PIE); V8's TurboFan under lxrun
+  (`docs/HEROIC_INTEGRATION.md`).
+
 - **Graphics: KosmicKrisp.** PARTLY DONE. The shim loads it in ICD mode
   when `STEAMARM_VK_ICD=kosmickrisp` (`4ccb914`), and the launcher sets that
   variable when **Gráficos → Motor** is KosmicKrisp, which it offers only
