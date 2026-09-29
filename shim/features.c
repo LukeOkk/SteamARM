@@ -13,6 +13,14 @@
 //    geometry shader fails at pipeline creation instead of at start-up
 //    (HYPOTHESIS: most D3D11 games do not; the real fix is geometry-shader
 //    emulation in MoltenVK).
+//    fillModeNonSolid the same way, for KosmicKrisp (STEAMARM_VK_ICD), which
+//    reports it false (MoltenVK reports it true, so nothing changes there).
+//    DXVK refused the adapter, D3D11 and D3D12 (whose DXGI is DXVK's) alike:
+//    MEASURED "Skipping: Device does not support required feature
+//    'fillModeNonSolid'"; with it reported, both probes ran (stage22). A
+//    wireframe (D3D11_FILL_WIREFRAME) pipeline on such a device is invalid
+//    usage: what KosmicKrisp does with it is UNKNOWN (HYPOTHESIS: lines work,
+//    Metal has a lines fill mode; points do not).
 //
 // 2. VK_EXT_depth_clip_enable (DXVK: "required feature 'depthClipEnable'").
 //    Metal has the same switch (depth clip mode clip/clamp), which MoltenVK
@@ -41,8 +49,8 @@ typedef uint64_t VkPipeline;
 #define VK_INCOMPLETE 5
 
 #define N_FEATURES 55
-enum { F_GEOMETRY_SHADER = 4, F_DEPTH_CLAMP = 11, F_SHADER_CULL_DISTANCE = 38 };
-static const int k_spoof[] = { F_GEOMETRY_SHADER, F_SHADER_CULL_DISTANCE };
+enum { F_GEOMETRY_SHADER = 4, F_DEPTH_CLAMP = 11, F_FILL_MODE_NON_SOLID = 13, F_SHADER_CULL_DISTANCE = 38 };
+static const int k_spoof[] = { F_GEOMETRY_SHADER, F_FILL_MODE_NON_SOLID, F_SHADER_CULL_DISTANCE };
 #define N_SPOOF (sizeof k_spoof / sizeof k_spoof[0])
 
 #define STYPE_PHYSICAL_DEVICE_FEATURES_2                  1000059000
