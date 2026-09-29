@@ -834,7 +834,8 @@ bool lxrt_subpage_handle_fault(uint64_t pc, uint64_t fault_addr, void *uap)
     // they became executable; RW ones are data and never scanned (a data word
     // that looks like svc is not an instruction, and rewriting it would
     // corrupt it). FEX's guest pages hold x86 code: no scan there.
-    if (prefer == PROT_EXEC && lxrt_wx_enabled()) {
+    // LXRT_NO_RESCAN=1 turns it off with the other rescans (rescan_enabled).
+    if (prefer == PROT_EXEC && lxrt_wx_enabled() && rescan_enabled()) {
         struct lxrt_range r[LXRT_HOST_PAGE / GUEST_PAGE];
         int nr = 0;
         for (int i = 0; i < g_nsubs && nr < (int)(sizeof r / sizeof r[0]); i++) {
