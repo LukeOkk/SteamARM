@@ -115,14 +115,17 @@ env -i; LXRT_ROOT=<root>; TMPDIR=/tmp (the HOST directory where the runtime
 materialises Linux abstract sockets); XDG_RUNTIME_DIR=/data/local/tmp;
 HOME=/data/local/tmp; FEX_ROOTFS=/ (the root IS the x86 tree);
 FEX_GUESTBASE=1 FEX_LOWWINDOW=1 FEX_SMCCHECKS=mtrack;
-FEX_SERVERSOCKETPATH=steamarm-android-x86_64.FEXServer.Socket; then
-init.environ.rc's ANDROID_*, BOOTCLASSPATH, DEX2OATBOOTCLASSPATH.
+FEX_SERVERSOCKETPATH=steamarm-android-<12 hex of the root path's
+sha1>.FEXServer.Socket; then init.environ.rc's ANDROID_*, BOOTCLASSPATH,
+DEX2OATBOOTCLASSPATH.
 FEXServer: a FEX client takes its rootfs from the server it connects to
 (VERIFIED IN SOURCE, Source/Common/FEXServerClient.cpp SetupClient), and the
 shared server serves the Ubuntu rootfs. So this root has its own server: own
 socket name, own lock (Server.lock under HOME), started through the lxrt-emu
 loader (ld-linux-aarch64.so.1 --library-path /usr/lib/lxrt-emu FEXServer),
-detached, --persistent=60, its PID in /data/local/tmp/.fexserver.pid.
+detached, --persistent=60, its PID in /data/local/tmp/.fexserver.pid;
+--server-stop acts only on a PID whose process is an lxrt-emu FEXServer
+with this root as its LXRT_ROOT.
 FEX_LOWWINDOW=1: SteamARM's FEX gives the low window only to ET_EXEC and
 wine processes; Android's programs are PIE, so it is forced. The FEX log
 then says "GuestBase: 64-bit guest (ET_EXEC), low window at host
@@ -248,7 +251,8 @@ R4  AF_UNIX SOCK_DGRAM (and SEQPACKET, a datagram pair here) sockets get
     212992-byte send and receive buffers, Linux's net.core defaults.
 R5  madvise with a guest base and an address below 4 GiB acts on base +
     address (the same unambiguous rule gbase.c applies to pointer arguments:
-    no host memory lives below 4 GiB).
+    no host memory lives below 4 GiB); a range running past 4 GiB is split
+    at 4 GiB (the window's part, then identity).
 R6  getgroups/setgroups.
 R7  (scripts/mkandroidroot.sh) /system/etc/passwd and group entries
     "system_steamarm" for the Mac's uid and gid.
@@ -262,8 +266,9 @@ P1  fex-lxrt-lowwin-hint.patch: in the 64-bit low window a plain hint below
 P2  fex-lxrt-smc-mprotect-mirrors.patch, two parts:
     1. a guest mprotect making a shared view writable while another view of
        the same memory is executable leaves that view's host pages read-only
-       (the guest sees them writable); each first write faults and is
-       flushed precisely;
+       (the guest sees them writable; the range goes read-only first and
+       only the rest is opened, so no page is ever writable unseen); each
+       first write faults and is flushed precisely;
     2. the fault handler's shared-memory branch flushes and unprotects the
        whole 16 KiB SMC page of every mirror, not 4 KiB (unprotecting 4 KiB
        made the whole host page writable).
@@ -273,8 +278,13 @@ P2  fex-lxrt-smc-mprotect-mirrors.patch, two parts:
     every compiled method. Replaced by the above (1.74 s).
 P3  fex-lxrt-interrupt-page.patch: InterruptFaultPage (and the thread
     object's alignment) 16 KiB instead of FEX_PAGE_SIZE.
-Only the x86_64 root carries this FEX (/usr/lib/lxrt-emu/FEX, FEX-emu
-sha256 aa5d15670d5c...). /tmp/lxrt-root, the Steam root and
+A read-only review of the diff (Codex) found, and this record's last FEX
+build fixes: an overflow in P1's below-4 GiB test (addr + length for a hint
+near 2^64), the order of P2 part 1 (it first opened the range and then
+re-protected it, leaving a window), madvise ranges across 4 GiB (R5), and
+one FEXServer socket name for every root (run-android-x86.sh). Only the
+x86_64 root carries this FEX (/usr/lib/lxrt-emu/FEX, FEX-emu sha256
+08daa48ab5e9...; FEX 8787aad9988f...). /tmp/lxrt-root, the Steam root and
 ~/SteamARM-build/out were not rebuilt or reinstalled.
 
 Probes (tests/android/, MEASURED before -> after)
@@ -301,6 +311,16 @@ Measurements (MEASURED; direct lxrun with run-android-x86.sh's environment,
 the FEXServer already running; wall clock of the whole process; max RSS of
 the lxrun process from /usr/bin/time -l, i.e. FEX plus the guest)
 ------------------------------------------------------------------------------
+Two sets. The tables are the first (FEX-emu aa5d15670d5c, P2 before the
+review fix; system load not recorded). The second, with the final build
+(08daa48ab5e9), ran while a VMware Fusion vmware-vmx process -- not
+SteamARM's, not started by this session, not touched -- used ~155% CPU (load
+average 3.7): Hello 1.031 s (0.989-1.269), -Xint Hello 1.042 s, no boot
+image 1.188 s, -Xint Loop 160.6 ms/round, JIT Loop 79.0-79.4 ms/round after
+warm-up, JitChurn default 1.739 s, 128 KiB 2.013 s (checksum correct),
+128 KiB with SMC full 7.735 s; toybox true 0.143 s, sh -c true 0.128 s,
+$(toybox echo x) 0.274 s, sha256sum 0.252 s, dexdump 0.149 s. So 3-15 %
+slower under that load, with the same results.
 Start-up, 10 runs, median (min-max):
   toybox true                     0.125 s (0.123-0.136)  35 MB
   linker64 /system/bin/toybox true 0.123 s (0.122-0.144) 36 MB
@@ -415,13 +435,25 @@ What was not done
 - FEX was not installed for the Steam side; building it with
   scripts/build-fex-host.sh now applies P1-P3, and install-fex-host.sh would
   put it in the shared roots: run the Steam/Proton smoke tests first.
-- P2 keeps one small window: between the host mprotect(RW) and the
-  re-protection a write by another thread goes unseen (ART writes its code
-  cache from one thread under a lock).
+- P2's cost is one fault per 16 KiB page written after each mprotect that
+  makes such a view writable; not measured separately (JitChurn with the
+  default cache: 1.72 s unpatched, 1.74 s with P2).
+- Not changed after the review: a Linux limit value from 2^63-1 up is
+  "no limit" on Darwin and reads back as RLIM_INFINITY (R3).
 - 32-bit guests: P3 applies to them too (the same thread object); P2 part 2
   does not (their SMC page stays 4 KiB; tests/elf/i386_smc_subpage.c is
   still an expected failure).
 
-Final checks
-------------
-(filled in below after the last commit)
+Final checks (MEASURED, at d57e78a, default lxrun build)
+--------------------------------------------------------
+make lxrt launcher: rc 0 (23 s when lxrun was rebuilt; 1 s up to date).
+make test-launcher-core: rc 0, 60 s -- application core: all checks
+  passed; app entry: all checks passed; 39/0; 32/0; 10/0; guest_env 26/0;
+  mkarmroot 25/0; run_steam_arm64 10/0; 35/0.
+tests/elf/run.sh: 74 passed, 0 failed, 26 s (vulkaninfo skipped, as before).
+tests/android/run.sh with ANDROID_ROOT_DIR=/nonexistent (the arm64 section
+  skipped, see Tests): 13 passed, 0 failed, 21 s. Its timings in that run
+  (-Xint 290 ms/round, JIT 98 ms/round) were taken under the VMware load
+  above and are not measurements.
+tests/elf/run_i386.sh: 18 passed, 0 failed (shared FEX and final P1-P3).
+python3 -m unittest tests/test_docs_records.py: OK (6 tests).
