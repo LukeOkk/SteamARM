@@ -364,7 +364,7 @@ static void chain_relink(struct unlink *undo, int n)
 // Clear, in the caller's own structures, every spoofed feature the device
 // does not really have, drop the emulated extensions and their feature
 // structures, call MoltenVK, and put everything back.
-VkResult lxrt_inner_vkCreateDevice(VkPhysicalDevice pd, const VkDeviceCreateInfo *cci, const void *alloc, VkDevice *out)
+static VkResult create_device(VkPhysicalDevice pd, const VkDeviceCreateInfo *cci, const void *alloc, VkDevice *out)
 {
     if (!spoof_on() || !cci)
         return lxrt_mvk_vkCreateDevice(pd, cci, alloc, out);
@@ -440,6 +440,16 @@ VkResult lxrt_inner_vkCreateDevice(VkPhysicalDevice pd, const VkDeviceCreateInfo
     for (int s = 0; s < nsets; s++)
         for (unsigned i = 0; i < N_SPOOF; i++)
             sets[s]->f[k_spoof[i]] = saved[s][i];
+    return r;
+}
+
+void lxrt_note_device(VkDevice dev, VkPhysicalDevice pd);   // present.c
+
+VkResult lxrt_inner_vkCreateDevice(VkPhysicalDevice pd, const VkDeviceCreateInfo *cci, const void *alloc, VkDevice *out)
+{
+    VkResult r = create_device(pd, cci, alloc, out);
+    if (r == VK_SUCCESS && out)
+        lxrt_note_device(*out, pd);
     return r;
 }
 
