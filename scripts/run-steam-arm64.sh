@@ -96,11 +96,32 @@ track() {
             for (p in ours) printf "%s ", p
         }')
 }
+# A client that exits in its first seconds can leave webhelper zygotes that
+# were never seen as its descendants: reparented to launchd between two polls
+# (MEASURED, benchmarks/stage23-frame-root.txt C2). Those are this checkout's
+# lxrun, parent 1, running a steamrtarm64 program, started after this session.
+orphans() {
+    /bin/ps -axo pid=,ppid=,etime=,command= | /usr/bin/awk -v lx="$LXRUN " -v max=$((SECONDS + 2)) '
+        function secs(t,  a, n, d) {
+            d = 0; if (index(t, "-")) { split(t, a, "-"); d = a[1]; t = a[2] }
+            n = split(t, a, ":")
+            return d * 86400 + (n == 3 ? a[1] * 3600 + a[2] * 60 + a[3] : a[1] * 60 + a[2])
+        }
+        $2 == 1 && index($0, lx) && index($0, "/steamrtarm64/") && secs($3) <= max { printf "%s ", $1 }'
+}
+reap_orphans() {
+    local o; o=$(orphans)
+    [ -n "$o" ] || return 0
+    echo "stopping orphaned webhelper processes: $o"
+    kill -TERM $o 2>/dev/null; sleep 2
+    o=$(orphans); [ -z "$o" ] || kill -KILL $o 2>/dev/null
+}
 stop() {
     track
     [ -z "$PIDS" ] || kill -TERM $PIDS 2>/dev/null
-    for _ in 1 2 3 4 5; do track; [ -n "$PIDS" ] || return 0; sleep 1; done
-    kill -KILL $PIDS 2>/dev/null
+    for _ in 1 2 3 4 5; do track; [ -n "$PIDS" ] || break; sleep 1; done
+    [ -z "$PIDS" ] || kill -KILL $PIDS 2>/dev/null
+    reap_orphans
 }
 trap 'stop; restore_wh; exit 130' INT TERM
 SECONDS=0
@@ -108,5 +129,6 @@ while track; [ -n "$PIDS" ]; do
     if [ -n "$FOR" ] && [ "$SECONDS" -ge "$FOR" ]; then stop; break; fi
     sleep 1
 done
+reap_orphans
 restore_wh
 echo "ended after ${SECONDS} s; log: $LOG"
