@@ -634,12 +634,12 @@ static long rewrite_and_seal(void *p, size_t len, int want_prot, size_t scan_len
         fprintf(lxrt_trace_stream(), "[lxrt] mapped code at 0x%llx: %zu svc sites, "
                         "%zu rewritten, %zu poisoned | x18 %zu found, %zu rewritten, "
                         "%zu unsupported, %zu unreachable (%d code windows) | "
-                        "tls %zu found, %zu rewritten, %zu poisoned\n",
+                        "tls %zu found, %zu rewritten, %zu poisoned, %zu kept\n",
                 (unsigned long long)start, rep.sites_found,
                 rep.sites_rewritten, rep.sites_unreachable, rep.x18_found,
                 rep.x18_rewritten, rep.x18_unsupported, rep.x18_unreachable, ncode,
                 rep.tls_read_found + rep.tls_write_found, rep.tls_rewritten,
-                rep.tls_unreachable);
+                rep.tls_unreachable, rep.tls_kept);
     }
 
     if (mprotect((void *)start, (size_t)(end - start), want_prot) != 0)
@@ -1267,12 +1267,12 @@ static long do_mmap(uint64_t addr, uint64_t len, long prot, long lflags,
                     fprintf(lxrt_trace_stream(), "[lxrt] sub-page code at 0x%llx: %zu svc sites, %zu "
                                     "rewritten, %zu poisoned | x18 %zu found, %zu rewritten, "
                                     "%zu unsupported, %zu unreachable (%d code windows) | "
-                                    "tls %zu found, %zu rewritten, %zu poisoned\n",
+                                    "tls %zu found, %zu rewritten, %zu poisoned, %zu kept\n",
                             (unsigned long long)addr, rep.sites_found, rep.sites_rewritten,
                             rep.sites_unreachable, rep.x18_found, rep.x18_rewritten,
                             rep.x18_unsupported, rep.x18_unreachable, ncode,
                             rep.tls_read_found + rep.tls_write_found, rep.tls_rewritten,
-                            rep.tls_unreachable);
+                            rep.tls_unreachable, rep.tls_kept);
             }
             lxrt_subpage_reapply(addr, len);
         }
@@ -1528,6 +1528,89 @@ static long do_mprotect(uint64_t addr, uint64_t len, long prot)
     if (r == 0)
         lxrt_privmap_after_mprotect(addr, len, (int)prot);
     return r;
+}
+
+// mremap of 4 KiB guest pages that do not fill their 16 KiB host pages, which
+// mremap.c refuses. bionic's linker needs it before main(): its CFI shadow
+// (linker_cfi.cpp, ShadowWrite) fills a private copy and moves it with
+// mremap(MREMAP_MAYMOVE | MREMAP_FIXED) over a 4 KiB-aligned slice of the
+// shadow reservation, and CHECK-fails otherwise ("~ShadowWrite CHECK 'res !=
+// MAP_FAILED' failed": every Android program, benchmarks/stage25-android-
+// userspace.txt). Private anonymous memory, as that is: a new private
+// mapping through do_mmap, the bytes copied, the protection set through
+// do_mprotect, the old range unmapped through do_munmap -- the same paths,
+// and the same 4 KiB bookkeeping, as the guest's own calls. A shared or
+// file-backed source is not taken (it would lose its backing): ENOMEM, as
+// before. Growing in place is not tried: without MREMAP_MAYMOVE that is
+// ENOMEM, which Linux also answers when the next pages are taken.
+static long do_mremap_subpage(uint64_t old, uint64_t olen, uint64_t nlen, long fl, uint64_t naddr)
+{
+    enum { MAYMOVE = 1, FIXED = 2, DONTUNMAP = 4 };
+    if ((old & 4095) || !olen || !nlen || (fl & ~7L) ||
+        ((fl & (FIXED | DONTUNMAP)) && !(fl & MAYMOVE)))
+        return LERR(EINVAL);
+    if (olen > UINT64_MAX - 4095 || nlen > UINT64_MAX - 4095)
+        return LERR(ENOMEM);
+    olen = LXRT_ALIGN_UP(olen, 4096);
+    nlen = LXRT_ALIGN_UP(nlen, 4096);
+    if (old > UINT64_MAX - olen)
+        return LERR(EFAULT);
+    if ((fl & DONTUNMAP) && olen != nlen)
+        return LERR(EINVAL);
+    if ((fl & FIXED) && ((naddr & 4095) || naddr > UINT64_MAX - nlen ||
+                         (naddr < old + olen && old < naddr + nlen)))
+        return LERR(EINVAL);
+    if (!(fl & (FIXED | DONTUNMAP)) && nlen <= olen) {
+        if (nlen < olen) {
+            long r = do_munmap(old + nlen, olen - nlen);
+            if (r != 0)
+                return r;
+        }
+        return (long)old;
+    }
+    if (!(fl & MAYMOVE))
+        return LERR(ENOMEM);
+    // Every guest page of the source mapped, with one protection (Linux
+    // moves one VMA; a range across several is EFAULT).
+    int prot = -2;
+    for (uint64_t g = old; g < old + olen; g += 4096) {
+        bool shared = false;
+        int hp = lxrt_mremap_host_prot(g, &shared);
+        int p = lxrt_subpage_prot_at(g);
+        if (p < 0)
+            p = hp;
+        if (hp < 0 || p < 0 || (prot != -2 && p != prot))
+            return LERR(EFAULT);
+        if (shared) {
+            fprintf(lxrt_trace_stream(), "[lxrt] mremap: sub-page shared range 0x%llx+0x%llx: "
+                            "not supported\n", (unsigned long long)old, (unsigned long long)olen);
+            return LERR(ENOMEM);
+        }
+        prot = p;
+    }
+    long dst = do_mmap((fl & FIXED) ? naddr : 0, nlen, PROT_READ | PROT_WRITE,
+                       LINUX_MAP_PRIVATE | LINUX_MAP_ANONYMOUS | ((fl & FIXED) ? LINUX_MAP_FIXED : 0),
+                       -1, 0);
+    if (dst < 0)
+        return dst;
+    uint64_t n = olen < nlen ? olen : nlen;
+    if (lxrt_mremap_copy_out((void *)(uintptr_t)dst, old, n) != 0) {
+        do_munmap((uint64_t)dst, nlen);
+        return LERR(EFAULT);
+    }
+    if (prot != (PROT_READ | PROT_WRITE)) {
+        long r = do_mprotect((uint64_t)dst, nlen, prot);
+        if (r != 0) {
+            do_munmap((uint64_t)dst, nlen);
+            return r;
+        }
+    }
+    long r = (fl & DONTUNMAP)
+        ? do_mmap(old, olen, prot, LINUX_MAP_PRIVATE | LINUX_MAP_ANONYMOUS | LINUX_MAP_FIXED, -1, 0)
+        : do_munmap(old, olen);
+    if (r < 0)
+        return r;
+    return dst;
 }
 
 static long do_mprotect_inner(uint64_t addr, uint64_t len, long prot)
@@ -2457,6 +2540,51 @@ restart:
         if (ret == 0)
             lxrt_futex_shared_remove(a0, a1);
         break;
+    case 227: { // msync(addr, len, flags)
+        // Unimplemented until stage 25: ART probes for free address space
+        // page by page with msync(addr, 4096, 0), which Linux answers ENOMEM
+        // for an unmapped page; ENOSYS read as "mapped" sent it through all
+        // of the low 4 GiB one call at a time (benchmarks/stage25-android-
+        // userspace.txt). Linux: addr aligned to its page (4 KiB here),
+        // MS_ASYNC 1 | MS_INVALIDATE 2 | MS_SYNC 4, not ASYNC and SYNC
+        // together; ENOMEM if any page of the range is unmapped.
+        if ((a0 & 4095) || (a2 & ~7ull) || ((a2 & 1) && (a2 & 4))) { ret = LERR(EINVAL); break; }
+        uint64_t end = a0 + LXRT_ALIGN_UP(a1, 4096);
+        if (end < a0) { ret = LERR(ENOMEM); break; }
+        ret = 0;
+        for (uint64_t at = a0; at < end;) {
+            // The low 4 GiB is Darwin's __PAGEZERO: reserved, never free
+            // (benchmarks/stage2-pagezero.txt). Linux answers 0 for a
+            // reserved PROT_NONE range, and so does this; "free" made ART
+            // place a 64 MiB mapping at each of a million hints there, each
+            // landing above 4 GiB and unmapped again (stage 25).
+            if (at < (1ull << 32)) {
+                at = (1ull << 32);
+                continue;
+            }
+            mach_vm_address_t ra = at;
+            mach_vm_size_t rs = 0;
+            vm_region_basic_info_data_64_t ri;
+            mach_msg_type_number_t rc = VM_REGION_BASIC_INFO_COUNT_64;
+            mach_port_t obj = MACH_PORT_NULL;
+            if (mach_vm_region(mach_task_self(), &ra, &rs, VM_REGION_BASIC_INFO_64,
+                               (vm_region_info_t)&ri, &rc, &obj) != KERN_SUCCESS || ra > at) {
+                ret = LERR(ENOMEM);
+                break;
+            }
+            if (obj != MACH_PORT_NULL)
+                mach_port_deallocate(mach_task_self(), obj);
+            at = ra + rs;
+        }
+        // Writing back a file mapping is the only part with an effect here.
+        if (ret == 0 && (a2 & 4) && a1) {
+            uint64_t hs = LXRT_ALIGN_DOWN(a0, LXRT_HOST_PAGE);
+            if (msync((void *)hs, (size_t)(LXRT_ALIGN_UP(end, LXRT_HOST_PAGE) - hs), MS_SYNC) != 0 &&
+                errno != EINVAL)
+                ret = LERR(errno);
+        }
+        break;
+    }
     case LNR_mprotect:
         ret = do_mprotect(a0, a1, (long)a2);
         lxrt_memlog('p', a0, a1, (long)a2, 0, ret);
@@ -2967,6 +3095,21 @@ restart:
             }
             ret = 0;
             break;
+        case 55: // PR_SET_TAGGED_ADDR_CTRL
+        case 56: // PR_GET_TAGGED_ADDR_CTRL
+            // NOT supported: the tagged address ABI means the kernel accepts
+            // pointers with a tag in the top byte in every syscall, and the
+            // runtime hands guest pointers to Darwin as they are. bionic
+            // (Android 11) turns heap pointer tagging on when the SET call
+            // succeeds: malloc then returns 0xb4... pointers, the CPU's
+            // top-byte-ignore loads and stores through them fine, and the
+            // first read(2) into one got EFAULT from Darwin -- mksh read no
+            // script and exited 0 in silence (MEASURED,
+            // benchmarks/stage25-android-userspace.txt). EINVAL is a kernel
+            // without the ABI (Linux < 5.4); bionic then keeps its pointers
+            // untagged.
+            ret = LERR(EINVAL);
+            break;
         case 0x6d4d444c: // PR_GET_MEM_MODEL (Asahi kernels)
         case 0x4d4d444c: // PR_SET_MEM_MODEL
             // NOT supported, and it matters: FEX asks for PR_SET_MEM_MODEL_TSO
@@ -3172,7 +3315,12 @@ restart:
             break;
         }
         lxrt_privmap_forget(a0, a1);
-        ret = lxrt_mremap(a0, a1, a2, (int)a3, a4);
+        // 4 KiB guest pages that do not fill a host page: do_mremap_subpage.
+        if ((a0 % LXRT_HOST_PAGE) || ((a3 & 2) && (a4 % LXRT_HOST_PAGE)) ||
+            lxrt_subpage_tracked(a0, a1) || ((a3 & 2) && lxrt_subpage_tracked(a4, a2)))
+            ret = do_mremap_subpage(a0, a1, a2, (long)a3, a4);
+        else
+            ret = lxrt_mremap(a0, a1, a2, (int)a3, a4);
         if (ret >= 0) {
             lxrt_wx_moved(a0, a1, (uint64_t)ret, a2);
             // The host pages moved, shrank or were replaced: none of them is
@@ -3606,6 +3754,9 @@ restart:
         // the CLONE_CHILD_CLEARTID write this performs.
         lxrt_thread_exit((int)a0);
     case LNR_exit_group:
+        if (getenv("LXRT_TLS_KEEP_LOG") && lxrt_tlskeep_fixups())
+            fprintf(lxrt_trace_stream(), "[lxrt] pid %d: %lu kept-TLS faults fixed (runtime/tls.c)\n",
+                    (int)getpid(), lxrt_tlskeep_fixups());
         lxrt_sigstats_flush();
         lxrt_sysv_exit();
         lxrt_proc_cleanup();

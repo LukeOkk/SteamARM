@@ -430,6 +430,11 @@ static bool raised_by_instruction(int dsig, const siginfo_t *dinfo, void *uap)
 // (stage 23 review; tests/elf/wx_owner.c, "misaligned").
 bool lxrt_absorb_runtime_fault(int dsig, siginfo_t *dinfo, void *uap)
 {
+    // A thread pointer read the rewriter left in place (tls.c, kept ranges:
+    // BoringSSL's FIPS module) returned Darwin's TPIDR_EL0 and the load
+    // through it faulted: substitute the guest's and retry.
+    if (lxrt_tlskeep_fixup(dsig, uap))
+        return true;
     // SP-alignment fault (EC 0x26) on the x18 trampolines' register save and
     // restore: `stp Xa, Xb, [sp, #-16]!` / `ldp Xa, Xb, [sp], #16`. Code that
     // keeps sp misaligned between accesses is legal (pixman's hand-written

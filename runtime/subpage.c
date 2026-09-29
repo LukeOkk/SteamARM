@@ -644,6 +644,19 @@ static int slot_prot(uint64_t g)
     return p;
 }
 
+// The protection the guest gave the 4 KiB page at addr, or -1 when the table
+// has no record for it (an ordinary host page: the kernel's is the guest's).
+// dispatch.c's sub-page mremap gives the moved pages this protection.
+int lxrt_subpage_prot_at(uint64_t addr)
+{
+    uint64_t g = LXRT_ALIGN_DOWN(addr, GUEST_PAGE);
+    sigset_t old;
+    lxrt_pageprot_lock(&old);
+    int p = lxrt_subpage_tracked_locked(g, GUEST_PAGE) ? slot_prot(g) : -1;
+    lxrt_pageprot_unlock(&old);
+    return p;
+}
+
 // LXRT_SUBPAGE_LOG=<n>: report the first n split events of this process
 // (flips, emulated stores).
 static bool subpage_log_one(void)

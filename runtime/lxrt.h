@@ -79,6 +79,7 @@ struct lxrt_rewrite_report {
     size_t tls_write_found;     // msr TPIDR_EL0, Xt
     size_t tls_rewritten;
     size_t tls_unreachable;
+    size_t tls_kept;            // reads left in place in a kept range (tls.c)
     size_t ctr_found;           // mrs Xt, CTR_EL0
     size_t ctr_rewritten;
     size_t sysreg_found;        // mrs Xt, ID_AA64* / MIDR_EL1
@@ -163,6 +164,8 @@ long lxrt_subpage_mmap(uint64_t addr, uint64_t len, int prot, bool anon,
 long lxrt_subpage_mprotect(uint64_t addr, uint64_t len, int prot);
 bool lxrt_subpage_only_placeholders(uint64_t addr, uint64_t len);
 bool lxrt_subpage_tracked(uint64_t addr, uint64_t len);
+bool lxrt_subpage_tracked_locked(uint64_t addr, uint64_t len);
+int lxrt_subpage_prot_at(uint64_t addr);   // -1: no record (ask the kernel)
 void lxrt_subpage_forget(uint64_t addr, uint64_t len);
 void lxrt_subpage_reapply(uint64_t addr, uint64_t len);
 long lxrt_subpage_mmap_noreplace(uint64_t addr, uint64_t len, int prot, bool anon, int fd, uint64_t off);
@@ -373,6 +376,15 @@ unsigned long lxrt_tls_slot_offset(void);
 bool          lxrt_tls_ready(void);
 void          lxrt_tls_set(uint64_t v);
 uint64_t      lxrt_tls_get(void);
+// Ranges whose `mrs Xt, TPIDR_EL0` reads are left as they are, because the
+// program hashes its own code (BoringSSL's FIPS module; elfsect.c finds it):
+// the hardware register is loaded with the guest's thread pointer when a
+// read there returned Darwin's value and the load through it faulted.
+void          lxrt_tlskeep_add(uint64_t start, uint64_t end, const char *why);
+bool          lxrt_tlskeep_contains(uint64_t addr);
+bool          lxrt_tlskeep_fixup(int sig, void *uap);
+bool          lxrt_tlskeep_enabled(void);
+unsigned long lxrt_tlskeep_fixups(void);
 
 // thread.c -- guest threads and futexes.
 int  lxrt_gettid(void);

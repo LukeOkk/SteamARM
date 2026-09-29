@@ -1163,6 +1163,39 @@ else
     echo "  skip  ELECTRON_RUNTIME (no $STAGE)"
 fi
 
+# ANDROID_BIONIC_RT: what Android 11's bionic and ART needed, stage 25
+# (benchmarks/stage25-android-userspace.txt): PR_SET_TAGGED_ADDR_CTRL refused
+# (bionic tags its heap otherwise, and Darwin's syscalls reject the pointers),
+# msync (ART probes free address space with it), mremap(MREMAP_FIXED) of 4 KiB
+# pages into a reservation (bionic's CFI shadow) -- at the host page and with
+# LXRT_GUEST_PAGE=4096, as Android runs; then TPIDR_EL0 reads left in place
+# inside a BoringSSL FIPS range and fixed up after context switches
+# (runtime/tls.c), and the LXRT_TLS_KEEP=0 control that rewrites them.
+if [ -f "$STAGE/usr/lib64/libc.a" ] && [ -n "$GCCDIR" ]; then
+    if err=$(glibc_cc -static-pie -O2 -pthread -Wl,--export-dynamic -o build/android_bionic_rt tests/elf/android_bionic_rt.c); then
+        for pg in host 4096; do
+            if [ "$pg" = 4096 ]; then
+                out=$(LXRT_GUEST_PAGE=4096 deadline 60 ./build/lxrun "$PWD/build/android_bionic_rt" 2>&1); rc=$?
+            else
+                out=$(deadline 60 ./build/lxrun "$PWD/build/android_bionic_rt" 2>&1); rc=$?
+            fi
+            if [ "$rc" -eq 0 ] && grep -q '== android bionic runtime: ok' <<<"$out"; then
+                ok "ANDROID_BIONIC_RT ($pg pages): $(grep -c '^  ok ' <<<"$out") checks (tagged-address prctl, msync, 4 KiB mremap FIXED/shrink/move)"
+            else bad "ANDROID_BIONIC_RT ($pg pages)" "rc=$rc $(grep -E 'MAL|SIGBUS|SIGSEGV|lxrun:' <<<"$out" | head -6)"; fi
+        done
+        out=$(LXRT_TLS_KEEP_LOG=1 deadline 120 ./build/lxrun "$PWD/build/android_bionic_rt" tlskeep 2>&1); rc=$?
+        if [ "$rc" -eq 0 ] && grep -q '== android tlskeep: ok' <<<"$out"; then
+            ok "kept TLS reads (BoringSSL FIPS range): word untouched, 0 mismatches over 1M loads, $(grep -o '[0-9]* kept-TLS faults fixed' <<<"$out" | head -1)"
+        else bad "kept TLS reads" "rc=$rc $(grep -E 'MAL|SIG|lxrun:' <<<"$out" | head -6)"; fi
+        out=$(LXRT_TLS_KEEP=0 deadline 120 ./build/lxrun "$PWD/build/android_bionic_rt" tlskeep 2>&1); rc=$?
+        if [ "$rc" -ne 0 ] && grep -q 'MAL  the TPIDR_EL0 read in the kept range is untouched' <<<"$out"; then
+            ok "LXRT_TLS_KEEP=0 control: the read is rewritten (the bytes a FIPS self-test hashes change)"
+        else bad "LXRT_TLS_KEEP=0 control" "rc=$rc, expected the kept word to be rewritten"; fi
+    else bad "build android_bionic_rt" "$err"; fi
+else
+    echo "  skip  ANDROID_BIONIC_RT (no $STAGE)"
+fi
+
 echo
 summary="== $PASS passed, $FAIL failed"
 [ "$XFAIL" -eq 0 ] || summary="$summary ($XFAIL expected failures)"
