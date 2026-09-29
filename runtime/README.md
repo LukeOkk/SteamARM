@@ -47,6 +47,8 @@ malloc+stdio+snprintf ok, strlen=27
 | `include/lxrt_host.h` | the host bridge, for guest code to include |
 | `stack.c` | argc/argv/envp and the auxiliary vector, as glibc expects them |
 | `main.c` | `lxrun`, with `--trace` and `--dry-run` |
+| `binder.c` | `/dev/binder`, `/dev/hwbinder`, `/dev/vndbinder` for the guest: open, ioctl, mmap, poll, fd passing |
+| `binder_hub.c` | the binder driver's state as a host process, `lxrun --binder-hub <dir>` (`docs/ANDROID_RUNTIME_ARCHITECTURE.md`, "Binder") |
 
 Guest absolute paths resolve inside `LXRT_ROOT` when it is set;
 `scripts/mkroot-rpm.sh` populates one from pinned Fedora RPMs, with no VM (the

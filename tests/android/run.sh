@@ -39,6 +39,16 @@ g() {
         LXRT_ROOT="$ROOT" LXRT_GUEST_PAGE=4096 ${GENV:-} \
         /usr/bin/perl -e 'alarm shift; exec @ARGV' "${DL:-30}" "$LXRUN" "$@" 2>/dev/null
 }
+# The same, for a daemon started with `gbg ... &`: the background subshell
+# execs into env, perl and lxrun, so $! is the daemon's own PID to stop.
+gbg() {
+    exec env -i HOME=/data/local/tmp PATH=/system/bin:/system/xbin TERM=dumb \
+        ANDROID_ROOT=/system ANDROID_DATA=/data ANDROID_ART_ROOT=/apex/com.android.art \
+        ANDROID_I18N_ROOT=/apex/com.android.i18n ANDROID_TZDATA_ROOT=/apex/com.android.tzdata \
+        ANDROID_STORAGE=/storage BOOTCLASSPATH="$BCP" \
+        LXRT_ROOT="$ROOT" LXRT_GUEST_PAGE=4096 ${GENV:-} \
+        /usr/bin/perl -e 'alarm shift; exec @ARGV' "${DL:-30}" "$LXRUN" "$@" 2>/dev/null
+}
 
 # 1. bionic's linker run as a program, as the task names it.
 out=$(g /system/bin/linker64 /system/bin/toybox ls /); rc=$?
@@ -107,6 +117,104 @@ if [ -f "$R8_JAR" ] && command -v javac >/dev/null; then
 else
     echo "  skip  ART checks (no $R8_JAR or no javac)"
 fi
+
+# 6. Binder (runtime/binder.c, runtime/binder_hub.c; benchmarks/stage25-
+# binder.txt): Android's own servicemanager as context manager, Android's own
+# `service` client, and a native service (tests/android/binder_service.c,
+# raw ioctls, built with the Fedora glibc sysroot when present) registering
+# with it, called with an int and a file descriptor, then dying. A private
+# hub directory; the hub leaves 2 s after its last client; every daemon here
+# is stopped by its own PID.
+bdir=$(mktemp -d /tmp/lxrt-binder-android.XXXXXX)
+BENV="LXRT_BINDER_DIR=$bdir LXRT_BINDER_HUB_IDLE=2"
+GENV="$BENV" DL=90 gbg /system/bin/servicemanager >/dev/null &
+smpid=$!
+ready=""
+for _ in $(seq 1 60); do
+    GENV="$BENV" DL=10 g /system/bin/service check manager | grep -q 'found' && { ready=1; break; }
+    sleep 0.1
+done
+out=$(GENV="$BENV" DL=20 g /system/bin/service list); rc=$?
+if [ -n "$ready" ] && [ "$rc" -eq 0 ] && grep -q '^Found 1 services' <<<"$out" &&
+   grep -q 'manager: \[android.os.IServiceManager\]' <<<"$out"; then
+    ok "servicemanager on /dev/binder; service list: $(tr '\n\t' '  ' <<<"$out")"
+else bad "servicemanager + service list" "ready=${ready:-no} rc=$rc $(head -3 <<<"$out")"; fi
+
+STAGE="${STEAMARM_BUILD:-$HOME/SteamARM-build}/rootstage-f43"
+GCCDIR=$(ls -d "$STAGE"/usr/lib/gcc/aarch64-redhat-linux/* 2>/dev/null | tail -1)
+if [ -n "$ready" ] && [ -f "$STAGE/usr/include/linux/android/binder.h" ] && [ -n "$GCCDIR" ] &&
+   /opt/homebrew/opt/llvm/bin/clang --target=aarch64-redhat-linux-gnu --sysroot="$STAGE" \
+       --gcc-install-dir="$GCCDIR" -fuse-ld=lld --ld-path=/opt/homebrew/opt/lld/bin/ld.lld -w \
+       -static-pie -O2 -o build/binder_service tests/android/binder_service.c 2>/dev/null; then
+    mkdir -p "$ROOT/data/local/tmp"
+    cp build/binder_service "$ROOT/data/local/tmp/binder_service"
+    svclog=$(mktemp -t binder-service)
+    GENV="$BENV" DL=60 gbg /data/local/tmp/binder_service >"$svclog" &
+    svcpid=$!
+    for _ in $(seq 1 50); do grep -q registered "$svclog" && break; sleep 0.1; done
+    out=$(GENV="$BENV" DL=20 g /system/bin/service list)
+    if grep -q '^Found 2 services' <<<"$out" && grep -q 'steamarm.test: \[steamarm.test.IEcho\]' <<<"$out"; then
+        ok "a native service registered with servicemanager; service list: steamarm.test: [steamarm.test.IEcho]"
+    else bad "native service registration" "$(tr '\n' ' ' <<<"$out") / $(head -2 "$svclog")"; fi
+    out=$(GENV="$BENV" DL=20 g /system/bin/service call steamarm.test 1 i32 41)
+    grep -q 'Result: Parcel(00000000 0000002a' <<<"$out" && ok "service call steamarm.test 1 i32 41 -> 42" \
+        || bad "service call i32" "$out"
+    want=$(python3 -c "import sys; d=open(sys.argv[1],'rb').read(); print('%08x %08x' % (len(d), sum(d)))" "$ROOT/system/etc/hosts")
+    out=$(GENV="$BENV" DL=20 g /system/bin/service call steamarm.test 2 fd /system/etc/hosts)
+    grep -q "Result: Parcel(00000000 $want" <<<"$out" && ok "service call ... fd /system/etc/hosts: the service read it through the passed descriptor ($want)" \
+        || bad "service call fd" "want $want: $out"
+    # dumpsys lists only when there is more than one service (dumpsys.cpp,
+    # "if (N > 1)"), each checked with checkService.
+    out=$(GENV="$BENV" DL=20 g /system/bin/dumpsys -l)
+    grep -q '^  steamarm.test' <<<"$out" && grep -q '^  manager' <<<"$out" &&
+        ok "dumpsys -l: $(tr '\n' ' ' <<<"$out")" || bad "dumpsys -l" "$(tr '\n' ' ' <<<"$out")"
+    out=$(GENV="$BENV" DL=20 g /system/bin/service call steamarm.test 3)
+    wait "$svcpid" 2>/dev/null
+    gone=""
+    for _ in $(seq 1 20); do
+        out=$(GENV="$BENV" DL=20 g /system/bin/service list)
+        grep -q '^Found 1 services' <<<"$out" && { gone=1; break; }
+        sleep 0.1
+    done
+    [ -n "$gone" ] && ok "the service exited; servicemanager's death notification removed it" \
+        || bad "death notification" "$(tr '\n' ' ' <<<"$out")"
+    rm -f "$svclog" "$ROOT/data/local/tmp/binder_service"
+else
+    echo "  skip  native binder service (no $STAGE sysroot, or servicemanager not ready)"
+fi
+# A real libbinder daemon: idmap2d publishes "idmap" (BinderService::publish)
+# and serves from libbinder's own thread pool (startThreadPool +
+# joinThreadPool); IIdmap2::getIdmapPath is transaction 1.
+if [ -n "$ready" ]; then
+    GENV="$BENV" DL=60 gbg /system/bin/idmap2d >/dev/null &
+    idpid=$!
+    for _ in $(seq 1 50); do
+        GENV="$BENV" DL=10 g /system/bin/service check idmap | grep -q 'found' && break
+        sleep 0.1
+    done
+    out=$(GENV="$BENV" DL=20 g /system/bin/service call idmap 1 s16 /product/overlay/Test.apk i32 0)
+    flat=$(tr -d '\n' <<<"$out" | sed "s/'[^']*'//g")
+    if grep -q '^Result: Parcel' <<<"$out" && grep -q '00000000 00000033' <<<"$flat"; then
+        ok "idmap2d (libbinder's thread pool) registered and answered getIdmapPath: a 51-character path"
+    else bad "idmap2d getIdmapPath" "$(head -3 <<<"$out")"; fi
+    kill "$idpid" 2>/dev/null; wait "$idpid" 2>/dev/null
+fi
+kill "$smpid" 2>/dev/null; wait "$smpid" 2>/dev/null
+
+# vndservicemanager, the vendor context (/dev/vndbinder), and its client.
+GENV="$BENV" DL=60 gbg /vendor/bin/vndservicemanager /dev/vndbinder >/dev/null &
+vpid=$!
+out=""
+for _ in $(seq 1 50); do
+    out=$(GENV="$BENV" DL=10 g /vendor/bin/vndservice list)
+    grep -q '^Found 1 services' <<<"$out" && break
+    sleep 0.1
+done
+grep -q 'manager: \[android.os.IServiceManager\]' <<<"$out" && ok "vndservicemanager on /dev/vndbinder; vndservice list: manager" \
+    || bad "vndservicemanager + vndservice list" "$(head -3 <<<"$out")"
+kill "$vpid" 2>/dev/null; wait "$vpid" 2>/dev/null
+sleep 3
+rm -rf "$bdir"
 
 echo
 summary="== $PASS passed, $FAIL failed"

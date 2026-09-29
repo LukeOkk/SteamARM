@@ -1,0 +1,263 @@
+Stage 25 -- Android binder in userspace under lxrun: servicemanager, service, a native service (2026-09-29)
+=========================================================================================================
+
+ZERO-VM. No virtual machine, no guest kernel, no FEX. Host: Mac mini M4,
+16 GB, macOS 27.0. Base: 53432eb plus the stage-25 Android userspace work
+(1e35b68, merged). Every Android program below is an unmodified Android 11
+arm64 binary from the Waydroid LineageOS 18.1 root of
+benchmarks/stage25-android-userspace.txt (/Volumes/SteamARMAndroid/root),
+run by lxrun as a macOS process. Nothing was signed in to, no Google
+component was downloaded, no Steam client was started. Other sessions ran
+guests on the same Mac (a FEXServer started elsewhere was running); every
+process below was started and stopped by this session, by its own PID, and
+every binder hub it started left by itself when idle. Home paths are
+written as ~. Labels: MEASURED, VERIFIED IN SOURCE, UPSTREAM DOCUMENTED,
+HYPOTHESIS, UNKNOWN.
+
+Result
+------
+MEASURED:
+1. /dev/binder, /dev/hwbinder and /dev/vndbinder exist for every lxrun
+   process, as a userspace driver: runtime/binder_hub.c (the driver's state
+   in a host process, `lxrun --binder-hub <dir>`, started on demand) and
+   runtime/binder.c (the guest's open/ioctl/mmap/poll/close/fork).
+2. Android 11's own servicemanager runs as the context manager. Android's
+   own clients work against it: `service list` ("Found 1 services: 0
+   manager: [android.os.IServiceManager]"), `service check`, `service
+   call`, `dumpsys -l`.
+3. A native service in another process (tests/android/binder_service.c,
+   raw ioctls) registers with servicemanager, is listed with its interface
+   name, is called by `service call` with an int (41 -> 42) and with a file
+   descriptor (it reads /system/etc/hosts through it: 56 bytes, byte sum
+   3516, equal to the file on the Mac), and when it exits servicemanager's
+   death notification removes it.
+4. Real libbinder daemons register and serve from libbinder's own thread
+   pool: idmap2d answers IIdmap2::getIdmapPath with
+   "/data/resource-cache/product@overlay@Test.apk@idmap"; credstore
+   registers and answers with an AIDL service-specific error ("Error
+   creating default store": there is no identity-credential HAL).
+5. vndservicemanager on /dev/vndbinder with `vndservice list`: a separate
+   context. hwservicemanager becomes the /dev/hwbinder context manager but
+   cannot set hwservicemanager.ready (no property service), and lshal never
+   gets as far as opening /dev/hwbinder: the next wall is properties.
+6. Costs: a sync round trip is 36-38 us to a looper parked in
+   BINDER_WRITE_READ (libbinder's thread pool) and 46-55 us to a server that
+   polls like servicemanager; the host floor for the same three-process
+   relay over Unix sockets is 8-9 us. `service list` takes 60 ms median,
+   `toybox true` 58 ms: process start-up, not binder, is the cost.
+7. tests: tests/elf/run.sh BINDER_IPC (21 checks, two processes, raw ioctls
+   against the Linux UAPI header) and BINDER_POOL; tests/android/run.sh
+   15 passed + ART's expected failure. Full-suite numbers at the end.
+
+Design (runtime/binder.h, docs/ANDROID_RUNTIME_ARCHITECTURE.md "Binder")
+------------------------------------------------------------------------
+- The hub: one per user, /tmp/lxrt-binder-<uid> (LXRT_BINDER_DIR), socket
+  hub.sock 0600 in a 0700 directory; leaves 10 s after its last client
+  (LXRT_BINDER_HUB_IDLE); logs user errors to hub.log, every transaction
+  under LXRT_BINDER_LOG=1. Started by the first open with posix_spawn of
+  lxrun itself (--binder-hub <dir> --daemon, POSIX_SPAWN_CLOEXEC_DEFAULT,
+  stdio on /dev/null): that first process binds and listens, forks the real
+  hub (setsid) and exits, so the hub is nobody's child and inherits no
+  guest descriptor. Single-threaded; a thread that would sleep in
+  BINDER_WRITE_READ is parked (its answer is not sent yet).
+- State and semantics ported from drivers/android/binder.c (Linux 5.x):
+  procs, threads, nodes, refs, descriptors (0 = context manager), work
+  lists, transaction stacks, buffer allocator, death notifications. Checked
+  afterwards line by line against Linux v5.10's binder.c (downloaded to the
+  session scratch directory for reading only, GPL-2.0, not committed):
+  binder_inc_node_nilocked, binder_dec_node_nilocked,
+  binder_cleanup_ref_olocked, binder_inc_ref_olocked, binder_dec_ref_olocked,
+  binder_translate_handle, binder_thread_release, binder_poll, the
+  BR_SPAWN_LOOPER condition, the -ESRCH -> BR_DEAD_REPLY mapping, the FDA
+  release: VERIFIED IN SOURCE, same logic.
+- The guest's descriptor is its connection to the hub (the process
+  channel): poll/epoll work on it unchanged. Doorbell bytes make it
+  readable when work waits for a polling thread; every answer carries the
+  count written and whether one should stay unread, and the runtime reads
+  exactly up to that count. Each guest thread has its own channel (a
+  socketpair handed to the hub with SCM_RIGHTS).
+- BINDER_WRITE_READ sends the write bytes plus, per transaction, what the
+  kernel copies from the sender (data, offsets, scatter-gather buffers,
+  the descriptors named by FD/FDA objects, by SCM_RIGHTS). The receive
+  buffer is a file: read-only for the guest, read-write in the hub, which
+  copies each transaction into it as the kernel does; the runtime writes
+  installed descriptor numbers through its own read-write view.
+
+Runs, in order
+--------------
+R0. Before (HEAD runtime plus the stage-25 userspace work, LXRT_KEEP_X18=1
+    build): `servicemanager` ->
+      Binder driver '/dev/binder' could not be opened.  Terminating.
+      libc: Fatal signal 6 (SIGABRT) ...   rc=1
+
+R1. First BINDER_IPC run: 17 ok, 3 MAL.
+    - "a second context manager is refused (EBUSY)": EBADF. Cause: the
+      runtime's open skipped the hello when the hub was already listening
+      (only the spawn path said hello); the hub dropped the connection on
+      its first message. Fixed in the open loop.
+    - "20 oneway transactions arrived, in order": 11. Not a driver bug:
+      oneway calls to one node are delivered one at a time (the next one
+      only after BC_FREE_BUFFER of the previous), so a sync call can
+      overtake the queue, as on Linux. The test now asks until all 20
+      arrived: 20, in order, after 11 sync calls.
+    - the client's exit status followed from the second.
+R2. After the fixes: 19/19 checks, 5 runs with host pages and 3 with
+    LXRT_GUEST_PAGE=4096, all passing; the hub gone 2 s after each.
+R3. Benchmark, binder_ipc bench 5000 (server polls with O_NONBLOCK reads,
+    as servicemanager's Looper does), three runs:
+      sync round trip 46.0 / 55.3 / 45.8 us
+      oneway + wakeup 55.7 / 52.1 / 50.3 us each
+      server wakeups 20,053 / 20,133 / 20,307, 0 spurious in each
+R4. servicemanager + `service list`: first run.
+      Found 1 services:
+      0	manager: [android.os.IServiceManager]
+      Service manager: found            (service check manager)
+    logcat (tests/android/logd.py) showed two gaps, both fixed in lxrun:
+      ProcessState: Binder driver /dev/binder is unavailable. Using /dev/binder instead.
+        (access() of the device failed: it is not in the root) -> access,
+        stat and fstat of the three devices now succeed (char devices).
+      Parcel: Unable to getrlimit: Function not implemented
+        (syscalls 163/164 missing) -> getrlimit/setrlimit via prlimit64.
+    Re-run: both lines gone; logcat empty.
+      service call manager 4 i32 15 -> the list parcel "manager"
+      service call manager 2 s16 manager -> Object #0 'sh*' = 1 (a strong
+        handle), flags 0x113, stability 0x0c
+    Hub log: servicemanager "context manager of context 0"; each `service`
+    process: hello, mmap, the manager's node created for it, deleted when
+    it exited (the node reference protocol ran to completion); hub exit
+    "idle" 10 s after the last client.
+R5. The native service (tests/android/binder_service.c):
+    - first run: "addService(steamarm.test) failed: -2147483647"; logcat
+      "Parcel: Expecting header 0x53595354 but found 0x1a. Mixing copies of
+      libbinder?". LineageOS 18.1's libbinder writes Android 12's 'SYST'
+      header into interface tokens. Added to the service's parcels.
+    - then:
+      registered steamarm.test
+      Found 2 services:
+      0	manager: [android.os.IServiceManager]
+      1	steamarm.test: [steamarm.test.IEcho]
+      service call steamarm.test 1 i32 41 -> Result: Parcel(00000000 0000002a)
+      service call steamarm.test 2 fd /system/etc/hosts
+        -> Result: Parcel(00000000 00000038 00000dbc)   (Mac: 56 bytes, sum 3516)
+      service call steamarm.test 3 -> the service replies and exits (rc 0)
+      service list -> Found 1 services (death notification in servicemanager)
+R6. dumpsys: `dumpsys -l` with servicemanager alone printed nothing, rc 0.
+    The hub log showed its listServices call (code 4) answered with 28
+    bytes, i.e. "manager". LineageOS 18.1's cmds/dumpsys/dumpsys.cpp prints
+    the list only `if (N > 1)` (VERIFIED IN SOURCE). With the native service
+    registered: "Currently running services: manager steamarm.test".
+R7. The other two contexts:
+    - vndservicemanager /dev/vndbinder; vndservice list:
+      Found 1 services: 0 manager: [android.os.IServiceManager]
+    - hwservicemanager: hub "context manager of context 1"; logcat
+      "Failed to set "hwservicemanager.ready" (error 2). HAL services will
+      not start!" then "hwservicemanager is ready now.". lshal list:
+      killed by its 20 s deadline (rc 142); with LXRT_TRACE its last
+      syscall is a faccessat and it never opens /dev/hwbinder; `ps`: state
+      R, 100% CPU; `sample`: all time in guest code. libhidlbase.so
+      contains "Waited for hwservicemanager.ready for a second, waiting
+      another..."; that lshal spins in that wait is HYPOTHESIS. Either way
+      it is the property service, not binder.
+R8. Thread pool (binder_ipc pool): BR_SPAWN_LOOPER once with max threads 1,
+    the spawned pthread registered (BC_REGISTER_LOOPER), a held call and
+    its releasing call served at once by the two server threads, two client
+    threads with calls in flight at once, BC_EXIT_LOOPER +
+    BINDER_THREAD_EXIT. First version: the spawned looper never left (the
+    test's own shutdown: one DONE for two loopers); fixed in the test.
+    Then SIGUSR1 (no SA_RESTART) to the client thread blocked in its call:
+    handler ran, EINTR x1, the retried call completed. 3/3 runs.
+R9. Real libbinder daemons (servicemanager running):
+      Found 3 services:
+      0	android.security.identity: [android.security.identity.ICredentialStoreFactory]
+      1	idmap: [android.os.IIdmap2]
+      2	manager: [android.os.IServiceManager]
+      service call idmap 1 s16 /product/overlay/Test.apk i32 0 ->
+        "/data/resource-cache/product@overlay@Test.apk@idmap" (0x33 chars)
+      service call android.security.identity 1 i32 0 ->
+        exception -8 (service specific) "Error creating default store"
+    Both daemons stayed up; idmap2d had 5 host threads.
+R10. Timings (servicemanager and the native service running; 10 runs each,
+    wall time of the whole guest process):
+      servicemanager launch -> context manager       95 ms
+      toybox true                    median 58 ms (56-65)
+      service list (2 services)      median 60 ms (52-90)
+      service check manager          median 59 ms (56-79)
+      service call ... 1 i32 41      median 62 ms (59-82)
+      hub RSS 1,648 KB at start, 1,952 KB after the runs
+R11. Round trips to a parked looper (binder_ipc pool 5000), three runs:
+    37.9 / 35.7 / 37.5 us. Host floor, a C program on the Mac (no lxrun),
+    64-byte messages over Unix stream sockets, 20,000 round trips, three
+    runs: two processes 4.8 / 4.5 / 4.3 us; three processes relaying
+    A -> hub -> B -> hub -> A 9.1 / 9.1 / 8.1 us. The runtime's fault-safe
+    guest copies (mach_vm_read_overwrite) cost 0.37-0.46 us each, about six
+    per call per side. The rest is, as a HYPOTHESIS (not profiled), the
+    extra system calls per hop (header and payload reads, the hub's poll
+    over every channel): room to optimise, not done.
+R12. Review. A read-only review by Codex (gpt-6-sol, effort high) of
+    binder.c, binder_hub.c and the hooks reported 8 findings. Fixed:
+    - munmap of the receive buffer left the hub allocating there
+      (Linux: binder_vma_close, then -ESRCH/"no vma" -> BR_DEAD_REPLY);
+      the runtime now tells the hub. Test: after munmap, a call's reply
+      cannot be delivered, BR_DEAD_REPLY.
+    - installing descriptors into the buffer raced another thread's munmap:
+      serialised.
+    - dup3: a bad oldfd dropped newfd's module state before failing;
+      O_CLOEXEC was ignored (Darwin's dup2 clears it); other flags were not
+      EINVAL. All lxrun guests, not only binder.
+    - TF_CLEAR_BUF (Linux 5.11) was not honoured: the buffer is now zeroed
+      when freed. Test added.
+    - a 17th receive buffer in one process was untracked: refused.
+    Kept, with the source as evidence: "the next oneway work after
+    BC_FREE_BUFFER should go to thread->todo" and "a death notice for an
+    already dead node should go to the looper's thread->todo": in Linux
+    v5.10 both go to proc->todo (binder.c lines 3565 and 3913 of v5.10).
+    BINDER_IPC after the fixes: 20/20, 3 runs, then 21/21 with the
+    TF_CLEAR_BUF check; BINDER_POOL 3/3; tests/android 14 passed + 1
+    expected failure (15 with idmap2d, R9).
+R13. The hub's default directory is in /tmp: the runtime now refuses one it
+    does not own or that others can read or write (lstat: owner, mode
+    & 077 == 0). MEASURED with a 0755 directory: "[lxrt] binder:
+    /tmp/lxrt-binder-perm is not a private directory of this user; no
+    binder driver" and open(/dev/binder) = ENOENT. The tests use mktemp -d
+    (0700).
+
+Licences and downloads
+----------------------
+Nothing new in the repository or on the Mac's state. Read for verification
+only, in the session scratch directory: Linux v5.10
+drivers/android/binder.c (GPL-2.0) and LineageOS 18.1
+cmds/dumpsys/dumpsys.cpp (Apache-2.0). The Android root is the one of
+benchmarks/stage25-android-userspace.txt (Apache-2.0 and the licences in its
+NOTICE files; VANILLA, no Google apps). tests/android/run.sh copies the test
+service to the root's /data/local/tmp for the run and deletes it.
+
+What servicemanager still needs
+-------------------------------
+Nothing to run and serve (MEASURED above). Around it, for Android as a
+whole: a property service (hwservicemanager.ready, HIDL, setprop, ashmem's
+choice of memfd), init's start order, per-app uids (every process has the
+Mac's uid 501), SELinux labels (the image's servicemanager has its checks
+compiled out; the driver reports LXRT_BINDER_SECCTX, default
+u:r:unlabeled:s0), and ART's heap (docs/ANDROID_RUNTIME_ARCHITECTURE.md).
+
+Test suites (final tree)
+------------------------
+Both lxrun builds, one after the other, each from `rm -f build/lxrun`:
+                                  LXRT_KEEP_X18=1 (sdk 12.3)   default (sdk 27.0)
+  make lxrt launcher              rc 0                          rc 0
+  make test-launcher-core         rc 0: application core all passed; 37/0, 32/0,
+                                  10/0; guest_env 26/0; mkarmroot 25/0;
+                                  run_steam_arm64 10/0; 35/0; python unittests
+                                  20 OK (the docs checks among them) -- same in both
+  tests/elf/run.sh                76 passed, 0 failed (25 s)    76 passed, 0 failed (27 s)
+                                  (74 before this stage + BINDER_IPC + BINDER_POOL)
+  tests/android/run.sh            15 passed, 0 failed,          15 passed, 0 failed,
+                                  1 expected failure (ART)      1 expected failure (ART)
+  tests/elf/run_i386.sh (default build, after the dup3 change): 18 passed, 0 failed
+  python3 -m unittest tests/test_docs_records.py: OK (6 tests)
+No binder hub, servicemanager, service or test process was left running
+afterwards (ps).
+After R13 (the last runtime change), default build again: make lxrt
+launcher rc 0; make test-launcher-core rc 0 (same counts as above);
+tests/elf/run.sh 76 passed, 0 failed (BINDER_IPC: 21 checks);
+tests/android/run.sh 15 passed, 0 failed, 1 expected failure.

@@ -7,6 +7,7 @@
 // never produces for a terminal, and bash dereferenced a null pointer 0x514
 // bytes in during start-up (benchmarks/stage5-fex.txt).
 #include "lxrt.h"
+#include "binder.h"
 #include "ioctl_tty.h"
 #include "inotify.h"
 
@@ -151,6 +152,8 @@ long lxrt_ioctl(int fd, unsigned long lreq, uint64_t arg)
     void *p = (void *)arg;
     if (lxrt_evdev_is(fd))
         return lxrt_evdev_ioctl(fd, lreq, arg);
+    if (lxrt_binder_is(fd))
+        return lxrt_binder_ioctl(fd, lreq, arg);
     switch ((uint32_t)lreq) {
     case L_TCGETS: case L_TCGETS2: {
         struct termios d;
