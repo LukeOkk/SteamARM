@@ -96,6 +96,31 @@ commit messages and by the check, the launcher logs are
   (35 of 35 in each log from `steam-20260929-100948.log` on; 2 of 2 in the
   one that died).
 
+## Before 0.3.5 (no stage file)
+
+After the review fixes (`154bb33`) and the stale-fault recheck (`913fbad`),
+on the Mac, 2026-09-29. MEASURED:
+
+- Tests: `tests/elf/run.sh` 68 passed, 0 failed, 0 expected failures
+  (`WX_MPROTECT_RACE` stress: 0 and 0 faults, against 52 and 184 before
+  `913fbad`); `tests/elf/run_i386.sh` 18/0 (plus `smc_subpage`'s expected
+  failure); `tests/win/run.sh` 11/0, 159.2-161.7 fps;
+  `tests/win/run_steam_path.sh` 2/0; `make test-arm64` 4/0;
+  `tests/elf/run_vk_device.sh` 2/0; `tests/arm64/frame_glx.sh` 1/0;
+  `tests/steamframe_image/redact.sh` 5/0; `make test-launcher-core` passes.
+- From the launcher: "Steam ARM64 (experimental)" sign-in window at 16 s,
+  "Steam ARM64 · Steam Frame (experimental)" at 20 s, both still mapped 20 s
+  later, and **Detener** left 0 guest processes.
+- x86 Steam client from the launcher, same session: with this runtime the
+  main window came in 84-118 s in 5 of 6 starts; the sixth (the first
+  start after the Windows probes) had no window in 300 s, after the web
+  helper's usual GPU-process restarts ("Triggering shutdown due to GPU
+  process restarts", also 27 times on 2026-09-27 with the old runtime) and
+  no fault report. With the runtime from before this work (`e4047ef`),
+  interleaved: 3 of 3 starts, main window in 124-199 s. Together with the
+  earlier check: 9 of 11 x86 starts reached the window on the new runtime.
+  Too few runs to call a difference in reliability either way.
+
 ## Tools in this directory
 
 **Stage 1, syscall cost:**
