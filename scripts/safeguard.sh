@@ -25,6 +25,9 @@
 #     zone) or VM map entries above SAFEGUARD_MAX_MAPENT (1500000): kernel
 #     memory no RSS figure shows, and what the panicking kernel had run out of
 #     (the "vm objects" zone was 2856 MB)
+# All but the first (fseventsd, guest RSS, process count, kernel objects) stop
+# every guest at once, and are checked before the memory rule, so its grace
+# period never delays them.
 # A status line goes to $STEAMARM_STATE/logs/safeguard.log (~/SteamARM-roots) every 5 s.
 # Every stop is also written to logs/safeguard.last ("<epoch> <reason>") and
 # to the running app's log, so the launcher can say why the app ended.
@@ -170,15 +173,19 @@ while true; do
     else
         warned=0
     fi
-    if [ "$gcount" -gt 0 ] && [ "$crit" -ge "$CRIT_SECS" ]; then
-        relieve_memory "critical memory pressure (free ${level}%)"
-    elif [ "$gcount" -gt 0 ] && [ "$low" -ge "$LOW_SECS" ]; then
-        relieve_memory "free memory ${level}% < ${MIN_FREE}%"
-    elif [ "$fse" -gt "$FSE_MB" ]; then kill_guests "fseventsd ${fse} MB > ${FSE_MB} MB"
+    # The limits that stop everything at once come first, every second: after
+    # the memory rule has stopped the largest guest, its grace period used to
+    # hide them (a process-count or vm.objects runaway went on for
+    # SAFEGUARD_GRACE_SECS while memory stayed short).
+    if [ "$fse" -gt "$FSE_MB" ]; then kill_guests "fseventsd ${fse} MB > ${FSE_MB} MB"
     elif [ "$grss" -gt "$GUEST_MB" ]; then kill_guests "guests ${grss} MB > ${GUEST_MB} MB"
     elif [ "$gcount" -gt "$MAX_PROCS" ]; then kill_guests "${gcount} lxrun processes > ${MAX_PROCS}"
     elif [ "$vmobj" -gt "$MAX_VMOBJ" ]; then kill_guests "kernel vm.objects ${vmobj} > ${MAX_VMOBJ}"
     elif [ "$mapent" -gt "$MAX_MAPENT" ]; then kill_guests "kernel VM.map.entries ${mapent} > ${MAX_MAPENT}"
+    elif [ "$gcount" -gt 0 ] && [ "$crit" -ge "$CRIT_SECS" ]; then
+        relieve_memory "critical memory pressure (free ${level}%)"
+    elif [ "$gcount" -gt 0 ] && [ "$low" -ge "$LOW_SECS" ]; then
+        relieve_memory "free memory ${level}% < ${MIN_FREE}%"
     fi
     n=$((n + 1))
     # FEXServer is shared by every x86 program. If it is gone while x86 guests
