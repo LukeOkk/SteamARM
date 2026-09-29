@@ -265,7 +265,12 @@ void lxrt_x18_plan(uint32_t i, uint64_t site, uint64_t tramp,
     if (cls == X18_CLS_LDST_EXCL) { reject(p, "exclusive"); return; }
     if (cls == X18_CLS_CASP) { reject(p, "casp pair"); return; }
     if (sd && reg_at(i, 0) == 31) { reject(p, "writes sp"); return; }
-    if (cls == X18_CLS_SYSREG && i != 0xd53bd052 && i != 0xd51bd052) {
+    /* NZCV (mrs x18, nzcv / msr nzcv, x18: libcef's multiprecision code
+     * keeps the carry in x18) goes through the generic path unchanged: the
+     * stp/mrs/and/ldr before it and the str/ldp after it leave the flags
+     * alone. Other system registers stay refused. */
+    bool nzcv = i == 0xd53b4212 || i == 0xd51b4212;
+    if (cls == X18_CLS_SYSREG && i != 0xd53bd052 && i != 0xd51bd052 && !nzcv) {
         reject(p, "sysreg"); return;
     }
     if ((slot_off & 7) || slot_off >= 32768 || (tls_off & 7) || tls_off >= 32768 ||
@@ -390,6 +395,7 @@ void lxrt_x18_plan(uint32_t i, uint64_t site, uint64_t tramp,
         break;
     }
     case X18_CLS_SYSREG:
+        if (nzcv) { emit(p, j); break; }
         emit(p, (i == 0xd53bd052 ? 0xf9400000 : 0xf9000000) |
                 ((tls_off / 8) << 10) | (s2 << 5) | s1);
         break;

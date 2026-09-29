@@ -86,7 +86,11 @@ static void selftest(void) {
     CHECK(branch.words[7] == (0xf2800000u | (1u << 21) | (0x1000u << 5) | 30u));
     branch = plan(0xd65f0240);
     CHECK(branch.verdict == X18_OK && branch.terminal && branch.nwords == 7);
-    unsupported(0xd53b4212, "sysreg");
+    unsupported(0xd53b4412, "sysreg"); /* mrs x18, fpcr */
+    struct x18_plan p0 = plan(0xd53b4212); /* mrs x18, nzcv: generic path, flags untouched */
+    CHECK(p0.verdict == X18_OK && p0.nwords == 8 && p0.words[4] == 0xd53b4200);
+    p0 = plan(0xd51b4212); /* msr nzcv, x18 */
+    CHECK(p0.verdict == X18_OK && p0.nwords == 8 && p0.words[4] == 0xd51b4200);
     unsupported(0x9100025f, "writes sp");
     unsupported(0xf8408ff2, "sp writeback");
     unsupported(0xa8c14bf2, "sp writeback");
@@ -240,7 +244,8 @@ static void fixture_tests(void) {
         {0xd65f0240, UINT64_C(0x40000), X18_OK}, /* ret x18 */
         {0xd53bd052, UINT64_C(0x40000), X18_OK}, /* mrs x18, TPIDR_EL0 */
         {0xd51bd052, UINT64_C(0x40000), X18_OK}, /* msr TPIDR_EL0, x18 */
-        {0xd53b4212, UINT64_C(0x40000), X18_UNSUPPORTED}, /* mrs x18, NZCV */
+        {0xd53b4212, UINT64_C(0x40000), X18_OK}, /* mrs x18, NZCV */
+        {0xd51b4212, UINT64_C(0x40000), X18_OK}, /* msr NZCV, x18 */
         {0x4c407252, UINT64_C(0x40000), X18_OK}, /* ld1 { v18.16b }, [x18] */
         {0x4cd27072, UINT64_C(0x40008), X18_OK}, /* ld1 { v18.16b }, [x3], x18 */
         {0x4cdf7243, UINT64_C(0x40000), X18_OK}, /* ld1 { v3.16b }, [x18], #16 */
