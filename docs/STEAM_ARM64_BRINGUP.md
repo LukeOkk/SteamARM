@@ -11,10 +11,21 @@ the runtime's SIGSEGV/SIGBUS handler when the guest resets them to SIG_DFL.
 It also reaches that window on the root derived from the Steam Frame image
 (`scripts/mkframeroot.sh`), in 5 of 5 runs, 5-7 s later than on the Fedora
 root (MEASURED, `benchmarks/stage23-frame-root.txt`; next section).
-The working route for games is still the x86 client under FEX. The sections
-below are the earlier bring-up (`benchmarks/stage21-native-arm64-client.txt`),
-the Mac's logs as read by the 2026-09-29 audit, and the analysis of the
-abort, kept as written.
+The launcher has two built-in entries for it (`scripts/builtin-apps.json`,
+`9468028`): "Steam ARM64 (experimental)" (`steam-arm64`, the Fedora
+armroot) and "Steam ARM64 · Steam Frame (experimental)"
+(`steam-arm64-frame`, the Steam Frame root). In the post-merge check of
+2026-09-29 (after `b3f64c8`), started from the launcher, the sign-in window
+came at 15-16 s on the Fedora root and 21 s on the Frame root, and
+**Detener** left 0 guest processes (MEASURED; launcher logs
+`steam-arm64-20260929-100619.log`, `-100747.log` and
+`steam-arm64-frame-20260929-100701.log`: 0 FEX lines, every image an
+aarch64 PIE). Sign-in, the library, downloads and games under this client
+are not verified; Proton ARM64 does not run on macOS. The working route for
+games is still the x86 client under FEX. The sections below are the earlier
+bring-up (`benchmarks/stage21-native-arm64-client.txt`), the Mac's logs as
+read by the 2026-09-29 audit, and the analysis of the abort, kept as
+written, with notes where stage 22 answered them.
 
 Labels: MEASURED (a command and its result), VERIFIED IN SOURCE (file:line),
 UPSTREAM DOCUMENTED, HYPOTHESIS, UNKNOWN. Logs are in
@@ -55,11 +66,30 @@ tests/arm64/frame_glx.sh                # GLX in that root: an indirect context
   NetworkManager, atomupd-manager, which crashes without a system D-Bus).
   That these paths and the restart explain the slower start is a
   HYPOTHESIS.
-- **Launcher.** The built-in entry still uses the Fedora root. To move it,
-  change only its `"root"` to `/tmp/lxrt-arm64root`; the GL variables come
-  from the root's file.
+- **Launcher.** `9468028` added a separate built-in entry for this root,
+  `steam-arm64-frame` ("Steam ARM64 · Steam Frame (experimental)", root
+  `/tmp/lxrt-arm64root`, the same command and environment), and kept
+  `steam-arm64` on the Fedora root on purpose, because that root starts
+  5-7 s faster. Do not change `steam-arm64`'s root:
+  `tests/launcher/run_app_dispatch.sh` expects `/tmp/lxrt-armroot` for it.
+  The GL variables come from the root's `.lxrt-guest-env` through
+  `scripts/run-native.sh`. The launcher shows the entry as unavailable,
+  with the reason, while the SteamFrameRoot volume is not attached or the
+  client is missing from `<root>/tmp/armhome`. Before `9468028` the Frame
+  root was run through the launcher's runner only (`run-native.sh`, run N1
+  of stage 23); the first start through `scripts/run-app.sh
+  steam-arm64-frame` is the post-merge check above (window at 21 s).
 
-## How it runs today
+## How it runs on the Fedora armroot
+
+From the launcher: **Steam ARM64 (experimental)**. From a shell:
+
+```sh
+scripts/run-steam-arm64.sh --for 180       # stops what it started at the end
+```
+
+By hand, as stage 21 did (the script adds `LXRT_X18_ALL_TEXT=libcef.so`,
+a Linux `PATH` and `TMPDIR`, and tracks the processes it started):
 
 ```sh
 LXRT_ROOT=/tmp/lxrt-armroot LXRT_GUEST_PAGE=4096 HOME=/tmp/armhome DISPLAY=:2 \
@@ -74,13 +104,19 @@ LXRT_ROOT=/tmp/lxrt-armroot LXRT_GUEST_PAGE=4096 HOME=/tmp/armhome DISPLAY=:2 \
   `~/SteamARM-roots/armroot` from `scripts/mkarmroot.lock`: 150 root packages
   plus 5 build-only ones (MEASURED count of the lock; stage 21 says 153).
   Its glibc is 2.42-16. The client's home is `<armroot>/tmp/armhome`.
-- **Link.** `/tmp/lxrt-armroot` → `~/SteamARM-roots/armroot` was made by hand
-  (MEASURED `ls`). No script creates it, so it is gone after a reboot.
-- **Launcher.** Not wired at `dbd1657`: there is no aarch64 Steam entry, and
-  `scripts/run-native.sh` defaults to `/tmp/lxrt-arm64root` (which does not
-  exist) and never sets `LXRT_GUEST_PAGE` (VERIFIED IN SOURCE,
-  `scripts/run-native.sh:19-29`). A launcher entry is being worked on
-  separately; it is not done here.
+- **Link.** `/tmp/lxrt-armroot` → `~/SteamARM-roots/armroot`. At the audit
+  it was made by hand (MEASURED `ls`). Since `e8114fa`,
+  `scripts/env-links.sh` makes it whenever the armroot exists, and
+  `scripts/run-steam-arm64.sh` links it too (VERIFIED IN SOURCE).
+- **Launcher.** Not wired at `dbd1657`. Since `e8114fa` and `774f590` the
+  built-in entry `steam-arm64` runs `steamrtarm64/steam` in
+  `/tmp/lxrt-armroot` with `HOME_IN_GUEST=/tmp/armhome`,
+  `LXRT_GUEST_PAGE=4096` and `LXRT_X18_ALL_TEXT=libcef.so`, through
+  `scripts/run-native.sh`, which gives native guests a Linux `PATH` since
+  `ecca552`. Through the launcher's path the window came in 9 of 10
+  start/stop cycles in stage 23 (L1-L10; the failed one is the zygote
+  SIGBUS of `docs/STEAMWEBHELPER_BRINGUP.md`), and in the post-merge check
+  above.
 
 The client needs at most `GLIBC_2.29` (MEASURED 2026-09-29: `llvm-readelf -V`
 over `steam`, `steamui.so`, `steamclient.so`, `vgui2_s.so`, `chromehtml.so`,
@@ -123,15 +159,17 @@ it they were live `svc #1` (`docs/X18_VIRTUALIZATION.md`).
 None of the x86 files ran in the native runs: 0 FEX and 0 x86 exec lines
 (MEASURED). HYPOTHESIS: they serve x86 games (`steamclient.so`, overlay).
 
-## Where it stops
+## Where it stopped before stage 22
 
-Newest run: `native-arm64-steam-nss-20260929.log` (02:14-02:17).
+The audit's newest run, `native-arm64-steam-nss-20260929.log`
+(02:14-02:17). None of what follows came back after stage 22's root and
+runtime changes (`benchmarks/stage22-native-arm64-bringup.txt`).
 
 - The webhelper was launched 13 times, 10 s apart, from 02:15:08 to
   02:17:10. Each printed "Disabling sandbox due to a previous crash in
   CefInitialize". None reached BrowserReady; `steamui_html.txt` ends with
-  "Timed out waiting for webhelper init" (MEASURED). The webhelper is the open
-  blocker: `docs/STEAMWEBHELPER_BRINGUP.md`.
+  "Timed out waiting for webhelper init" (MEASURED). The webhelper was the
+  blocker then: `docs/STEAMWEBHELPER_BRINGUP.md`.
 - The main process then aborted: `free(): invalid pointer`, then
   `[lxrt] pid 60919 ...: SIGABRT to itself` (MEASURED, log lines 591-592).
 - `steam-runtime-launcher-service` was "not found" 3 times (non-fatal).
@@ -184,7 +222,18 @@ Earlier notes named the missing `lsof` as a HYPOTHESIS for this abort
 (`docs/STEAM_FRAME_COMPAT_TOOLS.md` §7.2). The chain above does not involve
 it.
 
-### Experiments that would confirm it (not run)
+### Experiments that would confirm it
+
+Run in stage 22 (MEASURED, `benchmarks/stage22-native-arm64-bringup.txt`):
+E1 on the old root gave `XSupportsLocale` 0, return `-2` and `tp.value`
+unchanged, the chain's step 4; E1b with `XLOCALEDIR` set gave
+`XSupportsLocale` 1; E1c on the rebuilt root (with `libX11-common` and
+glibc locales in its seeds) gave `XSupportsLocale` 1 without it. E2 could
+not run as written: on the rebuilt root the webhelper initialised (27 of 27
+launches reached BrowserReady), so the timeout, the rescue dialog and the
+abort were never reached again. The `free()` fix is therefore shown by the
+probes, not by a client run. E3 was not needed. The table is the plan as
+it was written.
 
 E1 to E3 write into `~/SteamARM-roots`, so they need the owner's approval.
 
@@ -217,10 +266,14 @@ stage 21 and the audit saw. The Frame root is the extraction at
 | `libSDL3.so.0` in the system dirs | absent | absent (the client ships its own in `steamrtarm64/`) | `gldriverquery` abort |
 | `steam-runtime-launcher-service` | absent | absent from `/usr`; only x86 copies inside the bootstrap's `steamrt64/` | 3 "not found" lines |
 
-The Fedora root is being changed by work in progress elsewhere: X locale
-data, glibc locales, the `libnssckbi.so` link and `libSDL3.so.0` appeared in
-it at 06:08 on 2026-09-29 (MEASURED `ls`, after the audit). What that does
-to the abort is what E2 measures; it is not measured here.
+Stage 22 added X locale data, glibc locales (C.UTF-8, en_US.UTF-8), the
+`libnssckbi.so` link, SDL3 and `lsof` to the Fedora root's seeds
+(`scripts/mkarmroot.lock`; MEASURED rebuilds in
+`benchmarks/stage22-native-arm64-bringup.txt`). With them the abort path is
+no longer reached, and without `lsof` the client had rejected the
+webhelper's transport connections (403, E13). `steam-runtime-launcher-
+service` is still missing; the client logs it as a possible problem and
+carries on.
 
 That the client gets further on the Frame root is a HYPOTHESIS until it is
 run there (`docs/ARM64_FIRST_MIGRATION.md`).
@@ -244,12 +297,18 @@ under the arm64 client is UNKNOWN.
 
 ## Open questions
 
-- Why the 2026-09-29 webhelpers never reach CEF initialisation
+- Sign-in, the main Steam window, the library and downloads under the
+  native client: not attempted.
+- Which Proton the native client resolves `proton_experimental` to, and how
+  x86 Proton is to be offered to it (`docs/ARM64_FIRST_MIGRATION.md`,
+  step 13). Proton ARM64 cannot start on macOS (stage 18, stage 19 §2).
+- Why the Frame root restarts the first webhelper, and why a webhelper
+  zygote died once with SIGBUS in a host `memset` at start (1 of 10
+  launcher cycles, stage 23 L2): both UNKNOWN
   (`docs/STEAMWEBHELPER_BRINGUP.md`).
-- Whether `LXRT_X18_ALL_TEXT` or other `LXRT_*` variables were set for the
-  2026-09-29 run. The log records no environment.
-- Which exact `build/lxrun` produced that log: it was rebuilt at 02:21,
-  after the run. Nothing memory-related changed in `runtime/` between the
-  WIP commit `4181429` and `e4047ef` (MEASURED `git diff`).
-- The library bases above are reconstructed. A `vmmap` of a live native
-  client, or abort reports that name mapped files, would make them MEASURED.
+- Answered or moot since stage 22: why the early 2026-09-29 webhelpers
+  never reached CEF initialisation (not reproduced after the root rebuild;
+  cause UNKNOWN), whether `LXRT_X18_ALL_TEXT` was set for that run, and
+  which `build/lxrun` produced it.
+- The library bases in the abort analysis are reconstructed. The abort is
+  no longer reached, so they will stay reconstructed unless it comes back.

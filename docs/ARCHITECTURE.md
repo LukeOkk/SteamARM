@@ -3,7 +3,8 @@
 On today's working route, Steam for Linux, Proton and the games are
 unmodified x86 Linux programs. aarch64 Linux programs run too, directly, with
 no translator; Valve's native arm64 Steam client is being brought up that way
-(experimental: it does not reach its window yet,
+(experimental: it reaches its "Sign in to Steam" window, with no FEX and
+V8's JIT on, and nothing after sign-in is verified;
 `docs/STEAM_ARM64_BRINGUP.md`). Instead of running a Linux kernel in a
 virtual machine, SteamARM runs these programs as ordinary macOS processes and
 translates what they ask the kernel for.
@@ -62,7 +63,10 @@ of that come the pieces the Linux tools expect:
 - **4 KiB-aligned ELF images** (Valve's native client, libcef) inside
   16 KiB host pages, through `runtime/subpage.c`. With
   `LXRT_GUEST_PAGE=4096` the guest sees AT_PAGESZ 4096, so glibc dlopens
-  such libraries (stage 21).
+  such libraries (stage 21). A host page holding both code and data is
+  either writable or executable at a time; a store executed from it into
+  itself is performed by the runtime instead of flipping forever
+  (`runtime/storemu.c`, `benchmarks/stage23-runtime-fixes.txt`).
 - **Read-write-execute pages for native guests** (V8's code range):
   `runtime/wxsplit.c` keeps each 16 KiB host page either read-write or
   read-execute, flips on faults, and scans a page read-only before it
@@ -104,9 +108,11 @@ that forwards to MoltenVK (Vulkan on Metal). It adds X11 presentation
 (windows of the native X server) and pointer translation for 32-bit
 programs. It also caps the video memory reported to games (the VRAM
 setting). Some Vulkan features Metal lacks (geometry shaders, transform
-feedback) are only partly covered. Details, and the backends the launcher
-knows (KosmicKrisp is installed on the Mac but not usable by the shim yet):
-`docs/GRAPHICS_BACKEND_ARCHITECTURE.md`.
+feedback) are only partly covered. With `STEAMARM_VK_ICD=kosmickrisp`
+(**Configuración → Gráficos**, when detected) the shim loads Mesa's
+KosmicKrisp instead of MoltenVK; that is experimental, measured with
+Direct3D probes only (`benchmarks/stage22-kosmickrisp.txt`). Details, and
+the backends the launcher knows: `docs/GRAPHICS_BACKEND_ARCHITECTURE.md`.
 
 ## Windows
 
@@ -136,7 +142,11 @@ the Mac runs out of memory, and the DRAM setting sets its ceiling. Since
 pressure for 2 checks, or free memory stays under 12 % for 3 checks; it
 stops the largest guest first and the rest only if the pressure lasts 5 s
 more, and it records why. Up to 0.3.4 one reading under 35 % free stopped
-everything, which closed Steam on a 16 GB Mac under normal use.
+everything, which closed Steam on a 16 GB Mac under normal use. Its other
+limits still stop every guest at once, however much memory is free: the
+guests' total resident size above the DRAM setting (8192 MB without one),
+fseventsd above 1500 MB, more than 80 `lxrun` processes, or the kernel's
+VM objects or map entries above 1,500,000 (`scripts/safeguard.sh`).
 
 ## Target: ARM64-first
 

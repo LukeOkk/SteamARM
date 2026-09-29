@@ -20,6 +20,9 @@ payloads, and FEX only for x86/i386 game code.
 - Nothing here was run on a Mac; the MEASURED facts come from the benchmark
   record.
 - For how a launch works in detail, see `docs/APPLICATION_MANAGER.md`.
+- Rows about the native arm64 client were brought up to date on 2026-09-29
+  after stages 22-23 (`benchmarks/stage22-*.txt`, `stage23-*.txt`); where a
+  row says "at the audit", the rest of it is the audit's state.
 
 **Evidence labels:**
 
@@ -168,7 +171,7 @@ Sources:
 | `/usr/lib/lxrt-emu` (inside the Steam root) | The only host directory visible inside pressure-vessel containers. Holds `FEX-emu`, the thunks, the shim and the aarch64 X libraries (`runtime/mounts.c:283-312`). | aarch64 | KEEP for game payloads. The X libraries are REPLACE_WITH_HOLO. |
 | `~/SteamARM-roots/samples` → `/tmp/lxrt-samples` | aarch64 test programs | aarch64 | KEEP |
 | `/tmp/lxrt-arm64root` | The ARM64 base the launcher and `scripts/run-native.sh` expect. `scripts/env-links.sh:16-18` links it when `$STEAMARM_STATE/arm64root` exists; that did not exist on the owner's Mac at the audit (MEASURED `ls`). Since stage 23 it is the root `scripts/mkframeroot.sh` derives from the Steam Frame image (an APFS clone on the `SteamFrameRoot` volume, so it resolves only while that volume is attached), and the native arm64 client reaches its login window from it (MEASURED, `benchmarks/stage23-frame-root.txt`). | aarch64 | new, REPLACE_WITH_HOLO target |
-| `$STEAMARM_STATE/armroot` → `/tmp/lxrt-armroot` | Fedora 43 aarch64 root built by `scripts/mkarmroot.sh` (150 root packages) for Valve's native client; stage 21 ran from it. The `/tmp` link was made by hand: no script creates it (MEASURED). | aarch64 | TRANSITIONAL; REPLACE_WITH_HOLO |
+| `$STEAMARM_STATE/armroot` → `/tmp/lxrt-armroot` | Fedora 43 aarch64 root built by `scripts/mkarmroot.sh` (150 root packages) for Valve's native client; stage 21 ran from it, and since stage 22 the client reaches its sign-in window from it (MEASURED). At the audit the `/tmp` link was made by hand (MEASURED); since `e8114fa` `scripts/env-links.sh` makes it whenever the armroot exists, and `scripts/run-steam-arm64.sh` links it too (VERIFIED IN SOURCE). The launcher's "Steam ARM64 (experimental)" entry runs from it. | aarch64 | TRANSITIONAL; REPLACE_WITH_HOLO |
 | `steamframe-oobe-repair-20260922.5153644-0.3.0.img` (on the owner's Mac) | Valve's Steam Frame recovery image: the source of the ARM64 userspace. It is read with `scripts/steamframe-image.py` (read-only, never booted, never bundled). Extracted and inventoried on 2026-09-29 (MEASURED): SteamOS 0.3.0, 965 packages, glibc 2.39, a Steam bootstrap with the native client; `docs/STEAM_FRAME_INVENTORY.md`. | data (aarch64 contents) | STEAM_RUNTIME_OWNED; PROPRIETARY_DO_NOT_REDISTRIBUTE |
 | `$STEAMARM_STATE/launcher/` | `apps.json`, `settings.json`, `running.{pid,id,display,arch}` | data | KEEP |
 | `/tmp/lxrt-shm-<uid>`, `/tmp/lxrt-sig`, `/tmp/lxrt-input` | Host directories behind `/dev/shm`, the cross-process signal mailboxes and the evdev sockets | host | KEEP |
@@ -193,6 +196,14 @@ This is VERIFIED IN SOURCE; details in `docs/APPLICATION_MANAGER.md`.
   is the ARM64 base, as `LaunchPlanner` does. "Añadir app" still installs
   every program under the Steam root, so an aarch64 program added that way is
   refused until the add flow installs into the ARM64 base.
+- Since then (at `b3f64c8`): the built-in entries come from
+  `scripts/builtin-apps.json`, which adds two aarch64 entries for Valve's
+  native client, `steam-arm64` and `steam-arm64-frame`, run through
+  `run-native.sh` with no FEX; "Añadir app" reads the ELF first and puts an
+  aarch64 program in the Fedora armroot; the launcher runs sessions through
+  `SessionMachine` (`e8114fa`, `774f590`, `9468028`;
+  `docs/APPLICATION_MANAGER.md`). The x86 "Steam" entry is still the
+  default and the working route.
 - Nothing stops the host side after the app exits: X11.bin and quartz-wm,
   PulseAudio, `steamarm-inputd`, FEXServer and the 1 Hz `safeguard.sh` loop
   keep running (no caller of their `stop`). This is harmless, but it is not
@@ -308,7 +319,7 @@ Everything below has to go for "everything ARM64 except game payloads".
 | i386 client `ubuntu12_32/steam` + `steamui.so` + scout i386 libraries | Valve's Linux client | Valve's native arm64 client (`steamrtarm64/steam`), downloaded from Valve or taken from the owner's Steam Frame image; never shipped by SteamARM |
 | x86-64 `steamwebhelper` (CEF) | Steam's UI | the arm64 `steamrtarm64/steamwebhelper` and `libcef.so` that come with that client |
 | x86-64 bash running `steam.sh`, `setup.sh`, `steam-runtime-check-requirements`, the launcher service | the bootstrap scripts | the ARM64 root's aarch64 shell and tools |
-| amd64 `lsof` + libtirpc (`fetch-x86-rootfs.sh:40-47`) | the client checks its websocket peer with `lsof -i TCP@127.0.0.1:<port>` (MEASURED, `stage8-steam-zero-vm.txt:296-311`) | an aarch64 `lsof`. HYPOTHESIS: the ARM64 client runs the same check. |
+| amd64 `lsof` + libtirpc (`fetch-x86-rootfs.sh:40-47`) | the client checks its websocket peer with `lsof -i TCP@127.0.0.1:<port>` (MEASURED, `stage8-steam-zero-vm.txt:296-311`) | an aarch64 `lsof`. The ARM64 client runs the same check: without `lsof` in the root it looked for it in every directory of `PATH` and answered each webhelper transport connection with 403; with it, no rejection (MEASURED, stage 22 E12b-E14). The Fedora armroot has it since stage 22; the Frame root has its own. |
 | i386 GTK2 + libXtst (`fetch-x86-rootfs.sh:35-39`) | presumably the i386 client; no record of who added them (`stage9-vmfree-build.txt:535-536`) | nothing |
 | x86-64 pressure-vessel tools for **steamwebhelper's** container | the client starts its UI through pressure-vessel (MEASURED, `stage6-steam-gap.txt:57-58`) | SLR Arm64 for the client. The x86 SLR stays for x86 Proton. |
 | FEXServer started on the **client's** launch path (`run-fex.sh:68-85`) | FEX needs it | started on the first x86 payload instead (TEMPORARY until the client is ARM64) |
@@ -362,7 +373,7 @@ Behaviours of the Steam client that the runtime handles specially
 | netlink uevent socket offered only inside bwrap containers (outside one, the client's window never appeared) | `socket.c:282-321` | UNKNOWN: tuned against the x86 client's udev threads |
 | `/proc/<pid>/fd`, `/proc/net/tcp` for `lsof` | `procpid.c` | yes, with an aarch64 `lsof` |
 | `max_user_namespaces = 0`, so CEF starts with `--no-sandbox` | `proc_ext.c:1172-1182` | yes |
-| mprotect RWX outside MAP_JIT granted as **RW** (x86 V8 under FEX never executes that memory) | `dispatch.c:1308-1320` | **no**, see below |
+| mprotect RWX outside MAP_JIT granted as **RW** (x86 V8 under FEX never executes that memory) | `dispatch.c:1308-1320` at the audit | **no**, see below. Since stage 23 the RW grant applies to FEX guests only; a native guest's RWX range is split W^X per 16 KiB page (`runtime/wxsplit.c`, MEASURED with V8, `stage23-native-arm64-jit.txt`) |
 | `PR_SET_MEM_MODEL` → EINVAL, so FEX keeps TSO | `dispatch.c:2653-2663` | no for the client; yes for FEX payloads |
 | `/proc/cpuinfo` untranslate, so FEX recognises it | `procfs.c:451-457` | no for the client; yes for FEX payloads |
 | AppKit started lazily; `OBJC_DISABLE_INITIALIZE_FORK_SAFETY=YES` on every exec | `window.m:104-135`, `process.c:138-161` | yes. UNKNOWN whether an ARM64 webhelper that loads the shim directly hits the ObjC fork kill that `steamwebhelper.json` avoids today. |
@@ -419,8 +430,8 @@ Behaviours of the Steam client that the runtime handles specially
 
 | workaround | where | ARM64 client |
 |---|---|---|
-| `svc` rewriting, TPIDR_EL0 in a TSD slot, x18 virtualisation, sysreg rewriting | runtime core | **yes**. Prebuilt ARM64 libraries use x18 (libcef `blr x18`, `stage19` §3a). `tests/x18_preserve` checks whether a macOS SDK < 13 binary keeps x18 (`stage19` §3a). Since stage 21 the x18 pass covers only `.eh_frame` function ranges (`runtime/elfsect.c`), because rewriting the client's OpenSSL constant tables in `.text` broke every TLS handshake. libcef's whole text is still rewritten, with `LXRT_X18_ALL_TEXT=libcef.so`, which no script sets yet (MEASURED, `stage21-native-arm64-client.txt`; `docs/X18_VIRTUALIZATION.md`). |
-| Guest-driven W^X flip (`0x4C580020`), RWX → MAP_JIT | `jit.c`, FEX `wx` patch | the mechanism, yes; an unpatched ARM64 V8 cannot use it (§7) |
+| `svc` rewriting, TPIDR_EL0 in a TSD slot, x18 virtualisation, sysreg rewriting | runtime core | **yes**. Prebuilt ARM64 libraries use x18 (libcef `blr x18`, `stage19` §3a). `tests/x18_preserve` checks whether a macOS SDK < 13 binary keeps x18 (`stage19` §3a). Since stage 21 the x18 pass covers only `.eh_frame` function ranges (`runtime/elfsect.c`), because rewriting the client's OpenSSL constant tables in `.text` broke every TLS handshake. libcef's whole text is still rewritten, with `LXRT_X18_ALL_TEXT=libcef.so` (MEASURED, `stage21-native-arm64-client.txt`; `docs/X18_VIRTUALIZATION.md`). At the audit no script set it; since stage 22 `scripts/run-steam-arm64.sh` and both ARM64 entries of `scripts/builtin-apps.json` do (VERIFIED IN SOURCE). |
+| Guest-driven W^X flip (`0x4C580020`), RWX → MAP_JIT | `jit.c`, FEX `wx` patch | the mechanism, yes; an unpatched ARM64 V8 cannot use it (§7). V8 does not need it: since stage 23 its `mprotect(RWX)` range gets the W^X split instead (§7 update) |
 | Sub-page (4 KiB on 16 KiB) | `subpage.c` | **yes**. Valve's native client ships 4 KiB-aligned images, and they load through `subpage.c` (MEASURED, `stage21-native-arm64-client.txt`). |
 | Guest base / low window, pointer rebasing, 32-bit thunks, `map32` | `gbase.c`, FEX patches, shim | no for the client; yes for x86/i386 games |
 | bwrap interpreter | `mounts.c` | yes (HYPOTHESIS: SLR Arm64 is pressure-vessel too) |
@@ -443,12 +454,21 @@ Behaviours of the Steam client that the runtime handles specially
    Valve's `steam_client_linuxarm64` manifest instead, into the root that
    `scripts/mkarmroot.sh` builds. It starts, updates itself, loads
    `steamui.so` and `steamclient.so`, then aborts with `free(): invalid
-   pointer` before its window. The abort's cause is a HIGH-CONFIDENCE
+   pointer` before its window. The abort's cause was then a HIGH-CONFIDENCE
    HYPOTHESIS: a `vgui2_s` bug reached after the webhelper times out, on a
    root without X locale data (`docs/STEAM_ARM64_BRINGUP.md`).
+   Answered by stages 22-23 (MEASURED): probes confirmed that mechanism and
+   the root gained X locale data, after which the abort path is not reached;
+   the `steamwebhelper` gets past BrowserReady (7-9 s) with no NSS FATAL,
+   and the client shows its "Sign in to Steam" window with V8's JIT on, on
+   the Fedora armroot and on the root derived from the Frame image
+   (`benchmarks/stage22-native-arm64-bringup.txt`,
+   `stage23-native-arm64-jit.txt`, `stage23-frame-root.txt`). Sign-in was
+   not attempted.
    The image does hold the client, as a bootstrap tarball
    (`usr/lib/steam/steam.tar.zst` with `steamrtarm64/`, MEASURED 2026-09-29,
-   `docs/STEAM_FRAME_INVENTORY.md`). It has not been run from there.
+   `docs/STEAM_FRAME_INVENTORY.md`). It has not been run from there: the
+   Frame root ran the stage 21 download, copied in.
 2. Are all ELFs in that tree PIE and 16 KiB-aligned (or more), and what page
    size is its kernel built for? The "Loading under lxrun" section of
    `steamframe-image.py inventory` answers this.
@@ -475,8 +495,9 @@ Fedora armroot as the transitional root and the Steam Frame root as the
 target. Its numbers are in `docs/ARM64_FIRST_AUDIT.md`. The plan this
 section held first (extract the Frame root, run its client, re-key the
 launcher, classify Holo) is folded into it: the extraction and inventory
-are done (MEASURED, 2026-09-29), and stage 21 reached the client by
-downloading it instead.
+are done (MEASURED, 2026-09-29), stage 21 reached the client by
+downloading it instead, and stages 22-23 ran it to its sign-in window on
+both roots, also from the launcher.
 
 ---
 

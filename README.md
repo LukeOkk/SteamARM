@@ -8,9 +8,10 @@ Steam (x86 / i386 Linux)  ─┐
 Proton / Wine (x86)        ├─ FEX (x86 → ARM64 JIT) ─┐
 DXVK / VKD3D-Proton        ┘                         ├─ lxrun (Linux on Darwin) ─ macOS
 aarch64 Linux programs, no FEX ──────────────────────┘
-  (experimental: Valve's native arm64 Steam client, no window yet)
+  (experimental: Valve's native arm64 Steam client, up to its sign-in window)
 
 Vulkan: x86 through FEX's thunks, aarch64 directly ─ Vulkan shim ─ MoltenVK ─ Metal
+                                         (or KosmicKrisp, experimental)
 X11 windows ─ native X server (XQuartz, rootless) + quartz-wm ─ real macOS windows
 ```
 
@@ -58,7 +59,7 @@ runtime and FEX and downloads the Linux packages and Steam.
 | [benchmarks/](benchmarks/) | what was measured at each stage, including what does not work |
 
 Research notes on moving to Valve's ARM64 Steam client. They are not user
-guides, and nothing in them works yet for players. Start with the plan,
+guides, and nothing in them is ready for players yet. Start with the plan,
 [ARM64_FIRST_MIGRATION.md](docs/ARM64_FIRST_MIGRATION.md), and its numbers,
 [ARM64_FIRST_AUDIT.md](docs/ARM64_FIRST_AUDIT.md).
 
@@ -101,7 +102,9 @@ Tests: `tests/elf/run.sh`, `tests/elf/run_i386.sh`,
 `tests/elf/run_vk_device.sh`, `tests/win/run.sh`,
 `tests/win/run_steam_path.sh`, `tests/x18_preserve/run.sh`,
 `tests/steamframe_image/run.sh` (Linux), `tests/steamframe_image/redact.sh`,
-`tests/audio/run.sh`, `tests/launcher/safeguard.sh`, `make test-launcher-core`.
+`tests/audio/run.sh`, `tests/launcher/safeguard.sh`, `make test-launcher-core`,
+`make test-arm64`, `python3 -m unittest tests/test_docs_records.py` (the
+benchmark index and the docs against the records and the x18 planner).
 
 The Steam Frame recovery image as the ARM64 base (read on the Mac, no VM, no
 mount): [docs/STEAM_FRAME_IMAGE.md](docs/STEAM_FRAME_IMAGE.md).
@@ -118,15 +121,27 @@ Working (measured, see `benchmarks/`):
 - sound and XInput controllers (with rumble) inside Steam's container;
 - an install from scratch up to Steam's sign-in window.
 
+Experimental (measured, not ready for players):
+
+- Valve's native arm64 Steam client under lxrun, with no FEX, reaches its
+  "Sign in to Steam" window with V8's JIT on, on a Fedora aarch64 root and
+  on a root derived from the Steam Frame image; the launcher has it as
+  **Steam ARM64 (experimental)** and **Steam ARM64 · Steam Frame
+  (experimental)** (`benchmarks/stage22-native-arm64-bringup.txt`,
+  `benchmarks/stage23-native-arm64-jit.txt`,
+  `benchmarks/stage23-frame-root.txt`,
+  [docs/STEAM_ARM64_BRINGUP.md](docs/STEAM_ARM64_BRINGUP.md)). Sign-in was
+  not attempted; the library, downloads and games under it are not
+  verified. Its root and client are not set up by the installer.
+- KosmicKrisp (Mesa's Vulkan driver for Metal) in place of MoltenVK:
+  D3D11/D3D12 probes at 158/154 fps (`benchmarks/stage22-kosmickrisp.txt`);
+  not tried through Steam's launch path or with games.
+
 Not done yet:
 
 - **Games are not verified.**
-- Valve's native arm64 Steam client starts, self-updates and loads its UI
-  libraries under lxrun, but does not reach its window yet
-  (`benchmarks/stage21-native-arm64-client.txt`,
-  [docs/STEAM_ARM64_BRINGUP.md](docs/STEAM_ARM64_BRINGUP.md)). Proton ARM64
-  does not run on macOS yet. The working route is the x86 client with x86
-  Proton.
+- Proton ARM64 does not run on macOS yet. The working route is the x86
+  Steam client with x86 Proton.
 - Controllers were tested with scripted input, not a physical pad.
 - Some Vulkan extensions are missing from the 32-bit thunks.
 - MoltenVK gaps are worked around, not solved: geometry shaders and
