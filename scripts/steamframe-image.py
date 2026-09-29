@@ -21,6 +21,7 @@ reads the image itself, read-only, with its own btrfs reader:
                                    and interpreters, FEX / Steam / Proton /
                                    Steam Linux Runtime / gamescope / Vulkan ICDs
                                    / NSS, x86 remnants, pacman repositories
+                                   (private per-device mirror URLs redacted)
   compare   INV.json REPO.db...    image packages against pacman repository
                                    databases (e.g. holo-core-aarch64-preview)
 
@@ -41,10 +42,12 @@ import collections
 import hashlib
 import json
 import os
+import re
 import stat
 import struct
 import subprocess
 import sys
+import urllib.parse
 import zlib
 
 # ------------------------------------------------------------------ constants
@@ -1077,9 +1080,30 @@ def kernel_pages(root):
     return out
 
 
+# A device image's pacman mirrors can be private: the Steam Frame 0.3.0 image
+# points every repository at a per-device path on holo-packages.steamos.cloud
+# (a long hex token plus a "do not share" marker). The inventory is meant to be
+# shared, so such a URL keeps only its scheme and host.
+PRIVATE_URL_MARK = 'DO_NOT_SHARE'
+PRIVATE_URL_TOKEN = re.compile(r'[0-9a-fA-F]{32,}')
+
+
+def redact_url(url):
+    parts = urllib.parse.urlsplit(url)
+    host = (parts.hostname or '').lower()
+    steamos = host == 'steamos.cloud' or host.endswith('.steamos.cloud')
+    if PRIVATE_URL_MARK not in url.upper() and not (
+            steamos and any(PRIVATE_URL_TOKEN.search(s) for s in parts.path.split('/'))):
+        return url
+    if not host or PRIVATE_URL_MARK in host.upper() or PRIVATE_URL_TOKEN.search(host):
+        return '<private URL redacted>'
+    return f'{parts.scheme}://{host}/<private path redacted>'
+
+
 def pacman_repos(root):
     """[repo] sections of etc/pacman.conf with their Server URLs ($repo/$arch
-    expanded), following Include= files inside the root."""
+    expanded), following Include= files inside the root. Private per-device
+    mirror URLs are redacted (redact_url)."""
     conf = os.path.join(root, 'etc/pacman.conf')
     if not os.path.isfile(conf):
         return []
@@ -1093,7 +1117,7 @@ def pacman_repos(root):
                 line = line.split('#', 1)[0].strip()
                 if line.startswith('Server'):
                     url = line.split('=', 1)[1].strip()
-                    out.append(url.replace('$repo', name).replace('$arch', arch))
+                    out.append(redact_url(url.replace('$repo', name).replace('$arch', arch)))
         except OSError:
             pass
         return out
@@ -1112,7 +1136,7 @@ def pacman_repos(root):
             if k == 'Architecture' and v not in ('auto', ''):
                 arch = v.split()[0]
             elif cur and k == 'Server':
-                cur['servers'].append(v.replace('$repo', cur['name']).replace('$arch', arch))
+                cur['servers'].append(redact_url(v.replace('$repo', cur['name']).replace('$arch', arch)))
             elif cur and k == 'Include':
                 cur['servers'] += servers_from(os.path.join(root, v.lstrip('/')), cur['name'])
     return repos
