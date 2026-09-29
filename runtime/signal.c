@@ -597,6 +597,28 @@ static void host_handler(int dsig, siginfo_t *dinfo, void *uap)
     // The runtime's own faults first (shared with main.c's fault_report).
     if (lxrt_absorb_runtime_fault(dsig, dinfo, uap))
         return;
+    // LXRT_FAULT_LOG=1: a synchronous fault that goes on to the guest (its
+    // handler or the default action), with pc, word, address and registers,
+    // without a syscall trace (whose timing hid a stage 25 crash).
+    {
+        static int flog = -1;
+        if (flog < 0) flog = getenv("LXRT_FAULT_LOG") ? 1 : 0;
+        if (flog && uap && (dsig == SIGSEGV || dsig == SIGBUS || dsig == SIGILL || dsig == SIGTRAP)) {
+            _STRUCT_ARM_THREAD_STATE64 *ts = &((ucontext_t *)uap)->uc_mcontext->__ss;
+            uint32_t w = 0;
+            mach_vm_size_t got = 0;
+            mach_vm_read_overwrite(mach_task_self(), ts->__pc, 4, (mach_vm_address_t)(uintptr_t)&w, &got);
+            char b[1400];
+            int n = snprintf(b, sizeof b, "[lxrt] pid %d fault to guest: darwin %d pc 0x%llx insn 0x%08x addr %p sp 0x%llx lr 0x%llx\n[lxrt]  ",
+                             (int)getpid(), dsig, (unsigned long long)ts->__pc, w,
+                             dinfo ? dinfo->si_addr : NULL, (unsigned long long)ts->__sp,
+                             (unsigned long long)ts->__lr);
+            for (int i = 0; i < 29 && n < (int)sizeof b - 40; i++)
+                n += snprintf(b + n, sizeof b - n, " x%d=%llx", i, (unsigned long long)ts->__x[i]);
+            n += snprintf(b + n, sizeof b - n, " fp=%llx\n", (unsigned long long)ts->__fp);
+            write(2, b, (size_t)n);
+        }
+    }
 
     int forced_code = -1;
     // An alignment fault (data abort, DFSC 0b100001) is a real SIGBUS/

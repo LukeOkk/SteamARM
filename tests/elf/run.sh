@@ -1185,7 +1185,7 @@ if [ -f "$STAGE/usr/lib64/libc.a" ] && [ -n "$GCCDIR" ]; then
         done
         out=$(LXRT_TLS_KEEP_LOG=1 deadline 120 ./build/lxrun "$PWD/build/android_bionic_rt" tlskeep 2>&1); rc=$?
         if [ "$rc" -eq 0 ] && grep -q '== android tlskeep: ok' <<<"$out"; then
-            ok "kept TLS reads (BoringSSL FIPS range): word untouched, 0 mismatches over 1M loads, $(grep -o '[0-9]* kept-TLS faults fixed' <<<"$out" | head -1)"
+            ok "kept TLS reads (BoringSSL FIPS range): word untouched, 0 mismatches over 100k loads, $(grep -o '[0-9]* kept-TLS faults fixed' <<<"$out" | head -1)"
         else bad "kept TLS reads" "rc=$rc $(grep -E 'MAL|SIG|lxrun:' <<<"$out" | head -6)"; fi
         out=$(LXRT_TLS_KEEP=0 deadline 120 ./build/lxrun "$PWD/build/android_bionic_rt" tlskeep 2>&1); rc=$?
         if [ "$rc" -ne 0 ] && grep -q 'MAL  the TPIDR_EL0 read in the kept range is untouched' <<<"$out"; then

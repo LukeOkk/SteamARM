@@ -111,17 +111,16 @@ uint64_t lxrt_tls_get(void)
 //     in that range as they are (every other site kind is still rewritten,
 //     and said -- the module has none: MEASURED 0 svc, 0 x18, 0 system
 //     register sites in Android 11's libcrypto.so);
-//   * such a read returns the hardware TPIDR_EL0, which Darwin replaces with
-//     a value of its own on every context switch (0, 2, 5, 0x1007,
-//     0x1000000000001 MEASURED, benchmarks/stage3-tls.txt and stage 25). None
-//     of those is a mapped address -- the low 4 GiB is __PAGEZERO, and bit 48
-//     is outside the user address space -- so the first load or store
-//     through it faults;
+//   * such a read returns the hardware TPIDR_EL0, which belongs to Darwin
+//     (0, 2, 5, 0x1007, 0x1000000000001 MEASURED, benchmarks/stage3-tls.txt
+//     and stage 25). None of those is a mapped address -- the low 4 GiB is
+//     __PAGEZERO, and bit 48 is outside the user address space -- so the
+//     first load or store through it faults;
 //   * lxrt_tlskeep_fixup, early in the fault path, recognises that fault (pc
 //     in a kept range, a load/store whose base register holds such a value),
-//     replaces the base register with the guest's thread pointer, writes the
-//     guest's thread pointer into TPIDR_EL0 (so the next reads are right
-//     until the next context switch) and retries the instruction.
+//     replaces the base register with the guest's thread pointer and retries
+//     the instruction. TPIDR_EL0 is not written: Darwin's allocator uses it
+//     (below), so each kept read that is dereferenced costs one fault.
 //
 // A copy of the bad value spilled to the stack faults and is fixed the same
 // way when it is reloaded and used. What this cannot fix: a Darwin value
@@ -208,7 +207,12 @@ bool lxrt_tlskeep_fixup(int sig, void *uap)
     if (!tp || v == tp)
         return false;
     *reg = tp;
-    __asm__ volatile("msr tpidr_el0, %0" :: "r"(tp));
+    // TPIDR_EL0 itself is left to Darwin: its xzone malloc keeps its own
+    // per-thread value there, and writing the guest's pointer into it made
+    // the runtime's next malloc fault (MEASURED, stage 25, with an lxrun
+    // built against the current SDK; the 12.3-SDK build gets the older
+    // allocator and did not care). So every kept read faults once, not once
+    // per context switch.
     atomic_fetch_add(&g_keep_fixups, 1);
     return true;
 }

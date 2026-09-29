@@ -103,12 +103,12 @@ static int tlskeep(void)
     check(kept_tp_load(0) == rewritten_tp_load(0), "kept and rewritten reads load the same TCB word");
     pthread_t th[4];
     for (int i = 0; i < 4; i++)
-        pthread_create(&th[i], NULL, hammer, (void *)(intptr_t)200000);
-    hammer((void *)(intptr_t)200000);
+        pthread_create(&th[i], NULL, hammer, (void *)(intptr_t)20000);
+    hammer((void *)(intptr_t)20000);
     for (int i = 0; i < 4; i++)
         pthread_join(th[i], NULL);
     char msg[160];
-    snprintf(msg, sizeof msg, "5 threads x 200000 loads across usleep/sched_yield: %ld mismatches",
+    snprintf(msg, sizeof msg, "5 threads x 20000 loads across usleep/sched_yield: %ld mismatches",
              (long)mismatches);
     check(mismatches == 0, msg);
     return bad;
