@@ -11,12 +11,18 @@
 # e.g. the Steam Frame root of scripts/mkframeroot.sh:
 #   ARMROOT=$STEAMARM_STATE/arm64root ARMROOT_LINK=/tmp/lxrt-arm64root);
 # the client lives in its tmp/armhome (HOME=/tmp/armhome in the guest).
+# ARMROOT without ARMROOT_LINK: the link env-links.sh gives that root
+# ($STATE/armroot, $STATE/arm64root); any other root needs its own link.
+# Refused while a guest runs on the root or on the link (one client per home;
+# the runtime follows the link on every lookup, so re-pointing it would move
+# a running session).
 # X: the native X server on :2 (scripts/run-x11-native.sh), started if needed.
 # Log (runtime + client stdout/stderr):
 #   $STATE/logs/native-arm64-steam-<date>.log     (STATE: ~/SteamARM-roots)
 # The client's own logs are in <root>/tmp/armhome/.local/share/Steam/logs.
 # --for SECONDS stops the session after that long. Stopping it (--for,
-# Ctrl-C) signals only the processes this run started, by PID.
+# Ctrl-C) signals only the processes this run started: by PID, and orphans
+# by this run's STEAMARM_RUN_ID in their environment.
 # --jitless: no longer needed (stage 23): V8's read-write-execute code pages
 #   are split W^X page by page by the runtime (runtime/wxsplit.c) and the
 #   login window comes with the JIT on. Kept as a control and a fallback: it
@@ -27,11 +33,29 @@
 # LXRT_WX_STATS=/host/file collects the renderers' W^X flip counters.
 # LXRT_* variables are passed through. LXRT_X18_ALL_TEXT defaults to
 # libcef.so: libcef has x18 uses outside its FDEs (stage 21, change 5).
+# STEAMARM_LXRUN (tests): a stand-in for build/lxrun.
 set -u
 cd "$(dirname "$0")/.." || exit 1
+. scripts/roots.sh
 STATE="${STEAMARM_STATE:-$HOME/SteamARM-roots}"
-ARMROOT="${ARMROOT:-$STATE/armroot}"
-LINK="${ARMROOT_LINK:-/tmp/lxrt-armroot}"
+# The /tmp link the runtime sees the root through. Each root has its own, as
+# scripts/env-links.sh makes them: /tmp/lxrt-armroot is the launcher's Fedora
+# root (scripts/builtin-apps.json, steam-arm64), /tmp/lxrt-arm64root its
+# Steam Frame root. Pointing one of those at another root would also move
+# every later launch from the launcher, so such a root names its own link.
+if [ -n "${ARMROOT_LINK:-}" ]; then
+    ARMROOT="${ARMROOT:-$STATE/armroot}" LINK="$ARMROOT_LINK"
+elif [ -z "${ARMROOT:-}" ]; then
+    ARMROOT="$STATE/armroot" LINK=/tmp/lxrt-armroot
+else
+    a=$(canon_path "$ARMROOT") || { echo "no root at $ARMROOT" >&2; exit 1; }
+    if [ "$a" = "$(canon_path "$STATE/armroot")" ]; then LINK=/tmp/lxrt-armroot
+    elif [ "$a" = "$(canon_path "$STATE/arm64root")" ]; then LINK=/tmp/lxrt-arm64root
+    else
+        echo "ARMROOT=$ARMROOT is neither \$STEAMARM_STATE/armroot nor .../arm64root: set ARMROOT_LINK=/tmp/<a name of its own> as well" >&2
+        exit 1
+    fi
+fi
 FOR="" JITLESS=0
 while [ $# -gt 0 ]; do
     case "$1" in
@@ -40,11 +64,17 @@ while [ $# -gt 0 ]; do
         *) break ;;
     esac
 done
-[ -x build/lxrun ] || { echo "no build/lxrun (make lxrt)" >&2; exit 1; }
+LXRUN="${STEAMARM_LXRUN:-$PWD/build/lxrun}"
+[ -x "$LXRUN" ] || { echo "no build/lxrun (make lxrt)" >&2; exit 1; }
 CLIENT="$ARMROOT/tmp/armhome/.local/share/Steam/steamrtarm64/steam"
 [ -f "$CLIENT" ] || { echo "no arm64 client at $CLIENT" >&2; exit 1; }
-if [ "$(readlink "$LINK" 2>/dev/null)" != "$ARMROOT" ]; then
+# One client per home, and never a link moved under a running guest.
+busy="$(guests_on_root "$ARMROOT") $(guests_on_root "$LINK")"
+busy=$(echo $busy)
+[ -z "$busy" ] || { echo "guests are running on $ARMROOT or $LINK (pid $busy): stop them first" >&2; exit 1; }
+if [ "$(canon_path "$LINK")" != "$(canon_path "$ARMROOT")" ]; then
     [ ! -e "$LINK" ] || [ -L "$LINK" ] || { echo "$LINK exists and is not a link" >&2; exit 1; }
+    [ ! -L "$LINK" ] || echo "re-pointing $LINK: $(readlink "$LINK") -> $ARMROOT"
     ln -sfn "$ARMROOT" "$LINK"
 fi
 WH="${CLIENT%/steam}/steamwebhelper.sh"
@@ -79,7 +109,11 @@ export LXRT_X18_ALL_TEXT="${LXRT_X18_ALL_TEXT-libcef.so}"
 . scripts/guest-env.sh
 guest_env_from_root "$ARMROOT"
 echo "log: $LOG"
-LXRUN="$PWD/build/lxrun"
+# This run's mark: the runtime hands a guest's environment on through every
+# exec (runtime/process.c, lxrt_execve) and a fork keeps it, so each process
+# of the session carries it, and the kernel shows the environment each one
+# was exec'd with (procs_env). How an orphan is told from another session's.
+export STEAMARM_RUN_ID="steam-arm64.$$.$(date +%s)"
 "$LXRUN" /tmp/armhome/.local/share/Steam/steamrtarm64/steam "$@" >"$LOG" 2>&1 &
 # The session's processes: every lxrun of this checkout descended from the
 # client, remembered once seen. The client and the webhelper start their own
@@ -98,9 +132,12 @@ track() {
 }
 # A client that exits in its first seconds can leave webhelper zygotes that
 # were never seen as its descendants: reparented to launchd between two polls
-# (MEASURED, benchmarks/stage23-frame-root.txt C2). Those are this checkout's
-# lxrun, parent 1, running a steamrtarm64 program, started after this session.
-orphans() {
+# (MEASURED, benchmarks/stage23-frame-root.txt C2). Candidates are this
+# checkout's lxrun, parent 1, running a steamrtarm64 program, started after
+# this session; that also fits another session's (a second run of this script
+# on the other root, a launcher session), so only those with this run's
+# STEAMARM_RUN_ID are ours.
+orphan_candidates() {
     /bin/ps -axo pid=,ppid=,etime=,command= | /usr/bin/awk -v lx="$LXRUN " -v max=$((SECONDS + 2)) '
         function secs(t,  a, n, d) {
             d = 0; if (index(t, "-")) { split(t, a, "-"); d = a[1]; t = a[2] }
@@ -109,8 +146,19 @@ orphans() {
         }
         $2 == 1 && index($0, lx) && index($0, "/steamrtarm64/") && secs($3) <= max { printf "%s ", $1 }'
 }
+orphans() {
+    local c; c=$(orphan_candidates)
+    [ -n "$c" ] || return 0
+    procs_env STEAMARM_RUN_ID $c | /usr/bin/awk -v id="$STEAMARM_RUN_ID" '$2 == id { printf "%s ", $1 }'
+}
 reap_orphans() {
-    local o; o=$(orphans)
+    local o c others p
+    c=$(orphan_candidates)
+    [ -n "$c" ] || return 0
+    o=$(orphans)
+    others=""
+    for p in $c; do case " $o " in *" $p "*) ;; *) others="$others $p" ;; esac; done
+    [ -z "$others" ] || echo "left running, without this run's STEAMARM_RUN_ID:$others"
     [ -n "$o" ] || return 0
     echo "stopping orphaned webhelper processes: $o"
     kill -TERM $o 2>/dev/null; sleep 2
