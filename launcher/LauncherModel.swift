@@ -218,7 +218,9 @@ final class LauncherModel: ObservableObject {
             self.openedScreenSharing = self.runningDisplay == .vnc
             self.logPath = (try? String(contentsOf: Paths.logs.appendingPathComponent("current"),
                                         encoding: .utf8))?.trimmingCharacters(in: .whitespacesAndNewlines)
-            self.phase = .running
+            // A Detener pressed while run-app.sh was starting the app already
+            // moved the phase on to .stopping; keep it.
+            if self.phase == .starting { self.phase = .running }
             self.startPolling()
         }
     }
@@ -287,6 +289,9 @@ final class LauncherModel: ObservableObject {
                 .trimmingCharacters(in: .whitespacesAndNewlines)
         } else if Shell.guestProcesses().contains(where: { $0.command.contains("ubuntu12_32/steam ") }) {
             id = "steam"   // started by scripts/run-steam.sh
+            // No session wrapper: a status or group on disk is an earlier session's.
+            try? FileManager.default.removeItem(at: Paths.statusFile)
+            try? FileManager.default.removeItem(at: Paths.pgidFile)
         } else {
             return
         }
@@ -329,11 +334,14 @@ final class LauncherModel: ObservableObject {
     private func finish() {
         timer?.invalidate()
         timer = nil
-        // scripts/session.py records how the program ended (exit code, or
-        // 128 + signal). Without it (a run adopted from run-steam.sh), the
-        // only signal of a crash is that it was gone within 15 s.
-        let status = (try? String(contentsOf: Paths.statusFile, encoding: .utf8))
-            .flatMap { Int32($0.trimmingCharacters(in: .whitespacesAndNewlines)) }
+        // scripts/session.py records how the program ended: "N" for exit code
+        // N, "N signal S" for a death by signal S. Without it (a run adopted
+        // from run-steam.sh), the only sign of a crash is that it was gone
+        // within 15 s.
+        let fields = ((try? String(contentsOf: Paths.statusFile, encoding: .utf8)) ?? "")
+            .split(separator: " ").map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+        let status = fields.first.flatMap { Int32($0) }
+        let bySignal = fields.count == 3 && fields[1] == "signal" ? Int32(fields[2]) : nil
         let stopped = phase == .stopping
         let quick = phase == .running && Date().timeIntervalSince(startedAt) < 15
         if runningDisplay == .vnc && openedScreenSharing && !screenSharingWasRunning {
@@ -345,7 +353,7 @@ final class LauncherModel: ObservableObject {
         let logAt = logPath ?? Paths.logs.path
         if !stopped, let name = running?.name {
             if let s = status, s != 0 {
-                let how = s > 128 ? "la señal \(s - 128)" : "el código \(s)"
+                let how = bySignal.map { "la señal \($0)" } ?? "el código \(s)"
                 alert = "\(name) terminó con \(how). Revisa el registro en \(logAt)."
             } else if status == nil, quick {
                 alert = "\(name) terminó enseguida. Revisa el registro en \(logAt)."
