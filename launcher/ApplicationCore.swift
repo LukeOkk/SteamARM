@@ -101,7 +101,8 @@ struct LinuxBaseEnvironment: Codable, Equatable, Identifiable {
         architectures: [.aarch64], translator: .none, fexRootfs: nil, transitional: false)
     /// The Fedora 43 aarch64 root of scripts/mkarmroot.sh, where the native
     /// arm64 Steam client runs (benchmarks/stage21). Transitional until the
-    /// Holo-derived root exists; a rebuild wipes it, client included.
+    /// Holo-derived root exists. A rebuild replaces the system and keeps
+    /// tmp/ (the client's home, tmp/armhome) and opt/apps.
     static let armroot = LinuxBaseEnvironment(
         id: "armroot", name: "Raíz ARM64 (Fedora 43, scripts/mkarmroot.sh)", guestRoot: "/tmp/lxrt-armroot",
         architectures: [.aarch64], translator: .none, fexRootfs: nil, transitional: true)
@@ -272,6 +273,94 @@ enum SessionFiles {
         guard let first = fields.first else { return nil }
         return (GuestArchitecture(rawValue: first), fields.count > 1 ? fields[1] : "")
     }
+
+    /// What `scripts/run-app.sh <id>` did, from the "session=<kind>" line it
+    /// prints last on success. nil: no such line (a run-app.sh older than it).
+    static func launchKind(_ output: String) -> LaunchKind? {
+        for line in output.split(separator: "\n").reversed() {
+            let t = line.trimmingCharacters(in: .whitespaces)
+            if t.hasPrefix("session="), let kind = LaunchKind(rawValue: String(t.dropFirst("session=".count))) {
+                return kind
+            }
+        }
+        return nil
+    }
+}
+
+/// How scripts/run-app.sh answered a launch.
+enum LaunchKind: String {
+    /// A new session under scripts/session.py (running.pgid, running.status).
+    case started
+    /// This app was already running in a session: shown again, not launched.
+    case reshown
+    /// A Steam that scripts/run-steam.sh started: no session wrapper, so no
+    /// process group, no exit status and no known start.
+    case adopted
+}
+
+/// When a running session is over. A session started by run-app.sh is its
+/// wrapper (scripts/session.py run, running.pid): the wrapper waits for the
+/// program, writes running.status, clears the program's process group and
+/// exits. That is the end, whatever else runs on the Mac: the native
+/// client's webhelper zygotes, for one, leave the group and outlive the
+/// client with parent 1 (benchmarks/stage23-frame-root.txt C2, F7), and
+/// run-app.sh --reap stops what the session left like that. Without a
+/// wrapper (a Steam adopted from scripts/run-steam.sh) there is nothing
+/// better to ask than whether any guest program still runs.
+enum SessionLiveness {
+    struct Probe: Equatable {
+        /// running.pid is alive and is the session's leader (isLeader).
+        var leaderAlive: Bool
+        /// running.status exists: the wrapper saw the program end.
+        var statusWritten: Bool
+        /// The session's process group (running.pgid) still has a process.
+        var groupAlive: Bool
+        /// Some guest program runs anywhere on the Mac.
+        var anyGuest: Bool
+    }
+
+    static func alive(_ p: Probe, wrapped: Bool) -> Bool {
+        guard wrapped else { return p.leaderAlive || p.anyGuest }
+        if p.leaderAlive { return true }
+        // The wrapper died before the program ended (it was killed): the
+        // program's group is then the session.
+        return !p.statusWritten && p.groupAlive
+    }
+
+    /// Whether the live process behind running.pid is the session's leader
+    /// and not a later process that reuses its PID: the wrapper for a session
+    /// run-app.sh started, a runtime process for a Steam it adopted. A
+    /// command line that could not be read counts as the leader.
+    static func isLeader(command: String?, wrapped: Bool) -> Bool {
+        guard let command, !command.isEmpty else { return true }
+        return command.contains(wrapped ? "session.py run" : "build/lxrun")
+    }
+}
+
+/// The host directory behind a guest root, as far as the launcher can tell
+/// why it is missing: never created, or a link whose target is gone. The
+/// Steam Frame root is such a link, into a sparsebundle volume
+/// (scripts/mkframeroot.sh links $STATE/arm64root there), and the volume is
+/// not attached again by itself after a restart.
+enum RootPresence: Equatable {
+    case present
+    case missing
+    /// The link points into /Volumes/<volume>, and no such volume is mounted.
+    case volumeNotAttached(volume: String, target: String)
+    /// The link's target does not exist (its volume, if any, is mounted).
+    case danglingLink(target: String)
+
+    static func of(_ path: String, fileManager fm: FileManager = .default) -> RootPresence {
+        if fm.fileExists(atPath: path) { return .present }
+        guard let dest = try? fm.destinationOfSymbolicLink(atPath: path) else { return .missing }
+        let target = dest.hasPrefix("/") ? dest
+            : ((path as NSString).deletingLastPathComponent as NSString).appendingPathComponent(dest)
+        let parts = (target as NSString).standardizingPath.split(separator: "/").map(String.init)
+        if parts.count >= 2, parts[0] == "Volumes", !fm.fileExists(atPath: "/Volumes/" + parts[1]) {
+            return .volumeNotAttached(volume: parts[1], target: target)
+        }
+        return .danglingLink(target: target)
+    }
 }
 
 /// Per-app history kept by the launcher in $STATE/launcher/library.json (not
@@ -411,6 +500,24 @@ enum FallbackPolicy: String, Codable, CaseIterable {
         case .ask: return .ask
         }
     }
+
+    /// The variables through which scripts/run-app.sh takes each fallback
+    /// over the settings (scripts/settings-env.py fallback_overrides): the
+    /// scripts never decide a fallback of their own that the launcher did
+    /// not announce, and never skip one it announced.
+    static let environmentVariables = [
+        "display": "STEAMARM_DISPLAY",
+        "synchronization": "STEAMARM_SYNCHRONIZATION",
+        "graphicsBackend": "STEAMARM_GRAPHICS_BACKEND",
+    ]
+
+    static func environment(for issues: [CapabilityIssue]) -> [String: String] {
+        var env: [String: String] = [:]
+        for issue in issues {
+            if let name = environmentVariables[issue.setting] { env[name] = issue.fallback }
+        }
+        return env
+    }
 }
 
 /// What a capability is today, from this repository and its measurements --
@@ -446,17 +553,24 @@ struct CapabilityIssue: Equatable {
 /// the launcher itself.
 struct RuntimeProbe: Decodable, Equatable {
     struct Driver: Decodable, Equatable { var path: String; var version: String }
+    /// `library` is the one the Vulkan shim loads for STEAMARM_VK_ICD=kosmickrisp
+    /// (only /opt/homebrew/lib or /usr/local/lib); `foundElsewhere` is one an
+    /// ICD manifest names outside those paths, which the shim never loads.
     struct KosmicKrisp: Decodable, Equatable {
         var icdJSON: String
         var library: String
         var version: String
         var osOK: Bool
         var exportsICD: Bool
+        var foundElsewhere: String
         enum CodingKeys: String, CodingKey {
             case icdJSON = "icd_json", library, version, osOK = "os_ok", exportsICD = "exports_icd"
+            case foundElsewhere = "found_elsewhere"
         }
-        init(icdJSON: String = "", library: String = "", version: String = "", osOK: Bool = false, exportsICD: Bool = false) {
+        init(icdJSON: String = "", library: String = "", version: String = "", osOK: Bool = false,
+             exportsICD: Bool = false, foundElsewhere: String = "") {
             (self.icdJSON, self.library, self.version, self.osOK, self.exportsICD) = (icdJSON, library, version, osOK, exportsICD)
+            self.foundElsewhere = foundElsewhere
         }
         init(from decoder: Decoder) throws {
             let c = try decoder.container(keyedBy: CodingKeys.self)
@@ -465,6 +579,7 @@ struct RuntimeProbe: Decodable, Equatable {
             version = try c.decodeIfPresent(String.self, forKey: .version) ?? ""
             osOK = try c.decodeIfPresent(Bool.self, forKey: .osOK) ?? false
             exportsICD = try c.decodeIfPresent(Bool.self, forKey: .exportsICD) ?? false
+            foundElsewhere = try c.decodeIfPresent(String.self, forKey: .foundElsewhere) ?? ""
         }
     }
     struct Shim: Decodable, Equatable {
@@ -539,6 +654,15 @@ struct RuntimeCapabilities {
             .openGLWineD3D: .init(state: .unsupported, reason: "el OpenGL del invitado es llvmpipe por software y no hay thunk de GL"),
         ])
 
+    /// The static table when scripts/compat-status.py gave no answer: what
+    /// only detection can establish stays unavailable, and says why.
+    static var undetected: RuntimeCapabilities {
+        var caps = current
+        caps.graphics[.vulkanKosmicKrisp] = .init(state: .unavailable,
+                                                  reason: "no se pudo comprobar: scripts/compat-status.py no respondió")
+        return caps
+    }
+
     /// The static table refined with what is installed on this Mac. Nothing
     /// becomes more than the table allows: fsync, MSync, WineD3D, Lightning
     /// JIT and Apple Hypervisor stay what they are whatever is installed.
@@ -554,7 +678,10 @@ struct RuntimeCapabilities {
         let kk = probe.kosmickrisp ?? .init()
         let kkName = kk.version.isEmpty ? "KosmicKrisp" : "KosmicKrisp \(kk.version)"
         if kk.library.isEmpty {
-            caps.graphics[.vulkanKosmicKrisp] = .init(state: .unavailable, reason: "KosmicKrisp no está instalado (Mesa de Homebrew)")
+            let reason = kk.foundElsewhere.isEmpty
+                ? "KosmicKrisp no está instalado (Mesa de Homebrew)"
+                : "hay un KosmicKrisp en \(kk.foundElsewhere), pero el shim Vulkan solo lo carga desde /opt/homebrew/lib o /usr/local/lib"
+            caps.graphics[.vulkanKosmicKrisp] = .init(state: .unavailable, reason: reason)
         } else if !kk.osOK {
             caps.graphics[.vulkanKosmicKrisp] = .init(state: .unavailable, reason: "\(kkName) necesita macOS 26 o posterior (Metal 4)")
         } else if !kk.exportsICD {
@@ -629,8 +756,9 @@ struct RuntimeCapabilities {
     }
 
     /// The settings of one launch that cannot work as asked, each with what
-    /// runs instead. scripts/run-app.sh and scripts/settings-env.py apply the
-    /// same fallbacks by themselves; FallbackPolicy decides whether to launch.
+    /// runs instead. FallbackPolicy decides whether to launch; the launcher
+    /// then hands each fallback to scripts/run-app.sh
+    /// (FallbackPolicy.environment), so what it announced is what runs.
     func issues(display: PresentationMode, synchronization sync: SynchronizationBackend,
                 graphics gfx: GraphicsBackend, appInX86Root: Bool) -> [CapabilityIssue] {
         var out: [CapabilityIssue] = []

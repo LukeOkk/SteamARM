@@ -1,6 +1,7 @@
 """Installed Valve and custom Proton discovery, without launching Steam."""
 import importlib.util
 import json
+import re
 from pathlib import Path
 import tempfile
 import unittest
@@ -40,7 +41,7 @@ class CompatibilityInventoryTests(unittest.TestCase):
         self.assertFalse(by_name["Bannerlator Proton (ARM64)"]["supported"])
         self.assertEqual(by_name["Bannerlator Proton (ARM64)"]["source"], "Personalizado")
 
-    def test_kosmickrisp_manifests_and_versions(self):
+    def test_kosmickrisp_where_the_shim_loads_it(self):
         with tempfile.TemporaryDirectory(prefix="steamarm-compat-test-") as temp:
             root = Path(temp)
             icd = root / "share/vulkan/icd.d"
@@ -48,33 +49,81 @@ class CompatibilityInventoryTests(unittest.TestCase):
             library = root / "Cellar/mesa/26.2.3/lib/libvulkan_kosmickrisp.dylib"
             library.parent.mkdir(parents=True)
             library.touch()
+            # The shim's fixed path, a link into the Cellar as Homebrew makes it.
+            shim_path = root / "lib/libvulkan_kosmickrisp.dylib"
+            shim_path.parent.mkdir(parents=True)
+            shim_path.symlink_to(library)
+            shim_paths = (str(root / "missing/libvulkan_kosmickrisp.dylib"), str(shim_path))
             (icd / "00-invalid.json").write_text("{")
             (icd / "01-lvp.json").write_text(json.dumps({"ICD": {
                 "library_path": str(library).replace("kosmickrisp", "lvp")}}))
             absolute = icd / "02-kosmickrisp.json"
             absolute.write_text(json.dumps({"ICD": {"library_path": str(library),
                                                     "api_version": "1.4.0"}}))
-            result = compat.kosmickrisp((str(icd),), macos="27.0", load=False)
+            result = compat.kosmickrisp((str(icd),), macos="27.0", load=False, shim_paths=shim_paths)
             self.assertEqual(result["icd_json"], str(absolute))
             self.assertEqual(result["library"], str(library.resolve()))
             self.assertEqual(result["version"], "26.2.3")
             self.assertEqual(result["api_version"], "1.4.0")
             self.assertTrue(result["os_ok"])
             self.assertFalse(result["exports_icd"])
+            self.assertEqual(result["found_elsewhere"], "")
 
+            # A manifest is not needed: the shim does not read one.
             absolute.unlink()
-            relative = icd / "03-kosmickrisp.json"
-            relative.write_text(json.dumps({"ICD": {
-                "library_path": "../../../Cellar/mesa/26.2.3/lib/libvulkan_kosmickrisp.dylib"}}))
-            result = compat.kosmickrisp((str(icd),), macos="15.5", load=False)
-            self.assertEqual(result["icd_json"], str(relative))
-            self.assertEqual(result["library"], str(library.resolve()))
+            result = compat.kosmickrisp((str(icd),), macos="15.5", load=False, shim_paths=shim_paths)
+            self.assertEqual((result["library"], result["icd_json"], result["api_version"]),
+                             (str(library.resolve()), "", ""))
             self.assertFalse(result["os_ok"])
 
-            relative.unlink()
-            result = compat.kosmickrisp((str(icd),), macos="27.0", load=False)
+    def test_kosmickrisp_elsewhere_is_not_usable(self):
+        """A Mesa built with another prefix (a manifest in ~/.local/share/vulkan/icd.d
+        naming ~/.local/lib/...): the shim only tries its two paths and would fall
+        back to MoltenVK, so it is reported as found elsewhere, never as the library."""
+        with tempfile.TemporaryDirectory(prefix="steamarm-compat-test-") as temp:
+            root = Path(temp)
+            icd = root / "share/vulkan/icd.d"
+            icd.mkdir(parents=True)
+            library = root / "local/lib/libvulkan_kosmickrisp.dylib"
+            library.parent.mkdir(parents=True)
+            library.touch()
+            (icd / "kosmickrisp.json").write_text(json.dumps({"ICD": {
+                "library_path": "../../../local/lib/libvulkan_kosmickrisp.dylib"}}))
+            shim_paths = (str(root / "opt/lib/libvulkan_kosmickrisp.dylib"),)
+            result = compat.kosmickrisp((str(icd),), macos="27.0", load=False, shim_paths=shim_paths)
             self.assertEqual(result, {"icd_json": "", "library": "", "version": "",
-                                      "api_version": "", "os_ok": True, "exports_icd": False})
+                                      "api_version": "", "os_ok": True, "exports_icd": False,
+                                      "found_elsewhere": str(library.resolve())})
+            (icd / "kosmickrisp.json").unlink()
+            self.assertEqual(compat.kosmickrisp((str(icd),), macos="27.0", load=False,
+                                                shim_paths=shim_paths)["found_elsewhere"], "")
+
+    def test_kosmickrisp_a_path_that_does_not_load_is_skipped(self):
+        """The shim's loop keeps the first path dlopen accepts; so does detection."""
+        with tempfile.TemporaryDirectory(prefix="steamarm-compat-test-") as temp:
+            root = Path(temp)
+            broken, good = root / "a/libvulkan_kosmickrisp.dylib", root / "b/libvulkan_kosmickrisp.dylib"
+            for path in (broken, good):
+                path.parent.mkdir(parents=True)
+                path.touch()
+
+            class Library:
+                vk_icdGetInstanceProcAddr = object()
+
+            def fake_cdll(path):
+                if path == str(broken):
+                    raise OSError("not a Mach-O")
+                return Library()
+            with patch.object(compat.ctypes, "CDLL", side_effect=fake_cdll):
+                result = compat.kosmickrisp((), macos="27.0", shim_paths=(str(broken), str(good)))
+            self.assertEqual(result["library"], str(good.resolve()))
+            self.assertTrue(result["exports_icd"])
+
+    def test_kosmickrisp_paths_are_the_shims(self):
+        source = (REPO / "shim/gen.py").read_text()
+        block = source[source.index("k_kk_paths[]"):]
+        block = block[:block.index("};")]
+        self.assertEqual(tuple(re.findall(r'"([^"]+)"', block)), compat.SHIM_KK_PATHS)
 
     def test_shim_marker(self):
         with tempfile.TemporaryDirectory(prefix="steamarm-compat-test-") as temp:

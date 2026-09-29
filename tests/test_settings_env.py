@@ -80,6 +80,26 @@ class SettingsEnvironmentTests(unittest.TestCase):
             self.assertNotIn("STEAMARM_VK_ICD", self.env({
                 "graphicsBackend": "vulkanKosmicKrisp"}))
 
+    def test_launcher_fallbacks_win(self):
+        """The fallback the launcher announced is the one that runs: its variables
+        go over the settings and the app's own choices (run-app.sh resolve_app)."""
+        environ = {"STEAMARM_GRAPHICS_BACKEND": "vulkanMoltenVK",
+                   "STEAMARM_SYNCHRONIZATION": "wineserver", "STEAMARM_DISPLAY": "native",
+                   "UNRELATED": "x"}
+        self.assertEqual(self.settings.fallback_overrides(environ),
+                         {"graphicsBackend": "vulkanMoltenVK", "synchronization": "wineserver"})
+        self.assertEqual(self.settings.fallback_overrides({"STEAMARM_GRAPHICS_BACKEND": ""}), {})
+        chosen = self.settings.with_overrides(
+            {"graphicsBackend": "vulkanKosmicKrisp", "synchronization": "esync"},
+            {"synchronization": "esync"})
+        applied = self.settings.with_overrides(chosen, self.settings.fallback_overrides(environ))
+        with patch.object(self.settings, "shim_selects_icd", return_value=True):
+            self.assertEqual(self.env(chosen)["STEAMARM_VK_ICD"], "kosmickrisp")
+            self.assertNotIn("PROTON_NO_ESYNC", self.env(chosen))
+            env = self.env(applied)
+            self.assertNotIn("STEAMARM_VK_ICD", env)
+            self.assertEqual(env["PROTON_NO_ESYNC"], "1")
+
     def test_shim_selects_icd(self):
         with tempfile.TemporaryDirectory(prefix="steamarm-shim-test-") as temp:
             path = Path(temp) / "libvulkan.so.1"

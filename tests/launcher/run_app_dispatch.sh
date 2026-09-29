@@ -17,8 +17,13 @@ cat > "$W/launcher/apps.json" <<'JSON'
  {"id":"x86armroot","name":"b","command":["/opt/apps/b/run"],"root":"/tmp/lxrt-arm64root","architecture":"x86_64"},
  {"id":"armcustom","name":"c","command":["/bin/c"],"root":"/tmp/some-other-root","architecture":"aarch64"},
  {"id":"ovr","name":"ovr","command":["/opt/apps/o/run"],"root":"/tmp/lxrt-steamroot","fexRootfs":"/","env":{},"kind":"custom","overrides":{"display":"vnc","vsync":"on","bogus":"x"}},
+ {"id":"kk","name":"kk","command":["/opt/apps/k/run"],"root":"/tmp/lxrt-steamroot","fexRootfs":"/","env":{},"kind":"custom","overrides":{"graphicsBackend":"vulkanKosmicKrisp","synchronization":"esync"}},
+ {"id":"hs","name":"Heroic Steam","command":["/opt/apps/h/run"],"root":"/tmp/lxrt-steamroot","fexRootfs":"/","env":{},"kind":"custom"},
  {"id":"steam","name":"Fake","command":["/bin/fake"],"kind":"custom"}]
 JSON
+# A Vulkan shim that reads STEAMARM_VK_ICD (settings-env.py looks for the name).
+mkdir -p "$W/steamroot/usr/lib/lxrt-emu"
+echo STEAMARM_VK_ICD > "$W/steamroot/usr/lib/lxrt-emu/libvulkan.so.1"
 echo '{"fexTSO":"fast"}' > "$W/launcher/settings.json"
 mkdir -p "$W2/launcher"
 echo '{"display":"vnc"}' > "$W2/launcher/settings.json"
@@ -59,5 +64,47 @@ expect bad   "architecture 'armv7'"
 expect armx86root "is aarch64 but its root is /tmp/lxrt-steamroot" 'command:'
 expect x86armroot "is x86_64 but its root is /tmp/lxrt-arm64root" 'command:'
 expect armcustom  'LXRT_ROOT=/tmp/some-other-root'
+# The launcher's fallbacks (FallbackPolicy.environment) win over the settings:
+# what its policy announced is what runs.
+expect kk 'STEAMARM_VK_ICD=kosmickrisp' 'PROTON_NO_ESYNC'
+expect_env() {  # VAR=VALUE id pattern [negative-pattern]
+    out="$(env "$1" STEAMARM_STATE="$W" scripts/run-app.sh --dry-run "$2" 2>&1)"
+    if printf '%s' "$out" | grep -q -- "$3" && { [ -z "${4:-}" ] || ! printf '%s' "$out" | grep -q -- "$4"; }; then
+        echo "  ok    $1 $2: $3"; pass=$((pass + 1))
+    else
+        echo "  FAIL  $1 $2: expected '$3'${4:+ and no '$4'}"; printf '%s\n' "$out" | sed 's/^/        /'; fail=$((fail + 1))
+    fi
+}
+expect_env STEAMARM_GRAPHICS_BACKEND=vulkanMoltenVK kk 'command:' 'STEAMARM_VK_ICD'
+expect_env STEAMARM_SYNCHRONIZATION=wineserver kk 'PROTON_NO_ESYNC=1'
+
+# What run-app.sh did, on its last line (the launcher reads it): with a fake
+# guest standing in for a running Steam, and osascript/open stubbed so that no
+# display is brought forward. It runs from a copy of the scripts whose
+# env-links.sh fails: should it ever get past the one-app check, it stops
+# there, before the /tmp links, the X server or a session.
+T="$W/tree"; mkdir -p "$T/scripts"
+cp scripts/run-app.sh scripts/settings-env.py scripts/session.py scripts/builtin-apps.json "$T/scripts/"
+printf '#!/bin/sh\necho "env-links stub: not in this test" >&2\nexit 1\n' > "$T/scripts/env-links.sh"
+chmod +x "$T/scripts/env-links.sh"
+B="$W/bin"; mkdir -p "$B"
+printf '#!/bin/sh\nexit 0\n' > "$B/osascript"; cp "$B/osascript" "$B/open"; chmod +x "$B/osascript" "$B/open"
+bash -c 'exec -a "$0" sleep 30' "$W/build/lxrun /tmp/fexhome/.local/share/Steam/ubuntu12_32/steam -dispatch-test" &
+fake=$!
+sleep 0.5
+pgrep -f "$W/build/lxrun" >/dev/null || { echo "  FAIL  the fake guest is not visible to pgrep"; fail=$((fail + 1)); }
+last_line() { STEAMARM_STATE="$W" PATH="$B:$PATH" STEAMARM_DISPLAY=native "$T/scripts/run-app.sh" "$1" 2>&1 | tail -1; }
+echo "aarch64 none" > "$W/launcher/running.arch"          # an earlier session's
+rm -f "$W/launcher/running.id" "$W/launcher/running.pid"
+[ "$(last_line steam)" = "session=adopted" ] && { echo "  ok    a Steam run-app.sh did not start: session=adopted"; pass=$((pass + 1)); } \
+    || { echo "  FAIL  adoption: $(last_line steam)"; fail=$((fail + 1)); }
+[ ! -e "$W/launcher/running.arch" ] && { echo "  ok    adoption drops an earlier session's running.arch"; pass=$((pass + 1)); } \
+    || { echo "  FAIL  running.arch left: $(cat "$W/launcher/running.arch")"; fail=$((fail + 1)); }
+for id in steam hs; do
+    echo "$id" > "$W/launcher/running.id"; echo "$fake" > "$W/launcher/running.pid"
+    [ "$(last_line "$id")" = "session=reshown" ] && { echo "  ok    $id shown again: session=reshown"; pass=$((pass + 1)); } \
+        || { echo "  FAIL  $id: $(last_line "$id")"; fail=$((fail + 1)); }
+done
+kill "$fake" 2>/dev/null; wait "$fake" 2>/dev/null
 echo "$pass passed, $fail failed"
 [ "$fail" -eq 0 ]
