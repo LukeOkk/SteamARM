@@ -1,17 +1,20 @@
 # Lepton reuse analysis
 
-Status (2026-09-29): this page is the Lepton reuse analysis the plan asks
-for. Lepton is Valve's Android compatibility layer for Steam Frame. The page
-answers two questions. What can SteamARM reuse from Lepton to run Android apps
-on a Mac without a VM? What cannot work on Darwin? The Lepton facts come from
-web research by a cloud session. An adversarial reviewer then re-checked every
+Status (2026-09-29): this page is the Lepton reuse analysis the plan asks for.
+Updated 2026-09-29 after `benchmarks/stage21-native-arm64-client.txt`. Lepton
+is Valve's Android compatibility layer for Steam Frame. The page answers two
+questions. What can SteamARM reuse from Lepton to run Android apps on a Mac
+without a VM? What cannot work on Darwin? The Lepton facts come from web
+research by a cloud session. An adversarial reviewer then re-checked every
 claim: 30 stood, 9 were refuted and appear here only in corrected form, and 5
 were relabelled. The lxrun facts were read in this repository at commit
-`4c5efd5`. The `runtime/` files cited are unchanged at `8d2e3c4`, apart from
-the `--chmod` fix in `runtime/mounts.c`. Nothing on this page was run on a
-Mac. The Lepton app entry, and how the client offers tools, are in
-`docs/STEAM_FRAME_COMPAT_TOOLS.md`; this page does not repeat them. The
-session could not reach these hosts:
+`4c5efd5`. They were re-checked at `dfab6e2`, the merge of main that brought
+stage21: line numbers are corrected, and the ELF loader, page size and x18
+rows follow main's runtime changes. The research ran nothing on a Mac; the
+MEASURED facts come from the repository's record. stage21 facts are MEASURED
+on the owner's Mac (M4, macOS 27). The Lepton app entry, and how the client
+offers tools, are in `docs/STEAM_FRAME_COMPAT_TOOLS.md`; this page does not
+repeat them. The session could not reach these hosts:
 
 - `gitlab.steamos.cloud` (Valve's upstream for Lepton);
 - `partner.steamgames.com`, `store.steampowered.com` and `steamdb.info`;
@@ -48,7 +51,8 @@ session could not reach these hosts:
   https://github.com/xXJSONDeruloXx/lepton at commit
   `6135b53dcfe6111ca8fc310a3b35e0fec9e65b9b`. Every mirror link below points
   at that commit.
-- SteamARM: paths in https://github.com/LukeOkk/SteamARM at commit `4c5efd5`.
+- SteamARM: paths in https://github.com/LukeOkk/SteamARM at commit `4c5efd5`,
+  with line numbers re-checked at `dfab6e2`.
 
 ## 1. What Lepton is and where its source is
 
@@ -373,33 +377,34 @@ and
 
 ## 6. Reuse table
 
-The "what lxrun has" column was read in `runtime/` at `4c5efd5`. It is marked
+The "what lxrun has" column was read in `runtime/` at `4c5efd5` and
+re-checked at `dfab6e2`. It is marked
 VERIFIED IN SOURCE only where the code was read. The label column gives three
 labels: for the Lepton side, for the lxrun side, and for the verdict.
 
 | Lepton component | what it needs from the host kernel | what lxrun on Darwin has today | reuse verdict | label |
 |---|---|---|---|---|
 | compat_tool scripts (`lepton`, `liblepton/*.sh`, `toolmanifest.vdf`) | Nothing directly. They drive podman, `systemctl --user`, flock, adb, avahi and inotify on a Linux host. | Linux shell scripts run under lxrun: Steam's `steam.sh` runs there today as x86-64 bash under FEX (MEASURED, `benchmarks/stage8-steam-zero-vm.txt`). flock (`LNR_flock`, `runtime/dispatch.c`) and inotify (`runtime/inotify.c`) are implemented. No container engine, systemd user session or avahi is in SteamARM's roots (HYPOTHESIS: nothing in `scripts/` installs one). | port. Keep the context, bake, property, `.rc` and adb logic. Replace every podman and systemd call with an lxrun launcher. | Lepton: VERIFIED IN SOURCE. lxrun: MEASURED, VERIFIED IN SOURCE, HYPOTHESIS. Verdict: HYPOTHESIS. |
-| podman, pasta, catatonit (crun/runc and fuse-overlayfs per a community report) | User namespaces with newuidmap/newgidmap and subuid/subgid; mount, pid, ipc, uts and net namespaces; overlayfs or FUSE; cgroup v2; a tap device for pasta; a systemd user session. | None of these. `mount`, `umount2`, `pivot_root`, `unshare` and `setns` have no case in `lxrt_dispatch`, so they return ENOSYS (`runtime/dispatch.c:3263-3284`). `clone` without CLONE_THREAD and CLONE_VM is a plain fork; namespace flags are not looked at (`runtime/thread.c:464-470`). `/proc/sys/user/max_user_namespaces` reads 0 (`runtime/proc_ext.c:1173-1183`). | cannot work. Replace with an interpreter of Lepton's podman command line, in the style of `runtime/mounts.c`. | Lepton: VERIFIED IN SOURCE (podman, pasta, catatonit), COMMUNITY OBSERVATION (crun/runc, fuse-overlayfs). lxrun: VERIFIED IN SOURCE. Verdict: HYPOTHESIS. |
-| Namespaces and cgroups: private pid, ipc and uts; host user as uid 0; cgroupns or a delegated slice | Kernel namespaces and cgroup v2. | Mount namespaces are emulated per process for pressure-vessel's bwrap plan (`runtime/mounts.c`). It is a table of at most 256 binds (`MAX_MOUNTS`), matched longest prefix first; writes under a read-only bind get EROFS. `--tmpfs` and `--dir` become plain directories in a sandbox root. The bwrap options `--unshare-*`, `--cap-add`, `--cap-drop`, `--uid`, `--gid`, `--seccomp` and `--add-seccomp-fd` are refused with ENOSYS. There is no PID namespace: `getpid` returns the Darwin pid (`dispatch.c:3050`). `getuid` returns the Mac user's uid, not 0 (`dispatch.c:2664`). Unknown `prctl` options, such as PR_SET_CHILD_SUBREAPER, return 0 and do nothing (`dispatch.c:2659-2661`). `runtime/` has no cgroup filesystem. | port for the mount view (path redirection, as `mounts.c` does). The rest cannot work as namespaces. It needs new lxrun pieces: a uid-0 view, a virtual PID 1 that reaps, and a stub cgroupfs. | Lepton: VERIFIED IN SOURCE. lxrun: VERIFIED IN SOURCE. Verdict: HYPOTHESIS. |
-| Capabilities: `--cap-drop ALL`, then 24 added back (sys_admin, net_admin, mknod, setuid, setgid and others) | Capabilities inside the user namespace. | `capget` reports an empty set. `capset` succeeds only when it asks for nothing; otherwise it returns EPERM (`dispatch.c:2145-2173`). | port: in a Lepton mode, answer `capget` and `capset` as Lepton's container would. HYPOTHESIS: today zygote's capset for system_server would fail. | Lepton: VERIFIED IN SOURCE. lxrun: VERIFIED IN SOURCE. Verdict: HYPOTHESIS. |
-| Seccomp profile (`lepton.seccomp.json`) | seccomp-bpf. | No `seccomp` syscall (277 falls to ENOSYS) and no bwrap `--seccomp`. The profile's effects differ from lxrun's current answers: `fchown` and `fchownat` go to Darwin (`dispatch.c:2384-2386`, `2414-2417`); setuid and setgid to another id fail with EPERM (`lxrt_setresuid`, `runtime/fileops2.c:2334`); `setgroups` has no case, so ENOSYS. | reference only for the JSON. Port its results into the syscall table: success for the chown family, setuid, setgid, setgroups, setpriority, and the clock and key calls. | Lepton: VERIFIED IN SOURCE. lxrun: VERIFIED IN SOURCE. Verdict: HYPOTHESIS. |
+| podman, pasta, catatonit (crun/runc and fuse-overlayfs per a community report) | User namespaces with newuidmap/newgidmap and subuid/subgid; mount, pid, ipc, uts and net namespaces; overlayfs or FUSE; cgroup v2; a tap device for pasta; a systemd user session. | None of these. `mount`, `umount2`, `pivot_root`, `unshare` and `setns` have no case in `lxrt_dispatch`, so they return ENOSYS (`runtime/dispatch.c:3268-3289`). `clone` without CLONE_THREAD and CLONE_VM is a plain fork; namespace flags are not looked at (`runtime/thread.c:464-470`). `/proc/sys/user/max_user_namespaces` reads 0 (`runtime/proc_ext.c:1174-1184`). | cannot work. Replace with an interpreter of Lepton's podman command line, in the style of `runtime/mounts.c`. | Lepton: VERIFIED IN SOURCE (podman, pasta, catatonit), COMMUNITY OBSERVATION (crun/runc, fuse-overlayfs). lxrun: VERIFIED IN SOURCE. Verdict: HYPOTHESIS. |
+| Namespaces and cgroups: private pid, ipc and uts; host user as uid 0; cgroupns or a delegated slice | Kernel namespaces and cgroup v2. | Mount namespaces are emulated per process for pressure-vessel's bwrap plan (`runtime/mounts.c`). It is a table of at most 256 binds (`MAX_MOUNTS`), matched longest prefix first; writes under a read-only bind get EROFS. `--tmpfs` and `--dir` become plain directories in a sandbox root. The bwrap options `--unshare-*`, `--cap-add`, `--cap-drop`, `--uid`, `--gid`, `--seccomp` and `--add-seccomp-fd` are refused with ENOSYS. There is no PID namespace: `getpid` returns the Darwin pid (`dispatch.c:3055`). `getuid` returns the Mac user's uid, not 0 (`dispatch.c:2669`). Unknown `prctl` options, such as PR_SET_CHILD_SUBREAPER, return 0 and do nothing (`dispatch.c:2664-2666`). `runtime/` has no cgroup filesystem. | port for the mount view (path redirection, as `mounts.c` does). The rest cannot work as namespaces. It needs new lxrun pieces: a uid-0 view, a virtual PID 1 that reaps, and a stub cgroupfs. | Lepton: VERIFIED IN SOURCE. lxrun: VERIFIED IN SOURCE. Verdict: HYPOTHESIS. |
+| Capabilities: `--cap-drop ALL`, then 24 added back (sys_admin, net_admin, mknod, setuid, setgid and others) | Capabilities inside the user namespace. | `capget` reports an empty set. `capset` succeeds only when it asks for nothing; otherwise it returns EPERM (`dispatch.c:2150-2178`). | port: in a Lepton mode, answer `capget` and `capset` as Lepton's container would. HYPOTHESIS: today zygote's capset for system_server would fail. | Lepton: VERIFIED IN SOURCE. lxrun: VERIFIED IN SOURCE. Verdict: HYPOTHESIS. |
+| Seccomp profile (`lepton.seccomp.json`) | seccomp-bpf. | No `seccomp` syscall (277 falls to ENOSYS) and no bwrap `--seccomp`. The profile's effects differ from lxrun's current answers: `fchown` and `fchownat` go to Darwin (`dispatch.c:2389-2391`, `2419-2422`); setuid and setgid to another id fail with EPERM (`lxrt_setresuid`, `runtime/fileops2.c:2334`); `setgroups` has no case, so ENOSYS. | reference only for the JSON. Port its results into the syscall table: success for the chown family, setuid, setgid, setgroups, setpriority, and the clock and key calls. | Lepton: VERIFIED IN SOURCE. lxrun: VERIFIED IN SOURCE. Verdict: HYPOTHESIS. |
 | binderfs and the binder driver | CONFIG_ANDROID_BINDER_IPC and CONFIG_ANDROID_BINDERFS; `mount -t binder` inside the user namespace; the BINDER_WRITE_READ ioctl protocol; per-process mmap'd receive buffers; node and handle refcounts; fd translation; death notifications. | Nothing. `mount` returns ENOSYS. Under `/dev`, only null, zero, full, random, urandom, `/dev/fd/N` and `/dev/std*` reach the host; every other path resolves inside the guest root (`dispatch.c:407-423`). `ioctl` handles terminals, FIONREAD, FIONBIO, FIOCLEX and evdev; any other request returns ENOTTY (`runtime/ioctl_tty.c:148-251`). Building blocks exist: process-shared futexes (`runtime/futex_ops.c`), SCM_RIGHTS, SysV shared memory (`runtime/sysv_ipc.c`) and memfd. | cannot work (the driver). A userspace binder, for example a broker process with shared memory, would be new lxrun work. The Android side is reuse as is: stock libbinder with Valve's uid-in-flags patch. | Lepton: VERIFIED IN SOURCE. lxrun: VERIFIED IN SOURCE. Verdict: HYPOTHESIS. |
 | memfd in place of ashmem | memfd_create with seals, shared over SCM_RIGHTS. | memfd_create exists. It is an unlinked temporary file, so growing, exact size, pread/pwrite and MAP_SHARED work. F_ADD_SEALS and F_GET_SEALS are bookkeeping inside one process: another process holding the fd, by SCM_RIGHTS or fork, is not bound by them (`runtime/fex_support.c:140-205`). A process can hold at most 256 memfd objects; the next memfd_create returns EMFILE (`fex_support.c:346-353`). | reuse as is for shared memory. HYPOTHESIS: the 256 limit and cross-process seals need checking against SurfaceFlinger and gralloc. | Lepton: VERIFIED IN SOURCE. lxrun: VERIFIED IN SOURCE. Verdict: HYPOTHESIS. |
 | FUSE for MediaProvider's `/storage/emulated` | `/dev/fuse`. | None. `/dev/fuse` is not passed through (`dispatch.c:407-423`). | cannot work as is. Either patch MediaProvider and vold to bind `/storage/emulated` directly, or serve the FUSE protocol inside lxrun. | Lepton: VERIFIED IN SOURCE. lxrun: VERIFIED IN SOURCE. Verdict: HYPOTHESIS. |
 | Copy-on-write layers (podman `:O` for the rootfs, `/data` and the app directory) | overlayfs in the user namespace, or fuse-overlayfs. | No overlay in `runtime/`. `docs/STEAM_FRAME_IMAGE.md` already derives roots as APFS clones (`cp -c`). | port: an APFS clone of the baked `/data` per app. | Lepton: VERIFIED IN SOURCE. lxrun: VERIFIED IN SOURCE. Verdict: HYPOTHESIS. |
 | Networking: pasta, a static eth0, a gateway to the host's Steam client (57343) and adbd (5555+n) | A network namespace and a tap device. | Guest sockets are host sockets, on the Mac's own interfaces and loopback. Abstract AF_UNIX names map to a directory (`runtime/socket.c:55-131`). AF_UNIX SOCK_SEQPACKET becomes SOCK_DGRAM (`socket.c:267-273`). Netlink exists only as a silent NETLINK_KOBJECT_UEVENT socket inside a bwrap plan (`socket.c:282-321`); there is no NETLINK_ROUTE. | port: point Steam3Master and adb at 127.0.0.1. UNKNOWN: how Android's network stack behaves with no route netlink and no eth0. | Lepton: VERIFIED IN SOURCE. lxrun: VERIFIED IN SOURCE. Verdict: HYPOTHESIS. |
 | SELinux, eBPF, uevent, device-mapper, loop devices | Nothing, after Valve's patches. | None of these, and none is needed. | reuse as is (Valve's patches). | Lepton: VERIFIED IN SOURCE. lxrun: VERIFIED IN SOURCE. Verdict: HYPOTHESIS. |
-| Android rootfs images: API 30 (LineageOS 18.1) and API 34 (AOSP android-14.0.0_r75) | A Linux arm64 kernel with 4 KiB pages, plus everything in the rows above. | Loads PIE aarch64 ELF only (`runtime/elf.c:113-119`). Refuses a main program or interpreter whose PT_LOAD `p_align` is not a multiple of 16 KiB (`elf.c:146-149`). Libraries mapped at 4 KiB granularity go through `runtime/subpage.c` (see the page-size row). The `p_align` of Lepton's `/system/bin/linker64`, `/init` and `app_process64` is UNKNOWN. | port: rebuild an image from source with SteamARM's changes. Which API level follows what Steam ships (a community report says API 30 on the Frame). HYPOTHESIS: the Android 11 image has the same 4 KiB page issue. Valve's depot build is reference only (PROPRIETARY_DO_NOT_REDISTRIBUTE; 4 KiB pages). | Lepton: VERIFIED IN SOURCE. lxrun: VERIFIED IN SOURCE, UNKNOWN. Verdict: HYPOTHESIS. |
+| Android rootfs images: API 30 (LineageOS 18.1) and API 34 (AOSP android-14.0.0_r75) | A Linux arm64 kernel with 4 KiB pages, plus everything in the rows above. | Loads PIE aarch64 ELF only (`runtime/elf.c:113-122`). Since stage21 it also loads a main program or interpreter aligned to 4 KiB: it refuses only a PT_LOAD `p_align` that is not a multiple of 4 KiB (`elf.c:147-157`), and keeps protections per 4 KiB through `runtime/subpage.c` (`elf.c:209-225`). `LXRT_GUEST_PAGE=4096` makes AT_PAGESZ 4096 (`runtime/stack.c:21-34, 134`). Valve's 4 KiB-aligned arm64 Steam client loaded this way (MEASURED, `benchmarks/stage21-native-arm64-client.txt`). The `p_align` of Lepton's `/system/bin/linker64`, `/init` and `app_process64` is UNKNOWN. | port: rebuild an image from source with SteamARM's changes. Which API level follows what Steam ships (a community report says API 30 on the Frame). HYPOTHESIS: a 4 KiB-aligned Android 11 image loads the same way. Valve's depot build is reference only (PROPRIETARY_DO_NOT_REDISTRIBUTE; 4 KiB pages). | Lepton: VERIFIED IN SOURCE. lxrun: VERIFIED IN SOURCE, MEASURED, UNKNOWN. Verdict: HYPOTHESIS. |
 | Mesa, Zink and Turnip graphics injection (host `/usr/share/guestos/android` bind-mounted in; `ro.hardware.*` properties) | The msm DRM render node `/dev/dri/renderD128`, or KGSL for the Qualcomm blob; kcmp for Mesa. | No DRM or KGSL device. Vulkan reaches Metal through the shim `libvulkan.so.1`, which calls MoltenVK through the host bridge (`lxrt_host_dlopen`, `shim/vulkan_shim.c:458-462`). The shim is linked `-nostdlib` (`Makefile:98`). Its WSI is X11 only: it dlopens `libxcb.so.1` and `libX11-xcb.so.1` (`shim/wsi.c:123-124`), and `shim/` has no Android surface or Wayland code. `kcmp` has no case: ENOSYS. | cannot work for Turnip, freedreno, minigbm_msm and KGSL. port the injection scheme: bind a host-provided bionic driver into the rootfs and set the properties. That driver would be a bionic Vulkan HAL over MoltenVK, with Zink or ANGLE on top for GLES (HYPOTHESIS). | Lepton: VERIFIED IN SOURCE. lxrun: VERIFIED IN SOURCE. Verdict: HYPOTHESIS. |
 | Vulkan layers (VALVE_rpo, VALVE_fdm_injection, fossilize, validation, gfxreconstruct, RenderDoc), rbind-mounted into each app's `lib/arm64` | Bind mounts inside the container. | Binds exist only as the per-process bwrap table (`runtime/mounts.c`). | reference only. VALVE_rpo and VALVE_fdm_injection come from the Frame image (PROPRIETARY_DO_NOT_REDISTRIBUTE) and target Adreno and foveated VR (HYPOTHESIS). The injection method can be ported if a layer is ever needed. | Lepton: VERIFIED IN SOURCE. lxrun: VERIFIED IN SOURCE. Verdict: HYPOTHESIS. |
 | `apk_extractor` (Rust crate `apk-info-extractor`) | Nothing from the kernel; host userspace. | lxrun runs aarch64 Linux programs. The crate could also be built for macOS directly. | reuse as is (MIT). | Lepton: VERIFIED IN SOURCE. lxrun: HYPOTHESIS. Verdict: HYPOTHESIS. |
-| The 4 KiB page-size assumption, against 16 KiB macOS host pages | A 4 KiB-page kernel. The API 34 image is 4096-aligned and compiles bionic's `PAGE_SIZE` macro. | `runtime/subpage.c` serves 4 KiB guest mappings on 16 KiB host pages. For a MAP_FIXED request at a 4 KiB address or file offset, and for data maps with a partial length, it backs the host pages with anonymous memory, reads the file bytes in with pread, and gives each 16 KiB page the union of its guest pages' protections (`subpage.c:1-24`, `dispatch.c:1100-1212`). A 4 KiB PROT_NONE guard next to a writable page therefore does not fault. A writable MAP_SHARED placed this way becomes a private copy (`dispatch.c:1156-1183`); read-only shared ranges are kept current by polling (`runtime/shmirror.c`). This works for FEX's x86 images (MEASURED, `benchmarks/stage5-subpage.txt`). `elf.c` still refuses 4 KiB-aligned main programs and interpreters. AT_PAGESZ is reported as 16384 (`runtime/stack.c:110-113`). | port. HYPOTHESIS: this is the first wall. Either build the platform with 16 KiB segments, or load 4 KiB executables through `subpage.c`. APK native libraries would go through `subpage.c`: copied, not shared, and with weaker guard pages. | Lepton: VERIFIED IN SOURCE. lxrun: VERIFIED IN SOURCE, MEASURED. Verdict: HYPOTHESIS. |
+| The 4 KiB page-size assumption, against 16 KiB macOS host pages | A 4 KiB-page kernel. The API 34 image is 4096-aligned and compiles bionic's `PAGE_SIZE` macro. | `runtime/subpage.c` serves 4 KiB guest mappings on 16 KiB host pages. For a MAP_FIXED request at a 4 KiB address or file offset, and for data maps with a partial length, it backs the host pages with anonymous memory, reads the file bytes in with pread, and gives each 16 KiB page the union of its guest pages' protections (`subpage.c:1-24`, `dispatch.c:1100-1217`). A 4 KiB PROT_NONE guard next to a writable page therefore does not fault. A writable MAP_SHARED placed this way becomes a private copy (`dispatch.c:1156-1183`); read-only shared ranges are kept current by polling (`runtime/shmirror.c`). Since stage21, a large file segment whose address and offset agree modulo 16 KiB has its page-aligned interior mapped from the file, and only its edges copied (`subpage.c:273-344`). This works for FEX's x86 images (MEASURED, `benchmarks/stage5-subpage.txt`). Since stage21, `elf.c` also loads 4 KiB-aligned main programs and interpreters through `subpage.c` (`elf.c:147-157, 209-225`), and AT_PAGESZ is 4096 with `LXRT_GUEST_PAGE=4096`, 16384 otherwise (`runtime/stack.c:21-34, 134`). Valve's arm64 Steam client runs this way (MEASURED, stage21). | port. The second of the two earlier options, loading 4 KiB executables through `subpage.c`, now exists. HYPOTHESIS: page size is no longer a load-time wall. The costs remain: small mappings are copied, not shared, and guard pages are weaker. | Lepton: VERIFIED IN SOURCE. lxrun: VERIFIED IN SOURCE, MEASURED. Verdict: HYPOTHESIS. |
 | bionic's TLS against glibc Mesa | Nothing from the kernel (userspace ABI). | Every `mrs` and `msr` of TPIDR_EL0 in guest code is rewritten to use a Darwin TSD slot (`runtime/tls.c:1-13`). The mechanism works at the register level; it has only been exercised with glibc. SteamARM's own Mesa (swrast in the Fedora root, for Xvnc) is glibc-built, and bionic's linker refuses a dlopened library with IE-model TLS (see 4.3). | cannot work for glibc Mesa or any glibc driver. A bionic-built driver is needed. The `-nostdlib` shim is the closest SteamARM piece (HYPOTHESIS). | Lepton: VERIFIED IN SOURCE (bionic linker). lxrun: VERIFIED IN SOURCE, HYPOTHESIS (bionic). Verdict: HYPOTHESIS. |
-| x18 in Android code (the ABI reserves it; ShadowCallStack uses it) | Nothing from the kernel. | A virtual x18 in a second TSD slot, with x18 uses rewritten (`runtime/x18.c`, `runtime/tls.c:24-29`). A binary linked against a macOS SDK below 13 keeps x18 across preemption (MEASURED on a GitHub M1 runner, `benchmarks/stage20-ci-macos-runner.txt`). | reuse as is (the lxrun mechanism). | Lepton: HYPOTHESIS. lxrun: VERIFIED IN SOURCE, MEASURED. Verdict: HYPOTHESIS. |
+| x18 in Android code (the ABI reserves it; ShadowCallStack uses it) | Nothing from the kernel. | A virtual x18 in a second TSD slot, with x18 uses rewritten (`runtime/x18.c`, `runtime/tls.c:24-29`). Since stage21, `br`, `blr` and `ret` through x18 are rewritten too (`runtime/x18.c:273-288`), and the pass touches only function ranges from a file's `.eh_frame` when it has one (`runtime/elfsect.c:129-139, 184-205`). A binary linked against a macOS SDK below 13 keeps x18 across preemption (MEASURED on a GitHub M1 runner, `benchmarks/stage20-ci-macos-runner.txt`). | reuse as is (the lxrun mechanism). HYPOTHESIS: hand-written assembly without CFI would be skipped by the `.eh_frame` filter; `LXRT_X18_ALL_TEXT` names files to scan whole (`runtime/elfsect.c:290-298`). | Lepton: HYPOTHESIS. lxrun: VERIFIED IN SOURCE, MEASURED. Verdict: HYPOTHESIS. |
 | Display: Waydroid hwcomposer to a Wayland socket | Sockets only; a Wayland compositor on the host. | SteamARM presents X11 only: XQuartz, rootless, with quartz-wm (`docs/ARCHITECTURE.md`). There is no Wayland compositor. | port: a composer that presents to X11 or Metal, or a Wayland compositor for macOS. | Lepton: VERIFIED IN SOURCE. SteamARM: VERIFIED IN SOURCE. Verdict: HYPOTHESIS. |
 | Audio: the host PulseAudio native socket | A Unix socket. | A PulseAudio server (Homebrew) on CoreAudio, with a socket inside each guest root that asks for one (`docs/ARCHITECTURE.md`; `docs/CURRENT_STEAM_ENVIRONMENT.md` §5.5). | reuse as is. | Lepton: VERIFIED IN SOURCE. SteamARM: VERIFIED IN SOURCE. Verdict: HYPOTHESIS. |
-| Steamworks wiring: androidarm64 `libsteamclient.so`, `Steam3Master=<gw>:57343`, `steam.pipe` | TCP and a named pipe. | SteamARM's Steam client is the x86 Linux client under FEX (MEASURED, `benchmarks/stage8-steam-zero-vm.txt`). Whether it carries `androidarm64/*.so` or listens on 57343 is UNKNOWN. Lepton is reported to offer itself on x86_64 clients although only an ARM64 build exists (COMMUNITY OBSERVATION, https://github.com/valvesoftware/steam-for-linux/issues/13634). | reference only until checked. The `.so` files are PROPRIETARY_DO_NOT_REDISTRIBUTE; they would be mounted from the user's own install, as Lepton does. | Lepton: VERIFIED IN SOURCE. SteamARM: MEASURED, UNKNOWN. Verdict: HYPOTHESIS. |
+| Steamworks wiring: androidarm64 `libsteamclient.so`, `Steam3Master=<gw>:57343`, `steam.pipe` | TCP and a named pipe. | SteamARM's working Steam client is the x86 Linux client under FEX (MEASURED, `benchmarks/stage8-steam-zero-vm.txt`; still so in stage21). Valve's native arm64 client starts under lxrun but aborts before its window (MEASURED, stage21). Whether either carries `androidarm64/*.so` or listens on 57343 is UNKNOWN. Lepton is reported to offer itself on x86_64 clients although only an ARM64 build exists (COMMUNITY OBSERVATION, https://github.com/valvesoftware/steam-for-linux/issues/13634). | reference only until checked. The `.so` files are PROPRIETARY_DO_NOT_REDISTRIBUTE; they would be mounted from the user's own install, as Lepton does. | Lepton: VERIFIED IN SOURCE. SteamARM: MEASURED, UNKNOWN. Verdict: HYPOTHESIS. |
 | OpenXR through SteamVR's androidarm64 `vrclient.so` | Nothing beyond the above. | SteamARM has no SteamVR. | cannot work. SteamVR has no macOS server, so flatscreen only (`lepton.headless=false`). | Lepton: VERIFIED IN SOURCE. SteamARM: VERIFIED IN SOURCE. Verdict: HYPOTHESIS. |
 
 ## 7. What this means for SteamARM
@@ -417,18 +422,20 @@ labels: for the Lepton side, for the lxrun side, and for the verdict.
 
    memfd already exists in lxrun (VERIFIED IN SOURCE,
    `runtime/fex_support.c`). Its seals hold only inside one process.
-2. HYPOTHESIS: page size is the first wall, not binder. The API 34 image is
-   built for 4 KiB pages (VERIFIED IN SOURCE, 4.4). The API 30 image that a
-   community report says the Frame runs is Android 11, which predates 16 KiB
-   page support in AOSP (HYPOTHESIS). `runtime/elf.c` refuses a main
-   program or interpreter that is not 16 KiB-aligned (VERIFIED IN SOURCE). If `linker64` is 4 KiB-aligned, no Android program starts until
-   that changes. Libraries are less of a problem: `subpage.c` already maps
-   4 KiB-aligned code (MEASURED for FEX, `benchmarks/stage5-subpage.txt`), at
-   the cost of private copies.
+2. HYPOTHESIS: page size is no longer the first wall; binder is. The API 34
+   image is built for 4 KiB pages (VERIFIED IN SOURCE, 4.4). The API 30 image
+   that a community report says the Frame runs is Android 11, which predates
+   16 KiB page support in AOSP (HYPOTHESIS). Since stage21, `runtime/elf.c`
+   loads a main program or interpreter aligned to 4 KiB, and
+   `LXRT_GUEST_PAGE=4096` reports 4 KiB pages (VERIFIED IN SOURCE,
+   `runtime/elf.c:147-157`, `runtime/stack.c:21-34`). Valve's 4 KiB-aligned
+   Steam client loaded this way (MEASURED, stage21). The cost stays:
+   `subpage.c` copies small 4 KiB-aligned mappings instead of sharing them
+   (MEASURED for FEX, `benchmarks/stage5-subpage.txt`).
 3. HYPOTHESIS: the Frame kernel uses 4 KiB pages. The reasoning: Lepton's
    Android image is 4 KiB-aligned, and it runs on the Frame.
-   `docs/STEAM_FRAME_REFERENCE.md` records the page size as UNKNOWN, and it
-   is open question 2 of `docs/CURRENT_STEAM_ENVIRONMENT.md`.
+   `docs/STEAM_FRAME_SNAPSHOT_2026-09-29.md` records the page size as
+   UNKNOWN, and it is open question 2 of `docs/CURRENT_STEAM_ENVIRONMENT.md`.
    `scripts/steamframe-image.py inventory` reads the kernel page size and
    settles it.
 4. HYPOTHESIS: graphics is the largest piece of new code. Turnip, freedreno,
@@ -452,13 +459,16 @@ labels: for the Lepton side, for the lxrun side, and for the verdict.
    Lepton either. HYPOTHESIS: this scope fits Apple Silicon, and FEX,
    `FEX_ROOTFS` and pressure-vessel's interpreter root play no part in an
    Android port.
-7. HYPOTHESIS: the Steam side is the least known part. SteamARM's client
-   today is the x86 Linux client under FEX (MEASURED,
-   `benchmarks/stage8-steam-zero-vm.txt`). Whether a Linux client on a Mac is
-   offered Android depots is UNKNOWN. Lepton is reported to offer itself
-   on x86_64 although only an ARM64 build exists (COMMUNITY OBSERVATION,
-   https://github.com/valvesoftware/steam-for-linux/issues/13634). The
-   native ARM64 client from the Steam Frame image is the likelier host.
+7. HYPOTHESIS: the Steam side is the least known part. SteamARM's working
+   client today is the x86 Linux client under FEX (MEASURED,
+   `benchmarks/stage8-steam-zero-vm.txt`; still so in stage21). Whether a
+   Linux client on a Mac is offered Android depots is UNKNOWN. Lepton is
+   reported to offer itself on x86_64 although only an ARM64 build exists
+   (COMMUNITY OBSERVATION,
+   https://github.com/valvesoftware/steam-for-linux/issues/13634). Valve's
+   native ARM64 client is the likelier host. stage21 fetched it from Valve's
+   manifest on the Mac and started it under lxrun, up to an abort before its
+   window (MEASURED).
 8. HYPOTHESIS: VR does not carry over. SteamVR has no macOS server, so only
    the flat window (`lepton.headless=false`) is a target.
 9. HYPOTHESIS: Lepton runs Android apps only and plays no part in running
@@ -494,24 +504,25 @@ In order. Each step decides whether the next one is worth doing.
    for `lib/arm64-v8a/*.so` of one Lepton game. Record every `p_align` in
    `benchmarks/`.
 2. Start one bionic program under lxrun:
-   `LXRT_ROOT=<android root> LXRT_REPORT_ENOSYS=1 build/lxrun <android root>/system/bin/toybox true`.
+   `LXRT_ROOT=<android root> LXRT_GUEST_PAGE=4096 LXRT_REPORT_ENOSYS=1 build/lxrun <android root>/system/bin/toybox true`.
    Record `elf.c` refusals and the missing syscalls it names.
-3. If `elf.c` refuses `linker64`, choose between two paths and measure both
-   costs: an `image-14` build with 16 KiB segments, or 4 KiB executables in
-   `elf.c` through `subpage.c`.
+3. `elf.c` no longer refuses 4 KiB-aligned executables (stage21). If
+   `linker64` is 4 KiB-aligned, measure the cost of `subpage.c` for it, and
+   compare with an `image-14` build with 16 KiB segments.
 4. Extend `scripts/steamframe-image.py inventory` to report
    `/usr/share/guestos/android` (files, ELF machine, `p_align`) and the
    kernel's CONFIG_ANDROID_BINDER_IPC, CONFIG_ANDROID_BINDERFS and
-   CONFIG_ANDROID_BINDER_DEVICES. Record the results in
-   `docs/STEAM_FRAME_REFERENCE.md`, with the podman, crun, pasta and
-   fuse-overlayfs versions, and the Lepton app version if the image holds it.
+   CONFIG_ANDROID_BINDER_DEVICES. Record the results with the rest of the
+   image inventory in `docs/STEAM_FRAME_ROOTFS_AUDIT.md`, with the podman,
+   crun, pasta and fuse-overlayfs versions, and the Lepton app version if the
+   image holds it.
 5. On a Linux arm64 host with Lepton, capture the full podman command line
    for one game. Count its binds against `MAX_MOUNTS` (256). List the options
    a plan interpreter must accept.
-6. Once the ARM64 Steam client runs on the Mac
-   (`docs/CURRENT_STEAM_ENVIRONMENT.md` §10), check three things: whether it
-   offers Lepton and Android depots, whether `androidarm64/libsteamclient.so`
-   is in its install, and whether it listens on 57343.
+6. The native ARM64 Steam client now installs and updates itself on the Mac
+   (stage21). Check now whether `androidarm64/libsteamclient.so` is in that
+   install. Once the client reaches its window, check whether it offers
+   Lepton and Android depots, and whether it listens on 57343.
 7. Only after steps 1 to 3 succeed: write design notes for a userspace binder
    in lxrun and for a bionic Vulkan HAL over MoltenVK.
 8. If any Lepton file is copied into SteamARM, add Valve's MIT notice to

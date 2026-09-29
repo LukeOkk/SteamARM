@@ -54,3 +54,12 @@ Steam Frame recovery observada es un disco de dispositivo con ESP FAT32,
 genérico. La comparación real de packages, ELF, FEX, Proton ARM64, runtimes y
 Gamescope sigue pendiente: `btrfs check` pasa, pero `btrfs restore` falla al
 descomprimir extents ZSTD. Ver `STEAM_FRAME_ROOTFS_AUDIT.md`.
+
+## Investigación web del 2026-09-29
+
+Lo que la investigación web del 2026-09-29 encontró sobre
+`holo-core-aarch64-preview` está en la sección 3 de
+`STEAM_FRAME_SNAPSHOT_2026-09-29.md` (en inglés). Sus datos son investigación
+web con etiquetas de evidencia, no mediciones hechas en el Mac. Donde el clon
+y el índice de paquetes registrados aquí confirman un dato, esa página lo
+indica y los cita.

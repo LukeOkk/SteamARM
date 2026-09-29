@@ -1,20 +1,24 @@
 # Steam Linux Runtime 4.0 on arm64, and pressure-vessel
 
-**Status (2026-09-29).** This page covers the Steam Linux Runtime 4.0 for
-arm64 and pressure-vessel on arm64, as they matter to SteamARM. It was
-written from web research by a cloud session: a Linux container with no Mac
-and no lxrun. A second reviewer then tried to refute every claim. It
-confirmed 31, refuted or corrected 8, and changed the label of 6. Those
-corrections are applied here. SteamARM's own facts come from `benchmarks/`,
-`docs/` and the source tree at commit `1911825`. Nothing on this page was
-run on a Mac for it. Blocked from the session: `repo.steampowered.com`,
-`gitlab.steamos.cloud`, `steamdb.info`, `partner.steamgames.com`,
-`wiki.debian.org` and GitHub's global search API. `blog.drakulix.de`,
-`gamingonlinux.com`, `discourse.libsdl.org` and `interfacinglinux.com` were
-blocked or not fetched. `registry.gitlab.steamos.cloud` was not tested.
-Valve's steam-runtime-tools was read in a third-party GitHub mirror at
-upstream snapshot 0.20260320.0. That snapshot is older than the
-pressure-vessel builds seen in use (0.20260714.0 and 0.20260728.0).
+**Status (2026-09-29).** Updated 2026-09-29 after
+`benchmarks/stage21-native-arm64-client.txt`. This page covers the Steam Linux
+Runtime 4.0 for arm64 and pressure-vessel on arm64, as they matter to
+SteamARM. It was written from web research by a cloud session: a Linux
+container with no Mac and no lxrun. A second reviewer then tried to refute
+every claim. It confirmed 31, refuted or corrected 8, and changed the
+label of 6. Those corrections are applied here. SteamARM's own facts come from
+`benchmarks/`, `docs/` and the source tree at commit `1911825`. Line numbers
+in files that main changed were re-checked at `dfab6e2`, the merge that
+brought stage21. stage21 facts are MEASURED on the owner's Mac (M4, macOS 27).
+Nothing on this page was run on a Mac for it. Blocked from the session:
+`repo.steampowered.com`, `gitlab.steamos.cloud`, `steamdb.info`,
+`partner.steamgames.com`, `wiki.debian.org` and GitHub's global search API.
+`blog.drakulix.de`, `gamingonlinux.com`, `discourse.libsdl.org` and
+`interfacinglinux.com` were blocked or not fetched.
+`registry.gitlab.steamos.cloud` was not tested. Valve's steam-runtime-tools
+was read in a third-party GitHub mirror at upstream snapshot 0.20260320.0.
+That snapshot is older than the pressure-vessel builds seen in use
+(0.20260714.0 and 0.20260728.0).
 
 **Evidence labels:**
 
@@ -37,7 +41,7 @@ image.
 
 | tree | commit | used for |
 |---|---|---|
-| https://github.com/LukeOkk/SteamARM | `1911825` | `runtime/`, `scripts/`, `tests/` (paths without a host below) |
+| https://github.com/LukeOkk/SteamARM | `1911825`; line numbers re-checked at `dfab6e2` | `runtime/`, `scripts/`, `tests/` (paths without a host below) |
 | https://github.com/llyyr/steam-runtime-tools (third-party mirror of `gitlab.steamos.cloud/steamrt/steam-runtime-tools`) | `2691ca4da05a1979debfc4b4d2cc614831cabd50` (upstream 0.20260320.0) | pressure-vessel |
 | https://github.com/ValveSoftware/steam-runtime | `8cb6d88c6c4467e76a1176d4815f6dac0eb9cd24` | runtime documentation |
 | https://github.com/ValveSoftware/Proton | `5b89db940e0ebe3a137a6009a3589232fe084c09` | tool manifests, build |
@@ -100,7 +104,8 @@ Notes:
    [proton:1239](https://github.com/ValveSoftware/Proton/blob/5b89db940e0ebe3a137a6009a3589232fe084c09/proton#L1239)).
    That the arm64 client has a `steamrtarm64/` directory is a COMMUNITY
    OBSERVATION ([TECHNICAL_LOG.md:221](https://github.com/huntergdavis/steamclienttermux/blob/dee92b8432424e873011542e6926b12651bc823c/docs/TECHNICAL_LOG.md#L221);
-   steam-arm64-nix `guest-run.sh`).
+   steam-arm64-nix `guest-run.sh`). It is now MEASURED too: stage21 runs
+   `steamrtarm64/steam` on the owner's Mac.
 4. **On a real Steam Frame.** An x86-64 Windows `.exe` ran under Proton 11
    through FEX (ARM64EC) inside the SLR 4.0 arm64 container. An x86-64 Linux
    ELF mapped to app 4183110 did not start, because the Frame would not
@@ -156,7 +161,7 @@ Only versions that a source actually showed are listed.
 | sysroot tarball name | `com.valvesoftware.SteamRuntime.Sdk-arm64-steamrt4-sysroot.tar.gz` would follow the depot tool's naming, whose architecture table includes arm64 | HYPOTHESIS. The template is VERIFIED IN SOURCE ([populate-depot.py](https://github.com/llyyr/steam-runtime-tools/blob/2691ca4da05a1979debfc4b4d2cc614831cabd50/subprojects/container-runtime/populate-depot.py)); the directory listing was not read. |
 | pressure-vessel in SLR 4.0 arm64 | 0.20260714.0, installed in August 2026 | COMMUNITY OBSERVATION ([TECHNICAL_LOG.md:1049](https://github.com/huntergdavis/steamclienttermux/blob/dee92b8432424e873011542e6926b12651bc823c/docs/TECHNICAL_LOG.md#L1049)) |
 | pressure-vessel that SteamARM ran | x86-64 `pressure-vessel-wrap --version` 0.20260728.0; `srt-bwrap --version` "bubblewrap 0.12.0"; `steam-runtime-system-info` 0.20260728.0 (2026-09-26). Which depot they came from is not recorded. | MEASURED (`benchmarks/stage7-guest-base.txt:313-317`) |
-| steamrt3c arm64 client runtime | `https://repo.steampowered.com/steamrt3c/images/<3c.0.YYYYMMDD.N>/steam-runtime-steamrt-arm64.tar.xz` and `com.valvesoftware.SteamRuntime.Platform-arm64-steamrt3c-runtime.tar.gz`, indexed by `latest-public-beta.txt` and `latest-public-stable.txt`. The only image version seen is `3c.0.20260824.257593`. The arm64 client manifests are `steam_client_linuxarm64` and `steam_client_publicbeta_linuxarm64`. | COMMUNITY REFERENCE ([runtime-source.nix](https://github.com/Mr-Banana-Egg/steam-arm64-nix/blob/5d236a5a13d9ee34e743beedb3755db3e56677ca/runtime-source.nix), [scripts/update.sh:103-107](https://github.com/Mr-Banana-Egg/steam-arm64-nix/blob/5d236a5a13d9ee34e743beedb3755db3e56677ca/scripts/update.sh#L103-L107)) |
+| steamrt3c arm64 client runtime | `https://repo.steampowered.com/steamrt3c/images/<3c.0.YYYYMMDD.N>/steam-runtime-steamrt-arm64.tar.xz` and `com.valvesoftware.SteamRuntime.Platform-arm64-steamrt3c-runtime.tar.gz`, indexed by `latest-public-beta.txt` and `latest-public-stable.txt`. The only image version seen is `3c.0.20260824.257593`. The arm64 client manifests are `steam_client_linuxarm64` and `steam_client_publicbeta_linuxarm64`. | MEASURED for `steam_client_linuxarm64`, which stage21 fetched on the owner's Mac. The rest: COMMUNITY REFERENCE ([runtime-source.nix](https://github.com/Mr-Banana-Egg/steam-arm64-nix/blob/5d236a5a13d9ee34e743beedb3755db3e56677ca/runtime-source.nix), [scripts/update.sh:103-107](https://github.com/Mr-Banana-Egg/steam-arm64-nix/blob/5d236a5a13d9ee34e743beedb3755db3e56677ca/scripts/update.sh#L103-L107)) |
 | `3.0.20260618.246540` | This is an Arch package version, not a steamrt3c image version. The PKGBUILD reads the real version from `latest-public-stable.txt` at build time and accepts only `^3c\.`. | COMMUNITY REFERENCE ([PKGBUILD lines 2, 13-14, 29-34](https://github.com/silime/ArchLinux-Packages/blob/HEAD/steam-arm64/PKGBUILD)) |
 
 ## 3. pressure-vessel on arm64
@@ -222,7 +227,7 @@ For the arm64 depot specifically (COMMUNITY OBSERVATION,
 
 | mode | pressure-vessel build | how x86 code runs | label and source |
 |---|---|---|---|
-| Interpreter-root ("transparent") | x86-64 or i386, running under FEX | FEX runs pressure-vessel itself. pressure-vessel detects FEX (§3.3) and builds an interpreter-root container (§3.4). x86 execs inside the container still need something to hand them to FEX: binfmt_misc on Linux, `lxrun`'s own hand-off on SteamARM (`runtime/main.c:357-390`). | VERIFIED IN SOURCE ([virtualization.c](https://github.com/llyyr/steam-runtime-tools/blob/2691ca4da05a1979debfc4b4d2cc614831cabd50/steam-runtime-tools/virtualization.c), [runtime.c:3401-3463](https://github.com/llyyr/steam-runtime-tools/blob/2691ca4da05a1979debfc4b4d2cc614831cabd50/pressure-vessel/runtime.c#L3401-L3463)) |
+| Interpreter-root ("transparent") | x86-64 or i386, running under FEX | FEX runs pressure-vessel itself. pressure-vessel detects FEX (§3.3) and builds an interpreter-root container (§3.4). x86 execs inside the container still need something to hand them to FEX: binfmt_misc on Linux, `lxrun`'s own hand-off on SteamARM (`runtime/main.c:387-420`). | VERIFIED IN SOURCE ([virtualization.c](https://github.com/llyyr/steam-runtime-tools/blob/2691ca4da05a1979debfc4b4d2cc614831cabd50/steam-runtime-tools/virtualization.c), [runtime.c:3401-3463](https://github.com/llyyr/steam-runtime-tools/blob/2691ca4da05a1979debfc4b4d2cc614831cabd50/pressure-vessel/runtime.c#L3401-L3463)) |
 | Emulator ("non-transparent"), 0.20251103.0 and later | aarch64 | `STEAM_COMPAT_EMULATOR` or `PRESSURE_VESSEL_EMULATOR` names an `emulator.json`. pressure-vessel prepends the emulator to foreign-architecture commands, shares the emulator's directory, provides aarch64 `ld.so` and libraries in the container, starts the emulator's server through `server_argv`, and takes x86 glibc and drivers from a graphics provider. binfmt_misc is not needed. | VERIFIED IN SOURCE ([steam-runtime-emulator.json.5.md](https://github.com/llyyr/steam-runtime-tools/blob/2691ca4da05a1979debfc4b4d2cc614831cabd50/docs/steam-runtime-emulator.json.5.md), [CONTRIBUTING.md:108-165](https://github.com/llyyr/steam-runtime-tools/blob/2691ca4da05a1979debfc4b4d2cc614831cabd50/CONTRIBUTING.md#L108-L165)) |
 | Neither: Proton ARM64 | - | The whole process is aarch64. Proton bundles a pinned FEX as Wine-internal DLLs (`aarch64-windows`, `arm64ec-windows`) plus an `aarch64-unix` unixlib. It does not use Linux FEX, binfmt_misc or `emulator.json`. | VERIFIED IN SOURCE ([Makefile.in:848-890](https://github.com/ValveSoftware/Proton/blob/5b89db940e0ebe3a137a6009a3589232fe084c09/Makefile.in#L848-L890), [proton](https://github.com/ValveSoftware/Proton/blob/5b89db940e0ebe3a137a6009a3589232fe084c09/proton) lines 549-556, 1646-1680, 2036-2048) |
 
@@ -428,7 +433,7 @@ where `lxrun` stands on each.
   `LXRT_MOUNTS` (`runtime/mounts.h:1-13`).
 - An x86 or i386 ELF exec'd inside the container is handed to
   `/usr/lib/lxrt-emu/FEX`, as binfmt_misc would do on Linux (VERIFIED IN
-  SOURCE, `runtime/main.c:357-390`; MEASURED,
+  SOURCE, `runtime/main.c:387-420`; MEASURED,
   `benchmarks/stage8-steam-zero-vm.txt:99-101`).
 - `steam-runtime-check-requirements` passes by actually running its bwrap
   probe (MEASURED, `benchmarks/stage8-steam-zero-vm.txt:105-106`).
@@ -443,6 +448,9 @@ where `lxrun` stands on each.
 - pressure-vessel under FEX is slow. It took 142 s to reach the webhelper
   before a `/proc/self/fd` fix and 27 s after (MEASURED,
   `benchmarks/stage8-steam-zero-vm.txt:121-122, 220-225`).
+- stage21 re-checked this route after its runtime changes: the x86 Steam
+  login window came up 85 s after start, and `tests/win` passed 11/11
+  (MEASURED, `benchmarks/stage21-native-arm64-client.txt`).
 
 ### 4.2 FEX_ROOTFS and interpreter-root mode: what SteamARM measured
 
@@ -452,18 +460,19 @@ should stay `/`. SteamARM's own record says the opposite.
 
 | what | evidence | label |
 |---|---|---|
-| The Steam client's environment has `FEX_ROOTFS=/`, and the Steam root is an x86-64 tree used as `/`. (`docs/CURRENT_STEAM_ENVIRONMENT.md:120` shows this variable.) | `scripts/run-app.sh:153, 334`; `scripts/run-steam.sh:88`; `scripts/mksteamroot.sh:1-10` | VERIFIED IN SOURCE |
-| FEXServer always starts with `FEX_ROOTFS=/tmp/fexhome/.local/share/fex-emu/RootFS/Ubuntu_24_04` and `LXRT_ROOT=/tmp/lxrt-root`, whoever starts it. | `scripts/run-fex.sh:44-52, 67` | VERIFIED IN SOURCE |
-| One FEXServer serves every FEX client of the user and hands each client its own rootfs path. So the client's `FEX_ROOTFS=/` is not what pressure-vessel sees; FEXServer's rootfs is. | `scripts/run-fex.sh:46-52`; `benchmarks/stage8-steam-zero-vm.txt:321-325` | MEASURED |
-| Started from a Steam run with `FEX_ROOTFS=/`, FEXServer told pressure-vessel the interpreter root was `/`. pressure-vessel set up no `/run/pressure-vessel/interpreter-root`. FEX found the container's empty `proc/` first, and every steamwebhelper zygote died: `FATAL thread_helpers.cc: fstatat(/proc, "self/task/") ENOENT`. | `benchmarks/stage8-steam-zero-vm.txt:321-325`; `scripts/run-fex.sh:48-51` | MEASURED |
+| The Steam client's environment has `FEX_ROOTFS=/`, and the Steam root is an x86-64 tree used as `/`. (`docs/CURRENT_STEAM_ENVIRONMENT.md:120` shows this variable.) | `scripts/run-app.sh:170, 354`; `scripts/run-steam.sh:92`; `scripts/mksteamroot.sh:1-10` | VERIFIED IN SOURCE |
+| FEXServer starts with `FEX_ROOTFS=/tmp/fexhome/.local/share/fex-emu/RootFS/Ubuntu_24_04` and `LXRT_ROOT=/tmp/lxrt-root`, whoever starts it. Since the merge of main (`dfab6e2`), `FEX_SERVER_ROOTFS` and `FEX_SERVER_LXRT_ROOT` can override the two. The comments reserve that for an isolated root, such as a Holo Core smoke test. | `scripts/run-fex.sh:38-41, 51-59, 81-85` | VERIFIED IN SOURCE |
+| One FEXServer serves every FEX client of the user and hands each client its own rootfs path. So the client's `FEX_ROOTFS=/` is not what pressure-vessel sees; FEXServer's rootfs is. | `scripts/run-fex.sh:53-59`; `benchmarks/stage8-steam-zero-vm.txt:321-325` | MEASURED |
+| Started from a Steam run with `FEX_ROOTFS=/`, FEXServer told pressure-vessel the interpreter root was `/`. pressure-vessel set up no `/run/pressure-vessel/interpreter-root`. FEX found the container's empty `proc/` first, and every steamwebhelper zygote died: `FATAL thread_helpers.cc: fstatat(/proc, "self/task/") ENOENT`. | `benchmarks/stage8-steam-zero-vm.txt:321-325`; `scripts/run-fex.sh:55-58` | MEASURED |
 | With FEX's CPUID leaves hidden from every program, pressure-vessel did not detect FEX, built no interpreter root, and the zygotes died the same way. The leaves are now hidden from the `steam` executable only (`AppConfig/steam.json`). After that the Steam UI came up. | `benchmarks/stage15-steam-proton-path.txt:77-83`; `scripts/install-steamroot-gfx.sh:100-105` | MEASURED |
 | Inside the container, pressure-vessel binds the real `resolv.conf` over the FEX rootfs image's empty one at `/run/pressure-vessel/interpreter-root/etc/resolv.conf`. FEX resolves guest paths relative to its rootfs descriptor. Lookups relative to a directory descriptor ignored the binds, so every Chromium request failed with `ERR_NAME_NOT_RESOLVED`. They now go through the bind table (`at_through_mounts`: `openat`, `openat2`, `fstatat`, `statx`, `faccessat(2)`, `readlinkat`). | `benchmarks/stage8-steam-zero-vm.txt:326-332`; `runtime/dispatch.c:303-309` | MEASURED |
 
 **The measured behaviour.** SteamARM's working Steam session runs the x86
 pressure-vessel in interpreter-root mode, and needs it. What pressure-vessel
 takes as FEX's rootfs is the rootfs FEXServer serves, not the client's
-`FEX_ROOTFS=/`. Keep FEXServer's rootfs at a real directory, never `/`, and
-keep FEX's CPUID leaves visible to pressure-vessel. The research
+`FEX_ROOTFS=/`. Keep FEXServer's rootfs at a real directory, never `/`
+(`FEX_SERVER_ROOTFS` included), and keep FEX's CPUID leaves visible to
+pressure-vessel. The research
 implication is dropped. Only its reading of pressure-vessel stands: a rootfs
 of exactly `/` turns the mode off (VERIFIED IN SOURCE, §3.3), which is the
 failure SteamARM measured.
@@ -521,7 +530,9 @@ Around the options (VERIFIED IN SOURCE unless marked):
   on Linux and through `mounts.c` under the runtime. The record says 11/11
   on both before `--chmod` was added (MEASURED,
   `benchmarks/stage6-steam-gap.txt:105-114`). `tests/elf/run.sh` now expects
-  12/12.
+  12/12 (`tests/elf/run.sh:444-458`). stage21's `tests/elf` 37/37 on the Mac
+  ran on main's tree, whose test still expected 11/11 (MEASURED; VERIFIED IN
+  SOURCE at `9e7bc2b`). So 12/12 has not run on a Mac yet.
 
 ### 4.4 The ARM64 tools, as SteamARM has seen them
 
@@ -533,21 +544,32 @@ Around the options (VERIFIED IN SOURCE unless marked):
   no ARM64 Proton, and only Valve's native arm64 client lists them. Both are
   in the record (`docs/CURRENT_STEAM_ENVIRONMENT.md` §1).
 - SLR 4.0 - Arm64 has not been run under `lxrun` (UNKNOWN;
-  `docs/CURRENT_STEAM_ENVIRONMENT.md` §5.3).
+  `docs/CURRENT_STEAM_ENVIRONMENT.md` §5.3). The Mac's audit of 2026-09-28
+  found it installed in the x86 client's library, with Proton 11 ARM64 and
+  Experimental ARM64 (MEASURED, `docs/CURRENT_STEAM_ENVIRONMENT.md`,
+  appendix). `scripts/install-arm-proton-tools.sh` clones the three into the
+  native client's library (VERIFIED IN SOURCE,
+  `scripts/install-arm-proton-tools.sh:35-39`). stage21 records no run of
+  them.
 - Proton 11.0 (ARM64), PROPRIETARY_DO_NOT_REDISTRIBUTE: `wine cmd` run
   natively under `lxrun` could not reserve 0x10000-0x68000000 and
   0x7f000000-0x7fff0000, and exited in 2 s (MEASURED,
   `benchmarks/stage18-settings-audio-controllers.txt:135-149`). macOS keeps
   the low 4 GiB of every arm64 process unmapped, and unmodified Wine maps
   `user_shared_data` at 0x7ffe0000 and exits if it cannot (VERIFIED IN
-  SOURCE, `benchmarks/stage19-steamframe-base-and-arm64-limits.txt` §2).
+  SOURCE, `benchmarks/stage19-steamframe-base-and-arm64-limits.txt` §2). A
+  probe whose `__PAGEZERO` was shrunk at link time was still killed at
+  0x7ffe0000 (MEASURED, stage18 follow-up of 2026-09-28). SteamARM's
+  launcher refuses ARM64 Proton for Windows apps (VERIFIED IN SOURCE,
+  `scripts/proton-command.py:37-38`).
 
 ## 5. What this means for SteamARM
 
 ### 5.1 Implications
 
 1. **Interpreter-root mode is load-bearing today.** Keep FEXServer's rootfs
-   at the Ubuntu 24.04 directory, never `/`. Keep the CPUID leaves visible
+   at the Ubuntu 24.04 directory, never `/`, and do not point
+   `FEX_SERVER_ROOTFS` at `/` either. Keep the CPUID leaves visible
    to everything but `steam`. (MEASURED, §4.2.)
 2. **SLR 4.0 arm64 ships pressure-vessel.** `docs/CURRENT_STEAM_ENVIRONMENT.md`
    §5.1 held this as a HYPOTHESIS. It is now a COMMUNITY OBSERVATION: the
@@ -565,7 +587,10 @@ Around the options (VERIFIED IN SOURCE unless marked):
 5. **The ARM64 client probably needs a native pressure-vessel before any
    game.** The x86 client starts its own UI through pressure-vessel
    (MEASURED, `benchmarks/stage6-steam-gap.txt:57-58`). HYPOTHESIS: the
-   ARM64 client does the same with the steamrt3c arm64 runtime.
+   ARM64 client does the same with the steamrt3c arm64 runtime. stage21
+   started the native client's UI process tree in a root where
+   `steam-runtime-launcher-service` was missing (MEASURED). Whether
+   pressure-vessel ran there is not recorded (UNKNOWN).
 6. **SteamARM could keep its own FEX under an ARM64 client.**
    `PRESSURE_VESSEL_EMULATOR` wins over the client's `STEAM_COMPAT_EMULATOR`
    (VERIFIED IN SOURCE). Valve's FEX tool (3127680) lacks SteamARM's
@@ -581,13 +606,16 @@ Around the options (VERIFIED IN SOURCE unless marked):
    needs 0x7ffe0000, which macOS cannot map (MEASURED and VERIFIED IN
    SOURCE, `stage18`, `stage19` §2). Windows games stay on x86 Proton under
    FEX, inside the x86 SLR 4.0.
-9. **Page size is the first risk for native aarch64 Steam code.** A packager
-   reports that Valve's aarch64 client crashes with SIGSEGV on a 16K-page
-   Asahi kernel and runs in a 4K-page guest (COMMUNITY OBSERVATION,
+9. **Page size: handled for the client, open for pressure-vessel.** A
+   packager reports that Valve's aarch64 client crashes with SIGSEGV on a
+   16K-page Asahi kernel and runs in a 4K-page guest (COMMUNITY OBSERVATION,
    [steam-arm64-nix README](https://github.com/Mr-Banana-Egg/steam-arm64-nix/blob/5d236a5a13d9ee34e743beedb3755db3e56677ca/README.md)).
-   `lxrun` publishes `AT_PAGESZ` 16384 (VERIFIED IN SOURCE,
-   `runtime/stack.c:113`, `runtime/lxrt.h:19`). Whether pressure-vessel
-   minds: UNKNOWN.
+   `lxrun` publishes `AT_PAGESZ` 16384 by default, and 4096 with
+   `LXRT_GUEST_PAGE=4096` (VERIFIED IN SOURCE, `runtime/stack.c:21-34, 134`,
+   `runtime/lxrt.h:19`). Under 16384, glibc refused the client's 4 KiB-aligned
+   `steamui.so`; under 4096 the client loaded `steamui.so` and
+   `steamclient.so` (MEASURED, stage21). Whether pressure-vessel needs the
+   same: UNKNOWN.
 
 ### 5.2 The native arm64 pressure-vessel under lxrun, without FEX
 
@@ -598,19 +626,19 @@ then for x86 payloads.
 | # | requirement | where SteamARM stands | label |
 |---|---|---|---|
 | 1 | Steam installs app 4185400, or the x86 SLR 4.0 carries `pressure-vessel-arm64/`. SteamARM must not ship either; Steam downloads them on the user's Mac. | The x86 client installed SLR 4.0 - Arm64 once, when it saw FEX's leaves (§4.4). The `pressure-vessel-arm64/` copy is reported by the community (§3.1). | MEASURED; COMMUNITY OBSERVATION |
-| 2 | An aarch64 root with `/bin/sh`: `_v2-entry-point` is a POSIX sh script, and `run` execs `pressure-vessel-unruntime` (§3.1). | The Fedora aarch64 root `/tmp/lxrt-root` exists. The ARM64 base `/tmp/lxrt-arm64root` is not created yet (`docs/CURRENT_STEAM_ENVIRONMENT.md` §3). `scripts/run-native.sh` runs `lxrun` with no FEX and unsets `FEX_ROOTFS` (`scripts/run-native.sh:29`). | VERIFIED IN SOURCE |
-| 3 | Loadable ELF files. `lxrun` refuses an aarch64 `ET_EXEC`, and an executable or `ld.so` whose `p_align` is not a multiple of 16 KiB (`runtime/elf.c:113-122, 146-149`). | The x86 pressure-vessel tools are all `ET_EXEC` (MEASURED, `stage7-guest-base.txt:276-283`). The aarch64 builds come from the steamrt3c arm64 SDK (VERIFIED IN SOURCE, §3.1). Whether they, and the steamrt4 arm64 `ld.so`, are PIE and 16 KiB-aligned is UNKNOWN. HYPOTHESIS: PIE, as Debian-based toolchains default to it. If they are `ET_EXEC`, this route is closed. | UNKNOWN |
-| 4 | x18. aarch64 Linux code uses x18 as an ordinary register, and Darwin zeroes it on every exception return. | MEASURED (`benchmarks/stage5-x18.txt`). `lxrun` rewrites x18 uses in every aarch64 image it loads (`docs/CURRENT_STEAM_ENVIRONMENT.md` §8). HYPOTHESIS: nothing new is needed. | MEASURED; HYPOTHESIS |
-| 5 | Page size. | `AT_PAGESZ` is 16384 (§5.1 item 9). pressure-vessel under 16 KiB pages: UNKNOWN. | UNKNOWN |
+| 2 | An aarch64 root with `/bin/sh`: `_v2-entry-point` is a POSIX sh script, and `run` execs `pressure-vessel-unruntime` (§3.1). | The Fedora aarch64 root `/tmp/lxrt-root` exists. `scripts/mkarmroot.sh` builds a second Fedora 43 aarch64 root, with bash, for Valve's native client at `$STEAMARM_STATE/armroot` (VERIFIED IN SOURCE); stage21 ran the client in it (MEASURED). The Frame-derived ARM64 base behind `/tmp/lxrt-arm64root` is still built by no script (`docs/CURRENT_STEAM_ENVIRONMENT.md` §3). `scripts/run-native.sh` runs `lxrun` with no FEX and unsets `FEX_ROOTFS` (`scripts/run-native.sh:29`). It defaults `LXRT_ROOT` to `/tmp/lxrt-arm64root` (`scripts/run-native.sh:19`). | VERIFIED IN SOURCE; MEASURED |
+| 3 | Loadable ELF files. `lxrun` refuses an aarch64 `ET_EXEC` (`runtime/elf.c:113-122`), and a PT_LOAD whose `p_align` is not a multiple of 4 KiB (`runtime/elf.c:147-157`). Since stage21, an executable or `ld.so` aligned to 4 KiB but not 16 KiB loads, with its protections kept per 4 KiB by `subpage.c` (`runtime/elf.c:209-225`). | The x86 pressure-vessel tools are all `ET_EXEC` (MEASURED, `stage7-guest-base.txt:276-283`). The aarch64 builds come from the steamrt3c arm64 SDK (VERIFIED IN SOURCE, §3.1). Whether they, and the steamrt4 arm64 `ld.so`, are PIE is UNKNOWN. HYPOTHESIS: PIE, as Debian-based toolchains default to it. If they are `ET_EXEC`, this route is closed. Alignment is less of a risk now: Valve's 4 KiB-aligned native client loaded this way (MEASURED, stage21). | VERIFIED IN SOURCE; MEASURED; UNKNOWN |
+| 4 | x18. aarch64 Linux code uses x18 as an ordinary register, and Darwin zeroes it on every exception return. | MEASURED (`benchmarks/stage5-x18.txt`). `lxrun` rewrites x18 uses in the aarch64 code it loads. Since stage21 it touches only words inside the function ranges of a file's `.eh_frame`, when the file has one. A file whose path contains the value of `LXRT_X18_ALL_TEXT` gets the whole-text pass (VERIFIED IN SOURCE, `runtime/elfsect.c:129-139, 184-205, 290-298`; `runtime/rewrite.c:324-331`). stage21 needed the filter for the client's static OpenSSL, and x18 rewriting over all of libcef's text, which uses x18 outside its FDEs (MEASURED). HYPOTHESIS: pressure-vessel needs nothing new, unless it too uses x18 outside its FDEs. | MEASURED; VERIFIED IN SOURCE; HYPOTHESIS |
+| 5 | Page size. | `AT_PAGESZ` is 16384, or 4096 with `LXRT_GUEST_PAGE=4096` (§5.1 item 9). The native client needed 4096 (MEASURED, stage21). pressure-vessel's needs: UNKNOWN. | VERIFIED IN SOURCE; MEASURED; UNKNOWN |
 | 6 | bwrap. pressure-vessel test-runs its bundled aarch64 `srt-bwrap`. | `lxrun` catches an exec by the basename `bwrap` or `srt-bwrap`, whatever the architecture (`runtime/process.c:86-91`). `PRESSURE_VESSEL_BWRAP` can name the candidate, but it must still end in `bwrap` or `srt-bwrap` for `lxrun` to catch it. HYPOTHESIS: the aarch64 plan reaches `mounts.c` unchanged. | VERIFIED IN SOURCE; HYPOTHESIS |
 | 7 | The plan. | Every option in the arm64 capture has a case (§4.3). Gaps: the 256-bind limit (UNKNOWN whether the plan exceeds it); `--remount-ro` and `--ro-bind-data` are not read-only (VERIFIED IN SOURCE; HYPOTHESIS: harmless). | as marked |
 | 8 | No interpreter-root mode (§3.3). | The emulator binds in `mounts.c` are skipped when their directories do not exist (`runtime/mounts.c:299-311`), so a no-FEX root gets none. | VERIFIED IN SOURCE |
 | 9 | The host view: `/proc/self/root` as a directory, walked with `openat(O_PATH\|O_NOFOLLOW)`. | `lxrun` answers `/proc/self/root` with `LXRT_ROOT` (`runtime/procfs.c:573`) and implements Linux `O_PATH` semantics (MEASURED for the x86 pressure-vessel under FEX, `stage7-guest-base.txt:312`, `stage8-steam-zero-vm.txt:107-108`). HYPOTHESIS: the same for a native one, since FEX forwards to the same system calls. | MEASURED; HYPOTHESIS |
 | 10 | `d_type` consistent with `readlinkat` (the Termux crash, §3.6); hard links for `PRESSURE_VESSEL_COPY_RUNTIME=1`. | `lxrun` converts Darwin `d_type` values to Linux ones (`runtime/dirents.c:122`). The x86 pressure-vessel builds its runtime copy under `lxrun` (MEASURED, `stage8-steam-zero-vm.txt:114-117`). | VERIFIED IN SOURCE; MEASURED |
-| 11 | Locks and process control. pressure-vessel uses OFD locks, and pv-adverb uses `PR_SET_CHILD_SUBREAPER` and `PR_SET_PDEATHSIG` (from the research, without line references: HYPOTHESIS). | `lxrun` maps OFD locks onto Darwin process locks (`runtime/fsflags.c:153-159`). `prctl` options without a Darwin meaning, including those two, return 0 and do nothing (`runtime/dispatch.c:2621-2663`). The x86 pv-adverb already runs with this (MEASURED, `stage15-steam-proton-path.txt:72-75`). HYPOTHESIS: an orphaned grandchild is not reparented to pv-adverb, unlike on Linux. | VERIFIED IN SOURCE; HYPOTHESIS |
+| 11 | Locks and process control. pressure-vessel uses OFD locks, and pv-adverb uses `PR_SET_CHILD_SUBREAPER` and `PR_SET_PDEATHSIG` (from the research, without line references: HYPOTHESIS). | `lxrun` maps OFD locks onto Darwin process locks (`runtime/fsflags.c:153-159`). `prctl` options without a Darwin meaning, including those two, return 0 and do nothing (`runtime/dispatch.c:2626-2668`). The x86 pv-adverb already runs with this (MEASURED, `stage15-steam-proton-path.txt:72-75`). HYPOTHESIS: an orphaned grandchild is not reparented to pv-adverb, unlike on Linux. | VERIFIED IN SOURCE; HYPOTHESIS |
 | 12 | No namespaces. pressure-vessel leaves them all to bwrap and shares PID and IPC by default (§3.5). | `mounts.c` turns the mount namespace into a per-process path view and refuses `--unshare-*`. Never set `PRESSURE_VESSEL_SHARE_PID=0`. | VERIFIED IN SOURCE |
-| 13 | Graphics for an aarch64 payload. pressure-vessel takes drivers from the root it treats as the host. | HYPOTHESIS: SteamARM's `libvulkan.so.1` shim and its ICD JSON in the aarch64 root, with Qualcomm ICDs moved aside (`docs/STEAM_FRAME_IMAGE.md`). An aarch64 program links the shim directly (MEASURED, `benchmarks/stage4-shim.txt`). | HYPOTHESIS |
-| 14 | x86 payloads in that container (FEX comes back here): an `emulator.json` and a graphics provider (§3.2). | HYPOTHESIS: a SteamARM-owned `emulator.json` naming `lxrun`'s patched FEX-emu (an ELF, as required), FEXServer through `server_argv` with the `READY=1` protocol, aarch64 `libc.so.6` and `libstdc++.so.6` in `/`, and `PRESSURE_VESSEL_GRAPHICS_PROVIDER` pointing at the x86 rootfs with the thunks and the shim. FEXServer today is started detached with `--persistent=0` (`scripts/run-fex.sh:61-75`), not as a child that exits on stdin EOF. Whether SteamARM's Ubuntu 24.04 rootfs has `/graphics_provider.json`: UNKNOWN. This inverts `scripts/mksteamroot.sh`: `/` becomes aarch64 and x86 comes from the provider. | HYPOTHESIS |
+| 13 | Graphics for an aarch64 payload. pressure-vessel takes drivers from the root it treats as the host. | HYPOTHESIS: SteamARM's `libvulkan.so.1` shim and its ICD JSON in the aarch64 root, with Qualcomm ICDs moved aside (`docs/STEAM_FRAME_IMAGE.md`). An aarch64 program links the shim directly (MEASURED, `benchmarks/stage4-shim.txt`). `scripts/mkarmroot.sh` already installs the shim as that root's `/usr/lib64/libvulkan.so.1` (VERIFIED IN SOURCE, `scripts/mkarmroot.sh:70-71`). | HYPOTHESIS |
+| 14 | x86 payloads in that container (FEX comes back here): an `emulator.json` and a graphics provider (§3.2). | HYPOTHESIS: a SteamARM-owned `emulator.json` naming `lxrun`'s patched FEX-emu (an ELF, as required), FEXServer through `server_argv` with the `READY=1` protocol, aarch64 `libc.so.6` and `libstdc++.so.6` in `/`, and `PRESSURE_VESSEL_GRAPHICS_PROVIDER` pointing at the x86 rootfs with the thunks and the shim. FEXServer today is started detached with `--persistent=0` (`scripts/run-fex.sh:76-85`), not as a child that exits on stdin EOF. Whether SteamARM's Ubuntu 24.04 rootfs has `/graphics_provider.json`: UNKNOWN. This inverts `scripts/mksteamroot.sh`: `/` becomes aarch64 and x86 comes from the provider. | HYPOTHESIS |
 
 ### 5.3 Next steps
 
@@ -619,6 +647,7 @@ then for x86 payloads.
    shape changes between releases.
 2. On the Mac, run `tests/elf/run.sh`. It now expects 12/12 from the bwrap
    test, which covers the `--chmod` fix under `lxrun` for the first time.
+   stage21's 37/37 predates the fix (§4.3).
 3. Add `--bind-fd` and `--ro-bind-fd` to `mounts.c` (the fd's path through
    `F_GETPATH`, as `at_through_mounts` already does), and accept `--size`.
    Add a case for each to `tests/elf/bwrap_test.c`. Decide whether
@@ -626,13 +655,15 @@ then for x86 payloads.
 4. On the next Steam run with `LXRT_TRACE=1`, read the `bwrap: <n> mounts`
    line (`runtime/mounts.c:551`) for each plan and compare it with the
    256-bind limit.
-5. Once Steam has installed SLR 4.0 - Arm64 (or the x86 SLR 4.0 with
-   `pressure-vessel-arm64/`), check its `pressure-vessel-wrap`, `pv-adverb`,
-   `srt-bwrap` and the platform's `ld-linux-aarch64.so.1` with
-   `llvm-readelf -h -l`: `ET_DYN` or `ET_EXEC`, and each `p_align`. Read
-   them in place; do not copy them out of the Steam install.
+5. SLR 4.0 - Arm64 is installed in the x86 client's library (MEASURED,
+   §4.4). Check its `pressure-vessel-wrap`, `pv-adverb`, `srt-bwrap` and the
+   platform's `ld-linux-aarch64.so.1` with `llvm-readelf -h -l`: `ET_DYN` or
+   `ET_EXEC`, and each `p_align` (a multiple of 4 KiB is enough now, §5.2
+   row 3). Read them in place; do not copy them out of the Steam install.
 6. If they load: run that `pressure-vessel-wrap --version` through
-   `scripts/run-native.sh` in the Fedora root. Then run the depot's
+   `scripts/run-native.sh`, with `LXRT_ROOT` set to the root that
+   `scripts/mkarmroot.sh` builds, and `LXRT_GUEST_PAGE=4096` if the files
+   are 4 KiB-aligned. Then run the depot's
    `_v2-entry-point --verb=run -- true` with `LXRT_TRACE=1`, and compare its
    plan with §4.3.
 7. From the Mac, read `https://repo.steampowered.com/steamrt4/apt/dists/steamrt4/Release`

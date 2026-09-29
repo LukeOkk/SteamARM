@@ -62,6 +62,9 @@ Steam environment, audited),
 [STEAM_FRAME_IMAGE.md](docs/STEAM_FRAME_IMAGE.md),
 [STEAM_FRAME_REFERENCE.md](docs/STEAM_FRAME_REFERENCE.md),
 [HOLO_CORE_ARM64_AUDIT.md](docs/HOLO_CORE_ARM64_AUDIT.md),
+[STEAM_FRAME_SNAPSHOT_2026-09-29.md](docs/STEAM_FRAME_SNAPSHOT_2026-09-29.md)
+(web research on Frame releases and Holo Core, checked against the Mac's
+records),
 [STEAM_FRAME_COMPAT_TOOLS.md](docs/STEAM_FRAME_COMPAT_TOOLS.md),
 [STEAM_RUNTIME_4_ARM64.md](docs/STEAM_RUNTIME_4_ARM64.md) and
 [LEPTON_REUSE_ANALYSIS.md](docs/LEPTON_REUSE_ANALYSIS.md).

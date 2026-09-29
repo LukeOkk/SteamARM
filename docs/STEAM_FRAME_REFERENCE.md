@@ -58,3 +58,11 @@ decisiones de arquitectura. Separar packages genéricos Arch ARM64 de firmware,
 kernel, drivers, servicios del dispositivo y capas propietarias específicas
 de Snapdragon/Frame. Un archivo presente en recovery no pasa automáticamente
 a ser redistribuible o necesario en ZERO-VM.
+
+## Investigación web del 2026-09-29
+
+La investigación web del 2026-09-29 sobre canales, imágenes de recovery,
+bundles de actualización y árboles de paquetes está en
+`STEAM_FRAME_SNAPSHOT_2026-09-29.md` (en inglés). Sus datos son investigación
+web con etiquetas de evidencia, no mediciones hechas en el Mac. Donde coinciden
+con las mediciones de este archivo, esa página lo indica y las cita.
