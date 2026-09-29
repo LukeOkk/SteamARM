@@ -43,6 +43,7 @@ the Fedora VM that was deleted on 2026-09-27; they are history, and
 | 19 | `stage19-steamframe-base-and-arm64-limits.txt` | 09-28 | reading the Steam Frame image without btrfs-progs; the macOS limits on ARM64 Proton (written without a Mac; labelled) |
 | 20 | `stage20-ci-macos-runner.txt` | 09-29 | first build and tests on a GitHub macOS runner (a virtual M1, not the M4); x18 preserved for a pre-13 SDK binary there |
 | 21 | `stage21-native-arm64-client.txt` | 09-27..29 | Valve's native arm64 client under lxrun: starts, self-updates, loads its UI libraries, no window yet |
+| 23 | `stage23-native-arm64-jit.txt` | 09-29 | V8's JIT in the native arm64 client: RWX pages split W^X per page and scanned before they execute, the host SIGSEGV/SIGBUS handler kept under a guest SIG_DFL; the login window with the JIT on, also from the launcher |
 
 ## After stage 21 (no stage file)
 

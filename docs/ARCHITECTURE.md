@@ -63,6 +63,11 @@ of that come the pieces the Linux tools expect:
   16 KiB host pages, through `runtime/subpage.c`. With
   `LXRT_GUEST_PAGE=4096` the guest sees AT_PAGESZ 4096, so glibc dlopens
   such libraries (stage 21).
+- **Read-write-execute pages for native guests** (V8's code range):
+  `runtime/wxsplit.c` keeps each 16 KiB host page either read-write or
+  read-execute, flips on faults, and scans a page read-only before it
+  becomes executable, whichever thread wrote it. FEX keeps MAP_JIT and its
+  guest-requested switch (`runtime/jit.c`) (stage 23).
 - **One process group per launcher session**, with an exit status
   (`scripts/session.py`, `docs/APPLICATION_MANAGER.md`).
 

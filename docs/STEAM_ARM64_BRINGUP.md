@@ -1,10 +1,17 @@
 # Valve's native arm64 Steam client under lxrun
 
-Status on 2026-09-29: the client starts, updates itself, loads `steamui.so`
-and `steamclient.so`, and starts its webhelper. It does not reach a window.
-The working route is still the x86 client under FEX. This page collects the
-bring-up (`benchmarks/stage21-native-arm64-client.txt`), the Mac's logs as
-read by the 2026-09-29 audit, and the analysis of the abort.
+Status on 2026-09-29 (stage 23): the client reaches its "Sign in to Steam"
+window with V8's JIT on, from `scripts/run-steam-arm64.sh` and from the
+launcher (`scripts/run-app.sh steam-arm64`); login itself was not tried
+(MEASURED, `benchmarks/stage23-native-arm64-jit.txt`). Stage 22 reached the
+same window only with `--jitless`
+(`benchmarks/stage22-native-arm64-bringup.txt`); stage 23 split V8's
+read-write-execute code pages W^X per page (`runtime/wxsplit.c`) and kept
+the runtime's SIGSEGV/SIGBUS handler when the guest resets them to SIG_DFL.
+The working route for games is still the x86 client under FEX. The sections
+below are the earlier bring-up (`benchmarks/stage21-native-arm64-client.txt`),
+the Mac's logs as read by the 2026-09-29 audit, and the analysis of the
+abort, kept as written.
 
 Labels: MEASURED (a command and its result), VERIFIED IN SOURCE (file:line),
 UPSTREAM DOCUMENTED, HYPOTHESIS, UNKNOWN. Logs are in

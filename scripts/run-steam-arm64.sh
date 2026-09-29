@@ -15,14 +15,14 @@
 # The client's own logs are in <root>/tmp/armhome/.local/share/Steam/logs.
 # --for SECONDS stops the session after that long. Stopping it (--for,
 # Ctrl-C) signals only the processes this run started, by PID.
-# --jitless: a WORKAROUND, not a fix. V8 in the webhelper's renderers asks for
-#   read-write-execute code pages; the runtime grants them read-write only
-#   (runtime/dispatch.c, do_mprotect_inner), so every renderer dies on its
-#   first JIT call and the login window never comes. This adds
-#   --js-flags=--jitless to Valve's steamwebhelper.sh for the session (and
-#   -noverifyfiles, or the client restores the file at start), then puts the
-#   original back. If this script is killed first, the client's own file
-#   verification restores it on the next normal start (MEASURED).
+# --jitless: no longer needed (stage 23): V8's read-write-execute code pages
+#   are split W^X page by page by the runtime (runtime/wxsplit.c) and the
+#   login window comes with the JIT on. Kept as a control and a fallback: it
+#   adds --js-flags=--jitless to Valve's steamwebhelper.sh for the session
+#   (and -noverifyfiles, or the client restores the file at start), then
+#   puts the original back. If this script is killed first, the client's own
+#   file verification restores it on the next normal start (MEASURED).
+# LXRT_WX_STATS=/host/file collects the renderers' W^X flip counters.
 # LXRT_* variables are passed through. LXRT_X18_ALL_TEXT defaults to
 # libcef.so: libcef has x18 uses outside its FDEs (stage 21, change 5).
 set -u

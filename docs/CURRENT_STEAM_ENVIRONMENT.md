@@ -385,6 +385,13 @@ Behaviours of the Steam client that the runtime handles specially
   - with the rule, when it executes its code (a fault).
 - This does not stop the network process, which runs no JS; the NSS FATAL
   comes first. It stops the renderers.
+- Update, stage 23 (`benchmarks/stage23-native-arm64-jit.txt`): none of
+  the ways below was needed. The runtime now keeps each 16 KiB page of a
+  native guest's RWX range either read-write or read-execute and flips it on
+  faults, scanning a page read-only before it becomes executable
+  (`runtime/wxsplit.c`); with the runtime's SIGSEGV/SIGBUS handler kept when
+  the zygote resets them to SIG_DFL, the unpatched V8 JITs and the login
+  window comes (MEASURED). What follows is the analysis as it stood.
 - The likely ways out:
   - run steamwebhelper with `--js-flags=--jitless` (no JIT and no
     WebAssembly; slower JS), set in the derived root's `steamwebhelper.sh`;
