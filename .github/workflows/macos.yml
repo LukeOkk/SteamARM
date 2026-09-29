@@ -1,5 +1,6 @@
 # Build and test on a macOS Apple Silicon runner, and publish a release when a
-# v* tag is pushed. The runner is a GitHub-hosted macOS arm64 machine: it
+# v* tag is pushed, or when the workflow is run by hand on main with a tag
+# name in "release" (gh then creates the tag on that commit). The runner is a GitHub-hosted macOS arm64 machine: it
 # builds everything the Makefile builds and runs the tests that need no Linux
 # roots (tests/elf, tests/win and Steam need a full setup on a real Mac).
 name: macOS
@@ -10,6 +11,11 @@ on:
     tags: ["v*"]
   pull_request:
   workflow_dispatch:
+    inputs:
+      release:
+        description: "Publish a release with this tag (e.g. v0.3.4), created on the dispatched commit of main"
+        required: false
+        default: ""
 
 permissions:
   contents: read
@@ -39,11 +45,13 @@ jobs:
         run: tests/x18_preserve/run.sh
 
   release:
-    if: startsWith(github.ref, 'refs/tags/v')
+    if: startsWith(github.ref, 'refs/tags/v') || (github.event.inputs.release != '' && github.ref == 'refs/heads/main')
     needs: build-test
     runs-on: macos-15
     permissions:
       contents: write
+    env:
+      TAG: ${{ github.event.inputs.release || github.ref_name }}
     steps:
       - uses: actions/checkout@v4
 
@@ -56,16 +64,17 @@ jobs:
       - name: Version matches the tag
         run: |
           v=$(/usr/libexec/PlistBuddy -c "Print :CFBundleShortVersionString" launcher/Info.plist.in)
-          [ "v$v" = "$GITHUB_REF_NAME" ] || { echo "Info.plist.in says $v, tag is $GITHUB_REF_NAME"; exit 1; }
+          [ "v$v" = "$TAG" ] || { echo "Info.plist.in says $v, tag is $TAG"; exit 1; }
 
       - name: Publish
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          v=${GITHUB_REF_NAME#v}
-          notes=docs/releases/$GITHUB_REF_NAME.md
+          v=${TAG#v}
+          notes=docs/releases/$TAG.md
           [ -f "$notes" ] || { echo "missing $notes"; exit 1; }
-          gh release create "$GITHUB_REF_NAME" --title "SteamARM $v" --notes-file "$notes" --prerelease \
+          # --target only matters when the tag does not exist yet (a run by hand).
+          gh release create "$TAG" --target "$GITHUB_SHA" --title "SteamARM $v" --notes-file "$notes" --prerelease \
               build/release/SteamARM-$v-macOS-arm64.dmg \
               build/release/SteamARM-$v-macOS-arm64.zip \
               build/release/SHA256SUMS.txt
