@@ -1,50 +1,101 @@
-FEX: a shared mapping made writable drops the translations of its mirrors (SteamARM)
+FEX: SMC tracking of shared memory with an executable view, on 16 KiB host pages (SteamARM)
 
 SMC tracking (mtrack) write-protects every writable view of shared memory
 whose code FEX translated through another view (MarkGuestExecutableRange).
-A guest mprotect that makes such a view writable again lifts that
-protection on the host, and FEX only invalidated translations in the
-mprotected range itself, where there are none: later writes through the
-view rewrote code whose translations FEX kept running. ART's JIT code
-cache is exactly that: a memfd mapped as an executable view and a writable
-view, and ScopedCodeCacheWrite flips the writable view from read-only to
-read-write around every code write. After code cache collections reused
-memory, x86-64 ART under FEX ran old methods' code and computed wrong
-results, 3 runs of 3 (MEASURED; correct with FEX_SMCCHECKS=full;
-SteamARM benchmarks/stage25-art-x86-fex.txt, tests/android/run.sh). Now the
-mirrors' translations of the range are invalidated when a shared mapping
-becomes writable; running that code again translates it and protects the
-view again. Nothing changes for private memory or with other SMC modes.
+Two holes, both hit by x86-64 ART's JIT code cache, a memfd mapped as an
+executable view and a writable view:
+
+1. A guest mprotect that makes such a writable view writable again lifted
+   that protection on the host, and FEX only invalidated translations in the
+   mprotected range itself, where there are none. ART's ScopedCodeCacheWrite
+   flips the writable view read-write around every code write, so rewrites
+   of freed code went unseen. Now the host pages of that view which alias an
+   executable view stay read-only (the guest sees them writable); each first
+   write faults once and is handled below.
+2. The fault handler's shared-memory branch flushed and unprotected one
+   4 KiB page of each mirror, while under the runtime the SMC page of a
+   64-bit guest is the 16 KiB host page (fex-lxrt-guest-base.patch):
+   unprotecting 4 KiB makes the whole host page writable, and writes to the
+   other three guest pages of it went unseen. It now flushes and unprotects
+   the same SMC page as the non-shared branch, clipped to the mapping, in
+   every mirror.
+
+MEASURED (SteamARM benchmarks/stage25-art-x86-fex.txt): after code cache
+collections ART ran old methods' code and computed wrong results, 3 runs of
+3; correct with FEX_SMCCHECKS=full. tests/android/x86_dualview.c, stale
+results of 2304: 89 before (2.), 2112 with "toggle" (1. and 2.), 0 after;
+with 1. alone, 89. Invalidating every mirror's
+translations at each mprotect instead (a first version of this patch) was
+correct but made a JIT-heavy run 4.4 times slower. The first write after the
+host mprotect(RW) and before the re-protection is the one window left; ART
+writes its code cache from one thread under a lock.
 
 diff --git a/Source/Tools/LinuxEmulation/LinuxSyscalls/SyscallsSMCTracking.cpp b/Source/Tools/LinuxEmulation/LinuxSyscalls/SyscallsSMCTracking.cpp
 --- a/Source/Tools/LinuxEmulation/LinuxSyscalls/SyscallsSMCTracking.cpp
 +++ b/Source/Tools/LinuxEmulation/LinuxSyscalls/SyscallsSMCTracking.cpp
-@@ -541,6 +541,7 @@
+@@ -118,20 +118,35 @@
+     if (Entry->second.Flags.Shared) {
+       LOGMAN_THROW_A_FMT(Entry->second.Resource, "VMA tracking error");
  
- uint64_t SyscallHandler::GuestMprotect(FEXCore::Core::InternalThreadState* Thread, void* addr, size_t len, int prot) {
-   uint64_t Result {};
-+  fextl::vector<std::pair<uint64_t, uint64_t>> MirrorRanges;
+-      auto Offset = FaultBase - Entry->first + Entry->second.Offset;
++      // The whole SMC page (a 16 KiB host page under the runtime, for 64-bit
++      // guests), clipped to this mapping: MarkGuestExecutableRange protected
++      // the writable mirrors that way, and unprotecting one 4 KiB page of a
++      // host page makes the whole host page writable. Flushing only the
++      // faulting 4 KiB of the mirrors let later writes to the rest of that
++      // host page go unseen: ART's JIT code cache (a memfd mapped twice, an
++      // executable view and a writable one) reused freed code and FEX ran
++      // stale translations of the old methods (MEASURED: wrong results after
++      // code cache collections, SteamARM benchmarks/stage25-art-x86-fex.txt).
++      const auto SpanBase = std::max<uint64_t>(FEXCore::AlignDown(FaultAddress, SMCPage), Entry->first);
++      const auto SpanTop = std::min<uint64_t>(FEXCore::AlignDown(FaultAddress, SMCPage) + SMCPage, Entry->first + Entry->second.Length);
++      const auto OffsetBase = SpanBase - Entry->first + Entry->second.Offset;
++      const auto OffsetTop = SpanTop - Entry->first + Entry->second.Offset;
  
-   {
-     auto lk = FEXCore::GuardSignalDeferringSection(VMATracking.Mutex, Thread);
-@@ -559,9 +560,48 @@
+       auto VMA = Entry->second.Resource->FirstVMA;
+       LOGMAN_THROW_A_FMT(VMA, "VMA tracking error");
+ 
+-      // Flush all mirrors, remap the page writable as needed
++      // Flush all mirrors, remap the pages writable as needed
+       do {
+-        if (VMA->Offset <= Offset && (VMA->Offset + VMA->Length) > Offset) {
+-          auto FaultBaseMirrored = Offset - VMA->Offset + VMA->Base;
++        const auto MirrorOffsetBase = std::max<uint64_t>(VMA->Offset, OffsetBase);
++        const auto MirrorOffsetTop = std::min<uint64_t>(VMA->Offset + VMA->Length, OffsetTop);
++        if (MirrorOffsetBase < MirrorOffsetTop) {
++          auto FaultBaseMirrored = MirrorOffsetBase - VMA->Offset + VMA->Base;
++          const auto MirrorLength = MirrorOffsetTop - MirrorOffsetBase;
+ 
+           if (VMA->Prot.Writable) {
+-            _SyscallHandler->TM.InvalidateGuestCodeRange(Thread, FaultBaseMirrored, FEXCore::Utils::FEX_PAGE_SIZE, UnprotectRegionCallback);
++            _SyscallHandler->TM.InvalidateGuestCodeRange(Thread, FaultBaseMirrored, MirrorLength, UnprotectRegionCallback);
+           } else {
+-            _SyscallHandler->TM.InvalidateGuestCodeRange(Thread, FaultBaseMirrored, FEXCore::Utils::FEX_PAGE_SIZE);
++            _SyscallHandler->TM.InvalidateGuestCodeRange(Thread, FaultBaseMirrored, MirrorLength);
+           }
+         }
+       } while ((VMA = VMA->ResourceNextVMA));
+@@ -559,6 +574,55 @@
      }
  
      TrackMprotect(Thread, addr, len, prot);
 +
-+    // Shared memory made writable: the host mprotect just lifted the write
-+    // protection SMC tracking had put on this view of memory whose code was
-+    // translated through another view of it (MarkGuestExecutableRange
-+    // protects every writable mirror), so its next rewrites would go unseen.
-+    // Drop the translations of every view of the range now; running that code
-+    // again translates it again and protects this view again. ART's JIT
-+    // flips the writable view of its code cache (a memfd mapped twice) from
-+    // read-only to read-write around every code write (ScopedCodeCacheWrite),
-+    // and x86-64 ART ran stale translations of freed methods after code cache
-+    // collections (MEASURED, SteamARM benchmarks/stage25-art-x86-fex.txt).
++    // A view of shared memory made writable while another view of the same
++    // memory is executable: the host mprotect just lifted the write
++    // protection SMC tracking keeps on every writable mirror of translated
++    // code (MarkGuestExecutableRange), so rewrites through this view would go
++    // unseen. Keep the host pages read-only instead; the guest sees them
++    // writable (VMA tracking), and each first write faults once, is flushed
++    // from the mirrors and unprotected by HandleSegfault, one SMC page at a
++    // time. ART's JIT code cache is such a pair (a memfd mapped as an
++    // executable view and a writable view) and ScopedCodeCacheWrite flips the
++    // writable view read-write around every code write: without this x86-64
++    // ART ran stale translations after code cache collections (MEASURED,
++    // SteamARM benchmarks/stage25-art-x86-fex.txt).
 +    if ((prot & PROT_WRITE) && SMCChecks == FEXCore::Config::CONFIG_SMC_MTRACK) {
 +      const auto Base = reinterpret_cast<uint64_t>(addr);
 +      const auto Top = Base + FEXCore::AlignUp(len, FEXCore::Utils::FEX_PAGE_SIZE);
++      const auto SMCPage = SMCPageSize();
 +      auto Mapping = VMATracking.VMAs.lower_bound(Top);
 +      while (Mapping != VMATracking.VMAs.begin()) {
 +        --Mapping;
@@ -56,13 +107,23 @@ diff --git a/Source/Tools/LinuxEmulation/LinuxSyscalls/SyscallsSMCTracking.cpp b
 +        if (!Mapping->second.Flags.Shared || !Mapping->second.Resource) {
 +          continue;
 +        }
-+        const auto OffsetBase = std::max(MapBase, Base) - MapBase + Mapping->second.Offset;
-+        const auto OffsetTop = std::min(MapTop, Top) - MapBase + Mapping->second.Offset;
++        const auto Lo = std::max(MapBase, Base);
++        const auto Hi = std::min(MapTop, Top);
++        const auto OffsetLo = Lo - MapBase + Mapping->second.Offset;
++        const auto OffsetHi = Hi - MapBase + Mapping->second.Offset;
 +        for (auto VMA = Mapping->second.Resource->FirstVMA; VMA; VMA = VMA->ResourceNextVMA) {
-+          const auto Lo = std::max<uint64_t>(VMA->Offset, OffsetBase);
-+          const auto Hi = std::min<uint64_t>(VMA->Offset + VMA->Length, OffsetTop);
-+          if (Lo < Hi && VMA->Base != MapBase) {
-+            MirrorRanges.emplace_back(Lo - VMA->Offset + VMA->Base, Hi - Lo);
++          const auto MirrorLo = std::max<uint64_t>(VMA->Offset, OffsetLo);
++          const auto MirrorHi = std::min<uint64_t>(VMA->Offset + VMA->Length, OffsetHi);
++          if (MirrorLo >= MirrorHi || VMA->Base == MapBase || !VMA->Prot.Executable) {
++            continue;
++          }
++          // This view's pages that alias executable memory, whole SMC pages,
++          // clipped to the range the guest mprotected.
++          const auto ProtLo = std::max(Lo, FEXCore::AlignDown(MirrorLo - OffsetLo + Lo, SMCPage));
++          const auto ProtHi = std::min(Hi, FEXCore::AlignUp(MirrorHi - OffsetLo + Lo, SMCPage));
++          if (ProtLo < ProtHi) {
++            auto rv = ::mprotect(FEX::HLE::G2H(reinterpret_cast<void*>(ProtLo)), ProtHi - ProtLo, PROT_READ);
++            LogMan::Throw::AFmt(rv == 0, "mprotect({}, {}) failed", ProtLo, ProtHi - ProtLo);
 +          }
 +        }
 +      }
@@ -70,9 +131,3 @@ diff --git a/Source/Tools/LinuxEmulation/LinuxSyscalls/SyscallsSMCTracking.cpp b
    }
  
    InvalidateCodeRangeIfNecessary(Thread, reinterpret_cast<uint64_t>(addr), len, false);
-+  for (const auto& [MirrorBase, MirrorLength] : MirrorRanges) {
-+    TM.InvalidateGuestCodeRange(Thread, MirrorBase, MirrorLength);
-+  }
- 
-   // Prepare for delayed code cache load after ld/Wine is done applying relocations.
-   // Hooking into mprotect is a reliable heuristic that matches behavior of ld (for ELF) and Wine (for PE).

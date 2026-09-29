@@ -11,10 +11,12 @@
 //        toggle  the writable view is read-only except around each write,
 //                which mprotect()s it read-write and back, as ART's
 //                ScopedCodeCacheWrite does. That mprotect lifts the write
-//                protection FEX's SMC tracking put there; FEX has to drop the
-//                executable view's translations when it happens
-//                (patches/fex-lxrt-smc-mprotect-mirrors.patch; without it,
-//                stale results, MEASURED)
+//                protection FEX's SMC tracking put there; FEX has to keep
+//                seeing the writes that follow
+//                (patches/fex-lxrt-smc-mprotect-mirrors.patch, 1.)
+// Without "toggle" it still takes the patch's 2.: two rewrites in one 16 KiB
+// host page between two runs. MEASURED, stale results of 2304 before the
+// patch: 89, and 2112 with toggle; after it, 0.
 //
 // Verdict line: "== x86_dualview: N ok, M mal" (M counts stale results).
 typedef unsigned long u64;
@@ -90,11 +92,19 @@ __attribute__((used)) static void main2(u64 argc, char **argv)
         for (u64 j = 0; j < SLOTS; j++) {
             u64 s = (r & 1) ? j : SLOTS - 1 - j;
             s = (s * 5 + r) % SLOTS;
+            // Two slots per write window, in neighbouring 4 KiB pages of one
+            // 16 KiB host page (4 slots per 4 KiB page), both translated in
+            // an earlier round: the second write must be seen too, although
+            // the first one's fault already made the host page writable.
+            u64 s2 = (s & ~15ul) | ((s + 4) & 15);
             if (toggle) sys3(NR_mprotect, w, SIZE, 3);
             put((volatile unsigned char *)(w + (i64)s * 1024), r * 1000 + s);
+            put((volatile unsigned char *)(w + (i64)s2 * 1024), r * 1000 + s2);
             if (toggle) sys3(NR_mprotect, w, SIZE, 1);
             u64 (*f)(void) = (u64 (*)(void))(x + (i64)s * 1024);
             if ((f() & 0xffffffff) == r * 1000 + s) oks++; else mals++;
+            f = (u64 (*)(void))(x + (i64)s2 * 1024);
+            if ((f() & 0xffffffff) == r * 1000 + s2) oks++; else mals++;
         }
         for (u64 s = 0; s < SLOTS; s++) {
             u64 (*f)(void) = (u64 (*)(void))(x + (i64)s * 1024);
