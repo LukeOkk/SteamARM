@@ -25,6 +25,10 @@ x18_rewrites_ok() {
 deadline() { perl -e 'alarm shift; exec @ARGV' "$@"; }
 
 CROSS_LD=/opt/homebrew/opt/lld/bin/ld.lld
+STAGE="${STEAMARM_BUILD:-$HOME/SteamARM-build}/rootstage-f43"
+GCCDIR=$(ls -d "$STAGE"/usr/lib/gcc/aarch64-redhat-linux/* 2>/dev/null | tail -1)
+glibc_cc() { /opt/homebrew/opt/llvm/bin/clang --target=aarch64-redhat-linux-gnu --sysroot="$STAGE" \
+                    --gcc-install-dir="$GCCDIR" -fuse-ld=lld --ld-path=$CROSS_LD -w "$@" 2>&1; }
 build_guest() {
     clang -target aarch64-unknown-linux-gnu -nostdlib -static-pie -fPIE \
           -fuse-ld=$CROSS_LD -Wl,-e,_start -o "build/$1" "tests/elf/$1.S" 2>&1
@@ -231,7 +235,7 @@ rm -f build/big_text
 
 # 1. The toolchain can still emit a Linux aarch64 PIE from macOS.
 if err=$(build_guest hello); then ok "build hello-linux"; else bad "build hello-linux" "$err"; fi
-if file build/hello 2>/dev/null | grep -q "ELF 64-bit LSB.*ARM aarch64"; then
+if grep -q "ELF 64-bit LSB.*ARM aarch64" <<<"$(file build/hello 2>/dev/null)"; then
     ok "hello is an aarch64 Linux ELF"
 else
     bad "hello is an aarch64 Linux ELF" "$(file build/hello 2>&1)"
@@ -738,6 +742,118 @@ if [ -d "$SYSROOT" ] && [ -d "$GUEST_ROOT/tmp" ] && ! pgrep -qx steamarm-inputd;
     else
         bad "build evdev_test" "$err"
     fi
+fi
+
+
+# ARM64_INITIAL_STACK_BOUNDS: entry stack alignment, auxv right after envp,
+# the pad page above the strings, the main thread's pthread bounds, a 6 MiB
+# recursion, and Linux's argv-then-env string order (stack.c, 0.3.4 had env
+# below argv). Run by absolute path: see the known failure below.
+if [ -f "$STAGE/usr/lib64/libc.a" ] && [ -n "$GCCDIR" ]; then
+    if err=$(glibc_cc -static-pie -O1 -pthread -o build/stack_bounds tests/elf/stack_bounds.c); then
+        out16=$(deadline 30 ./build/lxrun "$PWD/build/stack_bounds" a bb ccc 2>&1); rc16=$?
+        out4=$(LXRT_GUEST_PAGE=4096 deadline 30 ./build/lxrun "$PWD/build/stack_bounds" a bb ccc 2>&1); rc4=$?
+        if [ "$rc16" -eq 0 ] && [ "$rc4" -eq 0 ] &&
+           grep -q '== stack bounds: ok' <<<"$out16" && grep -q '== stack bounds: ok' <<<"$out4"; then
+            ok "ARM64_INITIAL_STACK_BOUNDS: entry alignment, auxv after envp, pad page, main-thread bounds, 6 MiB recursion, Linux string order (16 KiB and 4 KiB AT_PAGESZ)"
+        else
+            bad "ARM64_INITIAL_STACK_BOUNDS" "rc=$rc16/$rc4 $(grep FAIL <<<"$out16"; grep FAIL <<<"$out4")"
+        fi
+        # procfs.c keeps the program path as given, so readlink(/proc/self/exe)
+        # is relative when lxrun got a relative path; Linux's is absolute and
+        # static glibc asserts on it (MEASURED: _dl_get_origin, SIGABRT).
+        out=$(deadline 30 ./build/lxrun build/stack_bounds 2>&1); rc=$?
+        if [ "$rc" -eq 134 ] && grep -q "_dl_get_origin" <<<"$out"; then
+            xfail "/proc/self/exe is relative when lxrun is given a relative path" "static glibc: _dl_get_origin assertion, rc=134"
+        elif [ "$rc" -eq 0 ]; then
+            ok "relative program path (XPASS: /proc/self/exe is absolute now)"
+        else
+            bad "relative program path" "rc=$rc $(grep -v '^\[lxrt\]' <<<"$out" | tail -3)"
+        fi
+    else bad "build stack_bounds" "$err"; fi
+else
+    echo "  skip  ARM64_INITIAL_STACK_BOUNDS (no $STAGE)"
+fi
+
+# ARM64_AUXV_LAYOUT: a dynamic program checks every auxv pair against what
+# glibc and ld.so report, at AT_PAGESZ 16384 and at LXRT_GUEST_PAGE=4096, and
+# dlopens a 4 KiB-aligned library: refused at 16 KiB, loaded at 4 KiB. Its
+# written counter sits on its own host page (the W/X livelock above).
+if [ -f "$STAGE/usr/lib64/libc.a" ] && [ -n "$GCCDIR" ] &&
+   [ -f "$GUEST_ROOT/lib64/libc.so.6" ] && [ -f "$GUEST_ROOT/lib/ld-linux-aarch64.so.1" ]; then
+    # A private two-file guest root under build/ (ld.so and libc from the
+    # guest root): nothing is written into the shared root other guests use.
+    AUX_ROOT="$PWD/build/auxv-root"
+    mkdir -p "$AUX_ROOT/lib" "$AUX_ROOT/lib64" "$AUX_ROOT/tmp"
+    if ! cp "$GUEST_ROOT/lib/ld-linux-aarch64.so.1" "$AUX_ROOT/lib/" ||
+       ! cp "$GUEST_ROOT/lib64/libc.so.6" "$AUX_ROOT/lib64/"; then
+        bad "prepare auxv_layout guest root" "$GUEST_ROOT"
+    elif err=$(glibc_cc -O2 -pthread -o "$AUX_ROOT/tmp/auxv_layout" tests/elf/auxv_layout.c) &&
+       err=$(glibc_cc -shared -fPIC -O2 -Wl,-z,max-page-size=4096 -Wl,-z,common-page-size=4096 \
+                      -o "$AUX_ROOT/tmp/libpg4k.so" tests/elf/libpg4k.c); then
+        headers=$(/opt/homebrew/opt/llvm/bin/llvm-readelf -lW "$AUX_ROOT/tmp/libpg4k.so")
+        symbols=$(/opt/homebrew/opt/llvm/bin/llvm-readelf -sW "$AUX_ROOT/tmp/libpg4k.so")
+        counter=$(awk '$8 == "pg4k_counter" { print $2; exit }' <<<"$symbols")
+        precond=0
+        if [ -n "$counter" ]; then
+            aligned=$(awk '$1 == "LOAD" && $NF == "0x1000" { print 1; exit }' <<<"$headers")
+            read -r exec_start exec_size <<<"$(awk '$1 == "LOAD" && $8 == "E" { print $3, $6; exit }' <<<"$headers")"
+            counter_addr=$((16#$counter))
+            data_segment=0
+            while read -r data_start data_size; do
+                if [ "$counter_addr" -ge "$((data_start))" ] &&
+                   [ "$counter_addr" -lt "$((data_start + data_size))" ]; then data_segment=1; fi
+            done <<<"$(awk '$1 == "LOAD" && $7 == "RW" { print $3, $6 }' <<<"$headers")"
+            if [ "${aligned:-0}" -eq 1 ] && [ -n "$exec_start" ] && [ "$data_segment" -eq 1 ] &&
+               { [ $((counter_addr / 16384)) -lt $((exec_start / 16384)) ] ||
+                 [ $((counter_addr / 16384)) -gt $(((exec_start + exec_size - 1) / 16384)) ]; }; then
+                precond=1
+            fi
+        fi
+        if [ "$precond" -eq 1 ]; then
+            out16=$(LXRT_ROOT="$AUX_ROOT" deadline 30 ./build/lxrun /tmp/auxv_layout 16384 /tmp/libpg4k.so 2>&1); rc16=$?
+            out4=$(LXRT_ROOT="$AUX_ROOT" LXRT_GUEST_PAGE=4096 deadline 30 ./build/lxrun /tmp/auxv_layout 4096 /tmp/libpg4k.so 2>&1); rc4=$?
+            if [ "$rc16" -eq 0 ] && [ "$rc4" -eq 0 ] &&
+               grep -q '== auxv layout: ok (pagesz 16384)' <<<"$out16" &&
+               grep -q '== auxv layout: ok (pagesz 4096)' <<<"$out4"; then
+                ok "ARM64_AUXV_LAYOUT: auxv pairs, AT_PAGESZ 16384 and 4096 (LXRT_GUEST_PAGE), 4 KiB library refused at 16 KiB and loaded at 4 KiB"
+            else bad "ARM64_AUXV_LAYOUT" "rc=$rc16/$rc4 $(grep FAIL <<<"$out16"; grep FAIL <<<"$out4")"; fi
+        else bad "4 KiB DSO precondition" "$(grep LOAD <<<"$headers") counter=$counter"; fi
+    else bad "build auxv_layout/libpg4k" "$err"; fi
+else
+    echo "  skip  ARM64_AUXV_LAYOUT (no $STAGE or $GUEST_ROOT/lib64/libc.so.6)"
+fi
+
+# X18_THREAD_ISOLATION: nine threads keep distinct values in x18 through
+# 20000 raw syscalls each, with signals to one of them whose handler writes x18.
+if [ -f "$STAGE/usr/lib64/libc.a" ] && [ -n "$GCCDIR" ]; then
+    if err=$(glibc_cc -static-pie -O2 -pthread -o build/x18_threads tests/elf/x18_threads.c); then
+        out=$(deadline 60 ./build/lxrun "$PWD/build/x18_threads" 2>&1); rc=$?
+        if [ "$rc" -eq 0 ] && grep -q '== x18 threads: ok' <<<"$out"; then
+            ok "X18_THREAD_ISOLATION: 9 threads x 20000 syscalls keep their own x18 (signals included)"
+        else bad "X18_THREAD_ISOLATION" "rc=$rc $(grep -E 'FAIL|thread [0-9]+: bad=' <<<"$out")"; fi
+    else bad "build x18_threads" "$err"; fi
+else
+    echo "  skip  X18_THREAD_ISOLATION (no $STAGE)"
+fi
+
+# CEF_FILE_BACKED_MAPPING_FAST_PATH: a 4 KiB-offset file mapping whose 16 KiB
+# interior is mapped straight from the file (subpage.c); LXRT_NO_FAST_SUBPAGE
+# takes the copy path and must read the same bytes.
+if [ -f "$STAGE/usr/lib64/libc.a" ] && [ -n "$GCCDIR" ]; then
+    if err=$(glibc_cc -static-pie -O2 -o build/fast_subpage tests/elf/fast_subpage.c); then
+        out=$(deadline 30 ./build/lxrun --trace "$PWD/build/fast_subpage" 2>&1); rc=$?
+        control=$(LXRT_NO_FAST_SUBPAGE=1 deadline 30 ./build/lxrun --trace "$PWD/build/fast_subpage" 2>&1); control_rc=$?
+        if [ "$rc" -eq 0 ] && [ "$control_rc" -eq 0 ] &&
+           grep -q '== fast subpage: ok' <<<"$out" &&
+           grep -q 'subpage file interior mapped directly' <<<"$out" &&
+           grep -q '== fast subpage: ok' <<<"$control" &&
+           ! grep -q 'subpage file interior mapped directly' <<<"$control"; then
+            ok "CEF_FILE_BACKED_MAPPING_FAST_PATH: 4 KiB-offset file mapping served from the file (copy path agrees)"
+        else bad "CEF_FILE_BACKED_MAPPING_FAST_PATH" "rc=$rc/$control_rc $(grep -E 'FAIL|subpage file interior mapped directly' <<<"$out"; grep -E 'FAIL|subpage file interior mapped directly' <<<"$control")"; fi
+    else bad "build fast_subpage" "$err"; fi
+else
+    echo "  skip  CEF_FILE_BACKED_MAPPING_FAST_PATH (no $STAGE)"
 fi
 
 echo
