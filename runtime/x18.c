@@ -262,7 +262,11 @@ void lxrt_x18_plan(uint32_t i, uint64_t site, uint64_t tramp,
     if (!lxrt_x18_touches(i)) return;
     bool sb, sd;
     int cls, fields = lxrt_x18_gpr_fields(i, &sb, &sd, &cls);
-    if (cls == X18_CLS_LDST_EXCL) { reject(p, "exclusive"); return; }
+    /* LDAR/STLR (bit 23) share the exclusive group but hold no exclusive
+     * monitor, so the plain trampoline keeps their semantics (libcef's
+     * renderer: ldar w18, [x16]). An SP base stays refused. */
+    bool ordered = cls == X18_CLS_LDST_EXCL && (i & (1u << 23)) && reg_at(i, 5) != 31;
+    if (cls == X18_CLS_LDST_EXCL && !ordered) { reject(p, "exclusive"); return; }
     if (cls == X18_CLS_CASP) { reject(p, "casp pair"); return; }
     if (sd && reg_at(i, 0) == 31) { reject(p, "writes sp"); return; }
     /* NZCV (mrs x18, nzcv / msr nzcv, x18: libcef's multiprecision code
@@ -402,6 +406,7 @@ void lxrt_x18_plan(uint32_t i, uint64_t site, uint64_t tramp,
     case X18_CLS_LDST_UIMM: case X18_CLS_LDST_UNSCALED:
     case X18_CLS_LDST_PRE_POST: case X18_CLS_LDST_REGOFF: case X18_CLS_LDST_PAIR:
     case X18_CLS_CAS: case X18_CLS_ATOMIC: case X18_CLS_ADDSUB_IMM:
+    case X18_CLS_LDST_EXCL: /* ordered only, see above */
     case X18_CLS_SIMD_LDST: case X18_CLS_FP_INT: case X18_CLS_SIMD_COPY:
     case X18_CLS_DP_REG: case X18_CLS_DP_IMM:
         emit(p, j); break;

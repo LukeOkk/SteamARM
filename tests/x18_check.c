@@ -77,6 +77,13 @@ static void selftest(void) {
     expect_fields(0xf8320040, 11, X18_CLS_ATOMIC, true, false);
     expect_fields(0xd53bd052, 1, X18_CLS_SYSREG, false, false);
     unsupported(0xc8127c20, "exclusive");
+    unsupported(0xc85ffc12, "exclusive"); /* ldaxr x18, [x0] */
+    struct x18_plan o = plan(0x88dffe12); /* ldar w18, [x16]: no monitor */
+    CHECK(o.verdict == X18_OK && o.nwords == 8 && o.words[4] == 0x88dffe00);
+    o = plan(0x88dffe52); /* ldar w18, [x18] */
+    CHECK(o.verdict == X18_OK && o.nwords == 8 && o.words[4] == 0x88dffc00);
+    o = plan(0x889ffe12); /* stlr w18, [x16] */
+    CHECK(o.verdict == X18_OK && o.nwords == 8 && o.words[4] == 0x889ffe00);
     unsupported(0x4872fc20, "casp pair");
     struct x18_plan branch = plan(0xd61f0240);
     CHECK(branch.verdict == X18_OK && branch.terminal && branch.nwords == 7);
