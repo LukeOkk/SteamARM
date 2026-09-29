@@ -122,26 +122,28 @@ After extraction, the tree is a complete ARM64 userspace. To use it as the
 native Steam client's root:
 
 - keep the extracted copy untouched, and derive the root from it as an APFS
-  clone on the same volume. Then link the derived root where the launcher
-  looks for the ARM64 base (`/tmp/lxrt-arm64root`, which is also the
-  `LXRT_ROOT` default of `scripts/run-native.sh`):
+  clone on the same volume, linked where the launcher looks for the ARM64
+  base (`/tmp/lxrt-arm64root`, which is also the `LXRT_ROOT` default of
+  `scripts/run-native.sh`). `scripts/mkframeroot.sh` does this (stage 23):
 
   ```sh
-  cp -cR /Volumes/SteamFrameRoot/rootfs /Volumes/SteamFrameRoot/arm64root
-  ln -sfn /Volumes/SteamFrameRoot/arm64root ~/SteamARM-roots/arm64root
+  scripts/mkframeroot.sh      # /Volumes/SteamFrameRoot/rootfs -> .../arm64root,
+                              # linked as ~/SteamARM-roots/arm64root
   scripts/env-links.sh        # links /tmp/lxrt-arm64root while the volume is attached
   ```
 
-- add SteamARM's `libvulkan.so.1` shim and its ICD JSON;
-- move Qualcomm-only ICDs and services aside in the derived root, not in the
-  extracted copy;
-- keep `tmp/` as runtime state.
+  It adds only `etc/resolv.conf`, the host's `etc/localtime` and
+  `.lxrt-guest-env` (indirect GLX: the image's Mesa has no software driver),
+  keeps `tmp/` (the client's home) across rebuilds, and can seed a client
+  home with `--home-from DIR`. Valve's native arm64 client reaches its
+  login window on it (MEASURED, `benchmarks/stage23-frame-root.txt`).
+- SteamARM's Vulkan shim (`build/libvulkan.so.1`) as the root's
+  `libvulkan.so.1`: the image has only the freedreno ICD. The image's
+  `vulkaninfo` lists the Apple M4 through the shim on `LD_LIBRARY_PATH`
+  (MEASURED, stage 23 V1). It is not needed for the login window and not
+  installed yet;
+- moving Qualcomm-only ICDs and services aside: not needed so far, not done.
 
 The image has no FEX (no FEX binaries, no `binfmt.d` rules; MEASURED), so
-x86 payloads keep using SteamARM's own FEX. None of these steps has been
-done yet: they write under `~/SteamARM-roots` and need the owner's go-ahead.
-Their order is in `docs/ARM64_FIRST_MIGRATION.md` (steps 6-8).
-
-This has to be measured on the Mac with lxrun (steamwebhelper past
-BrowserReady, network process alive, Steam UI, Settings → Compatibility).
-It cannot be done from a machine without lxrun.
+x86 payloads keep using SteamARM's own FEX. The order of the remaining
+steps is in `docs/ARM64_FIRST_MIGRATION.md`.
