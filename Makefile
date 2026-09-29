@@ -72,6 +72,11 @@ lxrt: build/lxrun build/hello-linux
 test-lxrt: lxrt
 	./tests/elf/run.sh
 
+# Inspect native arm64 Steam images without starting the client.
+.PHONY: test-arm64
+test-arm64: lxrt
+	./tests/arm64/run.sh
+
 # ---------------------------------------------------------------- vulkan shim
 # An ELF libvulkan.so.1 whose entry points tail-call into Mach-O MoltenVK
 # (or, with STEAMARM_VK_ICD=kosmickrisp, Mesa's KosmicKrisp: shim/gen.py)

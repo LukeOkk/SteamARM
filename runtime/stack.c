@@ -107,17 +107,21 @@ void *lxrt_build_stack(const struct lxrt_image *img, int argc, char **argv,
         return NULL;
     }
 
-    for (int i = argc - 1; i >= 0; i--) {
-        size_t n = strlen(argv[i]) + 1;
-        strp -= n;
-        memcpy(strp, argv[i], n);
-        argv_ptr[i] = (uint64_t)strp;
-    }
+    // Linux's order, upward: argv strings, then env strings, contiguous
+    // (fs/exec.c copies them top-down, env first). setproctitle-style code
+    // that reuses the argv area for a title expects env to follow it; up to
+    // 0.3.4 env sat below argv here (tests/elf/stack_bounds.c checks it).
     for (int i = envc - 1; i >= 0; i--) {
         size_t n = strlen(envp[i]) + 1;
         strp -= n;
         memcpy(strp, envp[i], n);
         envp_ptr[i] = (uint64_t)strp;
+    }
+    for (int i = argc - 1; i >= 0; i--) {
+        size_t n = strlen(argv[i]) + 1;
+        strp -= n;
+        memcpy(strp, argv[i], n);
+        argv_ptr[i] = (uint64_t)strp;
     }
 
     // AT_RANDOM points at 16 bytes the guest reads for its stack canary.
