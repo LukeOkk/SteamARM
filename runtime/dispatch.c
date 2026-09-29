@@ -11,12 +11,14 @@
 // fails reports which call it lacked rather than dying anonymously.
 
 #include "lxrt.h"
+#include "offmap.h"
 
 #include <errno.h>
 #include <dlfcn.h>
 #include <mach/mach.h>
 #include <mach/mach_vm.h>
 #include <fcntl.h>
+#include <libkern/OSCacheControl.h>
 #include <limits.h>
 #include <mach/mach_time.h>
 #include <stdatomic.h>
@@ -724,6 +726,36 @@ static int region_tag(uint64_t addr)
     return (int)t;
 }
 
+// Is the region holding addr shared memory -- MAP_SHARED anonymous memory,
+// shm, a MAP_SHARED file, pages shared with a fork child -- whose contents
+// Linux keeps across MADV_DONTNEED (it only drops this process's page-table
+// entries)? Darwin's mmap gives every MAP_SHARED mapping VM_INHERIT_SHARE;
+// the share mode alone says SM_PRIVATE while this process is the object's
+// only mapper (MEASURED: a 20 KiB MAP_SHARED|MAP_ANONYMOUS region was taken
+// for private memory, replaced by zeros and detached from its object).
+static bool region_shared(uint64_t addr)
+{
+    mach_vm_address_t ra = addr;
+    mach_vm_size_t rs = 0;
+    vm_region_basic_info_data_64_t ri;
+    mach_msg_type_number_t rc = VM_REGION_BASIC_INFO_COUNT_64;
+    mach_port_t obj = MACH_PORT_NULL;
+    if (mach_vm_region(mach_task_self(), &ra, &rs, VM_REGION_BASIC_INFO_64,
+                       (vm_region_info_t)&ri, &rc, &obj) != KERN_SUCCESS || ra > addr)
+        return false;
+    if (ri.inheritance == VM_INHERIT_SHARE)
+        return true;
+    mach_vm_address_t xa = addr;
+    mach_vm_size_t xs = 0;
+    vm_region_extended_info_data_t xi;
+    mach_msg_type_number_t xc = VM_REGION_EXTENDED_INFO_COUNT;
+    if (mach_vm_region(mach_task_self(), &xa, &xs, VM_REGION_EXTENDED_INFO,
+                       (vm_region_info_t)&xi, &xc, &obj) != KERN_SUCCESS || xa > addr)
+        return false;
+    return xi.share_mode == SM_TRUESHARED || xi.share_mode == SM_SHARED_ALIASED ||
+           (xi.share_mode == SM_SHARED && ri.shared);
+}
+
 // madvise. Most advice is advisory and the constants differ, so unknown
 // advice is accepted and ignored. Two are NOT advisory on Linux:
 // MADV_DONTNEED (4) and MADV_REMOVE (9) on anonymous private memory make the
@@ -759,21 +791,12 @@ static long do_madvise(uint64_t addr, uint64_t len, int ladvice)
         if (ra > p) { p = ra; continue; }            // a hole: nothing to clear
         uint64_t seg_end = ra + rs < hend ? ra + rs : hend;
         bool file = region_is_file(p);
-        // Shared memory (MAP_SHARED anonymous, shm, fork-inherited shared
-        // pages) keeps its contents on Linux: MADV_DONTNEED only drops this
-        // process's page-table entries. Replacing it with fresh private
-        // memory would detach it from the other processes and lose data.
-        bool shared = false;
-        {
-            mach_vm_address_t xa = p; mach_vm_size_t xs = 0;
-            vm_region_extended_info_data_t xi;
-            mach_msg_type_number_t xc = VM_REGION_EXTENDED_INFO_COUNT;
-            mach_port_t xo = MACH_PORT_NULL;
-            if (mach_vm_region(mach_task_self(), &xa, &xs, VM_REGION_EXTENDED_INFO,
-                               (vm_region_info_t)&xi, &xc, &xo) == KERN_SUCCESS && xa <= p)
-                shared = xi.share_mode == SM_TRUESHARED || xi.share_mode == SM_SHARED_ALIASED ||
-                         (xi.share_mode == SM_SHARED && ri.shared);
-        }
+        // Shared memory keeps its contents on Linux (region_shared).
+        // Replacing it with fresh private memory would detach it from the
+        // other processes and lose data. (MADV_REMOVE would punch a hole in
+        // shmem, which reads back zeros; kept here too -- zeroing it would
+        // commit every page of a range the guest asked to release.)
+        bool shared = region_shared(p);
         if (shared) {
             static _Atomic int said;
             if (atomic_fetch_add(&said, 1) < 4)
@@ -803,7 +826,14 @@ static long do_madvise(uint64_t addr, uint64_t len, int ladvice)
         // it has. Accepted silently: nothing measured depends on it yet.
         p = seg_end;
     }
-    // The unaligned ends, when the page is writable right now.
+    // The unaligned ends, part of a host page the range shares with memory
+    // outside it: zeroed in place when writable right now, and only where
+    // Linux gives zeros. Not a file mapping: a private page reads back the
+    // file on Linux (kept as it is, like the aligned part above; unwritten,
+    // that IS the file) and a memset through a shared one would write zeros
+    // into the file. Not shared memory under MADV_DONTNEED, which keeps its
+    // contents. A 4 KiB-offset file mapping (offmap.c) always starts partway
+    // into a host page, so both reach here with every such mapping.
     for (int side = 0; side < 2; side++) {
         uint64_t lo = side == 0 ? addr : hend, hi = side == 0 ? hstart : end;
         if (lo >= hi) continue;
@@ -813,7 +843,8 @@ static long do_madvise(uint64_t addr, uint64_t len, int ladvice)
         if (mach_vm_region(mach_task_self(), &ra, &rs, VM_REGION_BASIC_INFO_64,
                            (vm_region_info_t)&ri, &rc, &obj) == KERN_SUCCESS &&
             ra <= lo && (ri.protection & VM_PROT_WRITE) && !lxrt_jit_contains(lo) &&
-            region_tag(lo) == 0)
+            region_tag(lo) == 0 && !region_is_file(lo) &&
+            !(ladvice == 4 && region_shared(lo)))
             memset((void *)lo, 0, (size_t)(hi - lo));
     }
     return 0;
@@ -833,8 +864,12 @@ static long do_munmap(uint64_t addr, uint64_t len)
 {
     static int knob = -1;                       // LXRT_PLAIN_MUNMAP=1: bisecting aid
     if (knob < 0) knob = getenv("LXRT_PLAIN_MUNMAP") ? 1 : 0;
-    if (knob)
-        return ret_of(munmap((void *)addr, (size_t)len));
+    if (knob) {
+        long r = ret_of(munmap((void *)addr, (size_t)len));
+        if (r == 0)
+            lxrt_offmap_disown(addr, len);
+        return r;
+    }
     if (addr % 4096 || !len)
         return LERR(EINVAL);
     if (host_heap_hit(addr, len, "munmap"))
@@ -848,6 +883,12 @@ static long do_munmap(uint64_t addr, uint64_t len)
     lxrt_privmap_forget(addr, len);
     if (hstart < hend && munmap((void *)hstart, (size_t)(hend - hstart)) != 0)
         return LERR(errno);
+    // A partly covered page at either end that belongs to a 4 KiB-offset file
+    // mapping (offmap.c) holds nothing else: it goes with its last guest byte.
+    uint64_t dead[2];
+    int ndead = lxrt_offmap_unmapped(addr, len, dead);
+    for (int i = 0; i < ndead; i++)
+        lxrt_subpage_forget(dead[i], LXRT_HOST_PAGE);
     return 0;
 }
 
@@ -967,6 +1008,10 @@ static long do_mmap(uint64_t addr, uint64_t len, long prot, long lflags,
         lxrt_shmirror_forget(addr, len);
         lxrt_wx_forget(addr, len);     // a new mapping is not the old RWX range
     }
+    // Something placed into the host pages of a 4 KiB-offset file mapping
+    // makes them no longer that mapping's alone (offmap.c).
+    if ((flags & MAP_FIXED) || (lflags & LINUX_MAP_FIXED_NOREPLACE))
+        lxrt_offmap_disown(addr, len);
     // A private mapping of a shared-memory file keeps seeing the file's
     // updates until the guest writes, as on Linux (privmap.c: wine's session
     // objects). Aligned ranges only; the whole host pages are replaced, so the
@@ -1243,13 +1288,17 @@ static long do_mmap(uint64_t addr, uint64_t len, long prot, long lflags,
     // 16 KiB host page is EINVAL for Darwin's mmap. Without MAP_FIXED any
     // address will do: map from the host page below and return the address
     // of the offset asked for (the native arm64 webhelper's shared-memory
-    // pool, grown 64 KiB at a time: its window never drew, stage22). The
-    // head of that first host page stays mapped until the page goes.
+    // pool, grown 64 KiB at a time: its window never drew, stage22). The head
+    // of the first host page and the tail of the last are nobody's; offmap.c
+    // records them so munmap frees them with the guest's last byte there.
     uint64_t head = (uint64_t)off % LXRT_HOST_PAGE;
     if (head && fd >= 0 && !(flags & MAP_FIXED) && !exec_map) {
         void *hp = mmap(NULL, (size_t)(len + head), use_prot, flags, (int)fd, (off_t)(off - head));
         if (hp == MAP_FAILED)
             return LERR(errno);
+        lxrt_offmap_note((uint64_t)(uintptr_t)hp,
+                         (uint64_t)(uintptr_t)hp + LXRT_ALIGN_UP(len + head, LXRT_HOST_PAGE),
+                         (uint64_t)(uintptr_t)hp + head, len);
         return (long)((uintptr_t)hp + head);
     }
 
@@ -1305,6 +1354,136 @@ static long do_mmap(uint64_t addr, uint64_t len, long prot, long lflags,
 
 static long do_mprotect_inner(uint64_t addr, uint64_t len, long prot);
 
+// The host protection of the region holding p, and where that region ends
+// (clamped to end). False for a hole (then *next is where mapping resumes).
+static bool prot_run(uint64_t p, uint64_t end, vm_prot_t *prot, uint64_t *next)
+{
+    mach_vm_address_t ra = p;
+    mach_vm_size_t rs = 0;
+    vm_region_basic_info_data_64_t ri;
+    mach_msg_type_number_t rc = VM_REGION_BASIC_INFO_COUNT_64;
+    mach_port_t obj = MACH_PORT_NULL;
+    if (mach_vm_region(mach_task_self(), &ra, &rs, VM_REGION_BASIC_INFO_64,
+                       (vm_region_info_t)&ri, &rc, &obj) != KERN_SUCCESS || ra >= end) {
+        *next = end;
+        return false;
+    }
+    if (ra > p) {
+        *next = ra;
+        return false;
+    }
+    *prot = ri.protection;
+    *next = ra + rs < end ? ra + rs : end;
+    return true;
+}
+
+// Hand a range the W^X split holds whole (wxsplit.c) over to protection
+// prot, which is not read-write-execute. [addr, addr+len) is host-page
+// aligned.
+//
+// The split's fault handler owns every page of the range until the range is
+// forgotten; a fault it no longer claims reaches the guest as SIGSEGV. This
+// used to forget the range first and then, for an executable request, open
+// all of it read-write for rewrite_and_seal's scan: a thread running code in
+// it or storing into a read-execute page of it died in between, although both
+// the old protection and the new one allowed what it did (Linux lets such an
+// access through). So, while the handler still owns the pages, each is taken
+// to a state the new protection allows, through the handler itself -- under
+// the split's lock, so no flip of another thread's interleaves with it:
+//   executable request: every page not executable yet is flipped as a fetch
+//     flips it (read-only, scanned, rewritten until clean, read-execute);
+//     pages already read-execute were scanned when they became so. A thread
+//     that fetches meanwhile is claimed and waits for the flip.
+//   writable request: every page not writable is flipped as a store flips it.
+//   read-only or none: nothing -- reads never fault, nothing else is allowed.
+// Then the range is forgotten and the exact protection applied. A page that
+// a racing access took back in between -- a store after its fetch flip, a
+// fetch after its store flip, both forbidden by the new protection -- is put
+// right after the forget: rescanned read-only before it becomes executable,
+// as every executable page is.
+//
+// Not closed here: a thread that faulted while the split still held its page
+// and is still waiting for the split's lock when the range is forgotten finds
+// the range gone, and the handler declines the fault although the page allows
+// the access by then (tests/elf/wx_mprotect_race.c, stress mode: tens of
+// faults in 300 rounds, against ~500000 with the range forgotten first). Only
+// the handler can see that; it has to recheck the page under its lock.
+static long wx_leave_whole(uint64_t addr, uint64_t len, int prot)
+{
+    uint64_t end = addr + len, next;
+    vm_prot_t cur;
+    bool exec = prot & PROT_EXEC, write = prot & PROT_WRITE;
+    if (exec || write) {
+        vm_prot_t have = exec ? VM_PROT_EXECUTE : VM_PROT_WRITE;
+        // The syndrome of the access the flip stands for: an instruction
+        // abort, or a data abort with WnR (and pc != addr, which would read
+        // as a fetch).
+        uint32_t esr = exec ? 0x20u << 26 : (0x24u << 26) | (1u << 6);
+        for (uint64_t p = addr; p < end; p = next) {
+            if (!prot_run(p, end, &cur, &next) || (cur & have))
+                continue;
+            for (uint64_t q = p; q < next; q += LXRT_HOST_PAGE)
+                lxrt_wx_handle_fault(exec ? q : 0, q, esr);
+        }
+    }
+    lxrt_wx_forget(addr, len);
+    if (exec) {
+        for (uint64_t p = addr; p < end; p = next) {
+            if (!prot_run(p, end, &cur, &next) ||
+                ((cur & VM_PROT_EXECUTE) && !(cur & VM_PROT_WRITE)))
+                continue;
+            for (uint64_t q = p; q < next; q += LXRT_HOST_PAGE) {
+                struct lxrt_range r = { q, q + LXRT_HOST_PAGE };
+                if (lxrt_wx_scan_for_exec(q, &r, 1)) {
+                    if (mprotect((void *)(uintptr_t)q, LXRT_HOST_PAGE, prot) != 0)
+                        return LERR(errno);
+                    sys_icache_invalidate((void *)(uintptr_t)q, LXRT_HOST_PAGE);
+                    continue;
+                }
+                // The scan did not settle (or could not protect the page):
+                // what the ordinary path does with it.
+                if (mprotect((void *)(uintptr_t)q, LXRT_HOST_PAGE, PROT_READ | PROT_WRITE) != 0)
+                    return LERR(errno);
+                long rc = rewrite_and_seal((void *)(uintptr_t)q, LXRT_HOST_PAGE, prot,
+                                           LXRT_HOST_PAGE, -1, 0);
+                if (rc < 0)
+                    return rc;
+            }
+        }
+    }
+    // Exactly what was asked (R-X becomes --X if so asked; RW- pages a racing
+    // fetch made read-execute become RW- again). Nothing here makes a page
+    // executable that was not scanned.
+    return ret_of(mprotect((void *)(uintptr_t)addr, (size_t)len, prot));
+}
+
+// A non-RWX request over a range that intersects the W^X split: the pages the
+// table holds are handed over by wx_leave_whole, the rest (and host pages the
+// table holds only part of) go the ordinary way, run by run.
+static long wx_leave(uint64_t addr, uint64_t len, int prot)
+{
+    if (lxrt_wx_covered(addr, len))
+        return wx_leave_whole(addr, len, prot);
+    uint64_t end = addr + len;
+    for (uint64_t s = addr; s < end; ) {
+        bool held = lxrt_wx_covered(s, LXRT_HOST_PAGE);
+        uint64_t e = s + LXRT_HOST_PAGE;
+        while (e < end && lxrt_wx_covered(e, LXRT_HOST_PAGE) == held)
+            e += LXRT_HOST_PAGE;
+        long r;
+        if (held) {
+            r = wx_leave_whole(s, e - s, prot);
+        } else {
+            lxrt_wx_forget(s, e - s);   // a partly held host page: ends here
+            r = do_mprotect_inner(s, e - s, prot);
+        }
+        if (r != 0)
+            return r;
+        s = e;
+    }
+    return 0;
+}
+
 // Copy-on-write pages of private shared-memory mappings (privmap.c) stay
 // unwritable on the host whatever the guest asks, until their first store.
 static long do_mprotect(uint64_t addr, uint64_t len, long prot)
@@ -1324,15 +1503,19 @@ static long do_mprotect_inner(uint64_t addr, uint64_t len, long prot)
 
     // A native aarch64 guest's read-write-execute range is split W^X page by
     // page (wxsplit.c): V8 makes its whole code range RWX with one call. Any
-    // other protection ends the split for that range, and the paths below
-    // treat it as the ordinary memory it becomes (an RX request is scanned by
-    // rewrite_and_seal, PROT_NONE is PROT_NONE). Sub-page ranges go through
-    // subpage.c, whose union flips scan the RWX guest pages the same way.
+    // other protection ends the split for that range (wx_leave: the pages are
+    // handed over without a moment in which an access both protections allow
+    // faults unclaimed); what the table does not hold goes the ordinary way
+    // below. Sub-page ranges go through subpage.c, whose union flips scan the
+    // RWX guest pages the same way.
     bool rwx = (prot & PROT_WRITE) && (prot & PROT_EXEC);
     if (lxrt_wx_enabled()) {
-        if (!rwx)
+        if (!rwx) {
+            if ((addr % LXRT_HOST_PAGE) == 0 && (len % LXRT_HOST_PAGE) == 0 &&
+                lxrt_wx_intersects(addr, len) && !lxrt_subpage_tracked(addr, len))
+                return wx_leave(addr, len, (int)prot);
             lxrt_wx_forget(addr, len);
-        else if ((addr % LXRT_HOST_PAGE) == 0 && (len % LXRT_HOST_PAGE) == 0 &&
+        } else if ((addr % LXRT_HOST_PAGE) == 0 && (len % LXRT_HOST_PAGE) == 0 &&
                  !lxrt_subpage_tracked(addr, len)) {
             long wret;
             if (lxrt_wx_protect(addr, len, &wret))
@@ -2922,8 +3105,13 @@ restart:
         }
         lxrt_privmap_forget(a0, a1);
         ret = lxrt_mremap(a0, a1, a2, (int)a3, a4);
-        if (ret >= 0)
+        if (ret >= 0) {
             lxrt_wx_moved(a0, a1, (uint64_t)ret, a2);
+            // The host pages moved, shrank or were replaced: none of them is
+            // a 4 KiB-offset mapping's alone any more (offmap.c).
+            lxrt_offmap_disown(a0, a1);
+            lxrt_offmap_disown((uint64_t)ret, a2);
+        }
         lxrt_memlog('r', a0, a1, (long)a2, (long)a3, ret);
         if (ret >= 0)
             lxrt_memlog('r', (uint64_t)ret, a2, (long)a2, (long)a3, ret);
@@ -2962,10 +3150,9 @@ restart:
         lxrt_memlog('s', ret >= 0 ? (uint64_t)ret : a1, LXRT_HOST_PAGE, (long)a0, (long)a2, ret);
         if (ret >= 0) {
             struct shmid_ds ds;
-            if (shmctl((int)a0, IPC_STAT, &ds) == 0)
-                lxrt_futex_shared_add((uint64_t)ret, ds.shm_segsz);
-            else
-                lxrt_futex_shared_add((uint64_t)ret, LXRT_HOST_PAGE);
+            uint64_t sz = shmctl((int)a0, IPC_STAT, &ds) == 0 ? ds.shm_segsz : LXRT_HOST_PAGE;
+            lxrt_futex_shared_add((uint64_t)ret, sz);
+            lxrt_offmap_disown((uint64_t)ret, sz);
         }
         break;
     case LNR_shmdt:

@@ -1037,6 +1037,58 @@ else
     echo "  skip  WX_ONE_OWNER (no $STAGE)"
 fi
 
+# MMAP_OFFSET_4K: file mappings at a 4 KiB offset that is not on a 16 KiB host
+# page (runtime/offmap.c, dispatch.c do_mmap/do_munmap/do_madvise). munmap
+# frees the head and tail host pages with the guest's last byte there (whole,
+# piece by piece, 300 map/unmap cycles: /proc/self/maps no longer), a page
+# mapped into the head's spare bytes survives, and MADV_DONTNEED keeps
+# MAP_SHARED contents and reads a private file mapping back from the file
+# instead of zeroing the partial host pages at either end.
+if [ -f "$STAGE/usr/lib64/libc.a" ] && [ -n "$GCCDIR" ]; then
+    if err=$(glibc_cc -static-pie -O2 -o build/mmap_offset4k tests/elf/mmap_offset4k.c); then
+        out4=$(LXRT_GUEST_PAGE=4096 deadline 60 ./build/lxrun "$PWD/build/mmap_offset4k" 2>&1); rc4=$?
+        out16=$(deadline 60 ./build/lxrun "$PWD/build/mmap_offset4k" 2>&1); rc16=$?
+        if [ "$rc4" -eq 0 ] && [ "$rc16" -eq 0 ] &&
+           grep -q '== mmap offset4k: ok' <<<"$out4" && grep -q '== mmap offset4k: ok' <<<"$out16"; then
+            ok "MMAP_OFFSET_4K: $(grep -o '[0-9]* ok, 0 mal' <<<"$out4") at 4 and 16 KiB pages; $(grep -o '[0-9]* lines before, [0-9]* after' <<<"$out4") in /proc/self/maps over 300 cycles"
+        else bad "MMAP_OFFSET_4K" "rc=$rc4/$rc16 $(grep MAL <<<"$out4" | head -4; grep MAL <<<"$out16" | head -2)"; fi
+    else bad "build mmap_offset4k" "$err"; fi
+else
+    echo "  skip  MMAP_OFFSET_4K (no $STAGE)"
+fi
+
+# WX_MPROTECT_RACE: an RWX range given RX, RW, R while other threads run code
+# in it (runtime/dispatch.c wx_leave): no thread faults while the range is
+# handed over, svc sites written before RX are rewritten before they run, and
+# the protection asked for is the one in force afterwards. The stress mode
+# (callers on the pages being written; storers under RWX -> RW) also counts
+# faults a thread took while the split still held the page and whose handler
+# ran after the hand-over: those need the handler to recheck the page
+# (runtime/wxsplit.c) and are reported as expected failures until it does.
+if [ -f "$STAGE/usr/lib64/libc.a" ] && [ -n "$GCCDIR" ]; then
+    if err=$(glibc_cc -static-pie -O2 -pthread -o build/wx_mprotect_race tests/elf/wx_mprotect_race.c); then
+        out=$(deadline 180 ./build/lxrun "$PWD/build/wx_mprotect_race" 2>&1); rc=$?
+        out4=$(LXRT_GUEST_PAGE=4096 deadline 180 ./build/lxrun "$PWD/build/wx_mprotect_race" 2>&1); rc4=$?
+        if [ "$rc" -eq 0 ] && [ "$rc4" -eq 0 ] &&
+           grep -q '== wx_mprotect_race: ok' <<<"$out" && grep -q '== wx_mprotect_race: ok' <<<"$out4"; then
+            ok "WX_MPROTECT_RACE: $(grep -o 'A\. [0-9]* x RWX -> RX -> RWX .*faults, 0 wrong of [0-9]* calls' <<<"$out"), at 16 and 4 KiB pages"
+        else bad "WX_MPROTECT_RACE" "rc=$rc/$rc4 $(grep MAL <<<"$out" | head -3; grep MAL <<<"$out4" | head -2)"; fi
+        st=$(deadline 180 ./build/lxrun "$PWD/build/wx_mprotect_race" stress 2>&1); src=$?
+        counts=$(grep -o 'S1 [0-9]* faults, S2 [0-9]* faults' <<<"$st")
+        s1=0
+        [[ "$counts" =~ S1\ ([0-9]+) ]] && s1=${BASH_REMATCH[1]}
+        if [ "$src" -eq 0 ]; then
+            ok "WX_MPROTECT_RACE stress: $counts"
+        elif [ "$src" -eq 2 ] && [ "$s1" -lt 10000 ]; then
+            # (Forgetting the range before the rescan faulted callers for
+            # the whole scan: ~500000 faults in S1.)
+            xfail "WX_MPROTECT_RACE stress: $counts" "faults handled after the hand-over: wxsplit.c declines them without rechecking the page"
+        else bad "WX_MPROTECT_RACE stress" "rc=$src $(grep -E 'S1|S2|MAL' <<<"$st" | head -4)"; fi
+    else bad "build wx_mprotect_race" "$err"; fi
+else
+    echo "  skip  WX_MPROTECT_RACE (no $STAGE)"
+fi
+
 echo
 summary="== $PASS passed, $FAIL failed"
 [ "$XFAIL" -eq 0 ] || summary="$summary ($XFAIL expected failures)"
