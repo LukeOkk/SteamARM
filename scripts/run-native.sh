@@ -27,4 +27,9 @@ export OBJC_DISABLE_INITIALIZE_FORK_SAFETY=YES
 export DISPLAY="${DISPLAY:-:2}"   # the native X server (scripts/run-x11-native.sh)
 # No FEX_* here: translator settings belong to x86 payloads only.
 unset FEX_ROOTFS FEX_GUESTBASE
+# The Mac's PATH means nothing inside the root: the native Steam client looks
+# for bash along it (MEASURED: "lxrun: open /opt/homebrew/.../bash" from a
+# launcher start), as scripts/run-steam-arm64.sh already knew. PATH_IN_GUEST
+# overrides.
+export PATH="${PATH_IN_GUEST:-/usr/local/bin:/usr/bin:/bin:/usr/local/sbin:/usr/sbin:/sbin}"
 exec ./build/lxrun $TRACE "$@"

@@ -89,6 +89,13 @@ static void fault_report(int sig, siginfo_t *info, void *uap)
     char buf[512];
     int n = snprintf(buf, sizeof buf, "\n[lxrt] %s at pc 0x%llx", name,
                      (unsigned long long)pc);
+    // Which address, and the thread's sp and lr: a fault inside a host
+    // routine (a zygote died once in _platform_memset, stage 23) says
+    // nothing without them.
+    if ((sig == SIGBUS || sig == SIGSEGV) && info)
+        n += snprintf(buf + n, sizeof buf - n, " addr %p sp 0x%llx lr 0x%llx",
+                      info->si_addr, (unsigned long long)uc->uc_mcontext->__ss.__sp,
+                      (unsigned long long)uc->uc_mcontext->__ss.__lr);
     if (g_img) {
         uint64_t base = (uint64_t)g_img->base;
         if (pc >= base && pc < base + g_img->span)
