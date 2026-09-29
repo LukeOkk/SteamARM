@@ -1,0 +1,71 @@
+# Build and test on a macOS Apple Silicon runner, and publish a release when a
+# v* tag is pushed. The runner is a GitHub-hosted macOS arm64 machine: it
+# builds everything the Makefile builds and runs the tests that need no Linux
+# roots (tests/elf, tests/win and Steam need a full setup on a real Mac).
+name: macOS
+
+on:
+  push:
+    branches: [main, "claude/**"]
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build-test:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Homebrew dependencies
+        run: brew install llvm lld vulkan-headers sdl2 sdl3 pulseaudio
+
+      - name: Build (lxrun, vdso, Vulkan shim, inputd, launcher)
+        run: make all
+
+      - name: Launcher core (ApplicationCore, run-app.sh dispatch, sessions)
+        run: make test-launcher-core
+
+      - name: x18 decoder/planner self-test
+        run: make build/x18_check && build/x18_check --self-test
+
+      - name: Audio (one PulseAudio server, a socket per guest root)
+        run: tests/audio/run.sh
+
+      - name: x18 across preemption (measurement on the runner, see benchmarks/stage19 §3a)
+        run: tests/x18_preserve/run.sh
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: build-test
+    runs-on: macos-15
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Homebrew dependencies
+        run: brew install sdl2 sdl3
+
+      - name: Package (scripts/make-release.sh)
+        run: scripts/make-release.sh
+
+      - name: Version matches the tag
+        run: |
+          v=$(/usr/libexec/PlistBuddy -c "Print :CFBundleShortVersionString" launcher/Info.plist.in)
+          [ "v$v" = "$GITHUB_REF_NAME" ] || { echo "Info.plist.in says $v, tag is $GITHUB_REF_NAME"; exit 1; }
+
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          v=${GITHUB_REF_NAME#v}
+          notes=docs/releases/$GITHUB_REF_NAME.md
+          [ -f "$notes" ] || { echo "missing $notes"; exit 1; }
+          gh release create "$GITHUB_REF_NAME" --title "SteamARM $v" --notes-file "$notes" --prerelease \
+              build/release/SteamARM-$v-macOS-arm64.dmg \
+              build/release/SteamARM-$v-macOS-arm64.zip \
+              build/release/SHA256SUMS.txt
