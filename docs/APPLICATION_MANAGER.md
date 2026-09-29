@@ -73,17 +73,25 @@ runner, after `make all`.
 
 ## Next steps, in order (all need the Mac)
 
+The launcher's part of `docs/ARM64_FIRST_MIGRATION.md` (step 10 there).
+Wiring Steam ARM64 into the launcher is being worked on separately; nothing
+below is claimed as done unless it says so.
+
 1. **Build and smoke-test.** Run `make launcher test-launcher-core`. Then copy
    an aarch64 test program into the ARM64 root, for example the `hello_dyn`
    sample from `scripts/mkroot-rpm.sh`. Add an entry for it to `apps.json` by
    hand, with `"architecture": "aarch64"` and `"root": "/tmp/lxrt-arm64root"`
    ("Añadir app" cannot do this yet, step 5). Launch it from the launcher, and
    check its log and `running.arch = "aarch64 none"`.
-2. **The ARM64 root at `/tmp/lxrt-arm64root`.** Link the root extracted from
-   the Steam Frame image there (`docs/STEAM_FRAME_IMAGE.md`), from
-   `scripts/env-links.sh` (done: it links `~/SteamARM-roots/arm64root` when
-   that exists). Until then, the launcher
-   must show aarch64 entries as unavailable, not failing.
+2. **The ARM64 roots.** `/tmp/lxrt-arm64root` is meant for a root derived
+   from the Steam Frame image (the target; extracted and inventoried on
+   2026-09-29, `docs/STEAM_FRAME_INVENTORY.md`); `scripts/env-links.sh`
+   links it when `~/SteamARM-roots/arm64root` exists, which it does not yet
+   (MEASURED). Stage 21 ran the native client from a different root: the
+   Fedora armroot of `scripts/mkarmroot.sh`, through a hand-made
+   `/tmp/lxrt-armroot` link that no script creates (MEASURED). Until one of
+   them is linked by a script, the launcher must show aarch64 entries as
+   unavailable, not failing.
 3. **Exit status and a process group per session.** Done in
    `scripts/session.py` (see the table above). Still to do on the Mac: run
    `tests/launcher/session.sh` there, and check that a Steam stop through the
@@ -102,12 +110,34 @@ runner, after `make all`.
 6. **One Steam definition.** Move Steam out of the `run-app.sh` dict and
    `AppEntry.steam` into a single JSON (`$STATE/launcher/builtin.json`, or
    `apps.json` with `builtIn: true`) read by both.
-7. **Steam ARM64 as its own entry.** Once the client from the Steam Frame
-   root reaches a stable UI under lxrun, add it as an entry with
-   `architecture: aarch64` and `root: /tmp/lxrt-arm64root`; its command comes
-   from the inventory. The x86 client remains as TRANSITIONAL_COMPATIBILITY
-   until the ARM64 one passes the acceptance test (open, UI, close, library,
-   open again).
+7. **Steam ARM64 as its own entry.** Its command is known:
+   `steamrtarm64/steam` under the client's `.local/share/Steam` (stage 21).
+   The entry needs `architecture: aarch64`, the root it runs on (the Fedora
+   armroot now, the Frame-derived root later) and `LXRT_GUEST_PAGE=4096`,
+   which `scripts/run-native.sh` does not set (VERIFIED IN SOURCE,
+   `:19-29`). The client does not reach a window yet
+   (`docs/STEAM_ARM64_BRINGUP.md`). The x86 client remains as
+   TRANSITIONAL_COMPATIBILITY until the ARM64 one passes the acceptance test
+   (open, UI, close, library, open again).
+
+## Virtual machines: not an option
+
+ZERO-VM is mandatory (`AGENTS.md`). The VM path was removed on 2026-09-27
+(`docs/history/`). In the model (VERIFIED IN SOURCE,
+`launcher/ApplicationCore.swift`):
+
+- `ExecutionBackend.appleHypervisorLegacy` exists only so the launcher can
+  show Apple Hypervisor as **unavailable, with that reason** (`:326`). No
+  runner starts a VM, and `usesVirtualMachine` is false for every other
+  backend.
+- No fallback ever returns it: the execution fallback goes from Lightning
+  JIT to lxrun and otherwise to nothing (`:356-360`), and the graphics
+  fallback order never involves a VM (`:349-354`).
+- `SessionVirtualizationMode` reads "ZERO-VM" for every session that can
+  run.
+
+A failure on the ZERO-VM path is fixed on that path, or reported as
+unsupported. It is never answered by proposing or starting a VM.
 
 ## Open design questions
 

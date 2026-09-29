@@ -642,6 +642,9 @@ then for x86 payloads.
 
 ### 5.3 Next steps
 
+Their place among the other ARM64 work: `docs/ARM64_FIRST_MIGRATION.md`
+(step 12 there).
+
 1. Record, in every Steam benchmark, the rootfs FEXServer serves and the
    pressure-vessel version from the runtime's `VERSIONS.txt`. The plan's
    shape changes between releases.

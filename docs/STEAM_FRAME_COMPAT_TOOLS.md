@@ -670,11 +670,17 @@ the client redistributable.
    load `steamui.so` and `steamclient.so` and to start its UI process tree.
    steamwebhelper reached BrowserReady in an earlier run (MEASURED). Open
    items:
-   - the main process's `free(): invalid pointer` abort, not yet diagnosed
-     (MEASURED). HYPOTHESIS: the missing `lsof` (§5.4);
-   - the NSS network-process FATAL of earlier notes. stage21's root carries
-     NSS with softokn and freebl, and stage21 does not mention the FATAL.
-     Whether it is gone: UNKNOWN;
+   - the main process's `free(): invalid pointer` abort (MEASURED). Its
+     cause is now a HIGH-CONFIDENCE HYPOTHESIS from disassembly: `vgui2_s`
+     ignores an Xlib error and frees an uninitialised pointer, on the
+     rescue-dialog path taken after the webhelper times out, because the
+     root had no X locale data (`docs/STEAM_ARM64_BRINGUP.md`). The earlier
+     `lsof` HYPOTHESIS (§5.4) is not part of that chain;
+   - the NSS network-process FATAL of earlier notes. The last one in
+     `cef_log.txt` is from 2026-09-28 17:17:19 (`libsoftokn3.so: cannot
+     open shared object`); the file is in the root now. No later run
+     reached CEF logging, so whether it is gone is UNKNOWN
+     (`docs/STEAMWEBHELPER_BRINGUP.md`);
    - the renderers' V8 without a JIT or with one that asks for the W^X flip
      (HYPOTHESIS, `docs/CURRENT_STEAM_ENVIRONMENT.md` §7 and §9).
 
@@ -733,10 +739,13 @@ the client redistributable.
 | Proton ARM64 is built with `-march=armv8.2-a` (VERIFIED IN SOURCE). The M4 under macOS 27 reports FEAT_LSE, RDM, DotProd and LRCPC2 (MEASURED, `benchmarks/stage5-idregs.txt`). There is no ISA blocker there, and the Cortex-A57 SIGILL reports do not apply. | VERIFIED IN SOURCE / MEASURED; the conclusion is HYPOTHESIS |
 | Lepton (3029110) needs rootless podman, user namespaces and Android binder. It is not viable under lxrun on macOS. Since it offers itself even where it cannot run (§3), SteamARM should filter it or document it as unsupported. | HYPOTHESIS |
 | The arm64 client can be fetched from Valve at run time, on the user's Mac, instead of being copied out of the Frame image. stage21 did so from the `steam_client_linuxarm64` manifest, and the client then updated itself (MEASURED). No repository script does it yet: `scripts/install-steam.sh` fetches only the x86 bootstrap, and no script names a `linuxarm64` URL (VERIFIED IN SOURCE; `docs/CURRENT_STEAM_ENVIRONMENT.md` §5.2). The steamrt3c runtime was probably not part of stage21's install, since `steam-runtime-launcher-service` was missing (HYPOTHESIS). | MEASURED / VERIFIED IN SOURCE / HYPOTHESIS |
-| The steamwebhelper NSS FATAL was thought to come from a missing NSS module in the root. stage21's root now carries NSS with softokn and freebl, and steamwebhelper reached BrowserReady in an earlier run (MEASURED). stage21 does not mention the FATAL; whether it is gone is UNKNOWN. The run now ends in the main process, at `free(): invalid pointer` (MEASURED). | MEASURED / UNKNOWN |
+| The steamwebhelper NSS FATAL came from a missing NSS module: the last one, at 2026-09-28 17:17:19, names `libsoftokn3.so` (MEASURED, `cef_log.txt`). stage21's root now carries NSS with softokn and freebl, and steamwebhelper reached BrowserReady at 17:15:32 the same day (MEASURED). The 2026-09-29 webhelpers never reached CEF logging, so whether the FATAL is gone is UNKNOWN. The run now ends in the main process, at `free(): invalid pointer` (MEASURED; cause in `docs/STEAM_ARM64_BRINGUP.md`). | MEASURED / UNKNOWN |
 | steamcmd for linuxarm64 could fetch depots 4185400, 4628740 and 3127680 for offline inventory without x86 emulation. 3127680 is ownersonly (COMMUNITY OBSERVATION); the others may also need an entitled account. | HYPOTHESIS |
 
 ### 7.4 Next steps
+
+These steps are now ordered, with the rest of the ARM64 work, in
+`docs/ARM64_FIRST_MIGRATION.md`; the list below keeps their detail.
 
 On the Mac, in this order. stage21 has done parts of steps 1 to 4.
 

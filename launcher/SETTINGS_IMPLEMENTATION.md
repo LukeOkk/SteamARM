@@ -41,9 +41,9 @@ STEAMARM_STATE="$(mktemp -d /tmp/steamarm-settings-test-XXXXXX)" /tmp/steamarm-s
 ## Límites y conexiones externas pendientes
 
 - La ventana persiste todos los ajustes. El entorno de juegos lo construye el scripts/settings-env.py existente; no se cambió ni se verificó mediante una sesión de juego.
-- En el árbol inspeccionado no hay lector de controllers.json en runtime/, scripts/ o shim/. Por tanto la entrega de mandos a juegos, identidad USB, remapping, transformaciones, LED, movimiento y vibración solicitada por juegos dependen del servicio de entrada externo descrito en la especificación. La detección/prueba SDL local sí está conectada.
+- Cuando se escribió esto no había lector de controllers.json en runtime/, scripts/ o shim/. Hoy lo lee `steamarm-inputd` (`tools/inputd/inputd.c`, arrancado por `scripts/input.sh --config`), que publica cada jugador como `/dev/input/eventN` para los juegos. Sensores de movimiento y posiciones del panel táctil siguen sin llegar a los juegos (`README.md`).
 - Los paneles táctiles y palancas solo se detectan si SDL expone controles equivalentes; el dibujo no implementa un transporte de datos táctiles o sensores.
-- guestFaults=false se guarda, pero scripts/run-steam.sh fuerza LXRT_GUEST_FAULTS=1 y la entrada Steam del script conserva ese valor. Hace falta corregir ese backend para que desactivar el control tenga efecto. Ese cambio está fuera del alcance autorizado.
+- guestFaults=false se guarda y tiene efecto: `scripts/settings-env.py` solo exporta LXRT_GUEST_FAULTS=1 con el ajuste activado, y scripts/run-steam.sh ya no lo fuerza.
 - Metal HUD se alterna y guarda; el proceso ya abierto conserva su entorno hasta reiniciarse.
 - Los atajos globales necesitan Accesibilidad y las capturas necesitan el permiso de grabación de pantalla. No se cambiaron permisos del sistema.
 - No se probaron en hardware capturas, vibración, LED, sensores ni las diez identidades de mando.

@@ -5,9 +5,12 @@ an Apple Silicon Mac, **without a virtual machine**.
 
 ```
 Steam (x86 / i386 Linux)  ─┐
-Proton / Wine (x86)        ├─ FEX (x86 → ARM64 JIT) ─ lxrun (Linux on Darwin) ─ macOS
-DXVK / VKD3D-Proton        ┘        │
-                                    └─ Vulkan thunks ─ Vulkan shim ─ MoltenVK ─ Metal
+Proton / Wine (x86)        ├─ FEX (x86 → ARM64 JIT) ─┐
+DXVK / VKD3D-Proton        ┘                         ├─ lxrun (Linux on Darwin) ─ macOS
+aarch64 Linux programs, no FEX ──────────────────────┘
+  (experimental: Valve's native arm64 Steam client, no window yet)
+
+Vulkan: x86 through FEX's thunks, aarch64 directly ─ Vulkan shim ─ MoltenVK ─ Metal
 X11 windows ─ native X server (XQuartz, rootless) + quartz-wm ─ real macOS windows
 ```
 
@@ -55,19 +58,35 @@ runtime and FEX and downloads the Linux packages and Steam.
 | [benchmarks/](benchmarks/) | what was measured at each stage, including what does not work |
 
 Research notes on moving to Valve's ARM64 Steam client. They are not user
-guides, and nothing in them works yet for players:
-[CURRENT_STEAM_ENVIRONMENT.md](docs/CURRENT_STEAM_ENVIRONMENT.md) (today's
-Steam environment, audited),
-[APPLICATION_MANAGER.md](docs/APPLICATION_MANAGER.md),
-[STEAM_FRAME_IMAGE.md](docs/STEAM_FRAME_IMAGE.md),
-[STEAM_FRAME_REFERENCE.md](docs/STEAM_FRAME_REFERENCE.md),
-[HOLO_CORE_ARM64_AUDIT.md](docs/HOLO_CORE_ARM64_AUDIT.md),
-[STEAM_FRAME_SNAPSHOT_2026-09-29.md](docs/STEAM_FRAME_SNAPSHOT_2026-09-29.md)
-(web research on Frame releases and Holo Core, checked against the Mac's
-records),
-[STEAM_FRAME_COMPAT_TOOLS.md](docs/STEAM_FRAME_COMPAT_TOOLS.md),
-[STEAM_RUNTIME_4_ARM64.md](docs/STEAM_RUNTIME_4_ARM64.md) and
-[LEPTON_REUSE_ANALYSIS.md](docs/LEPTON_REUSE_ANALYSIS.md).
+guides, and nothing in them works yet for players. Start with the plan,
+[ARM64_FIRST_MIGRATION.md](docs/ARM64_FIRST_MIGRATION.md), and its numbers,
+[ARM64_FIRST_AUDIT.md](docs/ARM64_FIRST_AUDIT.md).
+
+- The native client:
+  [STEAM_ARM64_BRINGUP.md](docs/STEAM_ARM64_BRINGUP.md),
+  [STEAMWEBHELPER_BRINGUP.md](docs/STEAMWEBHELPER_BRINGUP.md),
+  [ARM64_REWRITE_COVERAGE.md](docs/ARM64_REWRITE_COVERAGE.md),
+  [X18_VIRTUALIZATION.md](docs/X18_VIRTUALIZATION.md).
+- Today's environment and launcher:
+  [CURRENT_STEAM_ENVIRONMENT.md](docs/CURRENT_STEAM_ENVIRONMENT.md)
+  (audited), [APPLICATION_MANAGER.md](docs/APPLICATION_MANAGER.md).
+- Graphics, windows, speed:
+  [GRAPHICS_BACKEND_ARCHITECTURE.md](docs/GRAPHICS_BACKEND_ARCHITECTURE.md),
+  [WINDOWING_AND_PRESENTATION.md](docs/WINDOWING_AND_PRESENTATION.md),
+  [PERFORMANCE_BASELINE.md](docs/PERFORMANCE_BASELINE.md).
+- The Steam Frame image and Holo:
+  [STEAM_FRAME_IMAGE.md](docs/STEAM_FRAME_IMAGE.md),
+  [STEAM_FRAME_INVENTORY.md](docs/STEAM_FRAME_INVENTORY.md),
+  [STEAM_FRAME_ROOTFS_AUDIT.md](docs/STEAM_FRAME_ROOTFS_AUDIT.md),
+  [STEAM_FRAME_REFERENCE.md](docs/STEAM_FRAME_REFERENCE.md),
+  [HOLO_CORE_ARM64_AUDIT.md](docs/HOLO_CORE_ARM64_AUDIT.md),
+  [STEAM_FRAME_SNAPSHOT_2026-09-29.md](docs/STEAM_FRAME_SNAPSHOT_2026-09-29.md)
+  (web research on Frame releases and Holo Core, checked against the Mac's
+  records).
+- Valve's ARM64 tools:
+  [STEAM_FRAME_COMPAT_TOOLS.md](docs/STEAM_FRAME_COMPAT_TOOLS.md),
+  [STEAM_RUNTIME_4_ARM64.md](docs/STEAM_RUNTIME_4_ARM64.md),
+  [LEPTON_REUSE_ANALYSIS.md](docs/LEPTON_REUSE_ANALYSIS.md).
 
 ## Build from source
 
@@ -81,7 +100,8 @@ scripts/make-release.sh     # the downloadable .dmg, in build/release/
 Tests: `tests/elf/run.sh`, `tests/elf/run_i386.sh`,
 `tests/elf/run_vk_device.sh`, `tests/win/run.sh`,
 `tests/win/run_steam_path.sh`, `tests/x18_preserve/run.sh`,
-`tests/steamframe_image/run.sh` (Linux), `tests/audio/run.sh`, `make test-launcher-core`.
+`tests/steamframe_image/run.sh` (Linux), `tests/steamframe_image/redact.sh`,
+`tests/audio/run.sh`, `tests/launcher/safeguard.sh`, `make test-launcher-core`.
 
 The Steam Frame recovery image as the ARM64 base (read on the Mac, no VM, no
 mount): [docs/STEAM_FRAME_IMAGE.md](docs/STEAM_FRAME_IMAGE.md).
@@ -103,8 +123,10 @@ Not done yet:
 - **Games are not verified.**
 - Valve's native arm64 Steam client starts, self-updates and loads its UI
   libraries under lxrun, but does not reach its window yet
-  (`benchmarks/stage21-native-arm64-client.txt`). Proton ARM64 does not run
-  on macOS yet. The working route is the x86 client with x86 Proton.
+  (`benchmarks/stage21-native-arm64-client.txt`,
+  [docs/STEAM_ARM64_BRINGUP.md](docs/STEAM_ARM64_BRINGUP.md)). Proton ARM64
+  does not run on macOS yet. The working route is the x86 client with x86
+  Proton.
 - Controllers were tested with scripted input, not a physical pad.
 - Some Vulkan extensions are missing from the 32-bit thunks.
 - MoltenVK gaps are worked around, not solved: geometry shaders and

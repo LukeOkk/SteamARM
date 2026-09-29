@@ -493,7 +493,8 @@ labels: for the Lepton side, for the lxrun side, and for the verdict.
 
 ### Next steps
 
-In order. Each step decides whether the next one is worth doing.
+In order. Each step decides whether the next one is worth doing. Where
+these sit among the other ARM64 work: `docs/ARM64_FIRST_MIGRATION.md`.
 
 1. Measure alignment. Run `readelf -lW` (or `llvm-readelf -lW` on the Mac)
    on `system/bin/linker64`, `system/bin/init`, `system/bin/app_process64`,
@@ -515,13 +516,18 @@ In order. Each step decides whether the next one is worth doing.
    CONFIG_ANDROID_BINDER_DEVICES. Record the results with the rest of the
    image inventory in `docs/STEAM_FRAME_ROOTFS_AUDIT.md`, with the podman,
    crun, pasta and fuse-overlayfs versions, and the Lepton app version if the
-   image holds it.
+   image holds it. Partly done (MEASURED, 2026-09-29,
+   `docs/STEAM_FRAME_INVENTORY.md`): `usr/share/guestos/android` exists
+   (57 MB), with podman 5.5.2, crun 1.14.4, passt 2026_06_11 and
+   `lepton-podman-timeout.conf`; the per-file report and the binder config
+   are not done.
 5. On a Linux arm64 host with Lepton, capture the full podman command line
    for one game. Count its binds against `MAX_MOUNTS` (256). List the options
    a plan interpreter must accept.
 6. The native ARM64 Steam client now installs and updates itself on the Mac
-   (stage21). Check now whether `androidarm64/libsteamclient.so` is in that
-   install. Once the client reaches its window, check whether it offers
+   (stage21). `androidarm64/` is in that install, with 5 aarch64 files
+   including `libsteamclient.so` (37,517,612 bytes; MEASURED, audit
+   2026-09-29). Once the client reaches its window, check whether it offers
    Lepton and Android depots, and whether it listens on 57343.
 7. Only after steps 1 to 3 succeed: write design notes for a userspace binder
    in lxrun and for a bionic Vulkan HAL over MoltenVK.

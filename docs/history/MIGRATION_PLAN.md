@@ -1,5 +1,10 @@
 # MIGRATION_PLAN
 
+> **SUPERSEDED — VM-era.** The VM → ZERO-VM migration this plan describes
+> happened: the VM was deleted on 2026-09-27 (item 9 below). Its exit-criteria
+> status is dated 2026-09-26; later stages (15-21) moved several criteria.
+> The current plan is `docs/ARM64_FIRST_MIGRATION.md`. Kept as history.
+
 **Status: PLANNED.** Stages are ordered so that each one can *fail cheaply* and
 kill the plan early if the thesis is wrong. Nothing is deleted until a tested
 replacement exists.

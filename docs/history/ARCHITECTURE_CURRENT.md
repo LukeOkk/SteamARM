@@ -1,5 +1,10 @@
 # ARCHITECTURE_CURRENT
 
+> **SUPERSEDED — VM-era.** This was the architecture while SteamARM ran a
+> Linux VM (libkrun/HVF). The VM was deleted on 2026-09-27 and ZERO-VM is
+> mandatory (`AGENTS.md`). Today's design: `docs/ARCHITECTURE.md`. The
+> "Status: CURRENT" line below is kept as it was written.
+
 **Status: CURRENT.** Everything here was read from the code or measured on the
 running system. Nothing is planned or aspirational.
 
