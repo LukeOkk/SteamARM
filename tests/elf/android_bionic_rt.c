@@ -244,18 +244,18 @@ int main(int argc, char **argv)
     long pr = syscall(SYS_prlimit64, 0, RLIMIT_NOFILE, NULL, &rl2);
     check(gr == 0 && pr == 0 && rl.cur == rl2.cur && rl.max == rl2.max,
           "getrlimit (163) of RLIMIT_NOFILE equals prlimit64's");
-    check(rl.max != 0x7fffffffffffffffull && rl.cur != 0x7fffffffffffffffull,
+    check(pr == 0 && rl2.max != 0x7fffffffffffffffull && rl2.cur != 0x7fffffffffffffffull,
           "no limit reads as Linux's RLIM_INFINITY (~0), never Darwin's 2^63-1");
     check(syscall(163, RLIMIT_STACK, &rs) == 0 && syscall(164 /* setrlimit */, RLIMIT_STACK, &rs) == 0,
           "setrlimit (164) of RLIMIT_STACK to its own value -> 0");
-    if (rl.cur > 64) {
-        struct { uint64_t cur, max; } same = { rl.cur - 1, rl.max };
+    if (pr == 0 && rl2.cur > 64) {
+        struct { uint64_t cur, max; } same = { rl2.cur - 1, rl2.max };
         long ar = syscall(SYS_prlimit64, 0, RLIMIT_NOFILE, &same, &same);
         struct { uint64_t cur, max; } now = { 0, 0 };
         syscall(SYS_prlimit64, 0, RLIMIT_NOFILE, NULL, &now);
-        check(ar == 0 && same.cur == rl.cur && now.cur == rl.cur - 1,
+        check(ar == 0 && same.cur == rl2.cur && now.cur == rl2.cur - 1,
               "prlimit64 with one buffer for new and old: the new limit is set, the old one returned");
-        syscall(SYS_prlimit64, 0, RLIMIT_NOFILE, &rl, NULL);
+        syscall(SYS_prlimit64, 0, RLIMIT_NOFILE, &rl2, NULL);
     }
 
     // stack: field 28 of /proc/self/stat inside the maps entry holding a local
