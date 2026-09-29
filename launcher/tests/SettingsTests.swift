@@ -21,6 +21,26 @@ struct SettingsTests {
         changed.dramGB = 12
         let decoded = try decoder.decode(LauncherSettings.self, from: JSONEncoder().encode(changed))
         precondition(decoded == changed)
+        // The esync/fsync booleans become one choice that keeps what ran; "vulkan" was MoltenVK.
+        let old = try decoder.decode(LauncherSettings.self, from: Data(#"{"esync":true,"fsync":true,"graphicsBackend":"vulkan"}"#.utf8))
+        precondition(old.synchronization == "esync" && old.graphicsBackend == "vulkanMoltenVK" && old.fallbackPolicy == "auto")
+        let noEsync = try decoder.decode(LauncherSettings.self, from: Data(#"{"esync":false,"fsync":true}"#.utf8))
+        precondition(noEsync.synchronization == "wineserver")
+        precondition(defaults.synchronization == "auto" && defaults.graphicsBackend == "auto")
+        let saved = String(decoding: try JSONEncoder().encode(old), as: UTF8.self)
+        precondition(!saved.contains("\"esync\":") && !saved.contains("\"fsync\":") && saved.contains("\"synchronization\":\"esync\""))
+        // apps.json from before builtIn/readiness/overrides still decodes; builtin-apps.json decodes.
+        let oldApps = try decoder.decode([AppEntry].self, from: Data(#"[{"id":"h","name":"H","command":["/opt/apps/h/run"],"root":"/tmp/lxrt-steamroot","fexRootfs":"/","env":{},"kind":"heroic"}]"#.utf8))
+        precondition(oldApps.count == 1 && oldApps[0].overrides == nil && !oldApps[0].isBuiltIn)
+        // Run from the checkout: scripts/builtin-apps.json is read from the current directory.
+        let builtIns = try decoder.decode([AppEntry].self, from: Data(contentsOf: URL(fileURLWithPath:
+            FileManager.default.currentDirectoryPath).appendingPathComponent("scripts/builtin-apps.json")))
+        precondition(builtIns.map(\.id) == ["steam", "steam-arm64"] && builtIns.allSatisfy(\.isBuiltIn))
+        precondition(builtIns[1].isExperimental && builtIns[1].architecture == "aarch64" && builtIns[1].fexRootfs == nil)
+        var withOverrides = oldApps[0]
+        withOverrides.overrides = ["display": "vnc"]
+        let reread = try decoder.decode(AppEntry.self, from: JSONEncoder().encode(withOverrides))
+        precondition(reread == withOverrides)
         for (total, expected) in [(8, 6), (16, 12), (24, 20), (32, 28), (64, 60), (128, 124)] {
             precondition(MemoryChoices.maximum(totalGB: total) == expected)
         }
@@ -48,6 +68,6 @@ struct SettingsTests {
         manager.endEditing()
         precondition(manager.current == player)
         precondition(Store.load(ControllersConfig.self, from: Paths.controllersFile)?.players[0] == player)
-        print("PASS: defaults, legacy decoding, round trips, memory ceilings, controller apply/cancel")
+        print("PASS: defaults, legacy decoding, sync/graphics migration, app entries, round trips, memory ceilings, controller apply/cancel")
     }
 }

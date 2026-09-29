@@ -33,7 +33,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationDidFinishLaunching(_ notification: Notification) {
         HotkeyManager.shared.start()
         let model = LauncherModel.shared
-        if model.settings.launchSteamOnStart && model.phase == .idle { model.launch(.steam) }
+        if model.settings.launchSteamOnStart && model.canLaunch {
+            model.launch(model.allApps.first { $0.id == "steam" } ?? .steam)
+        }
     }
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { true }

@@ -31,6 +31,30 @@ struct AddAppView: View {
         return Installer.isWindowsExecutable(staging.appendingPathComponent(chosenExec))
     }
 
+    private var stagedELF: ELFInfo? {
+        staging.map { ELFInspector.inspect($0.appendingPathComponent(chosenExec)) } ?? nil
+    }
+
+    private var targetEnvironment: LinuxBaseEnvironment? {
+        if isWindows { return .legacyX86 }
+        if let elf = stagedELF {
+            guard let arch = elf.architecture else { return nil }
+            return arch == .aarch64 ? .armroot : .legacyX86
+        }
+        return .legacyX86
+    }
+
+    private var architectureDescription: String {
+        if isWindows { return "Windows (con Proton)" }
+        guard let elf = stagedELF else { return "Script: se trata como x86-64 con FEX" }
+        switch elf.architecture {
+        case .aarch64: return "ARM64 (aarch64)"
+        case .x86_64: return "x86-64"
+        case .i386: return "i386"
+        case nil: return "ELF sin arquitectura compatible (por ejemplo ARM de 32 bits)"
+        }
+    }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
             Text("Añadir app").font(.title2.bold())
@@ -58,7 +82,10 @@ struct AddAppView: View {
                 if step == .customPick {
                     Button("Añadir") { finishCustom() }
                         .keyboardShortcut(.defaultAction)
-                        .disabled(chosenExec.isEmpty || customName.trimmingCharacters(in: .whitespaces).isEmpty || (isWindows && protonTool.isEmpty))
+                        .disabled(chosenExec.isEmpty || customName.trimmingCharacters(in: .whitespaces).isEmpty
+                                  || (isWindows && protonTool.isEmpty) || targetEnvironment == nil
+                                  || !FileManager.default.fileExists(atPath: Paths.hostRoot(
+                                      forGuestRoot: targetEnvironment?.guestRoot ?? "").path))
                 }
             }
         }
@@ -82,7 +109,7 @@ struct AddAppView: View {
                    "shield.lefthalf.filled") { runKnown { r, h in try await Installer.installHeroic(report: r, holder: h) } }
             option("Minecraft Java (Prism Launcher)", "Descarga el AppImage x86_64 y lo extrae sin ejecutarlo.",
                    "cube.fill") { runKnown { r, h in try await Installer.installPrism(report: r, holder: h) } }
-            option("Personalizada (Linux / Windows)", "AppImage, archivo tar, .deb, ELF o .exe x86/x86_64. Windows usa el Proton que elijas.",
+            option("Personalizada (Linux / Windows)", "AppImage, archivo tar, .deb, ELF (ARM64 o x86) o .exe x86/x86_64. Windows usa el Proton que elijas.",
                    "shippingbox") { error = nil; showImporter = true }
         }
     }
@@ -122,6 +149,16 @@ struct AddAppView: View {
             TextField("Nombre", text: $customName)
             Picker("Ejecutable", selection: $chosenExec) {
                 ForEach(executables, id: \.self) { Text($0).tag($0) }
+            }
+            LabeledContent("Arquitectura", value: architectureDescription)
+            LabeledContent("Se instalará en", value: targetEnvironment.map { "\($0.name)  ·  opt/apps" } ?? "No disponible")
+            if stagedELF?.architecture == .aarch64 {
+                Text("La raíz ARM64 se borra al reconstruirla con scripts/mkarmroot.sh: las apps instaladas en ella se pierden.")
+                    .font(.caption).foregroundStyle(.secondary)
+                if !FileManager.default.fileExists(atPath: Paths.armRoot.path) {
+                    Text("No hay raíz ARM64 instalada (scripts/mkarmroot.sh).")
+                        .font(.caption).foregroundStyle(.red)
+                }
             }
             if isWindows {
                 Picker("Proton", selection: $protonTool) {
@@ -207,11 +244,17 @@ struct AddAppView: View {
     private func finishCustom() {
         guard let staging else { return }
         let windows = isWindows
+        let arch = stagedELF?.architecture
+        guard let env = targetEnvironment else { return }
         guard !windows || !protonTool.isEmpty else { return }
         let name = customName.trimmingCharacters(in: .whitespaces)
         let id = model.uniqueId(for: name)
-        let final = Paths.appsRoot.appendingPathComponent(id)
+        let hostRoot = Paths.hostRoot(forGuestRoot: env.guestRoot)
+        guard FileManager.default.fileExists(atPath: hostRoot.path) else { return }
+        let apps = hostRoot.appendingPathComponent("opt/apps")
+        let final = apps.appendingPathComponent(id)
         do {
+            try FileManager.default.createDirectory(at: apps, withIntermediateDirectories: true)
             try FileManager.default.moveItem(at: staging, to: final)
         } catch {
             self.error = error.localizedDescription
@@ -223,10 +266,9 @@ struct AddAppView: View {
             let sp = staging.standardizedFileURL.path, ip = chosenIcon.standardizedFileURL.path
             icon = ip.hasPrefix(sp) ? final.path + ip.dropFirst(sp.count) : ip
         }
-        let guest = Paths.guestPath(for: final.appendingPathComponent(chosenExec))
-        // The program's ISA from its ELF header (a script keeps the x86 default).
-        let arch = ELFInspector.inspect(final.appendingPathComponent(chosenExec))?.architecture
+        let guest = Paths.guestPath(for: final.appendingPathComponent(chosenExec), in: hostRoot)
         model.upsert(AppEntry(id: id, name: name, icon: icon, command: [guest],
+                              root: env.guestRoot, fexRootfs: arch == .aarch64 ? nil : "/",
                               kind: windows ? "windows" : "custom", installDir: final.path,
                               architecture: windows ? nil : arch?.rawValue,
                               protonTool: windows ? protonTool : nil))

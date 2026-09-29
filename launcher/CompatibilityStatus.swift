@@ -9,6 +9,10 @@ struct CompatibilityStatus: Decodable {
         let architecture: String
         let installed: Bool
         let supported: Bool
+        /// Compiled into its ntdll.so / wineserver (scripts/compat-status.py).
+        let esync: Bool?
+        let fsync: Bool?
+        let ntsync: Bool?
         var id: String { name }
         var status: String { supported ? "Disponible" : installed ? "No compatible aquí" : "Incompleto" }
     }
@@ -17,6 +21,20 @@ struct CompatibilityStatus: Decodable {
     let protons: [Proton]
     let nativeArmReason: String
     let note: String
+    /// The same report as RuntimeCapabilities.detect(from:) reads it.
+    let runtime: RuntimeProbe
+
+    private enum CodingKeys: String, CodingKey { case moltenvk, fex, protons, nativeArmReason, note }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        moltenvk = try c.decode(Driver.self, forKey: .moltenvk)
+        fex = try c.decode(FEX.self, forKey: .fex)
+        protons = try c.decode([Proton].self, forKey: .protons)
+        nativeArmReason = try c.decode(String.self, forKey: .nativeArmReason)
+        note = try c.decode(String.self, forKey: .note)
+        runtime = try RuntimeProbe(from: decoder)
+    }
 
     static func load(project: URL) async -> CompatibilityStatus? {
         await Task.detached(priority: .utility) {

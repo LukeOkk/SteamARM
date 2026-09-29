@@ -4,7 +4,7 @@ import ApplicationServices
 
 enum SettingsSection: String, CaseIterable, Identifiable {
     case interface = "Interfaz", input = "Entrada", system = "Sistema", processor = "Procesador"
-    case graphics = "Gráficos", sound = "Sonido", shortcuts = "Atajos", logs = "Registros", debug = "Depuración"
+    case graphics = "Gráficos", runtime = "Runtime", sound = "Sonido", shortcuts = "Atajos", logs = "Registros", debug = "Depuración"
     var id: String { rawValue }
     var symbol: String {
         switch self {
@@ -13,6 +13,7 @@ enum SettingsSection: String, CaseIterable, Identifiable {
         case .system: return "gearshape"
         case .processor: return "cpu"
         case .graphics: return "display"
+        case .runtime: return "checklist"
         case .sound: return "speaker.wave.2"
         case .shortcuts: return "keyboard"
         case .logs: return "doc.text"
@@ -78,6 +79,7 @@ struct SettingsView: View {
         .frame(width: 1160, height: 790)
         .preferredColorScheme(.dark)
         .task {
+            model.refreshCapabilities()
             compatibility = await CompatibilityStatus.load(project: model.projectDir)
             compatibilityLoaded = true
         }
@@ -119,6 +121,7 @@ struct SettingsView: View {
         case .system: systemSection
         case .processor: processorSection
         case .graphics: graphicsSection
+        case .runtime: runtimeSection
         case .sound:
             Section("Salida de sonido") {
                 choice("Dispositivo", $draft.audioBackend, [("coreaudio", "Salida del Mac (CoreAudio)"), ("none", "Silencio")])
@@ -172,14 +175,34 @@ struct SettingsView: View {
                 Toggle("Confirmar antes de detener una app", isOn: $draft.confirmStop)
             }
             Section("Pantalla") {
-                Picker("Modo de pantalla", selection: $draft.display) {
-                    Text("Ventanas nativas (recomendado)").tag(DisplayMode.native)
-                    Text("VNC (Compartir Pantalla)").tag(DisplayMode.vnc)
+                Picker("Backend de la aplicación", selection: Binding(
+                    get: { draft.display == .vnc ? ApplicationBackendPreset.vncScreenSharing : .nativeWindows },
+                    set: { preset in
+                        switch preset {
+                        case .nativeWindows: if model.capabilities.status(of: preset).usable { draft.display = .native }
+                        case .vncScreenSharing: if model.capabilities.status(of: preset).usable { draft.display = .vnc }
+                        default: break
+                        }
+                    })) {
+                    ForEach(ApplicationBackendPreset.allCases, id: \.self) { preset in
+                        let status = model.capabilities.status(of: preset)
+                        Text(preset.label + (status.state == .ready ? "" : " · " + status.state.label))
+                            .tag(preset).disabled(!status.usable).help(status.reason)
+                    }
                 }
                 Text(draft.display == .vnc
                      ? "Las apps se dibujan en Xvnc y se ven en Compartir Pantalla."
                      : "Cada ventana de la app es una ventana normal de macOS (servidor X nativo).")
                     .font(.caption).foregroundStyle(.secondary)
+                ForEach(ApplicationBackendPreset.allCases.filter { !model.capabilities.status(of: $0).usable }, id: \.self) { preset in
+                    let status = model.capabilities.status(of: preset)
+                    Text("\(preset.label): \(status.state.label.lowercased()) — \(status.reason).")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
+                let selected = draft.display == .vnc ? ApplicationBackendPreset.vncScreenSharing : .nativeWindows
+                Text("Modo de sesión: \(SessionVirtualizationMode(selected.execution).label)")
+                    .font(.caption).foregroundStyle(.secondary)
+                    .help("Ningún backend que se pueda elegir usa una máquina virtual.")
                 choice("Resolución de la pantalla X", $draft.resolution, LauncherSettings.resolutions)
                     .disabled(draft.display != .vnc)
                 Text("Solo VNC. Se aplica cuando Xvnc se reinicia sin apps en marcha; las ventanas nativas tienen su propio tamaño.")
@@ -221,12 +244,48 @@ struct SettingsView: View {
                         Button("UTC") { draft.timezone = "UTC" }
                     }.frame(width: 90)
                 }
-                choice("Sincronización vertical", $draft.vsync, [("game", "Según el juego"), ("on", "Activada"), ("off", "Desactivada")])
+                choice("Sincronización vertical", $draft.vsync, [("game", "AUTO (según el juego)"), ("on", "ON (activada)"), ("off", "OFF (desactivada)")])
+                Text("ON/OFF fijan DXVK (dxgi.syncInterval, d3d9.presentInterval) y VKD3D_SWAPCHAIN_PRESENT_MODE (FIFO / IMMEDIATE); Proton 10.0 no lee la variable de VKD3D. MoltenVK solo ofrece FIFO e IMMEDIATE, y el efecto en pantalla no se ha medido.")
+                    .font(.caption).foregroundStyle(.secondary)
             }
             Section("Memoria") { memory("DRAM", $draft.dramGB); memory("VRAM", $draft.vramGB) }
-            Section("Hacks (pueden causar inestabilidad)") {
-                Toggle("Esync", isOn: $draft.esync)
-                Toggle("Fsync", isOn: $draft.fsync)
+            Section("Sincronización (Proton)") {
+                Picker("Sincronización", selection: Binding(get: { draft.synchronization }, set: { value in
+                    guard let backend = SynchronizationBackend(rawValue: value),
+                          backend == .auto || model.capabilities.synchronization[backend]?.usable == true else { return }
+                    draft.synchronization = value
+                })) {
+                    ForEach(SynchronizationBackend.allCases, id: \.self) { backend in
+                        let status = model.capabilities.synchronization[backend]
+                        Text(backend.label + (backend == .auto || status?.state == .ready ? "" : " · \(status?.state.label ?? "No disponible")"))
+                            .tag(backend.rawValue)
+                            .disabled(backend != .auto && status?.usable != true)
+                            .help(status?.reason ?? "Sin datos")
+                    }
+                }
+                Text("AUTO → \(model.capabilities.effectiveSynchronization(.auto).label)")
+                    .font(.caption).foregroundStyle(.secondary)
+                if let selected = SynchronizationBackend(rawValue: draft.synchronization), selected != .auto,
+                   let status = model.capabilities.synchronization[selected] {
+                    Text("\(status.state.label): \(status.reason).")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
+                ForEach(SynchronizationBackend.allCases.filter {
+                    $0 != .auto && model.capabilities.synchronization[$0]?.usable != true
+                }, id: \.self) { backend in
+                    Text("\(backend.label): \(model.capabilities.synchronization[backend]?.reason ?? "Sin datos").")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
+                Text("Se aplica al iniciar Steam o la app.").font(.caption).foregroundStyle(.secondary)
+            }
+            Section("Alternativas") {
+                Picker("Si un ajuste no puede funcionar", selection: $draft.fallbackPolicy) {
+                    ForEach(FallbackPolicy.allCases, id: \.self) { policy in
+                        Text(policy.label).tag(policy.rawValue)
+                    }
+                }
+                Text("Solo actúa cuando algo pedido no puede funcionar para la app que abres: VNC con una app fuera de la raíz x86, o un valor guardado que ya no está disponible (por ejemplo KosmicKrisp sin un shim que lo cargue). AUTO abre con la alternativa, ESTRICTO no abre la app y PREGUNTAR te deja elegir. Nunca se recurre a una máquina virtual.")
+                    .font(.caption).foregroundStyle(.secondary)
             }
         }
     }
@@ -268,12 +327,30 @@ struct SettingsView: View {
                     Text("Steam puede mostrar 0.2.2210 para MoltenVK 1.4.2: interpreta su versión decimal como una versión Vulkan.")
                         .font(.caption).foregroundStyle(.secondary)
                 }
-                Picker("Motor", selection: $draft.graphicsBackend) {
-                    Text("Vulkan (MoltenVK / Metal)").tag("vulkan")
-                    Text("OpenGL (WineD3D)").tag("opengl").disabled(true)
-                        .help("no disponible: sin OpenGL en este sistema")
+                if let kk = model.compatibility?.runtime.kosmickrisp, !kk.library.isEmpty {
+                    LabeledContent("KosmicKrisp instalado", value: kk.version).help(kk.library)
                 }
-                Text("OpenGL: no disponible: sin OpenGL en este sistema").font(.caption).foregroundStyle(.secondary)
+                Picker("Motor", selection: Binding(get: { draft.graphicsBackend }, set: { value in
+                    guard let backend = GraphicsBackend(rawValue: value),
+                          backend == .auto || model.capabilities.graphics[backend]?.usable == true else { return }
+                    draft.graphicsBackend = value
+                })) {
+                    ForEach(graphicsOrder, id: \.self) { backend in
+                        let status = model.capabilities.graphics[backend]
+                        Text(backend.label + (backend == .auto || status?.state == .ready ? "" : " · \(status?.state.label ?? "No disponible")"))
+                            .tag(backend.rawValue)
+                            .disabled(backend != .auto && status?.usable != true)
+                            .help(status?.reason ?? "Sin datos")
+                    }
+                }
+                Text("AUTO → \(model.capabilities.effectiveGraphics(.auto).label)")
+                    .font(.caption).foregroundStyle(.secondary)
+                ForEach(graphicsOrder.filter {
+                    $0 != .auto && model.capabilities.graphics[$0]?.usable != true
+                }, id: \.self) { backend in
+                    Text("\(backend.label): \(model.capabilities.graphics[backend]?.reason ?? "Sin datos").")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
             }
             Section("Funcionalidades y mejoras") {
                 Toggle("Caché de sombreadores", isOn: $draft.shaderCache)
@@ -286,6 +363,84 @@ struct SettingsView: View {
             }
         }
     }
+
+    private var graphicsOrder: [GraphicsBackend] {
+        [.auto, .vulkanMoltenVK, .vulkanKosmicKrisp, .openGLWineD3D]
+    }
+
+    private var runtimeSection: some View {
+        Group {
+            Section("Modo de sesión") {
+                LabeledContent("Sesión", value: "ZERO-VM")
+                Text("SteamARM no usa ninguna máquina virtual: lxrun ejecuta aarch64 directamente y x86 con FEX.")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+            Section("Presentación") {
+                ForEach(PresentationMode.allCases, id: \.self) { mode in
+                    capabilityRow(mode.label, status: model.capabilities.presentation[mode])
+                }
+            }
+            Section("Ejecución") {
+                ForEach(ExecutionBackend.allCases, id: \.self) { backend in
+                    capabilityRow(executionName(backend), status: model.capabilities.execution[backend])
+                }
+            }
+            Section("Sincronización") {
+                ForEach(SynchronizationBackend.allCases.filter { $0 != .auto }, id: \.self) { backend in
+                    capabilityRow(backend.label, status: model.capabilities.synchronization[backend])
+                }
+            }
+            Section("Gráficos") {
+                ForEach(GraphicsBackend.allCases.filter { $0 != .auto }, id: \.self) { backend in
+                    capabilityRow(backend.label, status: model.capabilities.graphics[backend])
+                }
+            }
+            Section("Detectado en este Mac") {
+                if let runtime = model.compatibility?.runtime {
+                    LabeledContent("MoltenVK", value: runtime.moltenvk.version)
+                        .help(runtime.moltenvk.path)
+                    let kk = runtime.kosmickrisp
+                    LabeledContent("KosmicKrisp", value: kk?.library.isEmpty == false ? kk?.version ?? "" : "No instalado")
+                        .help(kk?.library ?? "")
+                    LabeledContent("macOS compatible", value: yesNo(kk?.osOK == true))
+                    LabeledContent("Carga como ICD", value: yesNo(kk?.exportsICD == true))
+                    LabeledContent("Shim Vulkan", value: "Instalado: \(yesNo(runtime.shim?.installed == true))")
+                        .help(runtime.shim?.path ?? "")
+                    LabeledContent("Selección de ICD (STEAMARM_VK_ICD)", value: yesNo(runtime.shim?.icdSelection == true))
+                    ForEach(model.compatibility?.protons.filter { $0.installed } ?? []) { proton in
+                        LabeledContent(proton.name, value: "esync \(yesNo(proton.esync == true)) · fsync \(yesNo(proton.fsync == true)) · ntsync \(yesNo(proton.ntsync == true))")
+                    }
+                    LabeledContent("Servidor X nativo", value: yesNo(runtime.presentation?.nativeX == true))
+                    LabeledContent("Xvnc", value: yesNo(runtime.presentation?.xvnc == true))
+                    LabeledContent("Compartir Pantalla", value: yesNo(runtime.presentation?.screenSharing == true))
+                } else {
+                    Text("Consultando…").foregroundStyle(.secondary)
+                }
+                Button("Volver a comprobar") { model.refreshCapabilities() }
+            }
+        }
+    }
+
+    private func capabilityRow(_ name: String, status: CapabilityStatus?) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            LabeledContent(name) {
+                Text(status?.state.label ?? "No disponible")
+                    .foregroundStyle(status?.state == .ready ? Color.green :
+                                     status?.state == .experimental ? Color.orange : Color.secondary)
+            }
+            Text(status?.reason ?? "Sin datos").font(.caption).foregroundStyle(.secondary)
+        }
+    }
+
+    private func executionName(_ backend: ExecutionBackend) -> String {
+        switch backend {
+        case .auto: return "lxrun (AUTO)"
+        case .lightningJIT: return "Lightning JIT"
+        case .appleHypervisorLegacy: return "Apple Hypervisor"
+        }
+    }
+
+    private func yesNo(_ value: Bool) -> String { value ? "sí" : "no" }
 
     private func choice(_ title: String, _ value: Binding<String>, _ values: [String]) -> some View {
         choice(title, value, values.map { ($0, $0) })

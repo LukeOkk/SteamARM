@@ -6,8 +6,9 @@
 # launcher's counterpart of scripts/run-steam.sh (see launcher/SPEC.md).
 #
 #   scripts/run-app.sh <app-id>            start (or re-show) an app from
-#                                          $STATE/launcher/apps.json; "steam"
-#                                          is the built-in Steam client
+#                                          $STATE/launcher/apps.json;
+#                                          scripts/builtin-apps.json defines "steam"
+#                                          (x86) and "steam-arm64" (experimental)
 #   scripts/run-app.sh --stop              stop the guest processes (X keeps running)
 #   scripts/run-app.sh --dry-run <app-id>  print what would run; start nothing
 #   scripts/run-app.sh --help
@@ -62,7 +63,7 @@ stop_guests() {
     rm -f "$ROOT/tmp/fexhome/.steam/steam.pid" "$PIDFILE" "$IDFILE" "$MODEFILE" "$ARCHFILE" "$PGIDFILE"
 }
 
-# Prints shell assignments (APP_NAME, APP_ARCH, APP_ROOT, APP_FEXROOTFS, GEOMETRY, DMODE
+# Prints shell assignments (APP_NAME, APP_ARCH, APP_ROOT, APP_IN_X86_ROOT, APP_FEXROOTFS, GEOMETRY, DMODE
 # and the arrays APP_ENV, APP_CMD) for app $1, from apps.json and settings.json.
 resolve_app() {
     /usr/bin/python3 - "$1" "$LDIR/apps.json" "$LDIR/settings.json" <<'PY'
@@ -86,7 +87,14 @@ steam = {
 apps = load(apps_path, [])
 if isinstance(apps, dict):
     apps = apps.get("apps", [])
-app = steam if app_id == "steam" else next((a for a in apps if a.get("id") == app_id), None)
+builtins = load(os.path.join(os.getcwd(), "scripts", "builtin-apps.json"), [])   # cwd: the checkout
+if not isinstance(builtins, list):
+    builtins = []
+if not any(b.get("id") == "steam" for b in builtins if isinstance(b, dict)):
+    builtins.append(steam)
+# Built-ins first: an apps.json entry cannot shadow them.
+app = next((a for a in builtins if isinstance(a, dict) and a.get("id") == app_id), None) \
+      or next((a for a in apps if isinstance(a, dict) and a.get("id") == app_id), None)
 if app is None:
     sys.stderr.write("run-app: unknown app id %r (not in %s)\n" % (app_id, apps_path))
     sys.exit(2)
@@ -111,14 +119,15 @@ if not isinstance(settings, dict):
 import importlib.util
 spec = importlib.util.spec_from_file_location(
     "settings_env", os.path.join(os.getcwd(), "scripts", "settings-env.py"))   # cwd: the checkout
+senv = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(senv)
+settings = senv.with_overrides(settings, app.get("overrides"))
 # Steam's Linux fossilize replay stalls here while processing Schedule I.
 # This flag affects Valve's pre-cache only; DXVK/VKD3D and Metal cache remain.
 env = {"STEAM_ENABLE_SHADER_CACHE_MANAGEMENT":
        os.environ.get("STEAM_ENABLE_SHADER_CACHE_MANAGEMENT", "0")} if app_id == "steam" else {}
 env.update(app.get("env") or {})
 # The launcher's settings (launcher/SETTINGS_SPEC.md) -> environment.
-senv = importlib.util.module_from_spec(spec)
-spec.loader.exec_module(senv)
 env.update(senv.env_from_settings(settings))
 senv.write_limits(settings)
 if app.get("kind") == "windows":
@@ -166,6 +175,7 @@ if (arch == "aarch64" and same(root, X86_ROOT)) or (arch != "aarch64" and same(r
                      "Install it there.\n" % (app_id, arch, root, arch, want))
     sys.exit(2)
 print("APP_ROOT=%s" % q(root))
+print("APP_IN_X86_ROOT=%s" % (1 if same(root, X86_ROOT) else 0))
 fr = app.get("fexRootfs")
 print("APP_FEXROOTFS=%s" % q("/" if fr is None else str(fr)))
 print("APP_PREFIX=%s" % q(env.get("STEAM_COMPAT_DATA_PATH", "") if app.get("kind") == "windows" else ""))
@@ -265,6 +275,13 @@ else
     RUNNER=scripts/run-fex.sh; TRANSLATOR=FEX
 fi
 MODE="${STEAMARM_DISPLAY:-$DMODE}"
+# Xvnc runs inside the x86 Steam root and binds its socket there; lxrun's
+# connect fallback reaches only the host's /tmp/.X11-unix (runtime/socket.c),
+# so a program in another root would find no display :1. Native windows instead.
+if [ "$MODE" = vnc ] && [ "$APP_IN_X86_ROOT" = 0 ]; then
+    echo "run-app: $APP_NAME is outside the x86 Steam root; VNC cannot serve it, using native windows" >&2
+    MODE=native
+fi
 case "$MODE" in
     native) DISP=:2 ;;
     vnc) DISP=:1 ;;

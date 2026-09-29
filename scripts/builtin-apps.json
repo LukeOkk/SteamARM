@@ -1,0 +1,35 @@
+[
+  {
+    "id": "steam",
+    "name": "Steam",
+    "kind": "steam",
+    "builtIn": true,
+    "command": [
+      "/bin/bash",
+      "/tmp/fexhome/.local/share/Steam/steam.sh",
+      "-noverifyfiles"
+    ],
+    "root": "/tmp/lxrt-steamroot",
+    "fexRootfs": "/",
+    "env": {},
+    "architecture": "x86_64"
+  },
+  {
+    "id": "steam-arm64",
+    "name": "Steam ARM64 (experimental)",
+    "kind": "steam",
+    "builtIn": true,
+    "readiness": "experimental",
+    "command": [
+      "/tmp/armhome/.local/share/Steam/steamrtarm64/steam"
+    ],
+    "root": "/tmp/lxrt-armroot",
+    "fexRootfs": null,
+    "env": {
+      "HOME_IN_GUEST": "/tmp/armhome",
+      "LXRT_GUEST_PAGE": "4096",
+      "LXRT_X18_ALL_TEXT": "libcef.so"
+    },
+    "architecture": "aarch64"
+  }
+]

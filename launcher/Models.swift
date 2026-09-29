@@ -25,20 +25,51 @@ enum Paths {
     static var statusFile: URL { launcherDir.appendingPathComponent("running.status") } // "N" or "N signal S"
     static var vncPasswordFile: URL { state.appendingPathComponent("vncpasswd.txt") }
 
+    /// Per-app history: launches, runtime, last result, favourites.
+    static var libraryFile: URL { launcherDir.appendingPathComponent("library.json") }
+
     /// Host directory of the x86-64 Steam root (guest "/").
     static var steamRoot: URL { state.appendingPathComponent("steamroot") }
+    /// Host directory of the Fedora ARM64 root (scripts/mkarmroot.sh), /tmp/lxrt-armroot.
+    static var armRoot: URL { state.appendingPathComponent("armroot") }
+    /// Host directory of the Holo-derived ARM64 root, /tmp/lxrt-arm64root.
+    static var arm64Root: URL { state.appendingPathComponent("arm64root") }
     /// Host directory that is /opt/apps in the guest.
     static var appsRoot: URL { steamRoot.appendingPathComponent("opt/apps") }
     static let guestRoot = "/tmp/lxrt-steamroot"
 
-    /// Host path -> guest path for anything under the Steam root.
-    static func guestPath(for url: URL) -> String {
-        let root = steamRoot.standardizedFileURL.path
-        let p = url.standardizedFileURL.path
-        if p.hasPrefix(root) {
-            let rest = String(p.dropFirst(root.count))
-            return rest.isEmpty ? "/" : rest
+    /// The host directory behind a guest root (the /tmp links of
+    /// scripts/env-links.sh); any other root is its own path.
+    static func hostRoot(forGuestRoot root: String) -> URL {
+        switch root.count > 1 && root.hasSuffix("/") ? String(root.dropLast()) : root {
+        case guestRoot: return steamRoot
+        case LinuxBaseEnvironment.armroot.guestRoot: return armRoot
+        case LinuxBaseEnvironment.arm64.guestRoot: return arm64Root
+        default: return URL(fileURLWithPath: root)
         }
+    }
+
+    /// opt/apps of every root the launcher installs into or may delete from.
+    static var knownAppsRoots: [URL] {
+        [steamRoot, armRoot, arm64Root].map { $0.appendingPathComponent("opt/apps") }
+    }
+
+    /// The x86 Steam root, however it is named (the link or its target).
+    static func isX86Root(_ root: String) -> Bool {
+        let a = URL(fileURLWithPath: root).resolvingSymlinksInPath().standardizedFileURL.path
+        let b = URL(fileURLWithPath: guestRoot).resolvingSymlinksInPath().standardizedFileURL.path
+        return a == b || hostRoot(forGuestRoot: root) == steamRoot
+    }
+
+    /// Host path -> guest path for anything under the Steam root.
+    static func guestPath(for url: URL) -> String { guestPath(for: url, in: steamRoot) }
+
+    /// Host path -> guest path for anything under the host root `root`.
+    static func guestPath(for url: URL, in root: URL) -> String {
+        let r = root.standardizedFileURL.path
+        let p = url.standardizedFileURL.path
+        if p == r { return "/" }
+        if p.hasPrefix(r + "/") { return String(p.dropFirst(r.count)) }
         return p
     }
 
@@ -70,16 +101,29 @@ struct AppEntry: Codable, Identifiable, Hashable {
     /// FEX path every entry took before this field existed.
     var architecture: String? = nil
     var protonTool: String? = nil // Windows apps: installed Steam Proton directory name
+    // Every field below must stay Optional: a missing non-optional key makes
+    // the whole apps.json fail to decode, and the next save would empty it.
+    /// Set on the entries of scripts/builtin-apps.json.
+    var builtIn: Bool? = nil
+    /// A CapabilityStatus.State raw value; nil means ready.
+    var readiness: String? = nil
+    /// This app's own display / vsync / synchronization / graphicsBackend
+    /// (settings keys and values); scripts/run-app.sh puts them over the
+    /// global settings (scripts/settings-env.py with_overrides).
+    var overrides: [String: String]? = nil
 
     /// The x86 client under FEX: TRANSITIONAL_COMPATIBILITY until the ARM64
-    /// client runs (docs/APPLICATION_MANAGER.md).
+    /// client runs (docs/APPLICATION_MANAGER.md). Only a fallback: the
+    /// definition run-app.sh uses is scripts/builtin-apps.json.
     static let steam = AppEntry(
         id: "steam", name: "Steam", icon: nil,
         command: ["/bin/bash", "/tmp/fexhome/.local/share/Steam/steam.sh", "-noverifyfiles"],
-        root: Paths.guestRoot, fexRootfs: "/", env: ["LXRT_GUEST_FAULTS": "1"], kind: "steam",
-        architecture: GuestArchitecture.x86_64.rawValue)
+        root: Paths.guestRoot, fexRootfs: "/", env: [:], kind: "steam",
+        architecture: GuestArchitecture.x86_64.rawValue, builtIn: true)
 
-    var isBuiltIn: Bool { id == "steam" }
+    var isBuiltIn: Bool { builtIn == true || id == "steam" }
+    var isExperimental: Bool { readiness == CapabilityStatus.State.experimental.rawValue }
+    var isWindows: Bool { kind == "windows" }
 }
 
 // MARK: - Settings
@@ -108,14 +152,17 @@ struct LauncherSettings: Codable, Equatable {
     var vsync: String = "game"
     var dramGB: Int = 0
     var vramGB: Int = 0
-    var esync: Bool = true
-    var fsync: Bool = true
+    /// SynchronizationBackend raw value; replaces the esync/fsync booleans
+    /// (SettingsMigration.synchronization reads those).
+    var synchronization: String = "auto"
+    /// FallbackPolicy raw value.
+    var fallbackPolicy: String = "auto"
     var fexDiskCache: Bool = false
     var fexTSO: String = "full"
     var fexMultiblock: Bool = true
     var fexSMC: String = "mtrack"
     var fexX87Reduced: Bool = false
-    var graphicsBackend: String = "vulkan"
+    var graphicsBackend: String = "auto"   // GraphicsBackend raw value
     var shaderCache: Bool = true
     var anisotropy: Int = 0
     var frameRateLimit: Int = 0
@@ -133,9 +180,22 @@ struct LauncherSettings: Codable, Equatable {
 
     static let resolutions = ["1280x720", "1600x900", "1920x1080", "2560x1440"]
 
+    var synchronizationBackend: SynchronizationBackend { SynchronizationBackend(rawValue: synchronization) ?? .auto }
+    var graphics: GraphicsBackend { GraphicsBackend(rawValue: graphicsBackend) ?? .auto }
+    var fallback: FallbackPolicy { FallbackPolicy(rawValue: fallbackPolicy) ?? .auto }
+
+    /// Keys of settings.json that are no longer properties, read once to migrate.
+    private enum LegacyKeys: String, CodingKey { case esync, fsync }
+
     init() {}
     init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
+        let legacy = try decoder.container(keyedBy: LegacyKeys.self)
+        synchronization = SettingsMigration.synchronization(
+            stored: try c.decodeIfPresent(String.self, forKey: .synchronization),
+            esync: try legacy.decodeIfPresent(Bool.self, forKey: .esync),
+            fsync: try legacy.decodeIfPresent(Bool.self, forKey: .fsync))
+        fallbackPolicy = SettingsMigration.fallbackPolicy(stored: try c.decodeIfPresent(String.self, forKey: .fallbackPolicy))
         launchSteamOnStart = try c.decodeIfPresent(Bool.self, forKey: .launchSteamOnStart) ?? false
         confirmStop = try c.decodeIfPresent(Bool.self, forKey: .confirmStop) ?? true
         guestLanguage = try c.decodeIfPresent(String.self, forKey: .guestLanguage) ?? "auto"
@@ -143,14 +203,12 @@ struct LauncherSettings: Codable, Equatable {
         vsync = try c.decodeIfPresent(String.self, forKey: .vsync) ?? "game"
         dramGB = try c.decodeIfPresent(Int.self, forKey: .dramGB) ?? 0
         vramGB = try c.decodeIfPresent(Int.self, forKey: .vramGB) ?? 0
-        esync = try c.decodeIfPresent(Bool.self, forKey: .esync) ?? true
-        fsync = try c.decodeIfPresent(Bool.self, forKey: .fsync) ?? true
         fexDiskCache = try c.decodeIfPresent(Bool.self, forKey: .fexDiskCache) ?? false
         fexTSO = try c.decodeIfPresent(String.self, forKey: .fexTSO) ?? "full"
         fexMultiblock = try c.decodeIfPresent(Bool.self, forKey: .fexMultiblock) ?? true
         fexSMC = try c.decodeIfPresent(String.self, forKey: .fexSMC) ?? "mtrack"
         fexX87Reduced = try c.decodeIfPresent(Bool.self, forKey: .fexX87Reduced) ?? false
-        graphicsBackend = try c.decodeIfPresent(String.self, forKey: .graphicsBackend) ?? "vulkan"
+        graphicsBackend = SettingsMigration.graphicsBackend(stored: try c.decodeIfPresent(String.self, forKey: .graphicsBackend))
         shaderCache = try c.decodeIfPresent(Bool.self, forKey: .shaderCache) ?? true
         anisotropy = try c.decodeIfPresent(Int.self, forKey: .anisotropy) ?? 0
         frameRateLimit = try c.decodeIfPresent(Int.self, forKey: .frameRateLimit) ?? 0
@@ -183,19 +241,25 @@ enum MemoryChoices {
 // MARK: - JSON persistence
 
 enum Store {
-    static func load<T: Decodable>(_ type: T.Type, from url: URL) -> T? {
+    static func load<T: Decodable>(_ type: T.Type, from url: URL,
+                                   dates: JSONDecoder.DateDecodingStrategy = .deferredToDate) -> T? {
         guard let data = try? Data(contentsOf: url) else { return nil }
-        return try? JSONDecoder().decode(T.self, from: data)
+        let dec = JSONDecoder()
+        dec.dateDecodingStrategy = dates
+        return try? dec.decode(T.self, from: data)
     }
 
-    static func save<T: Encodable>(_ value: T, to url: URL) {
-        try? saveChecked(value, to: url)
+    static func save<T: Encodable>(_ value: T, to url: URL,
+                                   dates: JSONEncoder.DateEncodingStrategy = .deferredToDate) {
+        try? saveChecked(value, to: url, dates: dates)
     }
 
-    static func saveChecked<T: Encodable>(_ value: T, to url: URL) throws {
+    static func saveChecked<T: Encodable>(_ value: T, to url: URL,
+                                          dates: JSONEncoder.DateEncodingStrategy = .deferredToDate) throws {
         try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
         let enc = JSONEncoder()
         enc.outputFormatting = [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes]
+        enc.dateEncodingStrategy = dates
         try enc.encode(value).write(to: url, options: .atomic)
     }
 }
