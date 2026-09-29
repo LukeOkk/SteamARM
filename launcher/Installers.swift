@@ -30,15 +30,6 @@ enum GitHub {
         return try JSONDecoder().decode(Release.self, from: data)
     }
 
-    /// Heroic: the Linux x64 tarball.
-    static func heroicAsset(_ r: Release) -> Asset? {
-        r.assets.first { $0.name.lowercased().hasSuffix("linux-x64.tar.xz") }
-            ?? r.assets.first {
-                let n = $0.name.lowercased()
-                return n.contains("linux") && n.hasSuffix(".tar.xz") && !n.contains("arm")
-            }
-    }
-
     /// Prism Launcher: the Linux x86_64 AppImage (not the .zsync, not aarch64).
     static func prismAsset(_ r: Release) -> Asset? {
         r.assets.first {
@@ -320,27 +311,103 @@ enum Installer {
         return try await d.start(url)
     }
 
-    static func installHeroic(report: @escaping Report,
-                              holder: @MainActor (Downloader) -> Void) async throws -> AppEntry {
-        await report("Consultando la última versión de Heroic…", nil)
-        let rel = try await GitHub.latest("Heroic-Games-Launcher/HeroicGamesLauncher")
-        guard let asset = GitHub.heroicAsset(rel) else {
-            throw InstallError("La versión \(rel.tag_name) no tiene un .tar.xz para Linux x64")
+    /// Heroic Games Launcher for linux-arm64, native in the Fedora ARM64 root
+    /// (docs/HEROIC_INTEGRATION.md). Heroic publishes Linux x64 builds only;
+    /// scripts/install-heroic-arm64.sh assembles the arm64 one from official
+    /// release files (sha256-pinned) and installs it into
+    /// <armroot>/opt/apps/heroic. The x64 build under FEX is no longer
+    /// installed: an ARM64 build exists, so it is the one used (ARM64-first).
+    /// Experimental: the window, its pages and a clean close/reopen are
+    /// measured; store sign-in, downloads and games are not, and Amazon's
+    /// helper (nile) cannot run (a non-PIE binary).
+    static func installHeroic(project: URL, report: @escaping Report) async throws -> AppEntry {
+        let root = Paths.armRoot
+        let missing = HeroicARM64.missing(inRoot: root.path) { FileManager.default.fileExists(atPath: $0) }
+        guard FileManager.default.fileExists(atPath: root.path) else {
+            throw InstallError("Falta la raíz ARM64 (\((root.path as NSString).abbreviatingWithTildeInPath)); créala con scripts/mkarmroot.sh")
         }
-        let file = try await download(asset, report: report, holder: holder)
-        defer { try? FileManager.default.removeItem(at: file) }
-        await report("Extrayendo \(asset.name)…", nil)
-        let dest = Paths.appsRoot.appendingPathComponent("heroic")
-        try await extract(file, kind: .tarball, to: dest)
-        let subdirs = (try? FileManager.default.contentsOfDirectory(atPath: dest.path)) ?? []
-        guard let dir = subdirs.sorted().first(where: {
-            FileManager.default.fileExists(atPath: dest.appendingPathComponent("\($0)/heroic").path)
-        }) else { throw InstallError("No se encontró el ejecutable heroic tras extraer") }
-        let icon = icons(in: dest.appendingPathComponent(dir)).first
-        return AppEntry(id: "heroic", name: "Heroic Games Launcher", icon: icon?.path,
-                        command: ["/opt/apps/heroic/\(dir)/heroic", "--no-sandbox"],
+        guard missing.isEmpty else {
+            throw InstallError("A la raíz ARM64 le falta \(missing.joined(separator: ", ")): reconstrúyela con scripts/mkarmroot.sh (conserva opt/apps y tmp/)")
+        }
+        let script = project.appendingPathComponent("scripts/install-heroic-arm64.sh")
+        guard FileManager.default.isExecutableFile(atPath: script.path) else {
+            throw InstallError("No se encontró \(script.path)")
+        }
+        await report("Preparando Heroic \(HeroicARM64.version) para ARM64…", nil)
+        let r = await runStreaming(script.path, [], cwd: project) { line in
+            guard let p = HeroicARM64.progress(line) else { return }
+            Task { @MainActor in report(p.text, Double(p.step - 1) / Double(p.of)) }
+        }
+        guard r.status == 0, let program = HeroicARM64.installedProgram(fromOutput: r.output) else {
+            throw InstallError("scripts/install-heroic-arm64.sh falló (\(r.status)):\n\(r.output.suffix(800))")
+        }
+        let dest = root.appendingPathComponent("opt/apps/heroic")
+        let hostProgram = root.appendingPathComponent(String(program.dropFirst()))
+        let icon = hostProgram.deletingLastPathComponent()
+            .appendingPathComponent("resources/app.asar.unpacked/build/icon.png")
+        return AppEntry(id: "heroic", name: "Heroic Games Launcher",
+                        icon: FileManager.default.fileExists(atPath: icon.path) ? icon.path : nil,
+                        command: HeroicARM64.command(program: program),
+                        root: HeroicARM64.root.guestRoot, fexRootfs: nil, env: HeroicARM64.env,
                         kind: "heroic", installDir: dest.path,
-                        architecture: GuestArchitecture.x86_64.rawValue)
+                        architecture: GuestArchitecture.aarch64.rawValue,
+                        readiness: CapabilityStatus.State.experimental.rawValue)
+    }
+
+    /// Runs `exe` to completion, handing each output line to `onLine` as it
+    /// comes; the whole output is in the result. Cancelling the task
+    /// terminates the process (the install script cleans up after itself).
+    static func runStreaming(_ exe: String, _ args: [String], cwd: URL,
+                             onLine: @escaping @Sendable (String) -> Void) async -> Shell.Result {
+        let p = Process()
+        p.executableURL = URL(fileURLWithPath: exe)
+        p.arguments = args
+        p.currentDirectoryURL = cwd
+        var env = ProcessInfo.processInfo.environment
+        env["PATH"] = Shell.path
+        p.environment = env
+        let pipe = Pipe()
+        p.standardOutput = pipe
+        p.standardError = pipe
+        p.standardInput = FileHandle.nullDevice
+        final class Collector: @unchecked Sendable {
+            let lock = NSLock()
+            var all = Data()
+            var pending = Data()
+        }
+        let c = Collector()
+        pipe.fileHandleForReading.readabilityHandler = { h in
+            let d = h.availableData
+            c.lock.lock()
+            c.all.append(d)
+            c.pending.append(d)
+            var lines: [String] = []
+            while let nl = c.pending.firstIndex(of: 0x0a) {
+                lines.append(String(decoding: c.pending[c.pending.startIndex..<nl], as: UTF8.self))
+                c.pending.removeSubrange(c.pending.startIndex...nl)
+            }
+            c.lock.unlock()
+            lines.forEach(onLine)
+        }
+        return await withTaskCancellationHandler {
+            await withCheckedContinuation { (cont: CheckedContinuation<Shell.Result, Never>) in
+                p.terminationHandler = { proc in
+                    pipe.fileHandleForReading.readabilityHandler = nil
+                    let rest = (try? pipe.fileHandleForReading.readToEnd()) ?? nil
+                    c.lock.lock()
+                    if let rest { c.all.append(rest) }
+                    let text = String(decoding: c.all, as: UTF8.self)
+                    c.lock.unlock()
+                    cont.resume(returning: Shell.Result(status: proc.terminationStatus, output: text))
+                }
+                do { try p.run() } catch {
+                    p.terminationHandler = nil
+                    cont.resume(returning: Shell.Result(status: -1, output: error.localizedDescription))
+                }
+            }
+        } onCancel: {
+            if p.isRunning { p.terminate() }
+        }
     }
 
     static func installPrism(report: @escaping Report,

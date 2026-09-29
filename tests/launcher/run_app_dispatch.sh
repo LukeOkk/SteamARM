@@ -19,6 +19,7 @@ cat > "$W/launcher/apps.json" <<'JSON'
  {"id":"ovr","name":"ovr","command":["/opt/apps/o/run"],"root":"/tmp/lxrt-steamroot","fexRootfs":"/","env":{},"kind":"custom","overrides":{"display":"vnc","vsync":"on","bogus":"x"}},
  {"id":"kk","name":"kk","command":["/opt/apps/k/run"],"root":"/tmp/lxrt-steamroot","fexRootfs":"/","env":{},"kind":"custom","overrides":{"graphicsBackend":"vulkanKosmicKrisp","synchronization":"esync"}},
  {"id":"hs","name":"Heroic Steam","command":["/opt/apps/h/run"],"root":"/tmp/lxrt-steamroot","fexRootfs":"/","env":{},"kind":"custom"},
+ {"id":"heroic","name":"Heroic Games Launcher","command":["/opt/apps/heroic/Heroic-2.22.3-linux-arm64/heroic","--no-sandbox","--disable-gpu","--js-flags=--no-opt"],"root":"/tmp/lxrt-armroot","fexRootfs":null,"env":{"HOME_IN_GUEST":"/tmp/heroichome","LXRT_X18_ALL_TEXT":"/opt/apps/heroic/"},"kind":"heroic","architecture":"aarch64","readiness":"experimental"},
  {"id":"steam","name":"Fake","command":["/bin/fake"],"kind":"custom"}]
 JSON
 # A Vulkan shim that reads STEAMARM_VK_ICD (settings-env.py looks for the name).
@@ -54,6 +55,13 @@ expect steam-arm64 'translator: none, session: ZERO-VM'
 expect steam-arm64-frame 'command:  scripts/run-native.sh /tmp/armhome/.local/share/Steam/steamrtarm64/steam' 'FEX_'
 expect steam-arm64-frame 'LXRT_ROOT=/tmp/lxrt-arm64root DISPLAY=:2'
 expect steam-arm64-frame 'LXRT_GUEST_PAGE=4096'
+# Heroic ARM64 as launcher/Installers.swift writes it (HeroicARM64): native,
+# the Fedora ARM64 root, its own home, x18 over all of the app's text.
+expect heroic 'command:  scripts/run-native.sh /opt/apps/heroic/Heroic-2.22.3-linux-arm64/heroic --no-sandbox --disable-gpu --js-flags=--no-opt' 'FEX_'
+expect heroic 'LXRT_ROOT=/tmp/lxrt-armroot DISPLAY=:2'
+expect heroic 'HOME_IN_GUEST=/tmp/heroichome'
+expect heroic 'LXRT_X18_ALL_TEXT=/opt/apps/heroic/'
+expect heroic 'translator: none, session: ZERO-VM'
 expect ovr 'display:  vnc (DISPLAY=:1)'
 expect ovr 'VKD3D_SWAPCHAIN_PRESENT_MODE=FIFO'
 expect_in "$W2" steam-arm64 'display:  native (DISPLAY=:2)'

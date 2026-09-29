@@ -907,3 +907,65 @@ enum Library {
         return parts.joined(separator: " · ")
     }
 }
+
+// MARK: - Heroic Games Launcher (linux-arm64)
+
+/// Heroic in the Fedora ARM64 root (docs/HEROIC_INTEGRATION.md). Upstream
+/// publishes Linux x64 builds only; scripts/install-heroic-arm64.sh assembles
+/// the arm64 one from official release files (the same files an
+/// `electron-builder --linux dir --arm64` build of the source tag produces,
+/// MEASURED in benchmarks/stage24-heroic.txt) into <armroot>/opt/apps/heroic.
+enum HeroicARM64 {
+    static let version = "2.22.3"
+    static let directory = "Heroic-\(version)-linux-arm64"
+    static let program = "/opt/apps/heroic/\(directory)/heroic"
+    /// Its home in the guest: <root>/tmp/heroichome, which a root rebuild keeps.
+    static let homeInGuest = "/tmp/heroichome"
+    static let root = LinuxBaseEnvironment.armroot
+    /// --no-sandbox: Chromium's sandbox needs namespaces and seccomp, which
+    /// lxrun does not provide (as for Steam's webhelper). --disable-gpu: its
+    /// GPU process cannot initialise GL here (ANGLE over indirect GLX) and
+    /// exited twice per start before the software fallback (MEASURED).
+    /// --js-flags=--no-opt: V8's TurboFan tier crashed under lxrun (a null
+    /// node input in GraphReducer::ReduceNode, and other graph checks; cause
+    /// UNKNOWN, docs/HEROIC_INTEGRATION.md); Ignition, Sparkplug and Maglev
+    /// stay on.
+    static func command(program: String = program) -> [String] {
+        [program, "--no-sandbox", "--disable-gpu", "--js-flags=--no-opt"]
+    }
+    /// LXRT_X18_ALL_TEXT: Electron's images use x18 in functions without an
+    /// .eh_frame FDE (Chromium is built without unwind tables), so every image
+    /// under the install is rewritten over its whole text.
+    static let env: [String: String] = [
+        "HOME_IN_GUEST": homeInGuest,
+        "LXRT_X18_ALL_TEXT": "/opt/apps/heroic/",
+    ]
+    /// What the root must have (scripts/mkarmroot.sh seeds them): Electron's
+    /// libgtk-3 (DT_NEEDED), the libsecret and libnotify Chromium dlopens,
+    /// and python3 for the legendary and gogdl zipapps.
+    static let requiredRootFiles = ["usr/lib64/libgtk-3.so.0", "usr/lib64/libsecret-1.so.0",
+                                    "usr/lib64/libnotify.so.4", "usr/bin/python3"]
+
+    /// The entries of `requiredRootFiles` that `exists` does not find under `hostRoot`.
+    static func missing(inRoot hostRoot: String, exists: (String) -> Bool) -> [String] {
+        requiredRootFiles.filter { !exists(hostRoot + "/" + $0) }
+    }
+
+    /// The installer's last line, "installed: <guest program>".
+    static func installedProgram(fromOutput output: String) -> String? {
+        for line in output.split(separator: "\n").reversed() where line.hasPrefix("installed: ") {
+            let p = String(line.dropFirst("installed: ".count)).trimmingCharacters(in: .whitespaces)
+            return p.hasPrefix("/opt/apps/heroic/") ? p : nil
+        }
+        return nil
+    }
+
+    /// "[n/6] step" -> (n, 6, step): the installer's progress lines.
+    static func progress(_ line: String) -> (step: Int, of: Int, text: String)? {
+        guard line.hasPrefix("["), let close = line.firstIndex(of: "]") else { return nil }
+        let parts = line[line.index(after: line.startIndex)..<close].split(separator: "/")
+        guard parts.count == 2, let n = Int(parts[0]), let total = Int(parts[1]),
+              total > 0, n >= 1, n <= total else { return nil }
+        return (n, total, line[line.index(after: close)...].trimmingCharacters(in: .whitespaces))
+    }
+}

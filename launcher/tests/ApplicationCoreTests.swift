@@ -351,6 +351,27 @@ struct ApplicationCoreTests {
         let line = Library.subtitle(sub, now: t0Stats.addingTimeInterval(3600))
         check(line.contains("1 vez") && line.contains("12 min") && line.contains("hace"), "subtitle: \(line)")
 
+        // Heroic (linux-arm64): an aarch64 program in the Fedora ARM64 root,
+        // native under lxrun, never FEX, never a VM.
+        let heroicPlan = try LaunchPlanner.plan(architecture: GuestArchitecture.aarch64.rawValue,
+                                                environmentID: HeroicARM64.root.id)
+        check(heroicPlan.runner == .native && !heroicPlan.usesVirtualMachine, "Heroic ARM64 runs natively")
+        check(HeroicARM64.root.guestRoot == "/tmp/lxrt-armroot", "Heroic lives in the Fedora ARM64 root")
+        check(HeroicARM64.command() == ["/opt/apps/heroic/Heroic-2.22.3-linux-arm64/heroic", "--no-sandbox", "--disable-gpu", "--js-flags=--no-opt"],
+              "Heroic command line")
+        check(HeroicARM64.env["HOME_IN_GUEST"] == "/tmp/heroichome" && HeroicARM64.env["LXRT_X18_ALL_TEXT"] == "/opt/apps/heroic/",
+              "Heroic environment")
+        check(HeroicARM64.missing(inRoot: "/r", exists: { _ in true }).isEmpty, "a complete root lacks nothing")
+        check(HeroicARM64.missing(inRoot: "/r", exists: { !$0.hasSuffix("libgtk-3.so.0") }) == ["usr/lib64/libgtk-3.so.0"],
+              "a root without GTK 3")
+        check(HeroicARM64.installedProgram(fromOutput: "[6/6] installing\ninstalled: /opt/apps/heroic/Heroic-2.22.3-linux-arm64/heroic\n")
+              == "/opt/apps/heroic/Heroic-2.22.3-linux-arm64/heroic", "installer's last line")
+        check(HeroicARM64.installedProgram(fromOutput: "installed: /usr/bin/true") == nil, "only a program under opt/apps/heroic")
+        check(HeroicARM64.installedProgram(fromOutput: "[1/6] downloading") == nil, "no program without the last line")
+        let prog = HeroicARM64.progress("[3/6] taking resources/ from the linux-x64 release")
+        check(prog?.step == 3 && prog?.of == 6 && prog?.text == "taking resources/ from the linux-x64 release", "progress line")
+        check(HeroicARM64.progress("      legendary (cached)") == nil && HeroicARM64.progress("[7/6] x") == nil, "not progress")
+
         print(failures == 0 ? "application core: all checks passed" : "application core: \(failures) FAILED")
         exit(failures == 0 ? 0 : 1)
     }
