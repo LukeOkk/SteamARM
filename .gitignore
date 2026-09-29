@@ -7,3 +7,6 @@ launcher/tests/artifacts/
 .local/
 .DS_Store
 __pycache__/
+
+# Agent worktrees
+.claude/worktrees/
