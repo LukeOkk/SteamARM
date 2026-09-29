@@ -54,6 +54,7 @@
 #include "x18.h"
 
 #include <errno.h>
+#include <fcntl.h>
 #include <libkern/OSCacheControl.h>
 #include <mach/mach.h>
 #include <mach/mach_vm.h>
@@ -259,7 +260,9 @@ void lxrt_wx_forget(uint64_t addr, uint64_t len)
 // ------------------------------------------------------------- statistics
 //
 // LXRT_WX_STATS=1: the flips and scans this process made, every 5 s while it
-// faults and at exit.
+// faults and at exit, on the runtime's stream. LXRT_WX_STATS=/host/path
+// appends them to that file instead: a webhelper renderer's stderr goes
+// nowhere anyone reads.
 static _Atomic uint64_t st_write, st_exec, st_scan_sites, st_rewritten, st_x18w;
 static _Atomic uint64_t st_last;
 static int stats_on(void)
@@ -270,13 +273,48 @@ static int stats_on(void)
 }
 static void stats_print(const char *when)
 {
-    fprintf(lxrt_trace_stream(), "[lxrt] pid %d wxsplit%s: %d ranges, %llu write flips, %llu exec flips, "
-            "%llu scans with sites, %llu words rewritten, %llu x18-naming words seen\n",
-            (int)getpid(), when, atomic_load(&g_n),
-            (unsigned long long)atomic_load(&st_write), (unsigned long long)atomic_load(&st_exec),
-            (unsigned long long)atomic_load(&st_scan_sites), (unsigned long long)atomic_load(&st_rewritten),
-            (unsigned long long)atomic_load(&st_x18w));
+    char line[320];
+    int n = snprintf(line, sizeof line, "[lxrt] pid %d wxsplit%s: %d ranges, %llu write flips, %llu exec flips, "
+                     "%llu scans with sites, %llu words rewritten, %llu x18-naming words seen\n",
+                     (int)getpid(), when, atomic_load(&g_n),
+                     (unsigned long long)atomic_load(&st_write), (unsigned long long)atomic_load(&st_exec),
+                     (unsigned long long)atomic_load(&st_scan_sites), (unsigned long long)atomic_load(&st_rewritten),
+                     (unsigned long long)atomic_load(&st_x18w));
+    const char *e = getenv("LXRT_WX_STATS");
+    int fd = e && *e == '/' ? open(e, O_WRONLY | O_CREAT | O_APPEND | O_CLOEXEC, 0644) : -1;
+    if (fd >= 0) {
+        (void)!write(fd, line, (size_t)n);
+        close(fd);
+    } else {
+        fputs(line, lxrt_trace_stream());
+    }
 }
+// With LXRT_WX_STATS=/path, the first 64 x18-naming words a process scans,
+// with 4 words either side: instruction or data is for a disassembler to say.
+static void stats_word(uint64_t a, uint64_t lo, uint64_t hi)
+{
+    static _Atomic int said;
+    const char *e = getenv("LXRT_WX_STATS");
+    if (!e || *e != '/' || atomic_fetch_add(&said, 1) >= 64)
+        return;
+    char line[256];
+    int n = snprintf(line, sizeof line, "[lxrt] pid %d x18 word at 0x%llx:", (int)getpid(),
+                     (unsigned long long)a);
+    for (int d = -4; d <= 4; d++) {
+        uint64_t q = a + (uint64_t)(int64_t)(d * 4);
+        if (q < lo || q + 4 > hi)
+            continue;
+        n += snprintf(line + n, sizeof line - (size_t)n, d ? " %08x" : " [%08x]",
+                      *(const uint32_t *)(uintptr_t)q);
+    }
+    n += snprintf(line + n, sizeof line - (size_t)n, "\n");
+    int fd = open(e, O_WRONLY | O_CREAT | O_APPEND | O_CLOEXEC, 0644);
+    if (fd >= 0) {
+        (void)!write(fd, line, (size_t)n);
+        close(fd);
+    }
+}
+
 static void stats_tick(void)
 {
     if (!stats_on())
@@ -310,8 +348,10 @@ bool lxrt_wx_scan_for_exec(uint64_t hpage, const struct lxrt_range *r, int nr)
         if (stats_on() && round == 0)
             for (int k = 0; k < nr; k++)
                 for (uint64_t a = r[k].start & ~3ull; a + 4 <= r[k].end; a += 4)
-                    if (lxrt_x18_touches(*(const uint32_t *)(uintptr_t)a))
+                    if (lxrt_x18_touches(*(const uint32_t *)(uintptr_t)a)) {
                         atomic_fetch_add(&st_x18w, 1);
+                        stats_word(a, r[k].start, r[k].end);
+                    }
         if (!sites)
             return true;
         // Something to replace: open the page, rewrite, and count again from

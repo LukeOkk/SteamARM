@@ -25,6 +25,7 @@
 #include <string.h>
 #include <sys/mman.h>
 #include <sys/syscall.h>
+#include <sys/wait.h>
 #include <unistd.h>
 
 #define KB 1024ul
@@ -319,6 +320,23 @@ int main(void)
     }
     CHECK(vbad == 0, "64 functions across the RWX range: %ld wrong", vbad);
     CHECK(munmap(v8, 64 * MB) == 0, "V8 range unmapped");
+
+    // 14. The same in a forked child, which is what a webhelper renderer is
+    // (forked from the zygote, never exec'd): a fresh RWX range, and the
+    // parent's already-flipped chunk written and run again.
+    fflush(stdout);
+    pid_t kid = fork();
+    if (kid == 0) {
+        uint32_t *k = (uint32_t *)(res + 8 * MB);
+        if (mprotect(k, 64 * KB, PROT_READ | PROT_WRITE | PROT_EXEC) != 0) _exit(10);
+        if (emit_const(k, 31)() != 31) _exit(11);
+        if (emit_getpid(k + 64)() != getpid()) _exit(12);
+        if (emit_const(a, 32)() != 32) _exit(13);   // inherited, read-execute now
+        _exit(0);
+    }
+    int st = -1;
+    waitpid(kid, &st, 0);
+    CHECK(WIFEXITED(st) && WEXITSTATUS(st) == 0, "forked child: RWX commit, svc and an inherited chunk (status %#x)", st);
 
     CHECK(munmap(res, RES) == 0, "reservation unmapped");
     printf("== jit_rwx: %s (%d ok, %d mal)\n", bad ? "FAIL" : "ok", ok, bad);
