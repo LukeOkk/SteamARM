@@ -231,12 +231,16 @@ void lxrt_dirents_close(int fd);
 // procfs.c -- a synthetic /proc, materialised as real files. FEXServer dies on
 // /proc/self/exe before anything else; Steam and pressure-vessel read /proc
 // heavily.
-void        lxrt_proc_init(const char *exe_path, int argc, char **argv);
+// exe_path: the guest's name of its image (what readlink(/proc/self/exe) and a
+// re-exec of /proc/self/exe use); exe_link: the host path the procfs link
+// points at, or NULL for exe_path itself.
+void        lxrt_proc_init(const char *exe_path, const char *exe_link, int argc, char **argv);
 const char *lxrt_proc_translate(const char *path);
 // sysfs.c -- /sys/devices/system/cpu in the guest root (CPU counting).
 void lxrt_sysfs_init(void);
 const char *lxrt_proc_untranslate(const char *host, char *out, size_t n);
 const char *lxrt_proc_exe_path(void);
+const char *lxrt_proc_exe_link_file(char *out, size_t n);
 
 // process.c -- the runtime gets a real process model, because FEX and Steam
 // both need one. A second process is a second runtime; nothing the single

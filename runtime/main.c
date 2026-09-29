@@ -469,7 +469,26 @@ int main(int argc, char **argv)
 
     // argv[i] rather than the resolved host path: the guest must see the name
     // it used, so an execve on /proc/self/exe resolves the same way again.
-    lxrt_proc_init(argv[i], argc - i, &argv[i]);
+    // But Linux's /proc/self/exe is always absolute: a program started by a
+    // relative path gets its absolute path in guest terms (inside LXRT_ROOT
+    // or a bind: the guest's spelling; otherwise the host's, which is then
+    // the guest's too), symlinks resolved as the kernel does. Static glibc's
+    // _dl_get_origin asserts on a relative one (MEASURED: SIGABRT, rc 134).
+    // The procfs link itself points at the image's host path whenever the
+    // guest's name is not one, so that open() reaches the file; readlink
+    // still gives the guest's name (dispatch.c, LNR_readlinkat).
+    const char *exe_name = argv[i], *exe_link = NULL;
+    static char exe_host[PATH_MAX], exe_guest[PATH_MAX], exe_same[PATH_MAX];
+    if (realpath(path, exe_host)) {
+        if (exe_name[0] != '/') {
+            const char *g = lxrt_mounts_untranslate(exe_host, exe_guest, sizeof exe_guest);
+            exe_name = g ? g : exe_host;
+            exe_link = exe_host;
+        } else if (!realpath(exe_name, exe_same) || strcmp(exe_same, exe_host) != 0) {
+            exe_link = exe_host;            // a guest path (LXRT_ROOT, binds)
+        }
+    }
+    lxrt_proc_init(exe_name, exe_link, argc - i, &argv[i]);
     lxrt_sysfs_init();
     install_fault_reporter(&img);
     lxrt_dispatch_set_trace(trace);

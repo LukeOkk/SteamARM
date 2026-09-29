@@ -812,20 +812,43 @@ if [ -f "$STAGE/usr/lib64/libc.a" ] && [ -n "$GCCDIR" ]; then
         else
             bad "ARM64_INITIAL_STACK_BOUNDS" "rc=$rc16/$rc4 $(grep FAIL <<<"$out16"; grep FAIL <<<"$out4")"
         fi
-        # procfs.c keeps the program path as given, so readlink(/proc/self/exe)
-        # is relative when lxrun got a relative path; Linux's is absolute and
-        # static glibc asserts on it (MEASURED: _dl_get_origin, SIGABRT).
+        # Started by a relative path: /proc/self/exe must still be absolute,
+        # or static glibc asserts at start-up (_dl_get_origin, SIGABRT, rc 134
+        # up to stage 22).
         out=$(deadline 30 ./build/lxrun build/stack_bounds 2>&1); rc=$?
-        if [ "$rc" -eq 134 ] && grep -q "_dl_get_origin" <<<"$out"; then
-            xfail "/proc/self/exe is relative when lxrun is given a relative path" "static glibc: _dl_get_origin assertion, rc=134"
-        elif [ "$rc" -eq 0 ]; then
-            ok "relative program path (XPASS: /proc/self/exe is absolute now)"
+        if [ "$rc" -eq 0 ] && grep -q '== stack bounds: ok' <<<"$out"; then
+            ok "static glibc started by a relative path (/proc/self/exe absolute; was _dl_get_origin abort)"
         else
             bad "relative program path" "rc=$rc $(grep -v '^\[lxrt\]' <<<"$out" | tail -3)"
         fi
     else bad "build stack_bounds" "$err"; fi
 else
     echo "  skip  ARM64_INITIAL_STACK_BOUNDS (no $STAGE)"
+fi
+
+# /proc/self/exe as Linux has it, however the program was named: absolute, in
+# guest terms, equal through readlink and realpath, and open()able. Relative,
+# with "..", absolute (the control: named as the host path already), and
+# under LXRT_ROOT by a relative and by an absolute guest path.
+if [ -f "$STAGE/usr/lib64/libc.a" ] && [ -n "$GCCDIR" ]; then
+    if err=$(glibc_cc -static-pie -O2 -o build/proc_self_exe tests/elf/proc_self_exe.c); then
+        EXE_ROOT="$PWD/build/exe-root"
+        mkdir -p "$EXE_ROOT/tmp" && cp build/proc_self_exe "$EXE_ROOT/tmp/"
+        here=$(pwd -P)
+        lx="$PWD/build/lxrun"
+        r1=$(deadline 20 ./build/lxrun build/proc_self_exe "$here/build/proc_self_exe" 2>&1); c1=$?
+        r2=$(deadline 20 ./build/lxrun ./build/../build/proc_self_exe "$here/build/proc_self_exe" 2>&1); c2=$?
+        r3=$(deadline 20 ./build/lxrun "$PWD/build/proc_self_exe" "$PWD/build/proc_self_exe" 2>&1); c3=$?
+        r4=$(cd "$EXE_ROOT/tmp" && LXRT_ROOT="$EXE_ROOT" deadline 20 "$lx" ./proc_self_exe /tmp/proc_self_exe 2>&1); c4=$?
+        r5=$(LXRT_ROOT="$EXE_ROOT" deadline 20 ./build/lxrun /tmp/proc_self_exe /tmp/proc_self_exe 2>&1); c5=$?
+        if [ "$c1$c2$c3$c4$c5" = 00000 ]; then
+            ok "/proc/self/exe: absolute in guest terms, readlink = realpath, openable (relative, '..', absolute, rooted relative, rooted absolute)"
+        else
+            bad "/proc/self/exe" "rc=$c1/$c2/$c3/$c4/$c5 $(grep -hE '^exe|FAIL|_dl_get_origin' <<<"$r1$r2$r3$r4$r5" | head -6)"
+        fi
+    else bad "build proc_self_exe" "$err"; fi
+else
+    echo "  skip  /proc/self/exe (no $STAGE)"
 fi
 
 # ARM64_AUXV_LAYOUT: a dynamic program checks every auxv pair against what
