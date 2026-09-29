@@ -8,6 +8,7 @@
 // bytes in during start-up (benchmarks/stage5-fex.txt).
 #include "lxrt.h"
 #include "ioctl_tty.h"
+#include "inotify.h"
 
 #include <errno.h>
 #include <fcntl.h>
@@ -221,7 +222,14 @@ long lxrt_ioctl(int fd, unsigned long lreq, uint64_t arg)
     }
     case L_FIONREAD: {
         int n = 0;
-        if (ioctl(fd, FIONREAD, &n) != 0) return LERR(errno);
+        // An inotify descriptor is a pipe holding one readiness byte; Linux
+        // answers with the size of the queued events, and Qt reads exactly
+        // that many (tests/elf/inotify_fionread.c).
+        if (lxrt_inotify_is(fd)) {
+            long q = lxrt_inotify_pending(fd);
+            if (q < 0) return q;
+            n = (int)q;
+        } else if (ioctl(fd, FIONREAD, &n) != 0) return LERR(errno);
         if (!p) return LERR(EFAULT);
         *(int32_t *)p = n;
         return 0;

@@ -23,6 +23,12 @@ x18_rewrites_ok() {
 }
 # macOS has no timeout(1). SIGALRM survives exec: exit status 142 when it fires.
 deadline() { perl -e 'alarm shift; exec @ARGV' "$@"; }
+# An lxrun linked as built against a pre-13 macOS SDK (make lxrt
+# LXRT_KEEP_X18=1) has its x18 kept by the kernel: the LXRT_NO_X18 controls
+# below then see x18 survive without the pass instead of lost
+# (tests/x18_preserve/run.sh, benchmarks/stage24-minecraft-prism.txt).
+LXRUN_SDK=$(otool -l build/lxrun 2>/dev/null | awk '/LC_BUILD_VERSION/{f=1} f && $1 == "sdk" {print $2; exit}')
+kernel_keeps_x18() { [ -n "$LXRUN_SDK" ] && [ "${LXRUN_SDK%%.*}" -lt 13 ]; }
 
 CROSS_LD=/opt/homebrew/opt/lld/bin/ld.lld
 STAGE="${STEAMARM_BUILD:-$HOME/SteamARM-build}/rootstage-f43"
@@ -125,7 +131,13 @@ if err=$(build_guest x18_forms); then
         bad "x18 ldar/stlr, nzcv/fpcr/fpsr, sp writes" "rc=$rc (exit code = failed check) $(grep x18 <<<"$out")"
     fi
     LXRT_NO_X18=1 deadline 20 ./build/lxrun build/x18_forms >/dev/null 2>&1; rc=$?
-    if [ "$rc" -ne 0 ]; then
+    if kernel_keeps_x18; then
+        if [ "$rc" -eq 0 ]; then
+            ok "without the x18 pass the same program passes: the kernel keeps x18 (lxrun sdk $LXRUN_SDK)"
+        else
+            bad "LXRT_NO_X18 control for x18_forms (lxrun sdk $LXRUN_SDK)" "expected x18 kept, got rc=$rc"
+        fi
+    elif [ "$rc" -ne 0 ]; then
         ok "without the x18 pass the same program fails (LXRT_NO_X18=1: rc=$rc)"
     else
         bad "LXRT_NO_X18 control for x18_forms" "expected a failure, got rc=0"
@@ -638,7 +650,13 @@ if [ -f "$X18_SAMPLE" ]; then
         bad "x18 virtualised" "rc=$rc, $n_ok ok, $n_bad bad: $(grep MAL <<<"$out" | head -3 | tr '\n' ';')"
     fi
     out=$(LXRT_NO_X18=1 ./build/lxrun "$X18_SAMPLE" 2>/dev/null)
-    if grep -q "MAL" <<<"$out"; then
+    if kernel_keeps_x18; then
+        if ! grep -q "MAL" <<<"$out" && [ "$(grep -c "^  ok " <<<"$out")" -ge 20 ]; then
+            ok "without the x18 pass the same binary keeps x18: the kernel keeps it (lxrun sdk $LXRUN_SDK)"
+        else
+            bad "LXRT_NO_X18 control (lxrun sdk $LXRUN_SDK)" "expected x18 kept: $(grep MAL <<<"$out" | head -3 | tr '\n' ';')"
+        fi
+    elif grep -q "MAL" <<<"$out"; then
         ok "without the x18 pass the same binary loses x18 (LXRT_NO_X18=1: $(grep -c MAL <<<"$out") failures)"
     else
         bad "LXRT_NO_X18 control" "expected failures without the pass, saw none"
@@ -691,6 +709,43 @@ if [ -f "$INO_SAMPLE" ]; then
     fi
 else
     echo "  skip  inotify test (run scripts/mkroot-rpm.sh first)"
+fi
+
+# 20b. FIONREAD on an inotify descriptor is the size of the queued events, as
+# on Linux. Qt reads exactly that many bytes on a blocking descriptor; the
+# pipe's readiness byte (1) made it read(fd, buf, 1) and left Prism
+# Launcher's window blank (benchmarks/stage24-minecraft-prism.txt).
+if [ -f "$STAGE/usr/lib64/libc.a" ] && [ -n "$GCCDIR" ]; then
+    if err=$(glibc_cc -static-pie -O2 -o build/inotify_fionread tests/elf/inotify_fionread.c); then
+        out=$(deadline 30 ./build/lxrun "$PWD/build/inotify_fionread" 2>&1)
+        if grep -q "== inotify fionread: ok" <<<"$out"; then
+            ok "inotify FIONREAD: the queued events' size ($(grep -o 'FIONREAD after one create: [0-9]*' <<<"$out" | grep -o '[0-9]*$') B for one), Qt's read of exactly that"
+        else
+            bad "inotify FIONREAD" "$(grep -E 'FAIL|read\(' <<<"$out" | head -6)"
+        fi
+    else
+        bad "build inotify_fionread" "$err"
+    fi
+else
+    echo "  skip  inotify FIONREAD (no $STAGE)"
+fi
+
+# 20c. An eventfd is one object across fork(), as on Linux. Qt's QProcess
+# (forkfd) parks the child in eventfd_read until the parent writes; with the
+# counter in process memory the child spun for ever and no QProcess started.
+if [ -f "$STAGE/usr/lib64/libc.a" ] && [ -n "$GCCDIR" ]; then
+    if err=$(glibc_cc -static-pie -O2 -o build/eventfd_fork tests/elf/eventfd_fork.c); then
+        out=$(deadline 30 ./build/lxrun "$PWD/build/eventfd_fork" 2>&1)
+        if grep -q "== eventfd fork: ok" <<<"$out"; then
+            ok "eventfd across fork: the child reads the parent's write ($(grep -o 'after [0-9.]* s' <<<"$out")), and back"
+        else
+            bad "eventfd across fork" "$(grep -E 'FAIL|child exit' <<<"$out" | head -6)"
+        fi
+    else
+        bad "build eventfd_fork" "$err"
+    fi
+else
+    echo "  skip  eventfd across fork (no $STAGE)"
 fi
 
 # 21. A bwrap plan, interpreted (runtime/mounts.c). pressure-vessel builds

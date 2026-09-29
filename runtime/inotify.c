@@ -426,6 +426,28 @@ long lxrt_inotify_rm_watch(int fd, int wd)
     pthread_mutex_unlock(&lock);
     return result;
 }
+// FIONREAD, as Linux answers it: the size of the queued events. Qt reads
+// exactly this many bytes on a blocking descriptor
+// (QInotifyFileSystemWatcherEngine::readFromInotify); the pipe's own count
+// (its one readiness byte) made that read(fd, buf, 1) fail with EINVAL.
+// A readiness byte with nothing queued is drained here, so a poll that
+// follows does not report the descriptor readable for nothing.
+long lxrt_inotify_pending(int fd)
+{
+    pthread_mutex_lock(&lock);
+    struct instance *i = lookup(fd);
+    long total = 0;
+    if (!i) {
+        total = LERR(EBADF);
+    } else {
+        for (struct record *r = i->head; r; r = r->next)
+            total += (long)(sizeof r->event + r->event.len);
+        if (!i->head && !i->stopping) drain_ready(i);
+        if (total > INT_MAX) total = INT_MAX;
+    }
+    pthread_mutex_unlock(&lock);
+    return total;
+}
 long lxrt_inotify_read(int fd, void *buf, size_t len)
 {
     pthread_mutex_lock(&lock);

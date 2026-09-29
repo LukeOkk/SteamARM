@@ -10,6 +10,9 @@ long lxrt_inotify_add_watch(int fd, const char *guest_path, uint32_t mask); // 2
 long lxrt_inotify_rm_watch(int fd, int wd);                    // 28
 bool lxrt_inotify_is(int fd);
 long lxrt_inotify_read(int fd, void *buf, size_t len);
+// FIONREAD: the bytes of whole events queued (Linux semantics), never the
+// pipe's readiness byte. With nothing queued it also drains any stray byte.
+long lxrt_inotify_pending(int fd);
 void lxrt_inotify_close(int fd);
 void lxrt_inotify_dup(int oldfd, int newfd);
 

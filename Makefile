@@ -38,6 +38,19 @@ LXRT_SRCS := runtime/procpid.c runtime/main.c runtime/elf.c runtime/elfsect.c ru
              runtime/futex_ops.c runtime/inotify.c runtime/ioctl_tty.c runtime/mounts.c runtime/memlog.c runtime/mremap.c runtime/timerfd_signalfd.c runtime/proc_ext.c runtime/privmap.c runtime/shmirror.c runtime/sysv_ipc.c runtime/process.c runtime/procfs.c runtime/signal.c runtime/socket.c runtime/stack.c runtime/storemu.c runtime/subpage.c runtime/sysfs.c runtime/sysreg.c runtime/window.m runtime/remote_layer.m runtime/thread.c runtime/tls.c runtime/trampoline.S runtime/vdso_map.c runtime/vdso_blob.S
 LXRT_CFLAGS := -arch arm64 -fmodules -Wall -Wextra -Wno-unused-parameter -O2 -Iruntime
 LXRT_LDFLAGS := -framework Cocoa -framework Metal -framework QuartzCore
+# LXRT_KEEP_X18=1 (opt-in): link lxrun as built against the macOS 12.3 SDK.
+# xnu keeps x18 across exceptions for such a binary (MEASURED on the M4 under
+# macOS 27 by tests/x18_preserve/run.sh), so guest code the runtime never
+# rewrote keeps its x18 too: Linux HotSpot's C1/C2 and llvmpipe's LLVM JIT
+# allocate it, and computed wrong results or crashed without it
+# (benchmarks/stage24-minecraft-prism.txt). Not the default until the x86
+# Steam, Proton and Vulkan presentation paths are measured with it.
+# `make clean` or deleting build/lxrun first: make does not see the switch.
+ifeq ($(LXRT_KEEP_X18),1)
+# SteamARM needs macOS 14 anyway: calls newer than 12.0 (mkfifoat) are there.
+LXRT_CFLAGS += -mmacosx-version-min=12.0 -Wno-unguarded-availability-new
+LXRT_LDFLAGS += -Wl,-platform_version,macos,12.0,12.3
+endif
 
 # The vDSO (M6): a Linux aarch64 shared object, embedded by vdso_blob.S.
 VDSO_CC := /opt/homebrew/opt/llvm/bin/clang

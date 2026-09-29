@@ -127,6 +127,18 @@ static void fault_report(int sig, siginfo_t *info, void *uap)
                           (unsigned long long)ra, (unsigned long long)rs,
                           fname[0] ? " " : "", fname);
         }
+        // Outside the image (JIT output, a dlopened library): the word too,
+        // read without trusting the page, and the hardware x18. Code the
+        // runtime never rewrote (a JIT's) keeps using x18, which Darwin
+        // zeroes on every exception; llvmpipe's JIT died reading through a
+        // null base in stage 24 (benchmarks/stage24-minecraft-prism.txt).
+        uint32_t word = 0;
+        mach_vm_size_t got = 0;
+        if ((!g_img || pc < (uint64_t)g_img->base || pc + 4 > (uint64_t)g_img->base + g_img->span) &&
+            mach_vm_read_overwrite(mach_task_self(), pc, sizeof word, (mach_vm_address_t)(uintptr_t)&word,
+                                   &got) == KERN_SUCCESS && got == sizeof word)
+            n += snprintf(buf + n, sizeof buf - n, ", insn 0x%08x, x18 0x%llx", word,
+                          (unsigned long long)uc->uc_mcontext->__ss.__x[18]);
     }
     // A trap or fault inside host code (a libsystem routine the runtime
     // called: a SIGTRAP in pthread_jit_write_protect_np once, 1 of 5 x86

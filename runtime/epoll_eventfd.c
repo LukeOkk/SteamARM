@@ -47,7 +47,9 @@
 #include <stddef.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sched.h>
 #include <sys/event.h>
+#include <sys/mman.h>
 #include <sys/stat.h>
 #include <sys/time.h>
 #include <sys/types.h>
@@ -320,6 +322,48 @@ LXRT_FORK_SAFE(epoll_eventfd_g_ep_lock, g_ep_lock)
 // census comes close.
 #define EV_MAX_ALIAS 16
 
+// The counter and the token flag live in memory this process shares with the
+// children it forks (MAP_SHARED|MAP_ANON stays shared across Darwin's fork()),
+// because on Linux a forked child's eventfd IS the parent's eventfd. With the
+// counter in process memory the two drifted apart while the token pipe was
+// shared: Qt's QProcess (forkfd, qtbase src/3rdparty/forkfd/forkfd.c) makes
+// the child wait in eventfd_read for the parent's "all clear" eventfd_write;
+// the child's copy stayed 0 while the parent's token kept the pipe readable,
+// and the child spun at 100% CPU for ever, so no QProcess ever started
+// (Prism Launcher's updater and Java checks; benchmarks/stage24-minecraft-
+// prism.txt, tests/elf/eventfd_fork.c).
+//
+// `lock` serialises count/armed and the token byte across processes. It is
+// only ever taken with g_ev_lock held, so no thread of this process can hold
+// it across fork() (g_ev_lock is held there, LXRT_FORK_SAFE), and it is held
+// for one counter update plus at most one non-blocking token write or read.
+// `procs` counts the processes that have the object (1, plus 1 per fork that
+// inherited it); a process that execs or exits without closing leaves it
+// high, so it only decides the courtesy wake-up in lxrt_eventfd_close().
+struct ev_shared {
+    atomic_flag lock;
+    uint64_t    count;
+    bool        armed;       // exactly one token byte is sitting in the pipe.
+                             // Invariant: armed == (count > 0).
+    atomic_int  procs;
+};
+#define EV_SHARED_BYTES 16384   // one host page per eventfd
+
+static void ev_sh_lock(struct ev_shared *s)
+{
+    for (unsigned spins = 0; atomic_flag_test_and_set_explicit(&s->lock, memory_order_acquire); spins++) {
+        if (spins < 64)
+            __builtin_arm_yield();
+        else
+            sched_yield();
+    }
+}
+
+static void ev_sh_unlock(struct ev_shared *s)
+{
+    atomic_flag_clear_explicit(&s->lock, memory_order_release);
+}
+
 struct ev_obj {
     bool     used;       // see struct ep_inst: a zero-filled free slot would
                          // otherwise claim to be descriptor 0
@@ -335,13 +379,12 @@ struct ev_obj {
                          // waiting on EPOLLOUT.
     int      fds[EV_MAX_ALIAS];   // guest-visible descriptors for this eventfd
     int      nfds;
-    uint64_t count;
+    struct ev_shared *sh; // count and armed, shared with forked children (above).
+                         // armed == (count > 0) is what makes the descriptor
+                         // readable to kqueue, poll and select without them
+                         // knowing anything about the counter.
     bool     semaphore;
     bool     nonblock;
-    bool     armed;      // exactly one token byte is sitting in the pipe.
-                         // Invariant: armed == (count > 0). That is what makes
-                         // the descriptor readable to kqueue, poll and select
-                         // without them knowing anything about the counter.
     int      refs;
     bool     dead;
 };
@@ -349,6 +392,28 @@ struct ev_obj {
 static struct ev_obj g_ev[MAX_EVENTFD];
 static pthread_mutex_t g_ev_lock = PTHREAD_MUTEX_INITIALIZER;
 LXRT_FORK_SAFE(epoll_eventfd_g_ev_lock, g_ev_lock)
+
+// A forked child has every eventfd of its parent, counter included (the
+// shared page is inherited shared): count it as one more owner BEFORE the
+// fork, in the parent. Counted in the child instead, the parent could close
+// its copy before the child had run at all and think itself the sole owner:
+// forkfd's parent writes 42 and closes at once, and the reset that followed
+// left the child reading 0 for ever (MEASURED in Prism Launcher's QProcess).
+// This prepare handler runs before LXRT_FORK_SAFE's (handlers registered
+// later prepare first). A fork that fails leaves the count one high, which
+// only costs the courtesy reset in lxrt_eventfd_close().
+static void ev_fork_prepare(void)
+{
+    pthread_mutex_lock(&g_ev_lock);
+    for (int i = 0; i < MAX_EVENTFD; i++)
+        if (g_ev[i].used && !g_ev[i].dead && g_ev[i].sh)
+            atomic_fetch_add_explicit(&g_ev[i].sh->procs, 1, memory_order_relaxed);
+    pthread_mutex_unlock(&g_ev_lock);
+}
+__attribute__((constructor(201))) static void ev_fork_register(void)
+{
+    pthread_atfork(ev_fork_prepare, NULL, NULL);
+}
 
 // lxrt_eventfd_is() sits in front of every read(63) and write(64) in the
 // process, so it cannot take a lock. A bitmap over the low fd space answers
@@ -410,6 +475,9 @@ static void ev_release(struct ev_obj *o)
         if (o->wfd >= 0)
             close(o->wfd);
         o->pr = o->wfd = -1;
+        if (o->sh)
+            munmap(o->sh, EV_SHARED_BYTES);   // this process's view only
+        o->sh = NULL;
         o->nfds = 0;
         o->dead = false;
         o->used = false;
@@ -500,6 +568,18 @@ long lxrt_eventfd2(unsigned initval, int lflags)
             fcntl(p[1], F_SETFL, fl | O_NONBLOCK);
     }
 
+    // Zero-filled: an unlocked lock, count 0, not armed.
+    struct ev_shared *sh = mmap(NULL, EV_SHARED_BYTES, PROT_READ | PROT_WRITE,
+                                MAP_SHARED | MAP_ANON, -1, 0);
+    if (sh == MAP_FAILED) {
+        int e = errno;
+        close(g);
+        close(p[0]);
+        close(p[1]);
+        return LERR(e);
+    }
+    atomic_init(&sh->procs, 1);
+
     pthread_mutex_lock(&g_ev_lock);
     struct ev_obj *o = NULL;
     for (int i = 0; i < MAX_EVENTFD; i++) {
@@ -510,6 +590,7 @@ long lxrt_eventfd2(unsigned initval, int lflags)
     }
     if (!o) {
         pthread_mutex_unlock(&g_ev_lock);
+        munmap(sh, EV_SHARED_BYTES);
         close(g);
         close(p[0]);
         close(p[1]);
@@ -520,17 +601,18 @@ long lxrt_eventfd2(unsigned initval, int lflags)
     o->wfd = p[1];
     o->fds[0] = g;
     o->nfds = 1;
-    o->count = initval;
+    o->sh = sh;
+    sh->count = initval;
     o->semaphore = (lflags & L_EFD_SEMAPHORE) != 0;
     o->nonblock = (lflags & L_EFD_NONBLOCK) != 0;
-    o->armed = false;
+    sh->armed = false;
     o->dead = false;
     o->refs = 0;
-    if (o->count > 0) {
+    if (sh->count > 0) {
         // Restore the invariant immediately: a non-zero initval means the
         // descriptor is already readable before the guest touches it.
         if (write(o->wfd, "e", 1) == 1)
-            o->armed = true;
+            sh->armed = true;
     }
     evmap_set(g, true);
     atomic_fetch_add_explicit(&g_ev_live, 1, memory_order_relaxed);
@@ -562,15 +644,17 @@ void lxrt_eventfd_dup(int oldfd, int newfd)
     pthread_mutex_unlock(&g_ev_lock);
 }
 
-// Caller holds g_ev_lock. Restores the invariant armed == (count > 0), which is
-// the whole reason the descriptor is pollable: kqueue, poll() and select() see
-// a pipe with a byte in it and know nothing about the counter.
+// Caller holds g_ev_lock and o->sh's lock. Restores the invariant armed ==
+// (count > 0), which is the whole reason the descriptor is pollable: kqueue,
+// poll() and select() see a pipe with a byte in it and know nothing about the
+// counter.
 static void ev_sync_token(struct ev_obj *o)
 {
-    if (o->count > 0 && !o->armed) {
+    struct ev_shared *s = o->sh;
+    if (s->count > 0 && !s->armed) {
         if (write(o->wfd, "e", 1) == 1)
-            o->armed = true;
-    } else if (o->count == 0 && o->armed) {
+            s->armed = true;
+    } else if (s->count == 0 && s->armed) {
         // The drain reads from our PRIVATE read end, so it cannot be affected
         // by anything the guest does to its own aliases. It is still gated on a
         // zero-timeout poll first: under the invariant the byte is always
@@ -582,11 +666,11 @@ static void ev_sync_token(struct ev_obj *o)
         if (poll(&pfd, 1, 0) == 1 && (pfd.revents & POLLIN)) {
             char c;
             if (read(o->pr, &c, 1) == 1) {
-                o->armed = false;
+                s->armed = false;
                 return;
             }
         }
-        o->armed = false;
+        s->armed = false;
     }
 }
 
@@ -606,17 +690,20 @@ long lxrt_eventfd_read(int fd, void *buf, size_t n)
             pthread_mutex_unlock(&g_ev_lock);
             return LERR(EBADF);
         }
-        if (o->count > 0) {
+        struct ev_shared *sh = o->sh;
+        ev_sh_lock(sh);
+        if (sh->count > 0) {
             uint64_t v;
             if (o->semaphore) {
                 // EFD_SEMAPHORE: hand back 1 and decrement by 1.
                 v = 1;
-                o->count -= 1;
+                sh->count -= 1;
             } else {
-                v = o->count;
-                o->count = 0;
+                v = sh->count;
+                sh->count = 0;
             }
             ev_sync_token(o);
+            ev_sh_unlock(sh);
             pthread_mutex_unlock(&g_ev_lock);
             // memcpy, not a store through a cast: the guest is only promised an
             // 8-byte buffer, never an 8-byte-aligned one, and aarch64 traps
@@ -624,6 +711,7 @@ long lxrt_eventfd_read(int fd, void *buf, size_t n)
             memcpy(buf, &v, sizeof v);
             return (long)sizeof(uint64_t);
         }
+        ev_sh_unlock(sh);
         if (o->nonblock) {
             pthread_mutex_unlock(&g_ev_lock);
             return LERR(EAGAIN);
@@ -681,12 +769,16 @@ long lxrt_eventfd_write(int fd, const void *buf, size_t n)
             return LERR(EBADF);
         }
         // The counter saturates at UINT64_MAX-1, not UINT64_MAX.
-        if (add <= (UINT64_MAX - 1) - o->count) {
-            o->count += add;
+        struct ev_shared *sh = o->sh;
+        ev_sh_lock(sh);
+        if (add <= (UINT64_MAX - 1) - sh->count) {
+            sh->count += add;
             ev_sync_token(o);
+            ev_sh_unlock(sh);
             pthread_mutex_unlock(&g_ev_lock);
             return (long)sizeof(uint64_t);
         }
+        ev_sh_unlock(sh);
         if (o->nonblock) {
             pthread_mutex_unlock(&g_ev_lock);
             return LERR(EAGAIN);
@@ -738,11 +830,21 @@ void lxrt_eventfd_close(int fd)
             }
         }
         if (o->nfds == 0) {
-            o->count = 0;
-            o->armed = false;
+            // Another process may still have this eventfd (a fork): then its
+            // counter and token stay as they are, and a thread of ours parked
+            // in poll() stays parked until that process writes, as a Linux
+            // read blocked on a descriptor another thread closed keeps
+            // waiting. Only a sole owner resets it and wakes its sleepers.
+            bool sole = atomic_fetch_sub_explicit(&o->sh->procs, 1, memory_order_acq_rel) <= 1;
+            if (sole) {
+                ev_sh_lock(o->sh);
+                o->sh->count = 0;
+                ev_sync_token(o);        // drains the token: no stray byte
+                ev_sh_unlock(o->sh);
+            }
             o->dead = true;
             atomic_fetch_sub_explicit(&g_ev_live, 1, memory_order_relaxed);
-            if (o->refs > 0 && o->wfd >= 0) {
+            if (sole && o->refs > 0 && o->wfd >= 0) {
                 // Wake anybody parked in poll() on the private read end. Both
                 // pipe ends are still open -- ev_release() closes them once the
                 // last reference drops -- so without a token nothing would ever

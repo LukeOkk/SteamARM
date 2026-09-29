@@ -23,6 +23,10 @@ export LXRT_ROOT="${LXRT_ROOT:-/tmp/lxrt-arm64root}"
 . scripts/guest-env.sh
 guest_env_from_root "$LXRT_ROOT"
 # As run-fex.sh: macOS's per-user TMPDIR and LD_LIBRARY_PATH must not leak in.
+# TMPDIR must stay a path that exists on the Mac: lxrun itself reads it for
+# its /proc, socket and mount directories (runtime/procfs.c). A guest-only
+# TMPDIR (/tmp/prismhome/tmp) left /proc/self/exe unreadable (MEASURED,
+# benchmarks/stage24-minecraft-prism.txt A1).
 export TMPDIR=/tmp
 unset LD_LIBRARY_PATH
 export HOME="${HOME_IN_GUEST:-/tmp/fexhome}"
