@@ -49,6 +49,19 @@
 // FEX keeps the old read-write grant: the x86 code it hands to mprotect is
 // data to the host, and executing it would be wrong. The main program's name
 // decides (lxrt_wx_set_program); LXRT_WX_SPLIT=0/1 overrides.
+//
+// One owner per host page. A 16 KiB host page can hold pages of this table
+// AND 4 KiB guest pages subpage.c records (a 4 KiB mprotect or MAP_FIXED
+// inside an RWX range, or an RWX commit that is not 16 KiB aligned). Such a
+// page is subpage.c's: when it first sees the page it records every slot of
+// this table as RWX (adopt_untracked), its flips scan every RWX guest page of
+// the page, and the fault handler here leaves the page alone. A page it does
+// not track is this file's. Both tables, and every protection change of a
+// page either of them owns, sit under ONE lock (lxrt_pageprot_lock): with a
+// lock each, a write flip here and an execute flip there changed one page at
+// the same time, and code in a 4 KiB RWX page only subpage.c knew about ran
+// unscanned after a fetch from a neighbour that was in this table (stage 23
+// review; tests/elf/wx_owner.c, "mixed").
 
 #include "lxrt.h"
 #include "x18.h"
@@ -104,13 +117,20 @@ struct wxr { uint64_t start, end; };
 static struct wxr *g_r;
 static int g_cap;
 static _Atomic int g_n;
+
+// The page-protection lock: this table, subpage.c's records, and every
+// protection change of a host page either one owns.
 static pthread_mutex_t g_lock = PTHREAD_MUTEX_INITIALIZER;
 LXRT_FORK_SAFE(wxsplit_g_lock, g_lock)
+static _Thread_local int t_held;        // this thread holds g_lock
 
 // Every path that holds g_lock runs with the asynchronous signals blocked: the
 // runtime runs a guest's handler nested inside the host handler, and a guest
 // handler that ran JIT code on a page this thread was in the middle of
-// flipping would wait for this thread's own lock forever.
+// flipping would wait for this thread's own lock forever. Only the
+// synchronous faults stay deliverable, and one raised while this thread holds
+// the lock is the runtime's own: the fault handlers report it
+// (lxrt_pageprot_held) instead of waiting.
 static void lock_nosig(sigset_t *old)
 {
     sigset_t all;
@@ -121,13 +141,24 @@ static void lock_nosig(sigset_t *old)
     sigdelset(&all, SIGTRAP);
     pthread_sigmask(SIG_BLOCK, &all, old);
     pthread_mutex_lock(&g_lock);
+    t_held++;
 }
 
 static void unlock_nosig(const sigset_t *old)
 {
+    t_held--;
     pthread_mutex_unlock(&g_lock);
     pthread_sigmask(SIG_SETMASK, old, NULL);
 }
+
+// For subpage.c, which keeps its records under the same lock.
+void lxrt_pageprot_lock(sigset_t *old) { lock_nosig(old); }
+void lxrt_pageprot_unlock(const sigset_t *old) { unlock_nosig(old); }
+bool lxrt_pageprot_held(void) { return t_held > 0; }
+
+// subpage.c, caller holds g_lock: does it record any guest page in
+// [addr, addr+len)? Such a host page is its to flip.
+bool lxrt_subpage_tracked_locked(uint64_t addr, uint64_t len);
 
 // First entry whose end is above addr. Caller holds g_lock.
 static int lower(uint64_t addr)
@@ -221,6 +252,20 @@ static bool add_locked(uint64_t start, uint64_t end)
     return true;
 }
 
+// The queries below for a caller that already holds g_lock (subpage.c).
+bool lxrt_wx_contains_locked(uint64_t addr)
+{
+    return atomic_load(&g_n) && find_locked(addr);
+}
+
+bool lxrt_wx_intersects_locked(uint64_t addr, uint64_t len)
+{
+    if (!atomic_load(&g_n) || !len)
+        return false;
+    int i = lower(addr);
+    return i < atomic_load(&g_n) && g_r[i].start < addr + len;
+}
+
 bool lxrt_wx_contains(uint64_t addr)
 {
     if (!atomic_load(&g_n))
@@ -252,8 +297,7 @@ bool lxrt_wx_intersects(uint64_t addr, uint64_t len)
         return false;
     sigset_t old;
     lock_nosig(&old);
-    int i = lower(addr);
-    bool r = i < atomic_load(&g_n) && g_r[i].start < addr + len;
+    bool r = lxrt_wx_intersects_locked(addr, len);
     unlock_nosig(&old);
     return r;
 }
@@ -451,13 +495,20 @@ static bool anon_private(uint64_t addr, uint64_t len)
 
 // The guest asked for read-write-execute on [addr, addr+len), host-page
 // aligned. Returns 1 when handled here (*ret set), 0 when the caller should
-// fall back to its old behaviour (not private anonymous memory).
+// fall back to its old behaviour (not private anonymous memory, or a host
+// page subpage.c owns: dispatch.c then sends the request there).
 int lxrt_wx_protect(uint64_t addr, uint64_t len, long *ret)
 {
     if (!lxrt_wx_enabled() || !len || !anon_private(addr, len))
         return 0;
     sigset_t old;
     lock_nosig(&old);
+    // dispatch.c asked subpage.c before calling here, but without this lock:
+    // a page it began tracking since is its, and stays its.
+    if (lxrt_subpage_tracked_locked(addr, len)) {
+        unlock_nosig(&old);
+        return 0;
+    }
     if (!add_locked(addr, addr + len)) {
         unlock_nosig(&old);
         *ret = -12;                 // ENOMEM
@@ -505,36 +556,33 @@ void lxrt_wx_moved(uint64_t old, uint64_t olen, uint64_t neu, uint64_t nlen)
 static _Thread_local uint64_t t_last_hp, t_last_pc;
 static _Thread_local unsigned t_pingpong;
 
-bool lxrt_wx_handle_fault(uint64_t pc, uint64_t addr, uint32_t esr)
+// Flip the host page hp, which this file owns (subpage.c does not track it):
+// read-only, scanned and read-execute for a fetch, read-write for a store.
+// Caller holds g_lock. Also subpage.c's, for a page that stopped being its
+// between the two handlers.
+bool lxrt_wx_flip_locked(uint64_t hp, bool fetch)
 {
-    if (!atomic_load(&g_n) || !addr)
-        return false;
-    uint32_t ec = esr >> 26;
-    bool fetch = ec == 0x20 || ec == 0x21 || pc == addr;
-    bool write = !fetch && (ec == 0x24 || ec == 0x25) && (esr & (1u << 6));
-    if (!fetch && !write)
-        return false;
-    uint64_t hp = LXRT_ALIGN_DOWN(addr, LXRT_HOST_PAGE);
-
-    sigset_t old;
-    lock_nosig(&old);
-    if (!find_locked(addr)) {
-        unlock_nosig(&old);
-        return false;
-    }
     int cur = host_prot(hp);
     bool ok = true;
     if (fetch) {
         if (cur < 0 || !(cur & PROT_EXEC)) {
             // Only the part of the host page the guest made RWX is scanned;
             // the table's ranges are host-page aligned where they came from
-            // an aligned mprotect, but a partial munmap can trim them.
-            struct lxrt_range r[4];
+            // an aligned mprotect, but a partial munmap can trim them. The
+            // rest of the page holds no guest page (subpage.c would track
+            // it), so this is every byte the fetch can reach.
+            struct lxrt_range r[LXRT_HOST_PAGE / 4096];
             int nr = 0;
             int n = atomic_load(&g_n);
-            for (int i = lower(hp); i < n && g_r[i].start < hp + LXRT_HOST_PAGE && nr < 4; i++) {
-                r[nr].start = g_r[i].start > hp ? g_r[i].start : hp;
-                r[nr].end = g_r[i].end < hp + LXRT_HOST_PAGE ? g_r[i].end : hp + LXRT_HOST_PAGE;
+            for (int i = lower(hp); i < n && g_r[i].start < hp + LXRT_HOST_PAGE; i++) {
+                uint64_t s = g_r[i].start > hp ? g_r[i].start : hp;
+                uint64_t e = g_r[i].end < hp + LXRT_HOST_PAGE ? g_r[i].end : hp + LXRT_HOST_PAGE;
+                if (nr == (int)(sizeof r / sizeof r[0])) {
+                    r[nr - 1].end = e;          // more pieces than slots: cover the rest
+                    continue;
+                }
+                r[nr].start = s;
+                r[nr].end = e;
                 nr++;
             }
             ok = lxrt_wx_scan_for_exec(hp, r, nr) &&
@@ -549,6 +597,40 @@ bool lxrt_wx_handle_fault(uint64_t pc, uint64_t addr, uint32_t esr)
         if (ok)
             atomic_fetch_add(&st_write, 1);
     }
+    return ok;
+}
+
+bool lxrt_wx_handle_fault(uint64_t pc, uint64_t addr, uint32_t esr)
+{
+    if (!atomic_load(&g_n) || !addr)
+        return false;
+    uint32_t ec = esr >> 26;
+    // An alignment fault (data abort, DFSC 0b100001) is never about page
+    // protection: a misaligned store-release into a read-write page of the
+    // table is WnR=1, and taking it for a write flip retried the instruction
+    // forever (MEASURED with lxrun's first handler, main.c's fault_report,
+    // which had no filter: tests/elf/wx_owner.c, "misaligned stlr").
+    if ((ec == 0x24 || ec == 0x25) && (esr & 0x3f) == 0x21)
+        return false;
+    bool fetch = ec == 0x20 || ec == 0x21 || pc == addr;
+    bool write = !fetch && (ec == 0x24 || ec == 0x25) && (esr & (1u << 6));
+    if (!fetch && !write)
+        return false;
+    // Raised while this thread holds the lock: the runtime's own fault, not a
+    // flip. Waiting would be waiting for itself.
+    if (t_held)
+        return false;
+    uint64_t hp = LXRT_ALIGN_DOWN(addr, LXRT_HOST_PAGE);
+
+    sigset_t old;
+    lock_nosig(&old);
+    // A page subpage.c tracks is subpage.c's (see the header): its handler,
+    // later in the same chain, scans every RWX guest page in it.
+    if (!find_locked(addr) || lxrt_subpage_tracked_locked(hp, LXRT_HOST_PAGE)) {
+        unlock_nosig(&old);
+        return false;
+    }
+    bool ok = lxrt_wx_flip_locked(hp, fetch);
     unlock_nosig(&old);
 
     // A store executed from the page it stores into: each flip undoes the
