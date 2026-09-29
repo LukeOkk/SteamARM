@@ -58,6 +58,24 @@ tests/arm64/frame_glx.sh                # GLX in that root: an indirect context
 - **Launcher.** The built-in entry still uses the Fedora root. To move it,
   change only its `"root"` to `/tmp/lxrt-arm64root`; the GL variables come
   from the root's file.
+- **Rebuilds and stops.** `scripts/mkframeroot.sh` and `scripts/mkarmroot.sh`
+  resolve SRC/OUT first (symlinks, trailing slashes, relative to the
+  caller), refuse a layout where the swap would delete or write something
+  else, and refuse a root a guest runs on. `scripts/roots.sh` carries
+  `tmp/` (the client home) and `opt/apps` over, puts them back after an
+  interrupted swap, and never deletes a leftover that holds a home
+  (VERIFIED IN SOURCE; MEASURED on fake roots by
+  `tests/launcher/mkarmroot.sh` and `tests/launcher/guest_env.sh`).
+  `scripts/run-steam-arm64.sh` refuses `ARMROOT` without `ARMROOT_LINK`
+  unless it is `$STEAMARM_STATE/armroot` or `.../arm64root`, and a root or
+  link a guest runs on. When it stops, it stops only the orphans that carry
+  its `STEAMARM_RUN_ID` (MEASURED with a stand-in for lxrun,
+  `tests/launcher/run_steam_arm64.sh`). That the variable reaches the real
+  webhelper's zygotes is a HYPOTHESIS: `runtime/process.c` (`lxrt_execve`)
+  passes the guest's environment on, and those processes still find their
+  files through `LXRT_ROOT`, which travels the same way; no client session
+  has been checked yet. Orphans without it are named in the log and left
+  running.
 
 ## How it runs today
 

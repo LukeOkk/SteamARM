@@ -10,9 +10,16 @@
 #   scripts/mkarmroot.sh [out-dir]      default $STEAMARM_STATE/armroot
 #   scripts/mkarmroot.sh --stage-only   refresh RPM lock/stage, preserve live root
 # A rebuild keeps <out-dir>/tmp (the client's home, tmp/armhome) and
-# <out-dir>/opt/apps.
+# <out-dir>/opt/apps: scripts/roots.sh (root_swap) carries them into the new
+# root, and puts them back if a swap was interrupted. out-dir is resolved
+# (symlinks, trailing slashes, relative to the caller's directory) before
+# anything is touched; a root a guest is running on is not rebuilt.
+# MKARMROOT_SKIP_RPM=1 (tests): use the stage in $STEAMARM_BUILD as it is,
+# without scripts/mkroot-rpm.sh (nothing is fetched).
 set -euo pipefail
+CANON_BASE=$PWD
 cd "$(dirname "$0")/.." || exit 1
+. scripts/roots.sh
 BUILD="${STEAMARM_BUILD:-$HOME/SteamARM-build}"
 STATE="${STEAMARM_STATE:-$HOME/SteamARM-roots}"
 OUT="${1:-$STATE/armroot}"
@@ -54,20 +61,47 @@ RELOCK=
 if [ ! -f "$LOCK" ] || [ "$(sed -n 's/^# root seeds: \(.*\) + their shared-library closure$/\1/p' "$LOCK")" != "$SEEDS" ]; then
     RELOCK=--relock
 fi
-MKROOT_SEEDS="$SEEDS" MKROOT_LOCK="$LOCK" MKROOT_STAGE="$STAGE" \
-    MKROOT_STAGE_ONLY=1 scripts/mkroot-rpm.sh $RELOCK "$BUILD/armroot-unused"
+if [ -z "${MKARMROOT_SKIP_RPM:-}" ]; then
+    MKROOT_SEEDS="$SEEDS" MKROOT_LOCK="$LOCK" MKROOT_STAGE="$STAGE" \
+        MKROOT_STAGE_ONLY=1 scripts/mkroot-rpm.sh $RELOCK "$BUILD/armroot-unused"
+fi
 if [ "$STAGE_ONLY" -eq 1 ]; then echo "armroot stage ready: $STAGE"; exit 0; fi
 # The root is the stage (APFS clones: no extra space) plus what a booted
-# system would have written.
-if [ -e "$OUT" ] && [ ! -f "$OUT/.lxrt-armroot" ]; then
-    echo "refusing: $OUT exists and was not made by this script" >&2; exit 1
+# system would have written. Every path is resolved first: "armroot/" once
+# put the build inside the old root, which the swap then deleted together
+# with the client's home.
+refuse() { echo "refusing: $*" >&2; exit 1; }
+FINAL=$(canon_path "$OUT") ||
+    refuse "$OUT: not a usable path (dangling symlink, a symlink to a file, or . / .. in a part that does not exist)"
+STAGE_REAL=$(canon_path "$STAGE") && [ -d "$STAGE_REAL" ] || refuse "no stage at $STAGE"
+[ "$FINAL" != / ] || refuse "$OUT is /"
+[ ! -e "$FINAL" ] || [ -d "$FINAL" ] || refuse "$OUT is not a directory"
+# Nothing the swap deletes (the old root, $FINAL.new, $FINAL.old) may hold the
+# stage, the state and build directories, this checkout or the home directory.
+for spared in "$STAGE_REAL" "$BUILD" "$STATE" "$PWD" "$HOME"; do
+    s=$(canon_path "$spared") || continue
+    for victim in "$FINAL" "$FINAL.new" "$FINAL.old"; do
+        if path_within "$s" "$victim"; then refuse "$OUT: $victim would contain $spared"; fi
+    done
+done
+if path_within "$FINAL" "$STAGE_REAL"; then refuse "$OUT is inside the stage $STAGE"; fi
+if [ -e "$FINAL" ] && [ ! -f "$FINAL/.lxrt-armroot" ]; then
+    # When $FINAL.new holds the client's home (a swap interrupted while the
+    # old root was being deleted), this refuses and says so.
+    root_recover "$FINAL" .lxrt-armroot
+    refuse "$OUT exists and was not made by this script"
 fi
+in_use=$(guests_on_root "$FINAL")
+[ -z "$in_use" ] || refuse "guests are running on $FINAL (pid $(echo $in_use)); stop them first"
 # Built beside the old root and swapped in at the end, so a failed build
-# leaves the old one (and the client's downloads in it) untouched.
-FINAL="$OUT"
+# leaves the old one (and the client's downloads in it) untouched. A swap
+# that was interrupted is put back first; a leftover that still holds a
+# client home is never deleted (scripts/roots.sh).
+mkdir -p "$(dirname "$FINAL")"
+root_recover "$FINAL" .lxrt-armroot
+root_clear "$FINAL"
 OUT="$FINAL.new"
-rm -rf "$OUT"
-cp -Rc "$STAGE" "$OUT"
+cp -Rc "$STAGE_REAL" "$OUT"
 touch "$OUT/.lxrt-armroot"
 mkdir -p "$OUT/etc" "$OUT/tmp" "$OUT/dev/shm" "$OUT/run"
 cp /etc/hosts "$OUT/etc/hosts" 2>/dev/null || true
@@ -102,14 +136,6 @@ done
 [ -e "$OUT/usr/lib64/libnssckbi.so" ] || ln -s pkcs11/p11-kit-trust.so "$OUT/usr/lib64/libnssckbi.so"
 # Runtime state survives a rebuild: tmp/ holds the client's home (tmp/armhome,
 # ~1 GB of client plus whatever it downloaded), opt/apps what was installed there.
-for keep in tmp opt/apps; do
-    if [ -e "$FINAL/$keep" ]; then
-        mkdir -p "$(dirname "$OUT/$keep")"
-        rm -rf "${OUT:?}/$keep"
-        mv "$FINAL/$keep" "$OUT/$keep"
-    fi
-done
-rm -rf "$FINAL"
-mv "$OUT" "$FINAL"
+root_swap "$FINAL"
 OUT="$FINAL"
 echo "armroot ready: $OUT ($(du -sh "$OUT" | cut -f1))"
