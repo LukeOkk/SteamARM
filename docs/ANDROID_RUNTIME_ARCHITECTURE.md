@@ -231,7 +231,9 @@ It is a host process, the **hub** (`runtime/binder_hub.c`, run as `lxrun
 --binder-hub <dir>`), one per user, started by the first guest that opens a
 binder device and gone 10 s after the last one closes
 (`LXRT_BINDER_HUB_IDLE`). The directory is `/tmp/lxrt-binder-<uid>`
-(`LXRT_BINDER_DIR` overrides it; the tests use private ones). It keeps
+(`LXRT_BINDER_DIR` overrides it; the tests use private ones); it must be
+the user's own and closed to others (mode 0700), or no binder device is
+offered. It keeps
 what the kernel driver keeps, under the kernel's names: procs (one per open
 of a device, so a process with `/dev/binder` and `/dev/hwbinder` has two),
 threads, nodes, refs and descriptors, transaction stacks, work lists,
