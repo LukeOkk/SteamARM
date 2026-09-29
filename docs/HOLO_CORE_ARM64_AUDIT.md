@@ -13,7 +13,9 @@ kernel and no virtualisation mechanism is part of the final runtime.
   changes and licence fixes, and calls it a technology preview, not a stable
   system with guarantees.
 - The package index shows ARM64 `core` and `extra`; the newest visible
-  revision was `mash-20251118.3` (tree listed 2026-07-10). Index count: 258
+  revision was `mash-20251118.3` (tree listed 2026-07-10). Rechecked on
+  2026-09-29: still `mash-20251118.3`, and `mash-20251118/` redirects there
+  (`benchmarks/stage24-holo-vs-frame.txt`). Index count: 258
   entries in `core` and 4,312 in `extra`, including databases and `FILES`
   metadata; these are not signature counts. The `.sig` files for
   `btrfs-progs` and `core.db` were not published (404). Recording SHA-256
@@ -67,12 +69,50 @@ client, once it took the host for arm64, installed Proton (ARM64), Steam
 Linux Runtime 4.0 Arm64 and Valve's FEX (MEASURED,
 `benchmarks/stage15-steam-proton-path.txt:24-31`).
 
-Still open: a package-by-package comparison between the image and the Holo
-repository (`steamframe-image.py compare <inventory.json> <core.db>
-<extra.db>`), and whether a root built from Holo packages alone can carry the
-native client. `docs/ARM64_FIRST_MIGRATION.md` takes the image's root as the
-target; Holo packages would matter for a root SteamARM could build without
-the image.
+## Package comparison (2026-09-29)
+
+The package-by-package comparison is in `docs/HOLO_CORE_VS_STEAM_FRAME.md`
+(record: `benchmarks/stage24-holo-vs-frame.txt`). It compares the image's
+965 packages with `mash-20251118.3` `core` + `extra` (4,560 packages; the
+databases' URLs, dates and sha256 are recorded there). Results (MEASURED):
+
+- **Versions.** 81 packages have the same version and 806 differ: Holo is
+  newer for 764, the Frame for 42 (PipeWire 1.6.8, gamescope 3.16.28,
+  kernel 6.18 headers, wayland 1.26). 78 are only in the Frame and 3,673
+  only in Holo.
+- **The Frame is not built from the preview.** Its set is older: glibc 2.39
+  against 2.42, nss 3.99 against 3.117. Every aarch64 package in it was
+  built in 2025-05 or later, 574 of them on 2025-10-16. This answers the
+  open question in section 3.3 of `STEAM_FRAME_SNAPSHOT_2026-09-29.md`.
+- **Frame-only packages.** Hardware and boot (20), SteamOS services (19),
+  the Steam client and SteamVR (6), Valve's Mesa builds (7), the Android
+  side (5), renamed packages (4, e.g. `sdl2` → `sdl2-compat`), and 16 Arch
+  packages Holo does not carry. **GTK 2** is one of those 16.
+- **The client's libraries.** Holo ships 50 of the 51 sonames the native
+  client's Fedora root is seeded with. The missing one is
+  `libgtk-x11-2.0.so.0`, which the client's `steamui.so` and `vgui2_s.so`
+  name in `DT_NEEDED`. So a root built from Holo packages alone cannot
+  carry the native client's UI.
+- **Where Holo is better placed.** Its `mesa` 25.2.7 ships `swrast_dri.so`
+  and `libGLX_indirect.so.0`; the Frame's Qualcomm Mesa has neither. Its
+  `gawk` is PIE; the Frame's is `ET_EXEC`, which lxrun refuses.
+- **Neither ships FEX**, and there is no Steam package in Holo.
+
+**Recommended base** (reasons and the measurements in
+`docs/HOLO_CORE_VS_STEAM_FRAME.md`, "Which base"):
+
+1. The Fedora armroot stays the native client's default. It reaches the
+   sign-in window 5-7 s sooner than the Frame root in stage 23, and it is
+   built from public, pinned packages.
+2. The Frame-derived root is the reference root, for checking the client
+   against Valve's own userspace.
+3. Holo packages are not a base. They lack GTK 2, carry no Steam pieces,
+   are unsigned, and the preview has been frozen since 2026-07-10.
+
+`steamframe-image.py compare` now orders versions with pacman's `vercmp`,
+links renamed packages through PROVIDES/REPLACES, accepts an extracted root
+and records each database's sha256 (`tests/steamframe_image/compare.sh`).
+Re-run it for each new Frame image or Holo snapshot.
 
 ## Web research of 2026-09-29
 

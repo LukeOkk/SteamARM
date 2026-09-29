@@ -33,9 +33,10 @@ not claimed here), OPEN.
 
 | root | what it is | role |
 |---|---|---|
-| Fedora 43 aarch64 armroot (`scripts/mkarmroot.sh`, `/tmp/lxrt-armroot`) | the shared-library closure of what the client links; 150 root packages; stage 21 ran on it | **TRANSITIONAL.** Keep it until the Frame root runs the client at least as far |
-| Steam Frame / Holo root (extracted from `steamframe-oobe-repair-20260922.5153644-0.3.0.img`) | Valve's own aarch64 userspace for the client: SteamOS 0.3.0 "holo", 965 packages, glibc 2.39 (`docs/STEAM_FRAME_INVENTORY.md`) | **TARGET.** It already has what the Fedora root lacked in stage 21: X locale data, glibc locales, `lsof`, GTK 3, `libnssckbi.so` |
-| Fedora 43 `lxrt-root` (`scripts/mkroot-rpm.sh`) | FEX, FEXServer, test programs | KEEP for FEX and `tests/elf` until the Frame root is proven for them |
+| Fedora 43 aarch64 armroot (`scripts/mkarmroot.sh`, `/tmp/lxrt-armroot`) | the shared-library closure of what the client links (156 root packages in `scripts/mkarmroot.lock`); stages 21-23 ran on it | **DEFAULT for the native client** (was TRANSITIONAL). Both roots reach the sign-in window, and this one does it 5-7 s sooner, with 1 webhelper start instead of 2 and about 0.25 GB less (MEASURED, `benchmarks/stage23-frame-root.txt`). It is built from public, pinned packages with no device image. The Holo comparison found no better base (`docs/HOLO_CORE_VS_STEAM_FRAME.md`). The launcher still labels this base `transicional` and calls the Frame/Holo root the target (`launcher/ApplicationCore.swift:83-108`); changing that label is a separate change |
+| Steam Frame root (extracted from `steamframe-oobe-repair-20260922.5153644-0.3.0.img`) | Valve's own aarch64 userspace for the client: SteamOS 0.3.0 "holo", 965 packages, glibc 2.39 (`docs/STEAM_FRAME_INVENTORY.md`) | **REFERENCE** (was TARGET). The second experimental entry, to check the client against what Valve ships: the `steamdeck_stable` branch and the SteamOS services. Owner-only; nothing from it is redistributed. Not built from `holo-core-aarch64-preview`: 81 of 887 shared package names have the same version (MEASURED, `benchmarks/stage24-holo-vs-frame.txt`) |
+| `holo-core-aarch64-preview` packages (`mash-20251118.3`) | a public, unsigned, Arch-based ARM64 package repository hosted by Valve; frozen since 2026-07-10 | **NOT ADOPTED.** It has no GTK 2, which the client's `steamui.so` and `vgui2_s.so` need, and no Steam pieces (MEASURED, stage 24). It remains a public source of Arch-layout packages. Its Mesa has `swrast_dri.so` and `libGLX_indirect.so.0`, and its `gawk` is PIE |
+| Fedora 43 `lxrt-root` (`scripts/mkroot-rpm.sh`) | FEX, FEXServer, test programs | KEEP for FEX and `tests/elf` until another root is proven for them |
 | x86 Steam root (`steamroot`) | the x86 client and x86 Proton's world | KEEP for game payloads; its client-only parts are REMOVE_LATER |
 
 Rules for the Frame root (`docs/STEAM_FRAME_IMAGE.md`, licence section):
@@ -68,6 +69,14 @@ otherwise.
 
 Independent of that order:
 
+- **Holo Core vs the Frame (the choice of base).** DONE, 2026-09-29
+  (`docs/HOLO_CORE_VS_STEAM_FRAME.md`, `benchmarks/stage24-holo-vs-frame.txt`).
+  The Frame's 965 packages were compared with the preview's 4,560
+  (MEASURED): 81 at the same version, 806 different (Holo newer for 764), 78
+  only in the Frame, 3,673 only in Holo. Holo lacks only
+  `libgtk-x11-2.0.so.0` of the client's 51 seed sonames. The root table
+  above follows from it. Still UNKNOWN: the client on a root built from Holo
+  packages; none was built.
 - **Graphics: KosmicKrisp.** PARTLY DONE. The shim loads it in ICD mode
   when `STEAMARM_VK_ICD=kosmickrisp` (`4ccb914`), and the launcher sets that
   variable when **Gráficos → Motor** is KosmicKrisp, which it offers only

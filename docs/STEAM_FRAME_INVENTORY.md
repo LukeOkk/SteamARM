@@ -170,7 +170,7 @@ aarch64 Vulkan driver through FEX's thunks, as they reach the shim here.
 
 | question | how to answer |
 |---|---|
-| How the image's packages compare with `holo-core-aarch64-preview` | `steamframe-image.py compare <inventory.json> <that repository's core.db and extra.db>` |
+| How the image's packages compare with `holo-core-aarch64-preview` | answered 2026-09-29: `docs/HOLO_CORE_VS_STEAM_FRAME.md` (81 of 887 shared names at the same version; Holo newer for 764; Holo has no GTK 2). Re-run `steamframe-image.py compare <root or inventory.json> <core.db> <extra.db>` for a new image or snapshot |
 | Whether the client runs on this root under lxrun | `docs/ARM64_FIRST_MIGRATION.md` steps 6-8 |
 | Whether the bootstrap's client is the stage 21 build | compare `steamrtarm64/steam` hashes after extracting the tarball locally |
 

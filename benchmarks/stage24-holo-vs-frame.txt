@@ -1,0 +1,170 @@
+Stage 24 (Holo vs Frame) -- holo-core-aarch64-preview against the Steam Frame 0.3.0 root (2026-09-29)
+=====================================================================================================
+
+ZERO-VM. No guest and no X for the comparison: package databases, file lists and ELF
+headers read with python3 on the host. Host: Mac mini M4, 16 GB, macOS 27.0, python 3.9.6,
+zstandard 0.25.0, zstd at /opt/homebrew/bin/zstd.
+Frame root: /Volumes/SteamFrameRoot/rootfs, extracted read-only from
+steamframe-oobe-repair-20260922.5153644-0.3.0.img (docs/STEAM_FRAME_INVENTORY.md); only read.
+The image's pacman.conf points at private per-device mirrors: never fetched, never written.
+Downloads went to a private scratch directory (<scratch> below); none is committed.
+Labels: MEASURED, VERIFIED IN SOURCE, UPSTREAM DOCUMENTED, HYPOTHESIS, UNKNOWN.
+Result and the recommended base: docs/HOLO_CORE_VS_STEAM_FRAME.md.
+
+Result (MEASURED)
+-----------------
+The Frame's 965 packages against Holo mash-20251118.3 core (254) + extra (4,306):
+same 81, differs 806 (Holo newer 764, Frame newer 42; pkgrel only 168, version 638),
+Frame only 78 (5 with a Holo counterpart through PROVIDES/REPLACES), Holo only 3,673.
+With core-debug and extra-debug too: same 81, differs 807, Frame only 77, Holo only 5,844.
+The Frame is not built from the preview (81 of 887 shared names have the same version).
+Holo has 50 of the 51 sonames the Fedora root is seeded with (scripts/mkarmroot.sh), all but
+libgtk-x11-2.0.so.0: no GTK 2, which steamui.so and vgui2_s.so need (DT_NEEDED).
+
+Runs (UTC, host clock)
+----------------------
+H1  16:46:24  curl -sS -D ... https://holo-packages.steamos.cloud/holo-core-aarch64-preview/
+    -> "200 https://holo-packages.steamos.cloud/holo-core-aarch64-preview/", nginx/1.22.1,
+    1,673 bytes. Index rows:
+      mash-20251118/    -  2026-Jul-10 15:11
+      mash-20251118.2/  -  2026-Jun-06 11:46
+      mash-20251118.3/  -  2026-Jul-10 15:11
+H2  between H1 and H3 (times not captured)  listings and small files of the snapshot (curl):
+      curl -sSI .../mash-20251118/ -> "HTTP/1.1 307 Temporary Redirect",
+        "Location: /holo-core-aarch64-preview/mash-20251118.3/"
+      .../mash-20251118.3/: core/ core-debug/ extra/ extra-debug/ sources/ pacman.conf (164 B)
+        pacman.conf.debug (303 B) pacman.mirrorlist (100 B) system.rootfs.zst (367.1 MiB)
+      pacman.conf: "[core]" "SigLevel = Optional" "Include = /etc/pacman.d/mirrorlist",
+        the same for "[extra]"
+      pacman.mirrorlist: "Server = https://holo-packages.steamos.cloud/holo-core-aarch64-preview/mash-20251118/$repo/os/$arch"
+      core/os/aarch64/: 259 index rows; extra/os/aarch64/: 4,313 rows (both counts include the
+        parent row, the databases and their .tar.xz names)
+H3  16:47:04-16:47:10  curl -sS -D hdr -o <scratch>/<repo>.db .../mash-20251118.3/<repo>/os/aarch64/<repo>.db
+      "core 200 43340 1.387193s"    Last-Modified: Fri, 10 Jul 2026 13:47:22 GMT
+        749c5120622a0218a83259e3d3e0d70383e7e29ff710f419f068024a29aa28e5  core.db
+        "core.db: XZ compressed data, checksum CRC64"   "core.db.sig 404"
+      "extra 200 656616 1.202783s"  Last-Modified: Fri, 10 Jul 2026 14:12:40 GMT
+        cca1ced1cf1eb64c4b507c64b968c7a696fd4f67a546e3f35403d56d6a8bbe05  extra.db
+        "extra.db: XZ compressed data, checksum CRC64"  "extra.db.sig 404"
+H4  16:47:22-16:47:49 (27 s)  python3 scripts/steamframe-image.py inventory
+      /Volumes/SteamFrameRoot/rootfs --json <scratch>/inv.json --md <scratch>/inv.md
+      (the script as in 0.3.5) -> exit 0; 965 packages; 0 lines with DO_NOT_SHARE in either file.
+H5  between H4 and H6 (time not captured)  the same script's compare, before the fixes:
+      compare <scratch>/inv.json core.db extra.db --md <scratch>/compare0.md
+      -> "4638 packages: {'repo-only': 3673, 'differs': 806, 'same': 81, 'image-only': 78}", exit 0.
+      It worked, but "differs" said nothing about which side is newer, renamed packages were
+      two unrelated rows (sdl2 / sdl2-compat), and the report did not say which databases it
+      read. Fixed below.
+H6  16:50:21  core-debug.db and extra-debug.db, same URL pattern:
+      "core-debug 200 22440"   Last-Modified: Fri, 10 Jul 2026 14:14:12 GMT
+        c35c462720d124681d8655276ea9101de5e05b3f8b56a9b17f437e99fbd4bd68  core-debug.db
+      "extra-debug 200 255544" Last-Modified: Fri, 10 Jul 2026 14:21:54 GMT
+        8ee09e166f5f11ae0df06968210cb047a470b509a73b7cf719c802c36d66320a  extra-debug.db
+      The Frame has one debug package (glibc-debug).
+H7  16:57:08  core.files and extra.files (file lists), same URL pattern:
+      "core.files 200 781992"    Last-Modified: Fri, 10 Jul 2026 13:47:24 GMT
+        f22a78846c05bc958c7134f6e6f1158ae99f705e879016071ab97b0c05444f86  core.files
+      "extra.files 200 8108164"  Last-Modified: Fri, 10 Jul 2026 14:13:10 GMT
+        6935528e97068d7b9a913d826cc6ad199183d408b651815855616994f707164d  extra.files
+H8  16:57:53  two packages, to read ELF headers (licence from the database):
+      .../core/os/aarch64/gawk-5.3.2-1-aarch64.pkg.tar.zst       "gawk 200 1643981"
+        e2008e50f4c7828a48e3ad57ebc1c8d72bbe319f4ba02b122f598848738e04b0 (= its SHA256SUM), GPL-3.0-or-later
+      .../extra/os/aarch64/busybox-1.36.1-2.2-aarch64.pkg.tar.zst "busybox 200 1029225"
+        4f00454b717148a7bb865be7ac1845124670234f414ac072215e1751fd01eae2 (= its SHA256SUM), GPL-2.0-only
+      ELF headers (python3 struct, no execution):
+        holo  usr/bin/gawk    ET_DYN,  interp /lib/ld-linux-aarch64.so.1, min p_align 0x10000
+        frame usr/bin/gawk    ET_EXEC, interp /lib/ld-linux-aarch64.so.1, min p_align 0x10000
+        holo  usr/bin/busybox ET_EXEC, no interp (static), min p_align 0x10000
+        frame usr/bin/busybox ET_EXEC, no interp (static), min p_align 0x10000
+      Frame versions: gawk 5.3.0-1, busybox 1.37.0-1.2.
+H9  pacman's vercmp test vectors, as the reference for the new vercmp:
+      https://gitlab.archlinux.org/pacman/pacman/-/raw/master/test/util/vercmptest.sh
+      (200; sha256 5f2ef659c1c96fe32f44445139e2905bf20657a3e3d63e0913ac0235b59b59fd;
+      GPL-2.0-or-later): "tap_plan 92" = 46 pairs, each run both ways. The 46 pairs are in
+      tests/steamframe_image/compare.sh as data.
+H10 16:58:30-16:58:57 (27 s)  inventory again with the fixed script (PROVIDES, REPLACES,
+      BUILDDATE recorded) -> <scratch>/inv2.json, exit 0.
+H11 17:01:05-17:01:07 (2 s)  the fixed compare on the root itself:
+      python3 scripts/steamframe-image.py compare /Volumes/SteamFrameRoot/rootfs <scratch>/core.db
+        <scratch>/extra.db --md <scratch>/compare1.md --json <scratch>/compare1.json
+      -> "4638 packages: {'same': 81, 'differs': 806, 'image-only': 78, 'repo-only': 3673}", exit 0
+      report lines:
+        "- `core`: `core.db`, 254 packages, 43340 bytes, sha256 `749c5120...aa28e5`"
+        "- `extra`: `extra.db`, 4306 packages, 656616 bytes, sha256 `cca1ced1...8bbe05`"
+        "differs 806, image-only 78, repo-only 3673, same 81"
+        "differs: image newer 42, repository newer 764, same order 0; pkgrel only 168, version
+         638. image-only with a repository counterpart (PROVIDES/REPLACES) 5; repo-only with an
+         image counterpart 5."
+      counterparts: dbus-python -> python-dbus 1.4.0-1; deckard-mesa-linux-aarch64 -> mesa
+        1:25.2.7-1; holo-glibc-locales -> glibc-locales 2.42+r33+gde1fe81f4714-1; sdl2 ->
+        sdl2-compat 2.32.58-1.2; tracker3 -> tinysparql 3.10.1-2.
+      The same with <scratch>/inv2.json in place of the root: identical rows.
+H12 17:01:07-17:01:08 (1 s)  + core-debug.db extra-debug.db:
+      -> "6809 packages: {'same': 81, 'differs': 807, 'image-only': 77, 'repo-only': 5844}"
+        "| glibc-debug | 2.39-2 | 2.42+r33+gde1fe81f4714-1 | core-debug | aarch64 | differs | repo | version |"
+H13 16:52-17:05 (times not captured; these numbers do not depend on the counterpart fix)
+    analysis of compare1.json, the Frame's local database and the Holo databases (python3):
+      pkgrel-only differences by newer side: {'repo': 154, 'image': 14}
+      Frame BUILDDATE: n=965 min 2020-05-16 p25 2025-10-16 median 2025-10-16 p75 2025-11-24
+        max 2026-09-18; 574 packages on 2025-10-16; the 72 built before 2025 are all "any",
+        newest 2024-04-26 (python-mako); first aarch64 build 2025-05-07.
+      Holo BUILDDATE: core median 2026-07-03; core+extra p25 2025-08-27 median 2026-07-03
+        max 2026-07-07.
+      Frame packagers by domain: steamos.cloud 610, "Unknown Packager" 283, archlinux.org 71,
+        other 1 (names not recorded).
+      Frame architectures: aarch64 863, any 102.
+      No package whose name contains "fex" or "box64" in core/extra/core-debug/extra-debug; the
+        pattern "binfmt" matched only qemu-user-binfmt and qemu-user-static-binfmt.
+H14 after H13  the client's seed sonames (scripts/mkarmroot.sh SONAMES) in Holo's file lists:
+      "51 sonames, 50 found in Holo, missing: ['libgtk-x11-2.0.so.0']"
+      e.g. libSDL2-2.0.so.0 -> sdl2-compat-2.32.58-1.2 (extra); libGL.so.1 -> libglvnd-1.7.0-3;
+      libnss3.so -> nss-3.117-1 (core); libgbm.so.1 -> mesa-1:25.2.7-1.
+H15 after H14  DT_NEEDED of the ELF files in the Fedora root's client (tmp/armhome/.local/share/
+      Steam/steamrtarm64 and linuxarm64; builddate.txt "Thu Sep 3 01:26:16 UTC 2026"),
+      python3 section-header parser, pattern gtk|gdk:
+        steamrtarm64/steamui.so ['libgtk-x11-2.0.so.0', 'libgdk_pixbuf-2.0.so.0']
+        steamrtarm64/vgui2_s.so ['libgtk-x11-2.0.so.0']
+H16 after H7  key file lists (extra.files/core.files), MEASURED:
+      mesa-1:25.2.7-1: usr/lib/dri/kms_swrast_dri.so, libdril_dri.so, swrast_dri.so,
+        zink_dri.so, usr/lib/libGLX_indirect.so.0, libGLX_mesa.so.0, libEGL_mesa.so.0,
+        libgallium-25.2.7-arch1.1.so; depends include llvm-libs
+      vulkan-swrast-1:25.2.7-1: usr/lib/libvulkan_lvp.so, usr/share/vulkan/icd.d/lvp_icd.aarch64.json
+      libx11-1.8.12-1: usr/share/X11/locale/{C/,en_US.UTF-8/,locale.dir,compose.dir}
+      glibc-2.42+r33: usr/lib/ld-linux-aarch64.so.1, usr/lib/libc.so.6, usr/lib/locale/C.utf8/LC_CTYPE
+      glibc-locales: usr/lib/locale/en_US.utf8/LC_CTYPE, es_ES.utf8/LC_CTYPE
+      nss-3.117-1: libnss3.so, libsoftokn3.so, libfreeblpriv3.so, libnssckbi.so
+      lsof-4.99.5-2: usr/bin/lsof; ca-certificates-utils-20240618-1: etc/ssl/certs/ca-certificates.crt
+      sdl2-compat-2.32.58-1.2 depends on sdl3; sdl3-3.2.26-1: usr/lib/libSDL3.so.0
+
+Fixes to scripts/steamframe-image.py compare (VERIFIED IN SOURCE, tested)
+-------------------------------------------------------------------------
+- vercmp: a port of pacman's alpm_pkg_vercmp/rpmvercmp; rows say which side is newer and
+  whether only the pkgrel differs.
+- PROVIDES/REPLACES counterparts for one-side-only packages; a versioned REPLACES counts only
+  inside its range. A first version of the dependency parser split unversioned names ("mesa"
+  -> "m" + "esa") and so missed deckard-mesa-linux-aarch64 -> mesa; found on the real data
+  (H11 before the fix gave 4 counterparts), fixed, and now tested.
+- The report records each database (base name or redacted URL, bytes, sha256, package count);
+  an extracted root is accepted in place of an inventory JSON; --json, --states; a zstd
+  database decodes with the zstd command when the Python module is missing.
+- inventory records PROVIDES, REPLACES and BUILDDATE per package (its Markdown is unchanged).
+
+Tests (this branch, MEASURED on the Mac)
+----------------------------------------
+  tests/steamframe_image/compare.sh   27 passed, 0 failed (new; python3 only)
+    the same test against the 0.3.5 script (git show main:scripts/steamframe-image.py):
+    vercmp, compare on a root, every row check and the counts FAIL (the old compare has no
+    vercmp, no counterparts, no root input)
+  tests/steamframe_image/redact.sh    5 passed, 0 failed
+  tests/steamframe_image/run.sh       "SKIP: no mkfs.btrfs" (Linux only)
+  make lxrt launcher                  17:06:35-17:06:59, exit 0 ("built build/SteamARM.app")
+  make test-launcher-core             17:09:37-17:10:34, exit 0: "application core: all checks
+                                      passed"; unittest "Ran 20 tests ... OK"; run_app_dispatch
+                                      32/0; session 32/0; safeguard 10/0; guest_env 26/0;
+                                      mkarmroot 25/0; run_steam_arm64 10/0
+                                      (a first run at 17:07:04 failed test_cited_records_exist
+                                      because this record did not exist yet)
+  tests/elf/run.sh                    17:10:47-17:11:08, exit 0: "== 67 passed, 0 failed"
+  python3 -m unittest tests/test_docs_records.py   6 tests OK (after the last doc edit)
+  Not run: tests/win, tests/elf/run_i386.sh, make test-arm64 -- nothing they use changed
+  (scripts/steamframe-image.py is not on any runtime or launcher path).
