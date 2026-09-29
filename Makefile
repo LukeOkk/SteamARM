@@ -74,6 +74,7 @@ test-lxrt: lxrt
 
 # ---------------------------------------------------------------- vulkan shim
 # An ELF libvulkan.so.1 whose entry points tail-call into Mach-O MoltenVK
+# (or, with STEAMARM_VK_ICD=kosmickrisp, Mesa's KosmicKrisp: shim/gen.py)
 # through the runtime's host bridge. Built on the host: clang+lld can target
 # Linux aarch64 directly, no cross toolchain and no guest needed.
 LXRT_TARGET := aarch64-unknown-linux-gnu

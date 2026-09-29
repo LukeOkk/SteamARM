@@ -481,9 +481,12 @@ VkResult lxrt_inner_vkCreateGraphicsPipelines(VkDevice dev, VkPipelineCache cach
 void *lxrt_rebase_proc(const char *name);   // vk_rebase.c (generated)
 
 void *lxrt_tramp32(void *fn);                // map32.c: 32-bit guests only
+int lxrt_vk_missing(const char *name);       // vulkan_shim.c (generated): ICD mode only
 
 void *lxrt_inner_vkGetDeviceProcAddr(VkDevice dev, const char *name)
 {
     void *f = lxrt_rebase_proc(name);
+    if (f && lxrt_vk_missing(name))
+        return 0;
     return lxrt_tramp32(f ? f : lxrt_mvk_vkGetDeviceProcAddr(dev, name));
 }

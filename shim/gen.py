@@ -68,7 +68,12 @@ static const char *const k_names[] = {
     for n in names:
         f.write(f'    "{n}",\n')
     f.write("""};
-
+#define N_NAMES (sizeof(k_names) / sizeof(k_names[0]))
+""")
+    for n in ("vkCreateInstance", "vk_icdGetInstanceProcAddr",
+              "vkEnumerateInstanceLayerProperties", "vkEnumerateDeviceLayerProperties"):
+        f.write(f"#define I_{n} {names.index(n)}\n")
+    f.write("""
 // Homebrew first, then the Vulkan SDK. Whichever is present wins; a build that
 // finds neither leaves the table null and every entry point traps at brk #2
 // rather than silently doing nothing.
@@ -77,16 +82,157 @@ static const char *const k_paths[] = {
     "/usr/local/lib/libMoltenVK.dylib",
 };
 
+// STEAMARM_VK_ICD picks another driver: "kosmickrisp" (Mesa's Vulkan-on-Metal
+// driver, Homebrew's mesa), or the absolute path of a dylib. Unset or
+// "moltenvk": MoltenVK as above. A driver that cannot be used falls back to
+// MoltenVK, and says so on stderr.
+static const char *const k_kk_paths[] = {
+    "/opt/homebrew/lib/libvulkan_kosmickrisp.dylib",
+    "/usr/local/lib/libvulkan_kosmickrisp.dylib",
+};
+
+// ICD mode: a driver that exports only the loader-ICD interface (Mesa's
+// drivers export vk_icd* and nothing else, MEASURED with nm). Its entry points
+// are asked of vk_icdGetInstanceProcAddr -- the global ones here, every other
+// one once an instance exists (lxrt_vk_icd_fill). Dispatchable handles need
+// nothing from the shim: their first word is VK_LOADER_DATA, which both
+// MoltenVK and Mesa set to ICD_LOADER_MAGIC and never read (Mesa dispatches
+// through vk_object_base->device; MEASURED: the word stays 0x01CDC0DE through
+// a whole submit on either driver with no loader).
+typedef void *(*lxrt_gipa_fn)(void *instance, const char *name);
+__attribute__((visibility("hidden"))) int lxrt_vk_icd;
+__attribute__((visibility("hidden"))) const char *lxrt_vk_driver = "none";
+static lxrt_gipa_fn g_gipa;
+static volatile int g_fill_lock;
+
+static int s_eq(const char *a, const char *b)
+{
+    while (*a && *a == *b) { a++; b++; }
+    return *a == *b;
+}
+
+// stderr before the guest's libc may be initialised: Linux write(2) straight
+// to the runtime, the parts joined with no formatting.
+static void say(const char *const *parts)
+{
+    char buf[512];
+    unsigned n = 0;
+    for (; *parts; parts++)
+        for (const char *p = *parts; *p && n < sizeof buf - 1; p++)
+            buf[n++] = *p;
+    buf[n++] = '\\n';
+    lxrt_syscall3(64 /* write */, 2, (long)(uintptr_t)buf, n);
+}
+
+// The loader implements these; a driver need not.
+static int32_t no_instance_layers(uint32_t *count, void *props) { (void)props; *count = 0; return 0; }
+static int32_t no_device_layers(void *pd, uint32_t *count, void *props) { (void)pd; (void)props; *count = 0; return 0; }
+
+// Fill the table from `h`. Returns 0 if it holds no usable Vulkan driver.
+static int bind(void *h)
+{
+    lxrt_gipa_fn gipa = (lxrt_gipa_fn)lxrt_host_dlsym(h, "vk_icdGetInstanceProcAddr");
+    if (lxrt_host_dlsym(h, "vkCreateInstance") || !gipa) {
+        for (unsigned i = 0; i < N_NAMES; i++)
+            lxrt_vk_table[i] = lxrt_host_dlsym(h, k_names[i]);
+        return lxrt_vk_table[I_vkCreateInstance] != 0;
+    }
+    int32_t (*neg)(uint32_t *) = (int32_t (*)(uint32_t *))lxrt_host_dlsym(h, "vk_icdNegotiateLoaderICDInterfaceVersion");
+    uint32_t version = 7;   // CURRENT_LOADER_ICD_INTERFACE_VERSION (vk_icd.h)
+    if (neg && neg(&version) != 0)
+        return 0;
+    for (unsigned i = 0; i < N_NAMES; i++)
+        lxrt_vk_table[i] = gipa(0, k_names[i]);
+    if (!lxrt_vk_table[I_vkCreateInstance])
+        return 0;
+    lxrt_vk_table[I_vk_icdGetInstanceProcAddr] = (void *)gipa;
+    if (!lxrt_vk_table[I_vkEnumerateInstanceLayerProperties])
+        lxrt_vk_table[I_vkEnumerateInstanceLayerProperties] = (void *)no_instance_layers;
+    if (!lxrt_vk_table[I_vkEnumerateDeviceLayerProperties])
+        lxrt_vk_table[I_vkEnumerateDeviceLayerProperties] = (void *)no_device_layers;
+    g_gipa = gipa;
+    lxrt_vk_icd = 1;
+    return 1;
+}
+
 __attribute__((constructor))
 static void lxrt_vk_init(void)
 {
+    // The host's getenv: the environment the runtime was started (or
+    // re-executed, runtime/process.c) with, which is the guest's; readable
+    // before the guest's libc is initialised.
+    char *(*henv)(const char *) = (char *(*)(const char *))lxrt_host_dlsym((void *)-2 /* RTLD_DEFAULT */, "getenv");
+    const char *req = henv ? henv("STEAMARM_VK_ICD") : 0;
+    const char *dbg = henv ? henv("LXRT_VK_DEBUG") : 0;
+    const char *why = 0;
     void *h = 0;
-    for (unsigned i = 0; i < sizeof(k_paths) / sizeof(k_paths[0]) && !h; i++)
-        h = lxrt_host_dlopen(k_paths[i], 0);
-    if (!h)
+    if (req && *req && !s_eq(req, "moltenvk")) {
+        if (s_eq(req, "kosmickrisp"))
+            for (unsigned i = 0; i < sizeof(k_kk_paths) / sizeof(k_kk_paths[0]) && !h; i++)
+                h = lxrt_host_dlopen(k_kk_paths[i], 0);
+        else if (req[0] == '/')
+            h = lxrt_host_dlopen(req, 0);
+        else
+            why = "unknown driver name";
+        if (!h && !why)
+            why = "dlopen failed";
+        if (h && !bind(h)) {
+            h = 0;
+            why = "no usable Vulkan entry points";
+        }
+        if (h)
+            lxrt_vk_driver = req;
+    }
+    if (!h) {
+        for (unsigned i = 0; i < sizeof(k_paths) / sizeof(k_paths[0]) && !h; i++)
+            h = lxrt_host_dlopen(k_paths[i], 0);
+        if (h) {
+            lxrt_vk_driver = "moltenvk";
+            bind(h);
+        }
+    }
+    if (why || (dbg && *dbg == '1'))
+        say((const char *const[]){ "[shim] vk driver requested=", req && *req ? req : "moltenvk",
+                                   " effective=", lxrt_vk_driver, " (", why ? why : lxrt_vk_icd ? "icd" : "exports",
+                                   ")", 0 });
+}
+
+// ICD mode, after every vkCreateInstance that succeeds (shim/wsi.c): the
+// slots still empty are filled from vk_icdGetInstanceProcAddr(instance). A
+// slot is written once. Mesa answers only for what the instance enabled (its
+// apiVersion and extensions; MEASURED: NULL for vkCmdBeginRendering from a
+// 1.0 instance), so a later instance can fill what an earlier one could not;
+// the pointers do not depend on the instance (MEASURED: 431 names, two
+// instances, no difference).
+__attribute__((visibility("hidden")))
+void lxrt_vk_icd_fill(void *instance)
+{
+    if (!lxrt_vk_icd || !instance)
         return;
-    for (unsigned i = 0; i < sizeof(k_names) / sizeof(k_names[0]); i++)
-        lxrt_vk_table[i] = lxrt_host_dlsym(h, k_names[i]);
+    while (__atomic_exchange_n(&g_fill_lock, 1, __ATOMIC_ACQUIRE))
+        ;
+    for (unsigned i = 0; i < N_NAMES; i++)
+        if (!lxrt_vk_table[i]) {
+            void *f = g_gipa(instance, k_names[i]);
+            if (f)
+                __atomic_store_n(&lxrt_vk_table[i], f, __ATOMIC_RELEASE);
+        }
+    __atomic_store_n(&g_fill_lock, 0, __ATOMIC_RELEASE);
+}
+
+// ICD mode: 1 if `name` is a driver entry point this driver lacks, so that
+// vkGetInstanceProcAddr / vkGetDeviceProcAddr answer NULL, as the Khronos
+// loader would, rather than a thunk that traps at brk #2. Entry points the
+// shim implements itself are not driver entry points and stay available.
+__attribute__((visibility("hidden")))
+int lxrt_vk_missing(const char *name)
+{
+    if (!lxrt_vk_icd || !name)
+        return 0;
+    for (unsigned i = 0; i < N_NAMES; i++)
+        if (s_eq(name, k_names[i]))
+            return !__atomic_load_n(&lxrt_vk_table[i], __ATOMIC_ACQUIRE);
+    return 0;
 }
 """)
 print(f"{len(names)} entry points -> {asm_path}, {c_path}")
