@@ -856,6 +856,22 @@ else
     echo "  skip  CEF_FILE_BACKED_MAPPING_FAST_PATH (no $STAGE)"
 fi
 
+# NEAR_CODE_TRAMPOLINE_ALLOCATION: a 144 MiB code segment mapped like ld.so
+# maps libcef (reservation first, 4 KiB-aligned MAP_FIXED); the first slice's
+# only reachable free space is the hole between two PT_LOADs.
+if [ -f "$STAGE/usr/lib64/libc.a" ] && [ -n "$GCCDIR" ]; then
+    if err=$(glibc_cc -static-pie -O2 -o build/pool_near tests/elf/pool_near.c); then
+        out=$(deadline 60 ./build/lxrun --trace "$PWD/build/pool_near" 2>&1); rc=$?
+        if [ "$rc" -eq 0 ] && grep -q '== pool near: ok' <<<"$out" &&
+           grep -q 'trampoline pool in ELF load gap' <<<"$out" &&
+           grep -q 'sub-page code at 0x[0-9a-f]*: 2 svc sites, 2 rewritten, 0 poisoned' <<<"$out"; then
+            ok "NEAR_CODE_TRAMPOLINE_ALLOCATION: pool in the ELF load gap, svc/TLS 144 MiB apart all rewritten"
+        else bad "NEAR_CODE_TRAMPOLINE_ALLOCATION" "rc=$rc $(grep -E 'FAIL|ELF load gap|sub-page code|WARNING' <<<"$out")"; fi
+    else bad "build pool_near" "$err"; fi
+else
+    echo "  skip  NEAR_CODE_TRAMPOLINE_ALLOCATION (no $STAGE)"
+fi
+
 echo
 summary="== $PASS passed, $FAIL failed"
 [ "$XFAIL" -eq 0 ] || summary="$summary ($XFAIL expected failures)"
