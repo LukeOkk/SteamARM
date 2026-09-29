@@ -310,6 +310,11 @@ void lxrt_memlog_dump(uint64_t fault_addr, const char *why);
 // Where the main ELF image (FEX, under the Steam work) was loaded: a fault
 // report can then say "FEX+0x..." for an offline symboliser.
 extern uint64_t lxrt_main_image_base, lxrt_main_image_span;
+// /proc/self/stat field 28, startstack (proc_ext.c): the initial stack
+// pointer the runtime built (main.c), or, under FEX, an address in the stack
+// FEX mapped for the x86 program with MAP_GROWSDOWN (dispatch.c).
+extern uint64_t lxrt_start_stack;
+void lxrt_note_growsdown(uint64_t addr, uint64_t len, long prot);
 void lxrt_memlog_file(uint64_t addr, uint64_t len, uint64_t off, int fd);
 bool lxrt_memlog_file_lookup(uint64_t addr, char *path, size_t n, uint64_t *off);
 void lxrt_futex_shared_add(uint64_t addr, uint64_t len);

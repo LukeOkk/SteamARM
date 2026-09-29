@@ -29,6 +29,7 @@ struct memlog_ent {
 };
 
 uint64_t lxrt_main_image_base, lxrt_main_image_span;
+uint64_t lxrt_start_stack;
 
 static struct memlog_ent g_ring[MEMLOG_N];
 static _Atomic uint64_t g_next;

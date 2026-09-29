@@ -1168,7 +1168,9 @@ fi
 # (bionic tags its heap otherwise, and Darwin's syscalls reject the pointers),
 # msync (ART probes free address space with it), mremap(MREMAP_FIXED) of 4 KiB
 # pages into a reservation (bionic's CFI shadow) -- at the host page and with
-# LXRT_GUEST_PAGE=4096, as Android runs; then TPIDR_EL0 reads left in place
+# LXRT_GUEST_PAGE=4096, as Android runs; getrlimit (163), RLIM_INFINITY,
+# /proc/self/stat's startstack and big unix datagrams (x86-64 ART under FEX,
+# benchmarks/stage25-art-x86-fex.txt); then TPIDR_EL0 reads left in place
 # inside a BoringSSL FIPS range and fixed up after context switches
 # (runtime/tls.c), and the LXRT_TLS_KEEP=0 control that rewrites them.
 if [ -f "$STAGE/usr/lib64/libc.a" ] && [ -n "$GCCDIR" ]; then
@@ -1180,7 +1182,7 @@ if [ -f "$STAGE/usr/lib64/libc.a" ] && [ -n "$GCCDIR" ]; then
                 out=$(deadline 60 ./build/lxrun "$PWD/build/android_bionic_rt" 2>&1); rc=$?
             fi
             if [ "$rc" -eq 0 ] && grep -q '== android bionic runtime: ok' <<<"$out"; then
-                ok "ANDROID_BIONIC_RT ($pg pages): $(grep -c '^  ok ' <<<"$out") checks (tagged-address prctl, msync, 4 KiB mremap, clone TLS/CLONE_FILES, rt_tgsigqueueinfo)"
+                ok "ANDROID_BIONIC_RT ($pg pages): $(grep -c '^  ok ' <<<"$out") checks (tagged-address prctl, msync, 4 KiB mremap, clone TLS/CLONE_FILES, rt_tgsigqueueinfo, getrlimit/RLIM_INFINITY, startstack, 60 KiB unix datagrams)"
             else bad "ANDROID_BIONIC_RT ($pg pages)" "rc=$rc $(grep -E 'MAL|SIGBUS|SIGSEGV|lxrun:' <<<"$out" | head -6)"; fi
         done
         out=$(LXRT_TLS_KEEP_LOG=1 deadline 120 ./build/lxrun "$PWD/build/android_bionic_rt" tlskeep 2>&1); rc=$?

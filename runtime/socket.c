@@ -369,6 +369,22 @@ static bool is_netlink(int fd)
     return false;
 }
 
+// Darwin caps an AF_UNIX datagram at the socket's send buffer, 2048 bytes by
+// default (net.local.dgram.maxdgram), and queues 4096 bytes on the receiving
+// side (net.local.dgram.recvspace); Linux takes datagrams up to its default
+// buffer, 212992 bytes (net.core.wmem_default). Android's liblog sends each
+// record, up to 4068 bytes, as one datagram to logd: every longer one --
+// ART's abort message with its stack -- failed with EMSGSIZE and was lost
+// (MEASURED, benchmarks/stage25-art-x86-fex.txt). Linux's sizes, then.
+static void unix_dgram_buffers(int fd, int d, int ltype)
+{
+    if (d != AF_UNIX || type_to_darwin(ltype) != SOCK_DGRAM)
+        return;
+    int sz = 212992;
+    setsockopt(fd, SOL_SOCKET, SO_SNDBUF, &sz, sizeof sz);
+    setsockopt(fd, SOL_SOCKET, SO_RCVBUF, &sz, sizeof sz);
+}
+
 long lxrt_socket(int ldomain, int ltype, int proto)
 {
     // Only inside a (fake) bwrap container -- where Proton's winebus and the
@@ -403,6 +419,7 @@ long lxrt_socket(int ldomain, int ltype, int proto)
         return LERR(errno);
     apply_type_flags(fd, ltype);
     seqpkt_mark(fd, ltype);
+    unix_dgram_buffers(fd, d, ltype);
     return fd;
 }
 
@@ -417,6 +434,8 @@ long lxrt_socketpair(int ldomain, int ltype, int proto, int *sv)
     apply_type_flags(sv[1], ltype);
     seqpkt_mark(sv[0], ltype);
     seqpkt_mark(sv[1], ltype);
+    unix_dgram_buffers(sv[0], d, ltype);
+    unix_dgram_buffers(sv[1], d, ltype);
     return 0;
 }
 

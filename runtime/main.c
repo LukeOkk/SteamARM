@@ -561,6 +561,7 @@ int main(int argc, char **argv)
         fprintf(lxrt_trace_stream(), "lxrun: stack: %s\n", err ? err : "failed");
         return 1;
     }
+    lxrt_start_stack = (uint64_t)(uintptr_t)sp;
 
     // After the stack, so the heap hole is chosen above everything already
     // mapped rather than next to it.
