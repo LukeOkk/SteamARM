@@ -36,6 +36,8 @@ int main(void)
     printf("device %s, driver %s, api %u.%u\n", p2.properties.deviceName, p12.driverName,
            VK_API_VERSION_MAJOR(p2.properties.apiVersion), VK_API_VERSION_MINOR(p2.properties.apiVersion));
     printf("driver info: %s, raw version %u\n", p12.driverInfo, p2.properties.driverVersion);
+    printf("driverID %d, apiVersion %u.%u.%u\n", (int)p12.driverID, VK_API_VERSION_MAJOR(p2.properties.apiVersion),
+           VK_API_VERSION_MINOR(p2.properties.apiVersion), VK_API_VERSION_PATCH(p2.properties.apiVersion));
 
     VkPhysicalDeviceVulkan13Features f13 = { VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES };
     VkPhysicalDeviceVulkan12Features f12 = { VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES, &f13 };
