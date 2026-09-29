@@ -25,6 +25,16 @@ enum Paths {
     static var statusFile: URL { launcherDir.appendingPathComponent("running.status") } // "N" or "N signal S"
     static var vncPasswordFile: URL { state.appendingPathComponent("vncpasswd.txt") }
 
+    /// scripts/android-pm.py's tree: packages/<package>/ (base.apk, meta.json,
+    /// icon.png) and data/<package>/ (docs/APK_SUPPORT.md).
+    static var androidRoot: URL { state.appendingPathComponent("android") }
+    static func androidPackageDir(_ package: String) -> URL {
+        androidRoot.appendingPathComponent("packages").appendingPathComponent(package)
+    }
+    static func androidDataDir(_ package: String) -> URL {
+        androidRoot.appendingPathComponent("data").appendingPathComponent(package)
+    }
+
     /// Per-app history: launches, runtime, last result, favourites.
     static var libraryFile: URL { launcherDir.appendingPathComponent("library.json") }
 
@@ -111,6 +121,10 @@ struct AppEntry: Codable, Identifiable, Hashable {
     /// (settings keys and values); scripts/run-app.sh puts them over the
     /// global settings (scripts/settings-env.py with_overrides).
     var overrides: [String: String]? = nil
+    /// kind "android": what scripts/apk-inspect.py and android-pm.py found
+    /// (docs/APK_SUPPORT.md). Such an entry has no command: SteamARM has no
+    /// Android runtime yet, and the launcher never starts one.
+    var android: AndroidAppInfo? = nil
 
     /// The x86 client under FEX: TRANSITIONAL_COMPATIBILITY until the ARM64
     /// client runs (docs/APPLICATION_MANAGER.md). Only a fallback: the
@@ -124,6 +138,7 @@ struct AppEntry: Codable, Identifiable, Hashable {
     var isBuiltIn: Bool { builtIn == true || id == "steam" }
     var isExperimental: Bool { readiness == CapabilityStatus.State.experimental.rawValue }
     var isWindows: Bool { kind == "windows" }
+    var isAndroid: Bool { kind == "android" }
 }
 
 // MARK: - Settings

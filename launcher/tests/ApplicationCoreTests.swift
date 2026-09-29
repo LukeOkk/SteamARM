@@ -372,6 +372,112 @@ struct ApplicationCoreTests {
         check(prog?.step == 3 && prog?.of == 6 && prog?.text == "taking resources/ from the linux-x64 release", "progress line")
         check(HeroicARM64.progress("      legendary (cached)") == nil && HeroicARM64.progress("[7/6] x") == nil, "not progress")
 
+        // Android (docs/APK_SUPPORT.md): ABI verdicts, the inspector's JSON,
+        // the card, the library filter and the reason no card can be opened.
+        check(AndroidABI.verdict(abis: ["arm64-v8a", "armeabi-v7a", "x86", "x86_64"]) == .arm64, "arm64-v8a preferred")
+        check(AndroidABI.verdict(abis: ["armeabi-v7a"]) == .arm32Only && AndroidABI.verdict(abis: ["armeabi"]) == .arm32Only,
+              "32-bit ARM only")
+        check(AndroidABI.verdict(abis: ["x86_64", "x86"]) == .x86Only, "x86 only")
+        check(AndroidABI.verdict(abis: []) == AndroidABI.none, "ART only")
+        check(AndroidABI.verdict(abis: ["mips"]) == .unsupported, "other ABIs")
+        check(AndroidABI.arm32Only.label(abis: ["armeabi-v7a"]).contains("AArch32"), "32-bit ARM says why")
+        check(AndroidABI.x86Only.label(abis: ["x86"]).contains("FEX"), "x86 says FEX")
+        check(AndroidABI.arm64.architecture(abis: ["arm64-v8a"]) == "aarch64"
+              && AndroidABI.none.architecture(abis: []) == "aarch64"
+              && AndroidABI.arm32Only.architecture(abis: ["armeabi-v7a"]) == "armv7"
+              && AndroidABI.x86Only.architecture(abis: ["x86"]) == "i386"
+              && AndroidABI.x86Only.architecture(abis: ["x86", "x86_64"]) == "x86_64", "card architecture from the ABI")
+        check(AndroidABI.arm64.platformLabel(abis: ["arm64-v8a"]) == "Android · ARM64", "platform chip")
+        for (raw, verdict) in [("arm64", AndroidABI.arm64), ("arm32-only", .arm32Only), ("x86-only", .x86Only),
+                               ("unsupported", .unsupported), ("none", AndroidABI.none)] {
+            check(AndroidABI(rawValue: raw) == verdict, "verdict id \(raw) matches apk-inspect.py")
+        }
+        let inspectJSON = #"""
+        {"format": "apk", "supported": true, "fileName": "org.fdroid.fdroid_2000050.apk", "size": 12496223,
+         "package": "org.fdroid.fdroid", "versionCode": 2000050, "versionName": "2.0.0", "minSdk": 24, "targetSdk": 37,
+         "maxSdk": null, "label": "F-Droid", "labelSource": "application", "launcherActivity": "org.fdroid.MainActivity",
+         "permissions": [{"name": "android.permission.INTERNET"}, {"name": "android.permission.READ_EXTERNAL_STORAGE", "maxSdkVersion": 32}],
+         "features": [], "glEsVersion": null, "vulkan": null, "abis": ["arm64-v8a", "armeabi-v7a", "x86", "x86_64"],
+         "abiVerdict": {"id": "arm64", "abi": "arm64-v8a", "summary": "..."}, "isGame": false,
+         "splits": {"split": null, "isSplit": false, "needsSplits": false},
+         "signing": {"v1": true, "v2": true, "v3": true, "v31": false, "blocks": ["v2", "v3"], "certificates": ["43238d51"],
+                     "certificateSource": "v3", "lineage": [], "verified": false},
+         "icon": {"path": "res/o-.png", "density": 640, "format": "png", "width": 192, "height": 192, "source": "manifest"},
+         "sha256": "94938d32"}
+        """#
+        let apk = try JSONDecoder().decode(AndroidPackageInfo.self, from: Data(inspectJSON.utf8))
+        check(apk.package == "org.fdroid.fdroid" && apk.minSdk == "24" && apk.targetSdk == "37", "inspector JSON")
+        check(apk.versionLabel == "2.0.0 (2000050)" && apk.signingSchemes == "v1 + v2 + v3", "version and signing labels")
+        check(apk.abiVerdict == .arm64 && apk.installBlocker == nil && apk.icon?.width == 192, "installable")
+        check(apk.permissions?.last?.maxSdkVersion == 32, "permission details")
+        let codename = try JSONDecoder().decode(AndroidPackageInfo.self, from: Data(#"{"package": "a.b", "minSdk": "Baklava"}"#.utf8))
+        check(codename.minSdk == "Baklava", "a preview codename as minSdk")
+        let bundle = try JSONDecoder().decode(AndroidPackageInfo.self, from: Data(
+            #"{"format": "xapk", "supported": false, "reason": "split installs are not supported yet"}"#.utf8))
+        check(bundle.installBlocker?.contains("XAPK") == true, "an XAPK is refused with the reason")
+        var unsigned = apk; unsigned.signing = nil
+        check(unsigned.installBlocker?.contains("firmado") == true, "an unsigned APK is refused")
+        var split = apk; split.splits = .init(split: "config.arm64_v8a", isSplit: true, needsSplits: false)
+        check(split.installBlocker?.contains("dividido") == true, "a split APK is refused")
+        check(AndroidApps.isValidPackage("org.fdroid.fdroid") && AndroidApps.isValidPackage("a.B_1"), "valid packages")
+        check(!AndroidApps.isValidPackage("../x.y") && !AndroidApps.isValidPackage("single")
+              && !AndroidApps.isValidPackage("a..b") && !AndroidApps.isValidPackage("a.1b") && !AndroidApps.isValidPackage("a.b/c"),
+              "invalid packages")
+        check(AndroidApps.entryID(package: "org.fdroid.fdroid") == "android-org.fdroid.fdroid", "card id")
+        check(AndroidApps.entryID(package: "org.foo_bar") != AndroidApps.entryID(package: "org.foo.bar")
+              && AndroidApps.entryID(package: "org.Foo.bar") != AndroidApps.entryID(package: "org.foo.bar"),
+              "distinct packages, distinct cards")
+        let pmJSON = #"""
+        {"ok": true, "action": "installed", "package": "org.fdroid.fdroid", "label": "F-Droid", "versionName": "2.0.0",
+         "versionCode": 2000050, "minSdk": 24, "targetSdk": 37, "abis": ["arm64-v8a", "armeabi-v7a", "x86", "x86_64"],
+         "abiVerdict": "arm64", "launcherActivity": "org.fdroid.MainActivity",
+         "packageDir": "/s/android/packages/org.fdroid.fdroid", "dataDir": "/s/android/data/org.fdroid.fdroid",
+         "icon": "/s/android/packages/org.fdroid.fdroid/icon.png", "installedAt": "2026-09-29T19:00:00Z",
+         "updatedAt": "2026-09-29T19:00:00Z", "abiSummary": "...", "previousVersion": null, "dataKept": false}
+        """#
+        let noise = "some warning on stderr\n" + pmJSON + "\n"
+        let pmResult = try JSONDecoder().decode(AndroidPMResult.self, from: AndroidApps.jsonPayload(noise) ?? Data())
+        check(pmResult.ok && pmResult.action == "installed", "android-pm.py JSON, with stderr around it")
+        // The file changed between the preview and the install: the card
+        // takes what was installed, never the preview's details.
+        let changed = try JSONDecoder().decode(AndroidPMResult.self, from: Data(#"""
+        {"ok": true, "package": "org.fdroid.fdroid", "label": "F-Droid", "versionName": "2.0.1", "versionCode": 2000060,
+         "minSdk": 26, "targetSdk": "Baklava", "abis": ["x86_64"], "sha256": "ffff", "permissions": ["android.permission.CAMERA"],
+         "packageDir": "/s/p", "dataDir": "/s/d"}
+        """#.utf8))
+        let changedCard = AndroidApps.card(result: changed, info: apk)
+        check(changedCard?.info.minSdk == "26" && changedCard?.info.targetSdk == "Baklava"
+              && changedCard?.info.permissions == ["android.permission.CAMERA"] && changedCard?.info.apkSha256 == "ffff"
+              && changedCard?.architecture == "x86_64" && changedCard?.info.launcherActivity == nil,
+              "a file replaced after the preview: the installed file's details")
+        let card = AndroidApps.card(result: pmResult, info: apk)
+        check(card?.id == "android-org.fdroid.fdroid" && card?.name == "F-Droid" && card?.architecture == "aarch64", "the card")
+        check(card?.icon == "/s/android/packages/org.fdroid.fdroid/icon.png" && card?.installDir == "/s/android/packages/org.fdroid.fdroid",
+              "card icon and folder")
+        check(card?.info.dataDir == "/s/android/data/org.fdroid.fdroid" && card?.info.abiVerdict == "arm64"
+              && card?.info.permissions?.count == 2 && card?.info.apkSha256 == "94938d32", "card details")
+        let failed = try JSONDecoder().decode(AndroidPMResult.self, from: Data(
+            #"{"ok": false, "code": "different-signer", "error": "x"}"#.utf8))
+        check(AndroidApps.card(result: failed, info: apk) == nil, "no card for a refused install")
+        check(AndroidApps.errorMessage(code: "different-signer", detail: nil).contains("otro certificado"), "signer error in Spanish")
+        check(AndroidApps.errorMessage(code: "downgrade", detail: "x").hasSuffix("(x)."), "error detail")
+        let reason = AndroidApps.launchUnavailableReason
+        check(reason.prefix(1).uppercased() + reason.dropFirst()
+              == "El entorno Android de SteamARM todavía no ejecuta apps (docs/ANDROID_ZERO_VM_FEASIBILITY.md)",
+              "the card's reason, as shown")
+        check(AndroidApps.unavailableReason(card?.info) == reason, "an ARM64 app: the runtime is the only reason")
+        check(AndroidApps.unavailableReason(AndroidAppInfo(abis: ["armeabi-v7a"])).hasPrefix(reason)
+              && AndroidApps.unavailableReason(AndroidAppInfo(abis: ["armeabi-v7a"])).contains("32 bits"), "32-bit ARM adds why")
+        // AppEntry.android: every field optional, so a partial object decodes.
+        let partialInfo = try JSONDecoder().decode(AndroidAppInfo.self, from: Data(#"{"package": "a.b"}"#.utf8))
+        check(partialInfo.package == "a.b" && partialInfo.verdict == AndroidABI.none, "partial Android info decodes")
+        let androidItems = items + [LibraryItem(id: "android-a.b", name: "Juego Android", architecture: "aarch64",
+                                                isWindows: false, isAndroid: true)]
+        check(Library.visible(androidItems, stats: [:], query: "", filter: .android) == ["android-a.b"], "Android filter")
+        check(!Library.visible(androidItems, stats: [:], query: "", filter: .arm64).contains("android-a.b"),
+              "Android apps are not in the ARM64 (Linux) filter")
+        check(LibraryFilter.android.label == "Android", "filter label")
+
         print(failures == 0 ? "application core: all checks passed" : "application core: \(failures) FAILED")
         exit(failures == 0 ? 0 : 1)
     }

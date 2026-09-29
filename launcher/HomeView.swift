@@ -7,6 +7,8 @@ struct HomeView: View {
     @State private var editing: AppEntry?
     @State private var deleting: AppEntry?
     @State private var builtInInfo: AppEntry?
+    @State private var androidInfo: AppEntry?
+    @State private var uninstalling: AppEntry?
     @State private var query = ""
     @State private var filter: LibraryFilter = .all
 
@@ -27,15 +29,24 @@ struct HomeView: View {
                                 .contextMenu {
                                     Button("Abrir") { model.launch(app) }
                                         .disabled(!model.canLaunch || model.unavailableReason(app) != nil)
-                                    Button("Ajustes…") {
-                                        if app.isBuiltIn { builtInInfo = app } else { editing = app }
+                                    if app.isAndroid {
+                                        Button("Información…") { androidInfo = app }
+                                        Button("Abrir carpeta") { model.openFolder(app) }
+                                        Button("Abrir carpeta de datos") { model.openAndroidData(app) }
+                                    } else {
+                                        Button("Ajustes…") {
+                                            if app.isBuiltIn { builtInInfo = app } else { editing = app }
+                                        }
+                                        Button("Abrir carpeta") { model.openFolder(app) }
+                                        Button("Abrir registros") { model.openLogs(app) }
                                     }
-                                    Button("Abrir carpeta") { model.openFolder(app) }
-                                    Button("Abrir registros") { model.openLogs(app) }
                                     Button(model.isFavorite(app) ? "Quitar de favoritas" : "Añadir a favoritas") {
                                         model.toggleFavorite(app)
                                     }
-                                    if !app.isBuiltIn {
+                                    if app.isAndroid {
+                                        Divider()
+                                        Button("Desinstalar…", role: .destructive) { uninstalling = app }
+                                    } else if !app.isBuiltIn {
                                         Divider()
                                         Button("Eliminar", role: .destructive) { deleting = app }
                                     }
@@ -51,12 +62,30 @@ struct HomeView: View {
                             .padding(.top, 28)
                     }
                 }
+                .confirmationDialog("¿Desinstalar \(uninstalling?.name ?? "")?",
+                                    isPresented: Binding(get: { uninstalling != nil },
+                                                         set: { if !$0 { uninstalling = nil } }),
+                                    titleVisibility: .visible) {
+                    Button("Desinstalar y borrar sus datos", role: .destructive) {
+                        if let a = uninstalling { model.uninstallAndroid(a, keepData: false) }
+                        uninstalling = nil
+                    }
+                    Button("Desinstalar y conservar sus datos") {
+                        if let a = uninstalling { model.uninstallAndroid(a, keepData: true) }
+                        uninstalling = nil
+                    }
+                    Button("Cancelar", role: .cancel) { uninstalling = nil }
+                } message: {
+                    Text("Se borra el APK instalado. Si conservas los datos, volver a instalar la app "
+                         + "firmada con el mismo certificado los recupera.")
+                }
             }
         }
         .background(Theme.background)
         .sheet(isPresented: $showAdd) { AddAppView().environmentObject(model) }
         .sheet(item: $editing) { app in EditAppView(app: app).environmentObject(model) }
         .sheet(item: $builtInInfo) { app in BuiltInInfoView(app: app).environmentObject(model) }
+        .sheet(item: $androidInfo) { app in AndroidInfoView(app: app).environmentObject(model) }
         .confirmationDialog("¿Eliminar \(deleting?.name ?? "")?",
                             isPresented: Binding(get: { deleting != nil },
                                                  set: { if !$0 { deleting = nil } }),
@@ -126,6 +155,8 @@ struct AppCard: View {
     private var reason: String? { model.unavailableReason(app) }
     private var platform: String {
         if app.isWindows { return "Windows" }
+        if app.isAndroid, let info = app.android { return info.verdict.platformLabel(abis: info.abis ?? []) }
+        if app.isAndroid { return "Android" }
         switch GuestArchitecture.of(app.architecture) {
         case .aarch64: return "ARM64"
         case .x86_64: return "x86-64"
@@ -346,6 +377,58 @@ struct BuiltInInfoView: View {
     private var environmentLabel: String {
         guard let env = model.environment(of: app) else { return app.root }
         return env.name + (env.transitional ? " (transicional)" : "")
+    }
+}
+
+/// What an installed APK is (docs/APK_SUPPORT.md): read-only, since an
+/// Android app has no command line or environment to edit.
+struct AndroidInfoView: View {
+    @EnvironmentObject var model: LauncherModel
+    @Environment(\.dismiss) private var dismiss
+    let app: AppEntry
+
+    var body: some View {
+        let info = app.android ?? AndroidAppInfo()
+        let abis = info.abis ?? []
+        VStack(alignment: .leading, spacing: 12) {
+            HStack(spacing: 12) {
+                AppIconView(app: app, size: 48)
+                Text(app.name).font(.title2.bold())
+            }
+            Form {
+                LabeledContent("Paquete") { Text(info.package ?? "?").textSelection(.enabled) }
+                LabeledContent("Versión", value: [info.versionName, info.versionCode.map { "(\($0))" }]
+                    .compactMap { $0 }.joined(separator: " "))
+                LabeledContent("SDK", value: "mínimo \(info.minSdk ?? "1") · objetivo \(info.targetSdk ?? info.minSdk ?? "1")")
+                LabeledContent("Código nativo") {
+                    Text(info.verdict.label(abis: abis)).multilineTextAlignment(.trailing)
+                }
+                LabeledContent("Actividad principal", value: info.launcherActivity ?? "ninguna")
+                LabeledContent("APK instalado") {
+                    Text(info.packageDir ?? "?").font(.caption.monospaced()).textSelection(.enabled)
+                }
+                LabeledContent("Datos") {
+                    Text(info.dataDir ?? "?").font(.caption.monospaced()).textSelection(.enabled)
+                }
+                DisclosureGroup("Permisos (\((info.permissions ?? []).count))") {
+                    ForEach(info.permissions ?? [], id: \.self) {
+                        Text($0).font(.caption.monospaced()).textSelection(.enabled)
+                    }
+                }
+                if let reason = model.unavailableReason(app) {
+                    Text(reason.prefix(1).uppercased() + reason.dropFirst())
+                        .font(.caption).foregroundStyle(.orange)
+                }
+            }
+            .formStyle(.grouped)
+            HStack {
+                Spacer()
+                Button("Cerrar") { dismiss() }.keyboardShortcut(.defaultAction)
+            }
+        }
+        .padding(20)
+        .frame(width: 540)
+        .frame(maxHeight: 620)
     }
 }
 

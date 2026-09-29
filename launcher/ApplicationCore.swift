@@ -817,7 +817,7 @@ enum SettingsMigration {
 
 /// The library's filter chips.
 enum LibraryFilter: String, CaseIterable, Identifiable {
-    case all, favorites, recent, arm64, x86, windows
+    case all, favorites, recent, arm64, x86, windows, android
     var id: String { rawValue }
     var label: String {
         switch self {
@@ -827,6 +827,7 @@ enum LibraryFilter: String, CaseIterable, Identifiable {
         case .arm64: return "ARM64"
         case .x86: return "x86"
         case .windows: return "Windows"
+        case .android: return "Android"
         }
     }
 }
@@ -837,6 +838,9 @@ struct LibraryItem: Equatable {
     var name: String
     var architecture: String?   // AppEntry.architecture
     var isWindows: Bool
+    /// Android apps have a filter of their own, like Windows programs: their
+    /// architecture is that of their native code, not a Linux program's.
+    var isAndroid: Bool = false
 }
 
 enum Library {
@@ -854,9 +858,10 @@ enum Library {
             case .all: return true
             case .favorites: return stats[item.id]?.favorite == true
             case .recent: return stats[item.id]?.lastLaunch != nil
-            case .arm64: return !item.isWindows && arch == .aarch64
-            case .x86: return !item.isWindows && (arch == .x86_64 || arch == .i386)
+            case .arm64: return !item.isWindows && !item.isAndroid && arch == .aarch64
+            case .x86: return !item.isWindows && !item.isAndroid && (arch == .x86_64 || arch == .i386)
             case .windows: return item.isWindows
+            case .android: return item.isAndroid
             }
         }
         if filter == .recent {
@@ -967,5 +972,417 @@ enum HeroicARM64 {
         guard parts.count == 2, let n = Int(parts[0]), let total = Int(parts[1]),
               total > 0, n >= 1, n <= total else { return nil }
         return (n, total, line[line.index(after: close)...].trimmingCharacters(in: .whitespaces))
+    }
+}
+
+// MARK: - Android apps (docs/APK_SUPPORT.md)
+
+/// Which native code of an APK SteamARM would use, ARM64 first. The same
+/// rules as abi_verdict in scripts/apk-inspect.py.
+enum AndroidABI: String, Codable, Equatable {
+    case arm64                      // arm64-v8a: runs directly on Apple Silicon (preferred)
+    case arm32Only = "arm32-only"   // armeabi-v7a / armeabi only: no AArch32 on Apple Silicon
+    case x86Only = "x86-only"       // x86 / x86_64 only: would need FEX; not supported
+    case unsupported                // native code for other ABIs only (mips, riscv64, ...)
+    case none                       // no native code: ART only
+
+    static func verdict(abis: [String]) -> AndroidABI {
+        let set = Set(abis)
+        if set.contains("arm64-v8a") { return .arm64 }
+        if !set.isDisjoint(with: ["armeabi-v7a", "armeabi"]) { return .arm32Only }
+        if !set.isDisjoint(with: ["x86_64", "x86"]) { return .x86Only }
+        return set.isEmpty ? .none : .unsupported
+    }
+
+    /// The Spanish sentence the launcher shows.
+    func label(abis: [String]) -> String {
+        let list = abis.sorted().joined(separator: ", ")
+        switch self {
+        case .arm64:
+            return "ARM64 nativo (arm64-v8a, preferido): Apple Silicon ejecuta su código directamente"
+        case .arm32Only:
+            return "Solo ARM de 32 bits (\(list)): Apple Silicon no tiene modo AArch32, "
+                + "así que este código no puede ejecutarse de forma nativa"
+        case .x86Only:
+            return "Solo x86 (\(list)): necesitaría FEX; todavía no se admite para apps Android"
+        case .unsupported:
+            return "Código nativo solo para \(list): no se admite"
+        case .none:
+            return "Sin código nativo (solo ART): no depende de la arquitectura"
+        }
+    }
+
+    /// AppEntry.architecture of the card: the ISA of the code that would
+    /// run. ART-only apps would run on the ARM64 Android runtime.
+    func architecture(abis: [String]) -> String {
+        switch self {
+        case .arm64, .none: return GuestArchitecture.aarch64.rawValue
+        case .arm32Only: return "armv7"
+        case .x86Only:
+            return abis.contains("x86_64") ? GuestArchitecture.x86_64.rawValue : GuestArchitecture.i386.rawValue
+        case .unsupported: return abis.sorted().first ?? "desconocida"
+        }
+    }
+
+    /// The card's platform chip.
+    func platformLabel(abis: [String]) -> String {
+        switch self {
+        case .arm64: return "Android · ARM64"
+        case .arm32Only: return "Android · ARM 32 bits"
+        case .x86Only: return abis.contains("x86_64") ? "Android · x86-64" : "Android · x86"
+        case .unsupported: return "Android · " + (abis.sorted().first ?? "?")
+        case .none: return "Android · ART"
+        }
+    }
+}
+
+/// What scripts/apk-inspect.py prints for a file (the fields the launcher
+/// shows). Every field is optional: the same type decodes its answers for
+/// an unsupported bundle and for an error.
+struct AndroidPackageInfo: Decodable, Equatable {
+    struct Permission: Decodable, Equatable {
+        var name: String
+        var maxSdkVersion: Int?
+    }
+    struct Icon: Decodable, Equatable {
+        var path: String?
+        var format: String?
+        var width: Int?
+        var height: Int?
+        var source: String?
+        var note: String?
+    }
+    struct Signing: Decodable, Equatable {
+        var v1: Bool?
+        var v2: Bool?
+        var v3: Bool?
+        var v31: Bool?
+        var certificates: [String]?
+        var certificateSource: String?
+    }
+    struct Splits: Decodable, Equatable {
+        var split: String?
+        var isSplit: Bool?
+        var needsSplits: Bool?
+    }
+
+    var supported: Bool?
+    var format: String?
+    var reason: String?
+    var error: String?
+    var fileName: String?
+    var size: Int?
+    var sha256: String?
+    var package: String?
+    var versionCode: Int?
+    var versionName: String?
+    /// An API level, or a preview's codename.
+    var minSdk: String?
+    var targetSdk: String?
+    var label: String?
+    var launcherActivity: String?
+    var permissions: [Permission]?
+    var abis: [String]?
+    var glEsVersion: String?
+    var isGame: Bool?
+    var icon: Icon?
+    var signing: Signing?
+    var splits: Splits?
+
+    private enum CodingKeys: String, CodingKey {
+        case supported, format, reason, error, fileName, size, sha256, package, versionCode, versionName, minSdk,
+             targetSdk, label, launcherActivity, permissions, abis, glEsVersion, isGame, icon, signing, splits
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        func sdk(_ key: CodingKeys) -> String? {
+            if let n = try? c.decodeIfPresent(Int.self, forKey: key) { return String(n) }
+            return (try? c.decodeIfPresent(String.self, forKey: key)) ?? nil
+        }
+        supported = try? c.decodeIfPresent(Bool.self, forKey: .supported)
+        format = try? c.decodeIfPresent(String.self, forKey: .format)
+        reason = try? c.decodeIfPresent(String.self, forKey: .reason)
+        error = try? c.decodeIfPresent(String.self, forKey: .error)
+        fileName = try? c.decodeIfPresent(String.self, forKey: .fileName)
+        size = try? c.decodeIfPresent(Int.self, forKey: .size)
+        sha256 = try? c.decodeIfPresent(String.self, forKey: .sha256)
+        package = try? c.decodeIfPresent(String.self, forKey: .package)
+        versionCode = try? c.decodeIfPresent(Int.self, forKey: .versionCode)
+        versionName = try? c.decodeIfPresent(String.self, forKey: .versionName)
+        minSdk = sdk(.minSdk)
+        targetSdk = sdk(.targetSdk)
+        label = try? c.decodeIfPresent(String.self, forKey: .label)
+        launcherActivity = try? c.decodeIfPresent(String.self, forKey: .launcherActivity)
+        permissions = try? c.decodeIfPresent([Permission].self, forKey: .permissions)
+        abis = try? c.decodeIfPresent([String].self, forKey: .abis)
+        glEsVersion = try? c.decodeIfPresent(String.self, forKey: .glEsVersion)
+        isGame = try? c.decodeIfPresent(Bool.self, forKey: .isGame)
+        icon = try? c.decodeIfPresent(Icon.self, forKey: .icon)
+        signing = try? c.decodeIfPresent(Signing.self, forKey: .signing)
+        splits = try? c.decodeIfPresent(Splits.self, forKey: .splits)
+    }
+
+    var abiVerdict: AndroidABI { AndroidABI.verdict(abis: abis ?? []) }
+
+    /// "2.0.0 (2000050)".
+    var versionLabel: String {
+        switch (versionName, versionCode) {
+        case let (name?, code?): return "\(name) (\(code))"
+        case let (name?, nil): return name
+        case let (nil, code?): return String(code)
+        default: return "sin versión"
+        }
+    }
+
+    /// "v1 + v2 + v3"; nil when no scheme is present.
+    var signingSchemes: String? {
+        guard let s = signing else { return nil }
+        let names = [(s.v1, "v1"), (s.v2, "v2"), (s.v3, "v3"), (s.v31, "v3.1")]
+            .compactMap { $0.0 == true ? $0.1 : nil }
+        return names.isEmpty ? nil : names.joined(separator: " + ")
+    }
+
+    /// Why android-pm.py would refuse this file, in Spanish; nil when it can be installed.
+    var installBlocker: String? {
+        if supported == false {
+            if let format { return AndroidApps.bundleMessage(format: format) }
+            return "No es un APK que SteamARM pueda leer: \(error ?? "formato desconocido")."
+        }
+        guard let package, AndroidApps.isValidPackage(package) else {
+            return "El APK no tiene un nombre de paquete válido."
+        }
+        if splits?.isSplit == true {
+            return "Es un APK dividido (\(splits?.split ?? "split")), no el APK base: "
+                + "todavía no se admiten las instalaciones divididas."
+        }
+        if splits?.needsSplits == true {
+            return "Este APK necesita APK divididos que no están en el archivo (una instalación de Play Store): "
+                + "todavía no se admiten."
+        }
+        if (signing?.certificates ?? []).isEmpty {
+            return "El APK no está firmado: Android no instala APK sin firma."
+        }
+        return nil
+    }
+}
+
+/// android-pm.py's JSON answer to install and uninstall.
+/// It describes what was installed, read again from the file at install
+/// time: the card is built from it first, so a file replaced after the
+/// preview never gets the preview's details.
+struct AndroidPMResult: Decodable, Equatable {
+    var ok: Bool
+    var action: String?
+    var code: String?
+    var error: String?
+    var package: String?
+    var label: String?
+    var versionName: String?
+    var versionCode: Int?
+    var minSdk: String?
+    var targetSdk: String?
+    var abis: [String]?
+    var launcherActivity: String?
+    var packageDir: String?
+    var dataDir: String?
+    var icon: String?
+    var sha256: String?
+    var permissions: [String]?
+    var previousVersion: String?
+    var dataKept: Bool?
+
+    private enum CodingKeys: String, CodingKey {
+        case ok, action, code, error, package, label, versionName, versionCode, minSdk, targetSdk, abis,
+             launcherActivity, packageDir, dataDir, icon, sha256, permissions, previousVersion, dataKept
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        func sdk(_ key: CodingKeys) -> String? {
+            if let n = try? c.decodeIfPresent(Int.self, forKey: key) { return String(n) }
+            return (try? c.decodeIfPresent(String.self, forKey: key)) ?? nil
+        }
+        ok = (try? c.decode(Bool.self, forKey: .ok)) ?? false
+        action = try? c.decodeIfPresent(String.self, forKey: .action)
+        code = try? c.decodeIfPresent(String.self, forKey: .code)
+        error = try? c.decodeIfPresent(String.self, forKey: .error)
+        package = try? c.decodeIfPresent(String.self, forKey: .package)
+        label = try? c.decodeIfPresent(String.self, forKey: .label)
+        versionName = try? c.decodeIfPresent(String.self, forKey: .versionName)
+        versionCode = try? c.decodeIfPresent(Int.self, forKey: .versionCode)
+        minSdk = sdk(.minSdk)
+        targetSdk = sdk(.targetSdk)
+        abis = try? c.decodeIfPresent([String].self, forKey: .abis)
+        launcherActivity = try? c.decodeIfPresent(String.self, forKey: .launcherActivity)
+        packageDir = try? c.decodeIfPresent(String.self, forKey: .packageDir)
+        dataDir = try? c.decodeIfPresent(String.self, forKey: .dataDir)
+        icon = try? c.decodeIfPresent(String.self, forKey: .icon)
+        sha256 = try? c.decodeIfPresent(String.self, forKey: .sha256)
+        permissions = try? c.decodeIfPresent([String].self, forKey: .permissions)
+        previousVersion = try? c.decodeIfPresent(String.self, forKey: .previousVersion)
+        dataKept = try? c.decodeIfPresent(Bool.self, forKey: .dataKept)
+    }
+}
+
+/// What AppEntry.android stores. Every field is optional: apps.json must
+/// keep decoding whatever an older or newer launcher wrote.
+struct AndroidAppInfo: Codable, Hashable {
+    var package: String?
+    var versionName: String?
+    var versionCode: Int?
+    var minSdk: String?
+    var targetSdk: String?
+    var abis: [String]?
+    var abiVerdict: String?
+    var launcherActivity: String?
+    var permissions: [String]?
+    var packageDir: String?
+    var dataDir: String?
+    var apkSha256: String?
+
+    var verdict: AndroidABI { AndroidABI(rawValue: abiVerdict ?? "") ?? AndroidABI.verdict(abis: abis ?? []) }
+}
+
+extension AndroidAppInfo {
+    /// A field of the wrong type is dropped, never an error: one bad value
+    /// must not make the whole apps.json unreadable.
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        package = try? c.decodeIfPresent(String.self, forKey: .package)
+        versionName = try? c.decodeIfPresent(String.self, forKey: .versionName)
+        versionCode = try? c.decodeIfPresent(Int.self, forKey: .versionCode)
+        minSdk = try? c.decodeIfPresent(String.self, forKey: .minSdk)
+        targetSdk = try? c.decodeIfPresent(String.self, forKey: .targetSdk)
+        abis = try? c.decodeIfPresent([String].self, forKey: .abis)
+        abiVerdict = try? c.decodeIfPresent(String.self, forKey: .abiVerdict)
+        launcherActivity = try? c.decodeIfPresent(String.self, forKey: .launcherActivity)
+        permissions = try? c.decodeIfPresent([String].self, forKey: .permissions)
+        packageDir = try? c.decodeIfPresent(String.self, forKey: .packageDir)
+        dataDir = try? c.decodeIfPresent(String.self, forKey: .dataDir)
+        apkSha256 = try? c.decodeIfPresent(String.self, forKey: .apkSha256)
+    }
+}
+
+/// The library card of an installed APK, before it becomes an AppEntry
+/// (launcher/Models.swift, which the core tests do not build).
+struct AndroidCard: Equatable {
+    var id: String
+    var name: String
+    var icon: String?
+    var architecture: String
+    var installDir: String?
+    var info: AndroidAppInfo
+}
+
+enum AndroidApps {
+    /// Why no Android card can be opened; the card shows it capitalised.
+    /// It goes away only when an Android runtime exists: no fake launch.
+    static let launchUnavailableReason =
+        "el entorno Android de SteamARM todavía no ejecuta apps (docs/ANDROID_ZERO_VM_FEASIBILITY.md)"
+
+    /// The card's reason, with what its native code adds.
+    static func unavailableReason(_ info: AndroidAppInfo?) -> String {
+        switch info?.verdict ?? .none {
+        case .arm32Only:
+            return launchUnavailableReason
+                + "; además, su código nativo es solo ARM de 32 bits, que Apple Silicon no ejecuta"
+        case .x86Only:
+            return launchUnavailableReason + "; además, su código nativo es solo x86 y necesitaría FEX"
+        case .unsupported:
+            return launchUnavailableReason + "; además, su código nativo es de una arquitectura no admitida"
+        case .arm64, .none:
+            return launchUnavailableReason
+        }
+    }
+
+    /// Android's rule for a package name (android-pm.py PACKAGE_RE).
+    static func isValidPackage(_ s: String) -> Bool {
+        guard !s.isEmpty, s.utf8.count <= 255 else { return false }
+        let segments = s.split(separator: ".", omittingEmptySubsequences: false)
+        guard segments.count >= 2 else { return false }
+        return segments.allSatisfy { seg in
+            let u = Array(seg.unicodeScalars)
+            guard let first = u.first, first.isASCII, CharacterSet.letters.contains(first) else { return false }
+            return u.allSatisfy { $0.isASCII && (CharacterSet.alphanumerics.contains($0) || $0 == "_") }
+        }
+    }
+
+    /// "android-org.fdroid.fdroid": one card per package, so an update
+    /// replaces its own card. The package name is kept as it is (it is
+    /// validated, [A-Za-z0-9_.] only): folding it (dots and underscores to
+    /// dashes, lower case) would give org.foo_bar and org.foo.bar one card.
+    static func entryID(package: String) -> String {
+        "android-" + package
+    }
+
+    /// The card for what android-pm.py installed. Its answer describes the
+    /// file it installed; the preview (`info`) only fills what it leaves out,
+    /// and only when both describe the same file.
+    static func card(result: AndroidPMResult, info: AndroidPackageInfo) -> AndroidCard? {
+        guard result.ok, let package = result.package ?? info.package else { return nil }
+        let preview: AndroidPackageInfo? = (result.sha256 == nil || result.sha256 == info.sha256)
+            && (result.package == nil || result.package == info.package) ? info : nil
+        let abis = result.abis ?? preview?.abis ?? []
+        let verdict = AndroidABI.verdict(abis: abis)
+        let appInfo = AndroidAppInfo(
+            package: package, versionName: result.versionName ?? preview?.versionName,
+            versionCode: result.versionCode ?? preview?.versionCode,
+            minSdk: result.minSdk ?? preview?.minSdk, targetSdk: result.targetSdk ?? preview?.targetSdk,
+            abis: abis, abiVerdict: verdict.rawValue,
+            launcherActivity: result.launcherActivity ?? preview?.launcherActivity,
+            permissions: result.permissions ?? preview?.permissions?.map(\.name),
+            packageDir: result.packageDir, dataDir: result.dataDir,
+            apkSha256: result.sha256 ?? preview?.sha256)
+        let name = (result.label ?? preview?.label).flatMap { $0.isEmpty ? nil : $0 } ?? package
+        return AndroidCard(id: entryID(package: package), name: name, icon: result.icon,
+                           architecture: verdict.architecture(abis: abis), installDir: result.packageDir,
+                           info: appInfo)
+    }
+
+    static func bundleMessage(format: String) -> String {
+        let what: String
+        switch format {
+        case "xapk": what = "un XAPK"
+        case "apks": what = "un conjunto APKS (bundletool)"
+        case "apkm": what = "un APKM"
+        case "aab": what = "un Android App Bundle (.aab): no se instala tal cual, antes hay que generar los APK con bundletool"
+        default: what = "un paquete con varios APK"
+        }
+        return "El archivo es \(what). Todavía no se admiten las instalaciones divididas ni los datos OBB: "
+            + "usa el APK completo (universal) de la app."
+    }
+
+    /// android-pm.py's error codes in Spanish, with its detail.
+    static func errorMessage(code: String?, detail: String?) -> String {
+        let d = detail.map { " (\($0))" } ?? ""
+        switch code {
+        case "different-signer":
+            return "La app instalada está firmada con otro certificado: Android no permite esa actualización, "
+                + "y SteamARM tampoco\(d)."
+        case "downgrade":
+            return "Ya hay instalada una versión más reciente\(d)."
+        case "unsigned":
+            return "El APK no está firmado: Android no instala APK sin firma\(d)."
+        case "split-apk", "needs-splits", "bundle":
+            return "Todavía no se admiten las instalaciones divididas\(d)."
+        case "bad-package":
+            return "El nombre de paquete no es válido\(d)."
+        case "not-apk":
+            return "No es un APK que SteamARM pueda leer\(d)."
+        case "not-installed":
+            return "La app ya no está instalada\(d)."
+        default:
+            return "No se pudo completar la operación\(d)."
+        }
+    }
+
+    /// The JSON object in a script's output (Shell.run puts stderr in the
+    /// same text).
+    static func jsonPayload(_ output: String) -> Data? {
+        guard let start = output.firstIndex(of: "{"), let end = output.lastIndex(of: "}"), start < end else {
+            return nil
+        }
+        return String(output[start...end]).data(using: .utf8)
     }
 }

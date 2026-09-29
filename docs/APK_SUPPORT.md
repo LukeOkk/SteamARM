@@ -1,0 +1,374 @@
+# APK support: install, list, update and uninstall (no runtime yet)
+
+Status, 2026-09-29 (stage 25, `benchmarks/stage25-apk-install.txt`).
+SteamARM reads Android APKs, installs them into its state directory, keeps
+their data across updates, uninstalls them and shows them in the launcher's
+library. **It does not run them.** There is no Android runtime in SteamARM
+yet: no binder, no ART, no Android userspace under lxrun. What such a
+runtime needs with zero VM is the subject of
+`docs/ANDROID_ZERO_VM_FEASIBILITY.md`, and
+`docs/LEPTON_REUSE_ANALYSIS.md` covers what Valve's Lepton layer relies on.
+Until a runtime exists, every Android card is disabled and says why. No
+button pretends to open an app.
+
+Labels: MEASURED (run on the owner's Mac mini M4, macOS 27, recorded in
+stage 25), VERIFIED IN SOURCE (file and line, or a URL at a commit),
+UPSTREAM DOCUMENTED, HYPOTHESIS, UNKNOWN.
+
+## What exists
+
+| piece | where | state | evidence |
+|---|---|---|---|
+| APK reader: manifest, label, icon, ABIs, splits, signing, bundles | `scripts/apk-inspect.py` (Python 3.9+, standard library only) | done | MEASURED: 10 real F-Droid APKs agree with F-Droid's `index-v2.json` on the 9 compared fields; 42 unit tests on synthetic APKs; 3,000 mutated APKs raised only its own error type |
+| Package manager | `scripts/android-pm.py` | done | MEASURED on real APKs in a scratch state: install, update with data kept, downgrade refused, uninstall with and without data; 18 unit tests |
+| Library card, filter, context menu, disabled launch | `launcher/AddAppView.swift`, `HomeView.swift`, `LauncherModel.swift`, `ApplicationCore.swift` (`AndroidApps`, `AndroidABI`) | built; the model path was driven with real APKs; the sheet itself was not clicked | MEASURED (a harness that calls `LauncherModel`, stage 25 section E); core tests |
+| `run-app.sh` refuses Android entries | `scripts/run-app.sh` | done | `tests/launcher/run_app_dispatch.sh` (2 new checks) |
+| Running an app | none | **missing** | `docs/ANDROID_ZERO_VM_FEASIBILITY.md` |
+
+## Reading an APK (`scripts/apk-inspect.py`)
+
+```sh
+scripts/apk-inspect.py app.apk                    # JSON
+scripts/apk-inspect.py --extract-icon icon.png app.apk
+scripts/apk-inspect.py --xml app.apk              # the decoded AndroidManifest.xml
+scripts/apk-inspect.py --fdroid-index index-v2.json app.apk
+```
+
+It exits 0 for an APK it read, 2 for a file that is not an APK or cannot be
+read, and 3 for a bundle it recognises but does not support.
+
+### The ZIP
+
+The standard `zipfile` module reads the archive. An entry whose
+compression method is unknown is read as stored, the way Android's own zip
+reader treats it. Some obfuscators use that trick to break other tools
+(tested). An entry flagged as encrypted is read as if it were not: the
+flag, without any real encryption, is another trick aimed at analysis tools
+(tested). A damaged deflate stream is an error of the APK, not of the tool.
+Every read is capped: the manifest at 16 MiB, `resources.arsc` at 128 MiB,
+an icon at 16 MiB.
+
+### The binary manifest (AXML)
+
+This follows the chunk format of AOSP `ResourceTypes.h` (UPSTREAM DOCUMENTED):
+
+- the string pool, UTF-8 or UTF-16, including the two-unit lengths of
+  strings longer than 127 or 32,767 units;
+- the resource map;
+- start and end element chunks. Each attribute is read from its typed
+  `Res_value`: string, decimal and hex integer, boolean, reference,
+  attribute, float and colour.
+
+An android attribute is named by its resource id when the map has one.
+Android matches framework attributes by id, so an obfuscated or emptied
+name string does not change what the attribute is. The id table
+(`ANDROID_ATTRS`) was checked against the resource maps of the 10 real APKs.
+
+The report holds:
+
+- `package`;
+- `versionCode` (with `versionCodeMajor` when present) and `versionName`;
+- `minSdk`, which defaults to 1, or a preview codename kept as a string;
+- `targetSdk`, which defaults to minSdk, as Android does;
+- `maxSdk` and `compileSdk`;
+- `label`;
+- the launcher activity;
+- permissions (`uses-permission` and `uses-permission-sdk-23`, with
+  maxSdkVersion);
+- the permissions Android implies (`impliedPermissions`);
+- features;
+- the OpenGL ES version;
+- Vulkan version, level and compute;
+- `isGame`;
+- `extractNativeLibs`;
+- `hasCode`.
+
+Values given as references are resolved through the resource table. Some
+examples are `@string/app_name` and an integer minSdk.
+
+**The launcher activity** is the first enabled `<activity>` or
+`<activity-alias>` with an intent filter that has action `MAIN` and category
+`LAUNCHER`. A relative name (`.Main`) gets the package prepended, and an
+alias reports its `targetActivity`. The LEANBACK (TV) launcher is reported
+apart. Lepton's own extractor (`compat_tool/liblepton/apk_extractor/src/main.rs`
+at `6135b53`, VERIFIED IN SOURCE) reads package, versionCode, minSdkVersion
+and the first `<activity>` with MAIN and LAUNCHER, as written, relative
+names included. It does not look at aliases. F-Droid 2.0.0 declares its
+launcher entry only as an `activity-alias` (`org.fdroid.IconActivity`), after
+a disabled one (its calculator disguise), and its `MainActivity` has only the
+LEANBACK category (MEASURED, `--xml`). This parser returns MainActivity
+through the enabled alias; Lepton's would find no launcher activity
+(HYPOTHESIS: read from its source, not run).
+
+### resources.arsc
+
+The table's global string pool, then each package's type and key pools, then
+every type chunk. Type chunks come in these entry layouts:
+
+- dense, with 32-bit offsets;
+- sparse (`FLAG_SPARSE`);
+- 16-bit offsets (`FLAG_OFFSET16`);
+- compact entries (`FLAG_COMPACT`).
+
+Bags (styles, arrays) are skipped. Of each configuration, the parser uses
+the locale, the density, the SDK level and night mode. Any other qualifier
+makes a configuration "not default".
+
+- **Label:** the default configuration first, then English, then any other.
+  References are followed, at most 8 deep.
+- **Icon** (`android:icon`, else `roundIcon`): every configuration of the
+  resource, references followed. The highest-density PNG, WebP or JPEG
+  wins; night and locale variants count only when nothing else exists.
+  - An `anydpi` adaptive icon is XML. When it is the only choice, its
+    `<foreground>` drawable is followed (then `<background>`), and so is a
+    `<bitmap src>`, `<inset drawable>` or layer item.
+  - An icon that is only a vector has no raster. `icon.path` is then null,
+    with a note, unless a `res/mipmap*/ic_launcher.png|webp` exists, which is
+    then taken by its file name and marked `source: filename`.
+  - Width and height come from the PNG IHDR, or the WebP VP8, VP8L or VP8X
+    header.
+
+Resource-shortened paths (`res/o-.png`) resolve through the table like any
+other; 8 of the 10 real APKs use them.
+
+### Native code
+
+`abis` lists the `lib/<abi>/` directories. `nativeLibs` gives, per ABI:
+
+- the file count and total bytes;
+- how many files are stored uncompressed, so they are loadable straight
+  from the APK;
+- the smallest `PT_LOAD` `p_align` among the ELF files.
+
+The last one matters here. Apple Silicon has 16 KiB pages, and lxrun
+serves 4 KiB-aligned images through its sub-page path
+(`docs/ARCHITECTURE.md`). MEASURED: Termux's arm64 libraries are aligned at
+4 KiB, and Shattered Pixel Dungeon's, F-Droid's and the fcitx5 plugin's at
+16 KiB.
+
+### Splits and bundles
+
+- A split APK (manifest attribute `split`) is reported as `isSplit`.
+- A base APK that needs splits sets `needsSplits`. That is
+  `isSplitRequired`, `requiredSplitTypes`, or the Play meta-data
+  `com.android.vending.splits.required`.
+- A ZIP without its own `AndroidManifest.xml` is recognised as one of
+  these, and refused with the reason (exit 3):
+  - XAPK (`manifest.json` + APKs);
+  - APKS (bundletool, `toc.pb`);
+  - APKM (`info.json`);
+  - AAB (`BundleConfig.pb`, `base/manifest/`);
+  - a plain bag of APKs.
+
+### Signing
+
+- **v1:** `META-INF/MANIFEST.MF` + `*.SF` + `*.RSA|DSA|EC`. The PKCS#7
+  `SignedData` is read through a small DER reader. A block may carry a
+  chain or other certificates as well. Only the certificate each
+  `SignerInfo` names (by issuer and serial number, RFC 5652) is the
+  signer's; when none can be matched, all of them are kept.
+- **APK Signing Block:** found from the end of central directory (magic
+  `APK Sig Block 42`), with its id-value pairs listed:
+  - v2 `0x7109871a`, v3 `0xf05368c0`, v3.1 `0x1b93ad61`;
+  - verity padding, source stamp, Play frosting and dependency info.
+- **Signers:** the signing certificate of each v2, v3 and v3.1 signer is
+  read, and so is any v3 proof-of-rotation lineage.
+- **`certificates`:** SHA-256 digests of the DER certificates, from the
+  strongest scheme present (v3, then v2, then v1), as Android picks them.
+- **`rotatedCertificates`:** the v3.1 signers. v3.1 carries a rotated key
+  that Android 13 and later use in place of the v3 one (UPSTREAM DOCUMENTED,
+  source.android.com "APK signature scheme v3.1").
+- For all 10 real APKs these digests equal F-Droid's `signer.sha256`: v1
+  only for 2 APKs, v1+v2 for 4, and v1+v2+v3 for 4 (MEASURED).
+
+**Signatures are not verified cryptographically** (`verified: false`).
+The digests over the APK contents are not checked either. The report says
+which certificate an APK names, not that the APK was really signed with
+it.
+
+## Installing (`scripts/android-pm.py`)
+
+```sh
+scripts/android-pm.py install [--force] [--allow-downgrade] app.apk
+scripts/android-pm.py uninstall [--keep-data] <package>
+scripts/android-pm.py list
+scripts/android-pm.py info <package>
+```
+
+The state lives under `$STEAMARM_STATE` (default `~/SteamARM-roots`) or
+`--state`, and the output is JSON:
+
+```
+android/packages/<package>/base.apk     a copy of the APK (checked by SHA-256 after the copy)
+android/packages/<package>/meta.json    the apk-inspect report, installedAt, updatedAt, how it was installed
+android/packages/<package>/icon.png     the icon (a WebP is converted with sips; icon.webp if that fails)
+android/data/<package>/                 the app's data
+android/kept/<package>.json             the signer of data kept by uninstall --keep-data
+```
+
+- **Package names** must follow Android's rule: at least two segments, each
+  a letter followed by letters, digits or `_`, 255 characters at most. The
+  whole string must match (a trailing newline does not pass), which also
+  keeps `../` out of the paths.
+- **Install** stages into `packages/.install-*` and renames it into place.
+  - An existing version is moved aside (`packages/.old-*`), then removed.
+  - If the second rename fails, the old version is put back.
+  - If the process dies between the two renames, the next command puts
+    the old version back before anything else. Each command takes one
+    `flock`, and on taking it removes stages left by an install that never
+    finished.
+  - The data directory is made before anything is replaced.
+- **What it refuses, as Android does** (UPSTREAM DOCUMENTED, `PackageManager`
+  install failure codes):
+  - an unsigned APK (`INSTALL_PARSE_FAILED_NO_CERTIFICATES`; exit 3);
+  - a split APK, or a base that needs splits (`INSTALL_FAILED_MISSING_SPLIT`;
+    exit 3);
+  - a bundle (exit 3).
+- **Update:** the same package with the same certificate, or a new key
+  whose v3 lineage holds the old certificate (key rotation). A v3.1 rotated
+  key counts as the same signer as its v3 key. The data directory is kept.
+  - Another certificate is refused (`INSTALL_FAILED_UPDATE_INCOMPATIBLE`;
+    exit 4) unless `--force`. The replaced signer is then recorded in
+    `meta.json`.
+  - A lower versionCode is refused (`INSTALL_FAILED_VERSION_DOWNGRADE`;
+    exit 4) unless `--allow-downgrade`.
+  - The whole block digest is never compared, because it contains the
+    digests of the APK's contents and so differs between any two builds.
+- **Unknown signer:** an installed package whose `meta.json` is lost or
+  unreadable, or a non-empty data directory with neither an installed app
+  nor a kept-data record, has no known signer. Any APK is refused there
+  unless `--force`, so that nobody's data is handed to whichever APK comes
+  next.
+- **Uninstall** removes the data first, unless `--keep-data`, and then the
+  package directory. If the data cannot all be removed, the app stays
+  installed and the command fails (exit 6). Data kept with `--keep-data`
+  remembers its signer: reinstalling under another certificate is refused,
+  as for an update.
+- **Exit statuses:** 0 done, 2 bad input, 3 not supported, 4 refused,
+  5 not installed, 6 I/O.
+
+**Where it differs from Android:**
+
+- It installs an APK whose native code cannot run here (32-bit ARM only,
+  x86 only). Android would refuse it with `INSTALL_FAILED_NO_MATCHING_ABIS`.
+  Here the card shows why the app cannot run.
+- There is no dexopt, no per-app uid, and no granting of runtime
+  permissions: nothing runs.
+
+## ABI policy (ARM64-first)
+
+| APK's native code | verdict (`abiVerdict.id`) | card architecture | what it means |
+|---|---|---|---|
+| has `arm64-v8a` | `arm64` | `aarch64` | preferred: Apple Silicon executes it directly (lxrun already runs aarch64 Linux code; an Android runtime does not exist yet) |
+| only `armeabi-v7a` / `armeabi` | `arm32-only` | `armv7` | cannot run natively: Apple Silicon has no AArch32 execution state. UPSTREAM DOCUMENTED for the M1 by the box86 project ("it only supports 64bits operations. No ARM32 there", https://box86.org/2022/03/box64-running-on-m1-with-asahi/); for this M4, HYPOTHESIS by extension. SteamARM runs no AArch32 code anywhere (`ELFInspector` rejects e_machine 40, `launcher/ApplicationCore.swift`) |
+| only `x86_64` / `x86` | `x86-only` | `x86_64` / `i386` | would need FEX inside the Android runtime; not supported for now (analysis only) |
+| other ABIs only (mips, riscv64) | `unsupported` | that ABI | not supported |
+| none (dex only) | `none` | `aarch64` | ART only: it would run on the ARM64 Android runtime |
+
+`abi_verdict` in `scripts/apk-inspect.py` and `AndroidABI.verdict` in
+`launcher/ApplicationCore.swift` implement the same table; both are tested
+on the same cases.
+
+## In the launcher
+
+- **Añadir app → Añadir APK (Android)** opens a file panel. It accepts
+  `.apk`; `.xapk`, `.apks`, `.apkm` and `.aab` are accepted only to be
+  refused with the reason. The review screen shows:
+  - the icon (extracted to a temporary file) and the label;
+  - the package, the version and the SDK levels;
+  - the ABI verdict in Spanish;
+  - the launcher activity;
+  - the signing schemes, marked as not cryptographically verified;
+  - the size and the permissions;
+  - whether it will update an installed version (keeping its data);
+  - anything that blocks the install.
+
+  **Instalar** or **Actualizar** runs `android-pm.py install`. A refusal
+  comes back in Spanish (`AndroidApps.errorMessage`).
+- **The card** is an `AppEntry` with:
+  - `kind: "android"`;
+  - `command: []`;
+  - `architecture` from the ABI (table above);
+  - the icon from `packages/<package>/icon.png`;
+  - `installDir` = the package directory;
+  - `android`: an `AndroidAppInfo` with package, version, SDK, ABIs,
+    verdict, launcher activity, permissions and directories.
+
+  Every new field is Optional, and `AndroidAppInfo` drops a field of the
+  wrong type instead of failing. A non-optional field would make every
+  older `apps.json` undecodable, and the next save would empty it
+  (`launcher/tests/AppEntryTests.swift`). The id is
+  `android-<package>`, with the package name kept as it is, so an update
+  replaces its own card. Folding it (dots to dashes, lower case) would give
+  `org.foo_bar` and `org.foo.bar` a single card.
+- **The library** gains the **Android** filter. Android cards are not in
+  the ARM64 or x86 (Linux) filters. The chip reads `Android · ARM64`,
+  `Android · ARM 32 bits`, `Android · x86-64` / `x86`, or `Android · ART`.
+- **The context menu** has:
+  - **Información…** (read-only details);
+  - **Abrir carpeta** (the package directory);
+  - **Abrir carpeta de datos**;
+  - favourites;
+  - **Desinstalar…**, whose dialog offers **Desinstalar y borrar sus datos**
+    and **Desinstalar y conservar sus datos**.
+- **Opening is disabled.** The reason is "El entorno Android de SteamARM
+  todavía no ejecuta apps (docs/ANDROID_ZERO_VM_FEASIBILITY.md)", plus a
+  second sentence for 32-bit ARM or x86-only code. It is shown on the card,
+  as the card's help and in the alert of a launch attempt
+  (`LauncherModel.unavailableReason`). `scripts/run-app.sh` refuses any
+  `kind: "android"` entry as well, exit 2, before anything starts.
+
+## What is missing
+
+1. **The runtime.** Everything that makes an app run is missing:
+   - binder (no binderfs, and no userspace broker in lxrun yet);
+   - an Android userspace (init, servicemanager, zygote, ART) under lxrun;
+   - graphics (EGL/GLES and Vulkan over MoltenVK), input and audio;
+   - the display path to macOS windows.
+
+   See `docs/ANDROID_ZERO_VM_FEASIBILITY.md`. The launch stays disabled
+   until an app really starts; no fake launch in the meantime.
+2. **Split APKs, XAPK, APKS, APKM and OBB data.** The formats are
+   recognised and refused. Installing a base with its configuration splits
+   is the next piece a Play Store-delivered app needs.
+3. **Signature verification.** It needs RSA, ECDSA and DSA over the signed
+   data, and the chunked content digests. Today only the certificate an APK
+   names is compared.
+4. **Per-app state an Android system keeps:**
+   - uid and gid;
+   - runtime permission grants;
+   - `/data/data/<package>` inside a runtime: today's data directory is
+     where it would be bound;
+   - the OBB and media directories.
+5. **Google Play and Google Mobile Services.** These are policy, not code
+   yet:
+   - Google's proprietary components (GMS, the Play Store) are never
+     committed or bundled.
+   - SteamARM may download them only on the owner's Mac, from their
+     official source, and only where that is legal, as it does with Steam.
+   - Device certification is never falsified, and Play Integrity and
+     SafetyNet are never bypassed.
+   - None of this exists today.
+
+## Tests
+
+```sh
+python3 -m unittest tests/test_apk_inspect.py tests/test_android_pm.py   # in make test-launcher-core
+make test-launcher-core    # + ApplicationCoreTests (Android block), AppEntryTests, run_app_dispatch.sh
+```
+
+- `tests/apk_fixtures.py` generates every test APK: AXML, `resources.arsc`
+  in 4 entry layouts, PNG/WebP/ELF headers, PKCS#7 and v2/v3 signing blocks
+  with opaque stand-in certificates.
+- No third-party APK is committed.
+- The real APKs of stage 25 live in `~/SteamARM-roots/android/apk-samples/`
+  on the owner's Mac only.
+
+## Licences
+
+- The code on this page is SteamARM's (MIT).
+- The F-Droid APKs used to validate it were downloaded from
+  `https://f-droid.org/repo/` and are not in the repository. Their licences
+  are recorded in `benchmarks/stage25-apk-install.txt`: GPL-3.0-only,
+  GPL-3.0-or-later and LGPL-2.1-only.
+- Lepton's extractor was read for comparison, not copied (MIT, Valve).

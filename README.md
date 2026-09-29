@@ -98,6 +98,8 @@ guides, and nothing in them is ready for players yet. Start with the plan,
   (component by component, and a staged plan),
   [PLAY_STORE_RESEARCH.md](docs/PLAY_STORE_RESEARCH.md) (what Play Store
   needs, and why SteamARM never ships Google's apps).
+- Android apps: [APK_SUPPORT.md](docs/APK_SUPPORT.md) (APKs are read,
+  installed and listed; nothing Android runs yet).
 
 ## Build from source
 

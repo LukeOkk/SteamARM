@@ -1,0 +1,318 @@
+Stage 25 (Android, APK install) -- read, install, update, uninstall and list APKs; no runtime (2026-09-29)
+====================================================================================================
+
+ZERO-VM. Nothing Android ran: no binder, no ART, no Android userspace, no
+guest of any kind apart from tests/elf/run.sh's own test binaries at the end.
+Host: Mac mini M4, 16 GB, macOS 27.0, system /usr/bin/python3 3.9.6. Base
+commit 53432eb. No Steam client was started, no account was signed into,
+nothing under /Applications or ~/Library/Application Support/SteamARM was
+touched, and scripts/run-app.sh <id> / --stop were not called (only
+tests/launcher/run_app_dispatch.sh ran it: --dry-run, and a copy with a
+stubbed env-links.sh in a temporary state). Every install below went into a
+scratch STEAMARM_STATE, not the owner's ~/SteamARM-roots/android.
+Labels: MEASURED, VERIFIED IN SOURCE, UPSTREAM DOCUMENTED, HYPOTHESIS, UNKNOWN.
+What was built: docs/APK_SUPPORT.md.
+
+Result
+------
+MEASURED:
+1. scripts/apk-inspect.py (pure Python, standard library) reads 10 real APKs
+   from F-Droid's official repository and agrees with F-Droid's own
+   index-v2.json on all 9 compared fields for every one of them: versionCode,
+   versionName, minSdk, targetSdk, native ABIs, permissions (with the implied
+   READ_EXTERNAL_STORAGE), required features, the signer certificate's
+   SHA-256 and the file size. 0.06-0.14 s per APK, SHA-256 of the file
+   included. In all 10 v1 blocks the SignerInfo names its certificate by
+   issuer and serial number, and that v1 signer is the v2/v3 certificate in
+   the 8 APKs that have both (section B).
+2. scripts/android-pm.py installs them into packages/<package>/ and
+   data/<package>/:
+   - an update from 2.0-rc1 to 2.0.0 keeps a file placed in the data
+     directory;
+   - installing 2.0-rc1 again is refused as a downgrade (exit 4);
+   - uninstall --keep-data keeps the data, and a reinstall finds it;
+   - a plain uninstall removes it, and a second uninstall answers "not
+     installed" (exit 5);
+   - a JSON file is refused as not an APK (exit 2).
+
+   0.09-0.27 s per command (section C).
+3. The launcher's own model code (LauncherModel.inspectAPK, installAPK,
+   unavailableReason, launch, uninstallAndroid, compiled into a harness)
+   turns the same APKs into Android cards:
+   - kind android, no command, architecture from the ABI;
+   - an icon NSImage loads;
+   - the Android filter shows them and the ARM64 filter does not;
+   - a launch attempt is refused with "No se puede abrir F-Droid: el
+     entorno Android de SteamARM todavía no ejecuta apps
+     (docs/ANDROID_ZERO_VM_FEASIBILITY.md).";
+   - the session stays idle;
+   - an XAPK is refused with the reason (section E).
+
+   The SwiftUI sheet and menus themselves were built (make launcher) but
+   not clicked: another SteamARM.app and a Steam guest belonging to other
+   work were running on the Mac, and a second launcher instance would have
+   adopted that Steam.
+4. Robustness:
+   - 1,500 byte-mutated manifests and resource tables, and 3,000 APKs with
+     one mutated entry, raised nothing but the parser's own APKError on the
+     final code;
+   - two defects were found this way and fixed;
+   - a read-only review by Codex (gpt-6-sol) found 13 more, all fixed and
+     now under test (section F).
+5. Tests:
+   - test-launcher-core passes with the new checks: Python 80 tests, of
+     which 42 are apk-inspect and 18 android-pm; application core; app
+     entry; run_app_dispatch 39/0;
+   - tests/elf/run.sh: 70 passed, 0 failed (section G).
+
+Nothing here runs an Android app. The card is disabled for every APK, with
+the reason; docs/ANDROID_ZERO_VM_FEASIBILITY.md is where the runtime is
+discussed.
+
+A. Downloads (official F-Droid repository; SHA-256 computed here, and equal
+   to the file.sha256 of each version in F-Droid's index-v2.json)
+----------------------------------------------------------------------------
+Kept in ~/SteamARM-roots/android/apk-samples/ (state, not the repository;
+nothing of this is committed). Licences from the index's metadata.
+- https://f-droid.org/repo/index-v2.json
+  61,593,338 bytes, sha256 48915c43442423ffefed4101282bbff48157ffe0006215eaf6816544de0aa5c7
+  (repo timestamp 1790583823011 ms = 2026-09-28; licence of the index data: UNKNOWN, not redistributed)
+- https://f-droid.org/repo/org.fdroid.fdroid_2000050.apk  (F-Droid 2.0.0, GPL-3.0-or-later)
+  12,496,223 bytes, sha256 94938d324b03755fb324f143229240c75640e809cdd3a90cc0a545b5d0a61931
+- https://f-droid.org/repo/org.fdroid.fdroid_2000041.apk  (F-Droid 2.0-rc1, GPL-3.0-or-later)
+  13,257,686 bytes, sha256 36b343514ea2cdd353b7554c14b3da3f4309653b67be5ceb2e912b25597e3d85
+- https://f-droid.org/repo/com.termux_1022.apk  (Termux 0.119.0-beta.3, GPL-3.0-only)
+  114,920,926 bytes, sha256 fdd476982cd74f2f00aac12d3683b1fa260a0b2d146411b94e09d773be3a7b56
+- https://f-droid.org/repo/com.shatteredpixel.shatteredpixeldungeon_912.apk  (Shattered Pixel Dungeon 4.0.0, a game, GPL-3.0-only)
+  30,266,866 bytes, sha256 ed1b43d7312a70e86c5cd159d4ac29d7d69fae1033331a4e70f9a00dd346b207
+- https://f-droid.org/repo/de.tobiasbielefeld.solitaire_71.apk  (Simple Solitaire Collection 3.13, no native code, GPL-3.0-or-later)
+  16,738,109 bytes, sha256 fdfaf7cad18e4416989b337b5c60b71158c54652384e564fe3e6386421504220
+- https://f-droid.org/repo/net.asceai.meritous_2.apk  (Meritous 0.0.2, a game, armeabi only, GPL-3.0-or-later)
+  2,335,256 bytes, sha256 025f9b5d9bbb3d99a876650ad51bd876ad49ccdc191c0ee31ec1cdddb30e4bbd
+- https://f-droid.org/repo/org.fcitx.fcitx5.android.plugin.sayura_111.apk  (armeabi-v7a build, LGPL-2.1-only)
+  94,126 bytes, sha256 34bb77d6c9d9dad28b168800af6ec685c7c7a1c0ff4abfefdf746c4ad2c833fd
+- https://f-droid.org/repo/org.fcitx.fcitx5.android.plugin.sayura_112.apk  (arm64-v8a build, LGPL-2.1-only)
+  106,266 bytes, sha256 c15ca5468c797ffd2ec7c0eca4a821c656e0439eea25c6ccb87173af5dac617f
+- https://f-droid.org/repo/org.fcitx.fcitx5.android.plugin.sayura_113.apk  (x86 build, LGPL-2.1-only)
+  106,150 bytes, sha256 8d7e4156a0864bc3d5d00ef0caec3599a7a9b1726b04f984fce4e2612f715525
+- https://f-droid.org/repo/org.fcitx.fcitx5.android.plugin.sayura_114.apk  (x86_64 build, LGPL-2.1-only)
+  107,938 bytes, sha256 7a632113552ce9dec907a80aa68da23237a6f617671b84388b45cc92e70111fb
+Also read, not downloaded into SteamARM: Lepton's apk extractor,
+https://github.com/xXJSONDeruloXx/lepton/blob/6135b53dcfe6111ca8fc310a3b35e0fec9e65b9b/compat_tool/liblepton/apk_extractor/src/main.rs
+(MIT, Valve), for comparison only.
+
+B. scripts/apk-inspect.py --fdroid-index index-v2.json <apk>  (MEASURED)
+--------------------------------------------------------------------------
+Time: a fresh python3 process per APK, median of 3, without the index
+(its 61 MB load adds ~0.4 s when --fdroid-index is given); final code.
+Every row: F-Droid matched versionCode, versionName, minSdk, targetSdk,
+abis, permissions, features, signer, size; mismatched {}.
+
+apk                             time   package / version / SDK min-target       label (source)                 launcher activity                                     abis -> verdict                      icon (path, px, density)          signing, certificate source
+fdroid_2000050                  0.10 s org.fdroid.fdroid 2.0.0 (2000050) 24-37   F-Droid (application)          org.fdroid.MainActivity via alias org.fdroid.IconActivity   arm64-v8a armeabi-v7a x86 x86_64 -> arm64 res/o-.png 192x192 640      v1 v2 v3, v3
+fdroid_2000041                  0.12 s org.fdroid.fdroid 2.0-rc1 (2000041) 24-37 F-Droid (application)          org.fdroid.MainActivity                               (same)                        -> arm64 res/o-.png 192x192 640      v1 v2 v3, v3
+termux_1022                     0.14 s com.termux 0.119.0-beta.3 (1022) 24-28    Termux (application)           com.termux.app.TermuxActivity (also LEANBACK)         4 ABIs                         -> arm64 res/CG.png 192x192 640      v1 v2 v3, v3
+shatteredpixeldungeon_912       0.08 s ...shatteredpixeldungeon 4.0.0 (912) 21-36 Shattered Pixel Dungeon (app.) ...android.AndroidLauncher                         4 ABIs                         -> arm64 res/o-.png 192x192 640      v1 v2 v3, v3   isGame true, GLES 2.0
+solitaire_71                    0.09 s de.tobiasbielefeld.solitaire 3.13 (71) 11-25 Simple Solitaire Collection  ...ui.GameSelector                                    (none)                         -> none  res/mipmap-xxxhdpi-v4/ic_launcher.png 192x192 640  v1, v1
+meritous_2                      0.06 s net.asceai.meritous 0.0.2 (2) 4-15        Meritous (application)         net.asceai.meritous.MainActivity                      armeabi                        -> arm32-only res/drawable/icon.png 32x32 default v1, v1   implied READ_EXTERNAL_STORAGE
+fcitx sayura_111                0.06 s ...plugin.sayura 0.1.3-0-g048f581c (111) 23-36 Fcitx5 (Sayura Plugin)  none (a plugin: no MAIN/LAUNCHER)                     armeabi-v7a                    -> arm32-only res/o-.png 192x192 640 v1 v2, v2
+fcitx sayura_112                0.06 s (112)                                                                                                                        arm64-v8a                      -> arm64
+fcitx sayura_113                0.06 s (113)                                                                                                                        x86                            -> x86-only
+fcitx sayura_114                0.06 s (114)                                                                                                                        x86_64                         -> x86-only
+Signing:
+- v1 only in 2 APKs, v1+v2 in 4, v1+v2+v3 in 4.
+- The certificate SHA-256 the parser takes (v3, else v2, else v1) equals
+  F-Droid's signer.sha256 in all 10.
+- For v1 it is the certificate the block's SignerInfo names: 10 of 10 v1
+  blocks matched by issuer and serial, none fell back to "every
+  certificate". That v1 signer is the v2/v3 certificate in the 8 APKs that
+  have both.
+
+Native libraries (nativeLibs: files, bytes, smallest PT_LOAD p_align, stored uncompressed):
+- Termux:      arm64-v8a 3 files 30,246,792 B p_align 0x1000; armeabi-v7a/x86/x86_64 0x1000; 0 stored
+- SPD:         arm64-v8a 2 files 976,608 B 0x4000; the other three ABIs 0x4000; 0 stored
+- F-Droid:     arm64-v8a 1 file 10,096 B 0x4000; the other three 0x4000; all 4 stored (extractNativeLibs=false)
+- fcitx5:      arm64-v8a 0x4000, x86_64 0x4000, armeabi-v7a 0x1000, x86 0x1000
+- Meritous:    armeabi 5 files 1,144,372 B 0x8000
+So Termux's arm64 libraries are 4 KiB-aligned: an Android runtime under
+lxrun would need its sub-page path for them (runtime/subpage.c), as for
+Valve's client.
+
+Attribute ids: the resource maps of these 10 manifests give label
+0x01010001, icon 0x01010002, name 0x01010003, enabled 0x0101000e,
+exported 0x01010010, value 0x01010024, resource 0x01010025,
+targetActivity 0x01010202, minSdkVersion 0x0101020c, versionCode
+0x0101021b, versionName 0x0101021c, targetSdkVersion 0x01010270,
+maxSdkVersion 0x01010271, glEsVersion 0x01010281, required 0x0101028e,
+roundIcon 0x0101052c, isGame 0x010103f4, extractNativeLibs 0x010104ea,
+appCategory 0x01010545, compileSdkVersion 0x01010572: the ANDROID_ATTRS
+table in scripts/apk-inspect.py.
+
+Two findings from the comparison, fixed before the numbers above:
+- F-Droid lists only uses-feature entries with required=true (Termux's
+  touchscreen and leanback are required=false and absent from the index).
+  The report keeps every feature with its "required" flag.
+- F-Droid lists implied permissions: Meritous asks for WRITE_EXTERNAL_STORAGE
+  only and the index also lists READ_EXTERNAL_STORAGE (AOSP platform.xml
+  split-permission, UPSTREAM DOCUMENTED). The report gains
+  impliedPermissions.
+
+C. scripts/android-pm.py on the real APKs, scratch state  (MEASURED)
+----------------------------------------------------------------------
+(final code; each line a fresh process)
+$ android-pm.py install org.fdroid.fdroid_2000041.apk     exit 0, 0.17 s: installed, 2.0-rc1, arm64, icon.png
+  (echo "user data" > data/org.fdroid.fdroid/prefs.xml)
+$ android-pm.py install org.fdroid.fdroid_2000050.apk     exit 0, 0.15 s: updated, previousVersion 2.0-rc1, dataKept true
+  data after update: user data
+$ android-pm.py install org.fdroid.fdroid_2000041.apk     exit 4, 0.15 s: downgrade, "org.fdroid.fdroid 2.0-rc1 (2000041) is older than the installed 2.0.0 (2000050)"
+$ android-pm.py install org.fdroid.fdroid_2000050.apk     exit 0, 0.15 s: reinstalled
+$ android-pm.py install com.shatteredpixel.shatteredpixeldungeon_912.apk   exit 0, 0.14 s: installed, arm64
+$ android-pm.py install de.tobiasbielefeld.solitaire_71.apk               exit 0, 0.13 s: installed, none
+$ android-pm.py install net.asceai.meritous_2.apk                         exit 0, 0.10 s: installed, arm32-only
+$ android-pm.py install ...sayura_111.apk (armeabi-v7a)                   exit 0, 0.09 s: installed, arm32-only
+$ android-pm.py install ...sayura_114.apk (x86_64, versionCode 114)       exit 0, 0.09 s: updated, x86-only
+$ android-pm.py install ...sayura_112.apk (arm64, versionCode 112)        exit 4, 0.10 s: downgrade
+  (F-Droid encodes the ABI in the versionCode: 111 v7, 112 arm64, 113 x86,
+  114 x86_64; the highest one wins an update, as on Android.)
+$ android-pm.py install com.termux_1022.apk (115 MB)                      exit 0, 0.27 s: installed, arm64
+$ android-pm.py list                                                      exit 0, 0.09 s: 6 packages
+$ android-pm.py uninstall --keep-data org.fdroid.fdroid                   exit 0: dataKept true; data kept: user data
+$ android-pm.py install org.fdroid.fdroid_2000050.apk                     exit 0: installed, dataKept true
+$ android-pm.py uninstall com.termux                                      exit 0: com.termux data removed
+$ android-pm.py uninstall com.termux                                      exit 5: not-installed
+$ android-pm.py install index-v2.json                                     exit 2: not-apk ("not a zip archive")
+Icons written: 5 PNG, 192x192 (Meritous 32x32), all read by file(1) as PNG.
+The different-signer refusal, --force, key rotation through a v3 lineage,
+unsigned, split and bundle refusals were tested on synthetic APKs only
+(tests/test_android_pm.py): none of the downloaded APKs shares a package
+with a differently signed one.
+
+D. WebP icon conversion  (MEASURED)
+------------------------------------
+A 192x192 WebP made with Homebrew's cwebp from F-Droid's icon, inside a
+synthetic APK: apk-inspect reports format webp, 192x192 (VP8X/VP8L header);
+android-pm writes icon.png through /usr/bin/sips: "PNG image data, 192 x
+192, 8-bit/color RGBA". Without sips (Linux) the icon stays icon.webp
+(unit test).
+
+E. The launcher's model code with the real APKs  (MEASURED)
+------------------------------------------------------------
+launcher/LauncherModel.swift, Models.swift, ApplicationCore.swift and
+CompatibilityStatus.swift compiled with a harness (scratch, not committed)
+calling LauncherModel.shared on a scratch STEAMARM_STATE whose settings.json
+names the worktree as projectDir.
+(final code)
+- fdroid 2.0-rc1: inspected in 0.12 s; F-Droid · org.fdroid.fdroid ·
+  2.0-rc1 (2000041) · SDK 24/37; "ARM64 nativo (arm64-v8a, preferido)";
+  v1 + v2 + v3; icon preview 192x192. Card: id android-org.fdroid.fdroid,
+  kind android, arch aarch64, command []. Its icon loads in NSImage
+  (192x192). unavailableReason: "el entorno Android de SteamARM todavía no
+  ejecuta apps (docs/ANDROID_ZERO_VM_FEASIBILITY.md)".
+- fdroid 2.0.0: "already installed: 2.0-rc1 (2000041)"; the same card is
+  updated.
+- fdroid 2.0-rc1 again: "Ya hay instalada una versión más reciente (...)".
+- SPD: arch aarch64. Solitaire: "Sin código nativo (solo ART)", arch
+  aarch64.
+- Meritous: "Solo ARM de 32 bits (armeabi): Apple Silicon no tiene modo
+  AArch32, ...", arch armv7. The reason adds "; además, su código nativo es
+  solo ARM de 32 bits, que Apple Silicon no ejecuta".
+- fcitx x86: "Solo x86 (x86): necesitaría FEX; ...", arch i386, with the
+  x86 sentence.
+- index-v2.json: "No es un APK que SteamARM pueda leer: not a zip archive:
+  File is not a zip file."
+- Library, Android filter: 5 cards. ARM64 filter has Android cards: false.
+- launch(android-org.fdroid.fdroid): phase idle, alert "No se puede abrir
+  F-Droid: el entorno Android de SteamARM todavía no ejecuta apps
+  (docs/ANDROID_ZERO_VM_FEASIBILITY.md)."
+- uninstallAndroid(keepData: true): card gone, package dir gone, data kept.
+  apps.json 6,738 bytes, decodes back to 4 entries.
+- An XAPK (manifest.json + the sayura APK): "El archivo es un XAPK.
+  Todavía no se admiten las instalaciones divididas ni los datos OBB: usa
+  el APK completo (universal) de la app."
+
+F. Robustness and review  (MEASURED)
+-------------------------------------
+Mutation runs (seeded, scratch scripts, not committed):
+- 1,500 random byte mutations (1-8 bytes, 20% also truncated) of the real
+  manifests and resource tables of three APKs through:
+  - parse_axml and xml_text;
+  - ResourceTable, resolve_string and name.
+- 3,000 synthetic APKs with one mutated entry through inspect(): the
+  manifest, resources.arsc, the adaptive icon XML, the PKCS#7 block, an
+  ELF, a PNG.
+- On the final code: no exception other than APKError in either run.
+
+Found by these runs, and fixed:
+- a <manifest> whose package attribute had become an integer: TypeError.
+  A manifest without a string package is now an APKError.
+- A string whose bytes were neither UTF-8 nor modified UTF-8: a
+  UnicodeDecodeError in the modified-UTF-8 fallback. It now falls back to
+  U+FFFD.
+- inspect() now turns any stray parse error into APKError.
+
+Codex review (gpt-6-sol, reasoning effort high, read-only sandbox, run
+after the above). It reported 13 defects (12 in its final list, the
+encrypted-entry one in its notes) and changed no file. Each was checked
+here and fixed, with a test:
+- v1 took every certificate of the PKCS#7 block as a signer (a chain would
+  make an update by the same key look like another signer). Now the
+  SignerInfo's certificate, by issuer and serial number.
+- v3.1 rotated signers were ignored. They are reported as
+  rotatedCertificates, and android-pm accepts either identity.
+- A car or television UI-mode string counted as the default label. The UI
+  mode type and "notnight" are now qualifiers.
+- A deeply nested XML drawable (thousands of levels) raised RecursionError
+  through Element.iter(). iter() and xml_text are no longer recursive
+  (5,000 levels tested).
+- The file vanishing between the report and its SHA-256 let
+  FileNotFoundError escape. It is now an APKError.
+- Encrypted-flag zip entries let RuntimeError escape. They are now read
+  ignoring the flag (the "fake encryption" trick), and a damaged deflate
+  stream is an APKError.
+- android-pm: an installed package with a lost meta.json, or unaccounted
+  non-empty data, skipped the signer check. It is now an unknown signer,
+  refused unless --force.
+- android-pm: a process killed between the two renames of an update lost
+  the installed version. The next command now restores packages/.old-*,
+  and a failing second rename puts it back at once.
+- android-pm: the data directory was made after the swap, so a failure
+  there reported an install that had happened. It is now made first.
+- android-pm: a data directory that could not be removed was ignored and
+  its kept-data record deleted. Now the data goes first, and on failure
+  the app stays installed and the command exits 6.
+- android-pm: "org.app\n" passed the package regex ($ before a newline).
+  Now fullmatch.
+- Launcher: card ids folded dots and underscores (org.foo_bar and
+  org.foo.bar shared one card). The id is now "android-" + the package
+  name as it is.
+- Launcher: the card took the preview's details even if the file was
+  replaced before Instalar. android-pm's answer now carries SHA-256, SDK
+  levels and permissions, and the card uses them first.
+
+G. Builds and tests  (MEASURED)
+--------------------------------
+Final code:
+- make lxrt launcher: ok (35 s).
+- make test-launcher-core: ok (1 min 5 s):
+  - application core: all checks passed (the Android block included);
+  - app entry: all checks passed;
+  - Python: 80 tests OK (42 test_apk_inspect, 18 test_android_pm);
+  - run_app_dispatch: 39 passed, 0 failed (2 new Android refusals);
+  - session: 32 passed, 0 failed, 1 skip (no setsid on macOS);
+  - safeguard: 10/0; guest_env: 26/0; mkarmroot: 25/0;
+    run_steam_arm64: 10/0; fex_proton_tool: 35/0.
+- tests/elf/run.sh: 70 passed, 0 failed (26 s).
+
+Evidence for the ABI table (docs/APK_SUPPORT.md)
+-------------------------------------------------
+- arm64-v8a runs natively: lxrun runs aarch64 Linux code today (MEASURED in
+  earlier stages). An Android runtime to load an APK's code does not exist:
+  UNKNOWN until built.
+- No AArch32 on Apple Silicon: UPSTREAM DOCUMENTED for the M1 by the box86
+  project ("it only supports 64bits operations. No ARM32 there",
+  https://box86.org/2022/03/box64-running-on-m1-with-asahi/). For this M4:
+  HYPOTHESIS by extension (sysctl hw.optional lists no AArch32 feature;
+  nothing here tried to execute A32 code).
+- x86-only through FEX: HYPOTHESIS (FEX runs x86 Linux code under lxrun
+  today; inside an Android runtime it would need bionic-side thunks); not
+  attempted.

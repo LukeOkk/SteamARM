@@ -221,7 +221,8 @@ final class LauncherModel: ObservableObject {
     }
 
     func delete(_ app: AppEntry) {
-        guard !app.isBuiltIn else { return }
+        // Android apps go through android-pm.py (uninstallAndroid).
+        guard !app.isBuiltIn, !app.isAndroid else { return }
         apps.removeAll { $0.id == app.id }
         saveApps()
         stats[app.id] = nil
@@ -258,7 +259,8 @@ final class LauncherModel: ObservableObject {
     /// The library as shown: search, filter chip, favourites first.
     func visibleApps(query: String, filter: LibraryFilter) -> [AppEntry] {
         let all = allApps
-        let items = all.map { LibraryItem(id: $0.id, name: $0.name, architecture: $0.architecture, isWindows: $0.isWindows) }
+        let items = all.map { LibraryItem(id: $0.id, name: $0.name, architecture: $0.architecture,
+                                          isWindows: $0.isWindows, isAndroid: $0.isAndroid) }
         let byID = Dictionary(all.map { ($0.id, $0) }, uniquingKeysWith: { a, _ in a })
         return Library.visible(items, stats: stats, query: query, filter: filter).compactMap { byID[$0] }
     }
@@ -267,6 +269,8 @@ final class LauncherModel: ObservableObject {
     /// tried. Only programs outside the x86 Steam root are checked here (that
     /// one is the setup banner's business): their root and program must exist.
     func unavailableReason(_ app: AppEntry) -> String? {
+        // No Android runtime exists yet: every Android card stays closed, with why.
+        if app.isAndroid { return AndroidApps.unavailableReason(app.android) }
         guard !app.isWindows, !Paths.isX86Root(app.root) else { return nil }
         let host = Paths.hostRoot(forGuestRoot: app.root)
         let shown = (host.path as NSString).abbreviatingWithTildeInPath
@@ -343,6 +347,86 @@ final class LauncherModel: ObservableObject {
     func openFolder(_ app: AppEntry) {
         if let u = folder(of: app) { NSWorkspace.shared.open(u) }
         else { alert = "No se encuentra la carpeta de \(app.name)." }
+    }
+
+    // MARK: Android apps (docs/APK_SUPPORT.md)
+
+    var apkInspectScript: URL { projectDir.appendingPathComponent("scripts/apk-inspect.py") }
+    var androidPMScript: URL { projectDir.appendingPathComponent("scripts/android-pm.py") }
+
+    /// scripts/apk-inspect.py on `apk`, with its icon extracted to `icon`.
+    /// The error text is in Spanish.
+    func inspectAPK(_ apk: URL, iconTo icon: URL) async -> (info: AndroidPackageInfo?, error: String?) {
+        let r = await Shell.run("/usr/bin/python3", [apkInspectScript.path, "--extract-icon", icon.path, apk.path],
+                                cwd: projectDir)
+        guard let payload = AndroidApps.jsonPayload(r.output),
+              let info = try? JSONDecoder().decode(AndroidPackageInfo.self, from: payload) else {
+            return (nil, "No se pudo leer \(apk.lastPathComponent) (código \(r.status)).\n\n" + r.output.suffix(800))
+        }
+        switch r.status {
+        case 0: return (info, nil)
+        case 3: return (info, info.installBlocker ?? AndroidApps.bundleMessage(format: info.format ?? ""))
+        default: return (nil, "No es un APK que SteamARM pueda leer: \(info.error ?? "formato desconocido").")
+        }
+    }
+
+    /// The version already installed of `package` (android-pm.py's meta.json), if any.
+    func installedAndroidVersion(_ package: String) -> (name: String?, code: Int?)? {
+        guard AndroidApps.isValidPackage(package),
+              let data = try? Data(contentsOf: Paths.androidPackageDir(package).appendingPathComponent("meta.json")),
+              let meta = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return nil }
+        return (meta["versionName"] as? String, meta["versionCode"] as? Int)
+    }
+
+    /// android-pm.py install, then the library card. The error is in Spanish.
+    func installAPK(_ apk: URL, info: AndroidPackageInfo) async -> (entry: AppEntry?, error: String?) {
+        let r = await Shell.run("/usr/bin/python3", [androidPMScript.path, "install", apk.path],
+                                cwd: projectDir, env: ["STEAMARM_STATE": Paths.state.path])
+        guard let payload = AndroidApps.jsonPayload(r.output),
+              let result = try? JSONDecoder().decode(AndroidPMResult.self, from: payload) else {
+            return (nil, "android-pm.py falló (código \(r.status)).\n\n" + r.output.suffix(800))
+        }
+        guard result.ok, let card = AndroidApps.card(result: result, info: info) else {
+            return (nil, AndroidApps.errorMessage(code: result.code, detail: result.error))
+        }
+        let entry = AppEntry(id: card.id, name: card.name, icon: card.icon, command: [],
+                             root: card.installDir ?? Paths.androidRoot.path, fexRootfs: nil, env: [:],
+                             kind: "android", installDir: card.installDir, architecture: card.architecture,
+                             android: card.info)
+        upsert(entry)
+        return (entry, nil)
+    }
+
+    /// android-pm.py uninstall [--keep-data], then the card goes.
+    func uninstallAndroid(_ app: AppEntry, keepData: Bool) {
+        guard app.isAndroid, let package = app.android?.package, AndroidApps.isValidPackage(package) else { return }
+        let script = androidPMScript.path, cwd = projectDir
+        Task {
+            let r = await Shell.run("/usr/bin/python3",
+                                    [script, "uninstall"] + (keepData ? ["--keep-data"] : []) + [package],
+                                    cwd: cwd, env: ["STEAMARM_STATE": Paths.state.path])
+            let result = AndroidApps.jsonPayload(r.output).flatMap { try? JSONDecoder().decode(AndroidPMResult.self, from: $0) }
+            // Already gone (removed by hand, or from the command line): the card goes too.
+            guard result?.ok == true || result?.code == "not-installed" else {
+                self.alert = "No se pudo desinstalar \(app.name): "
+                    + AndroidApps.errorMessage(code: result?.code, detail: result?.error ?? r.output.suffix(400).description)
+                return
+            }
+            self.apps.removeAll { $0.id == app.id }
+            self.saveApps()
+            self.stats[app.id] = nil
+        }
+    }
+
+    /// $STATE/android/data/<package>, the app's data (kept across updates).
+    func openAndroidData(_ app: AppEntry) {
+        guard let package = app.android?.package, AndroidApps.isValidPackage(package) else {
+            alert = "No se encuentra la carpeta de datos de \(app.name)."
+            return
+        }
+        let dir = Paths.androidDataDir(package)
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        NSWorkspace.shared.open(dir)
     }
 
     /// The app's newest log (<id>-YYYYmmdd-HHMMSS.log), else the logs folder.
