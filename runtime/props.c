@@ -125,7 +125,7 @@ static int service_state(void)
 
 static bool socket_answers(void)
 {
-    for (int i = 0; i < 500; i++) {             // a leaving service: up to 5 s
+    for (int i = 0; i < 1000; i++) {            // a leaving service: up to 10 s
         int s = service_state();
         if (s >= 0) return s == 1;
         usleep(10000);

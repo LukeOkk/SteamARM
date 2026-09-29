@@ -152,51 +152,54 @@ static bool starts_with(const char *s, const char *p) { return strncmp(s, p, str
 
 // ------------------------------------------------------------ root paths
 //
-// The image's absolute symlinks are guest paths (/system_ext ->
-// /system/system_ext, /odm/etc -> /vendor/odm/etc): each component is
-// checked and an absolute target is followed inside the root, as the
-// runtime's guest_resolve does for guests.
+// The image's symlinks are guest paths (/system_ext -> /system/system_ext,
+// /odm/etc -> /vendor/odm/etc). A guest path is resolved here the way a
+// kernel resolves one inside a chroot: component by component, ".", ".."
+// and links (absolute ones from the root, relative ones from their
+// directory) handled here, never above the root. The host path that comes
+// out has no link left in it except, possibly, a last component that does
+// not exist yet.
 static bool root_path(const char *guest, char *out, size_t outn)
 {
-    char cur[PATH_MAX];
-    if (guest[0] != '/' || snprintf(cur, sizeof cur, "%s", guest) >= (int)sizeof cur)
+    char rest[PATH_MAX];            // what is still to walk
+    char done[PATH_MAX] = "";       // the resolved guest path ("" is "/")
+    if (guest[0] != '/' || snprintf(rest, sizeof rest, "%s", guest) >= (int)sizeof rest)
         return false;
-    for (int hops = 0; hops < 40; hops++) {
-        bool changed = false;
-        size_t len = strlen(cur);
-        for (size_t i = 1; i <= len; i++) {
-            if (cur[i] != '/' && cur[i] != '\0')
-                continue;
-            char save = cur[i];
-            cur[i] = '\0';
-            char host[PATH_MAX], tgt[PATH_MAX];
-            snprintf(host, sizeof host, "%s%s", g_root, cur);
-            ssize_t tl = readlink(host, tgt, sizeof tgt - 1);
-            cur[i] = save;
-            if (tl > 0) {
-                tgt[tl] = '\0';
-                char next[PATH_MAX];
-                if (tgt[0] == '/') {
-                    snprintf(next, sizeof next, "%s%s", tgt, cur + i);
-                } else {
-                    char parent[PATH_MAX];
-                    memcpy(parent, cur, i);
-                    parent[i] = '\0';
-                    char *sl = strrchr(parent, '/');
-                    sl[1] = '\0';
-                    snprintf(next, sizeof next, "%s%s%s", parent, tgt, cur + i);
-                }
-                snprintf(cur, sizeof cur, "%s", next);
-                changed = true;
-                break;
-            }
-            if (!save)
-                break;
+    int links = 0;
+    const char *p = rest;
+    while (*p) {
+        while (*p == '/') p++;
+        if (!*p) break;
+        size_t cl = strcspn(p, "/");
+        char comp[NAME_MAX + 1];
+        if (cl > NAME_MAX) return false;
+        memcpy(comp, p, cl);
+        comp[cl] = '\0';
+        p += cl;
+        if (!strcmp(comp, ".")) continue;
+        if (!strcmp(comp, "..")) {
+            char *s = strrchr(done, '/');
+            if (s) *s = '\0';
+            continue;
         }
-        if (!changed)
-            break;
+        char cand[PATH_MAX], host[PATH_MAX], tgt[PATH_MAX];
+        if (snprintf(cand, sizeof cand, "%s/%s", done, comp) >= (int)sizeof cand ||
+            snprintf(host, sizeof host, "%s%s", g_root, cand) >= (int)sizeof host)
+            return false;
+        ssize_t tl = readlink(host, tgt, sizeof tgt - 1);
+        if (tl > 0) {
+            if (++links > 40) return false;
+            tgt[tl] = '\0';
+            char next[PATH_MAX];
+            if (snprintf(next, sizeof next, "%s/%s", tgt, p) >= (int)sizeof next) return false;
+            memcpy(rest, next, strlen(next) + 1);
+            p = rest;
+            if (tgt[0] == '/') done[0] = '\0';
+            continue;
+        }
+        memcpy(done, cand, strlen(cand) + 1);
     }
-    return snprintf(out, outn, "%s%s", g_root, cur) < (int)outn;
+    return snprintf(out, outn, "%s%s", g_root, done[0] ? done : "/") < (int)outn;
 }
 
 static char *read_guest_file(const char *guest, size_t *len)
@@ -1079,16 +1082,25 @@ static bool pb_skip(const uint8_t **p, const uint8_t *end, int wt)
     }
 }
 
+// LoadPersistentPropertyFile: false (and *out untouched) when the file is
+// missing or unreadable; a file that does not parse is deleted, as init
+// does, so the next write starts clean. A stale .tmp is removed first.
 static bool load_persistent_file(struct kvlist *out)
 {
+    char tmpf[PATH_MAX + 8];
+    snprintf(tmpf, sizeof tmpf, "%s.tmp", g_persist);
+    if (unlink(tmpf) == 0)
+        plog("Found temporary property file while attempting to persistent system properties"
+             " a previous persistent property write may have failed");
     int fd = open(g_persist, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
-    if (fd < 0) return errno == ENOENT;      // none yet: an empty set
+    if (fd < 0) return false;
     struct stat st;
-    if (fstat(fd, &st) != 0 || st.st_size > (16 << 20)) { close(fd); return false; }
+    if (fstat(fd, &st) != 0 || !S_ISREG(st.st_mode) || st.st_size > (16 << 20)) { close(fd); return false; }
     uint8_t *d = xmalloc((size_t)st.st_size);
     ssize_t got = read(fd, d, (size_t)st.st_size);
     close(fd);
     if (got != st.st_size) { free(d); return false; }
+    struct kvlist tmp = { 0 };
     const uint8_t *p = d, *end = d + got;
     bool ok = true;
     while (ok && p < end) {
@@ -1110,13 +1122,21 @@ static bool load_persistent_file(struct kvlist *out)
             r += l2;
             if ((k2 >> 3) == 1) { free(name); name = s; } else { free(value); value = s; }
         }
-        if (ok) kv_set(out, name ? name : "", value ? value : "", false);
+        if (ok) kv_set(&tmp, name ? name : "", value ? value : "", false);
         free(name);
         free(value);
     }
     free(d);
-    if (!ok) plog("Unable to parse persistent property file %s", g_persist);
-    return ok;
+    if (!ok) {
+        plog("Unable to parse persistent property file %s: Could not parse protobuf (deleted)", g_persist);
+        unlink(g_persist);
+        kv_free(&tmp);
+        return false;
+    }
+    for (int i = 0; i < tmp.n; i++)
+        kv_set(out, tmp.a[i].k, tmp.a[i].v, false);
+    kv_free(&tmp);
+    return true;
 }
 
 static void pb_put_varint(uint8_t **p, uint64_t v)
@@ -1191,7 +1211,6 @@ static char *expand_props(const char *in)
     for (const char *p = in; *p; ) {
         const char *add = NULL;
         size_t al = 0;
-        char tmp[PROP_VALUE_MAX + 256];
         if (p[0] == '$' && p[1] == '$') { add = "$"; al = 1; p += 2; }
         else if (p[0] == '$' && p[1] == '{') {
             const char *e = strchr(p, '}');
@@ -1207,8 +1226,7 @@ static char *expand_props(const char *in)
             const char *v = get_prop(name, NULL);
             if (!v || !*v) v = def;
             if (!v) { plog("property '%s' doesn't exist while expanding '%s'", name, in); free(out); return NULL; }
-            snprintf(tmp, sizeof tmp, "%s", v);
-            add = tmp; al = strlen(tmp);
+            add = v; al = strlen(v);            // the area outlives this call
             p = e + 1;
         } else if (p[0] == '$') { plog("unexpected end of string in '%s', looking for }", in); free(out); return NULL; }
         else { add = p; al = 1; p++; }
@@ -1295,43 +1313,48 @@ static void derive_ro_product(void)
     static const char *const props[] = { "brand", "device", "manufacturer", "model", "name" };
     static const char *const allowed[] = { "odm", "product", "system_ext", "system", "vendor" };
     const char *deflt = "product,odm,vendor,system_ext,system";
-    char order[PROP_VALUE_MAX + 1];
-    snprintf(order, sizeof order, "%s", get_prop("ro.product.property_source_order", ""));
+    char *order = xstrdup(get_prop("ro.product.property_source_order", ""));
     if (order[0]) {
-        char tmp[sizeof order];
-        snprintf(tmp, sizeof tmp, "%s", order);
-        for (char *s = strtok(tmp, ","); s; s = strtok(NULL, ",")) {
+        // android::base::Split: empty pieces count (and are not allowed).
+        char *tmp = xstrdup(order), *sp = tmp;
+        for (char *s; (s = strsep(&sp, ",")); ) {
             bool ok = false;
             for (size_t i = 0; i < 5; i++) if (!strcmp(s, allowed[i])) ok = true;
             if (!ok) {
                 plog("Found unexpected source in ro.product.property_source_order; using the default property source order");
-                snprintf(order, sizeof order, "%s", deflt);
+                free(order);
+                order = xstrdup(deflt);
                 break;
             }
         }
-    } else snprintf(order, sizeof order, "%s", deflt);
+        free(tmp);
+    } else {
+        free(order);
+        order = xstrdup(deflt);
+    }
     for (size_t i = 0; i < 5; i++) {
         char base[64];
         snprintf(base, sizeof base, "ro.product.%s", props[i]);
         if (*get_prop(base, "")) continue;
-        char tmp[sizeof order];
-        snprintf(tmp, sizeof tmp, "%s", order);
-        char *sp = NULL;
-        for (char *s = strtok_r(tmp, ",", &sp); s; s = strtok_r(NULL, ",", &sp)) {
+        char *tmp = xstrdup(order), *sp = tmp;
+        for (char *s; (s = strsep(&sp, ",")); ) {
             char target[96];
             snprintf(target, sizeof target, "ro.product.%s.%s", s, props[i]);
             const char *v = get_prop(target, "");
             if (*v) {
-                char val[PROP_VALUE_MAX + 1];
-                snprintf(val, sizeof val, "%s", v);
+                // A copy of any length: ro.* values may be long ones.
+                char *val = xstrdup(v);
                 plog("Setting product property %s to '%s' (from %s)", base, val, target);
                 const char *err = "";
                 uint32_t r = property_set(base, val, &err);
                 if (r != PROP_SUCCESS) plog("Error setting product property %s: err=%u (%s)", base, r, err);
+                free(val);
                 break;
             }
         }
+        free(tmp);
     }
+    free(order);
 }
 
 // property_derive_build_fingerprint: only when the image does not set one,
@@ -1339,16 +1362,18 @@ static void derive_ro_product(void)
 static void derive_fingerprint(void)
 {
     if (*get_prop("ro.build.fingerprint", "")) return;
-    char fp[1024];
-    snprintf(fp, sizeof fp, "%s/%s/%s:%s/%s/%s:%s/%s",
-             get_prop("ro.product.brand", "unknown"), get_prop("ro.product.name", "unknown"),
-             get_prop("ro.product.device", "unknown"), get_prop("ro.build.version.release", "unknown"),
-             get_prop("ro.build.id", "unknown"), get_prop("ro.build.version.incremental", "unknown"),
-             get_prop("ro.build.type", "unknown"), get_prop("ro.build.tags", "unknown"));
+    char *fp = NULL;
+    if (asprintf(&fp, "%s/%s/%s:%s/%s/%s:%s/%s",
+                 get_prop("ro.product.brand", "unknown"), get_prop("ro.product.name", "unknown"),
+                 get_prop("ro.product.device", "unknown"), get_prop("ro.build.version.release", "unknown"),
+                 get_prop("ro.build.id", "unknown"), get_prop("ro.build.version.incremental", "unknown"),
+                 get_prop("ro.build.type", "unknown"), get_prop("ro.build.tags", "unknown")) < 0)
+        return;
     plog("Setting property 'ro.build.fingerprint' to '%s'", fp);
     const char *err = "";
     uint32_t r = property_set("ro.build.fingerprint", fp, &err);
     if (r != PROP_SUCCESS) plog("Error setting property 'ro.build.fingerprint': err=%u (%s)", r, err);
+    free(fp);
 }
 
 // ProcessKernelCmdline + ExportKernelBootProps. There is no kernel command
@@ -1379,9 +1404,9 @@ static void boot_props(void)
         { "ro.boot.revision",   "ro.revision",   "0" },
     };
     for (size_t i = 0; i < sizeof map / sizeof map[0]; i++) {
-        char v[PROP_VALUE_MAX + 1];
-        snprintf(v, sizeof v, "%s", get_prop(map[i].src, map[i].def));
+        char *v = xstrdup(get_prop(map[i].src, map[i].def));
         if (*v) init_set(map[i].dst, v);
+        free(v);
     }
 }
 
@@ -1421,6 +1446,58 @@ static void load_boot_defaults(void)
     derive_fingerprint();
 }
 
+// init's legacy format, one file per property in the persistent file's
+// directory (/data/property/persist.*), read when the protobuf file cannot
+// be. init requires each to be root:root, closed to group and others and
+// not a hard link; here the owner is the Mac user every file has.
+static void legacy_dir(char *dir, size_t n)
+{
+    snprintf(dir, n, "%s", g_persist);
+    char *sl = strrchr(dir, '/');
+    if (sl) *sl = '\0';
+}
+
+static bool load_legacy_persistent(struct kvlist *out)
+{
+    char dir[PATH_MAX];
+    legacy_dir(dir, sizeof dir);
+    DIR *d = opendir(dir);
+    if (!d) { plog("Unable to open persistent property directory \"%s\"", dir); return false; }
+    struct dirent *de;
+    while ((de = readdir(d))) {
+        if (!starts_with(de->d_name, "persist.") || de->d_type != DT_REG) continue;
+        int fd = openat(dirfd(d), de->d_name, O_RDONLY | O_NOFOLLOW | O_CLOEXEC);
+        if (fd < 0) continue;
+        struct stat sb;
+        if (fstat(fd, &sb) != 0 || (sb.st_mode & (S_IRWXG | S_IRWXO)) || sb.st_uid != getuid() ||
+            sb.st_nlink != 1 || sb.st_size > (1 << 20)) {
+            plog("skipping insecure property file %s", de->d_name);
+            close(fd);
+            continue;
+        }
+        char *v = xmalloc((size_t)sb.st_size + 1);
+        ssize_t got = read(fd, v, (size_t)sb.st_size);
+        close(fd);
+        if (got >= 0) { v[got] = '\0'; kv_set(out, de->d_name, v, false); }
+        free(v);
+    }
+    closedir(d);
+    return true;
+}
+
+static void remove_legacy_persistent(void)
+{
+    char dir[PATH_MAX];
+    legacy_dir(dir, sizeof dir);
+    DIR *d = opendir(dir);
+    if (!d) return;
+    struct dirent *de;
+    while ((de = readdir(d)))
+        if (starts_with(de->d_name, "persist.") && de->d_type == DT_REG)
+            unlinkat(dirfd(d), de->d_name, 0);
+    closedir(d);
+}
+
 // The persistent part of init's boot: /data/local.prop on a debuggable
 // build (load_override_properties), then the stored persist.* values, then
 // ro.persistent_properties.ready.
@@ -1440,8 +1517,14 @@ static void load_persistent(void)
         kv_free(&l);
     }
     struct kvlist l = { 0 };
-    if (!load_persistent_file(&l))
-        plog("Could not load the persistent property file %s", g_persist);
+    if (!load_persistent_file(&l)) {
+        plog("Could not load single persistent property file, trying legacy directory");
+        if (load_legacy_persistent(&l)) {
+            // Migrated as init migrates them: one protobuf file, then the
+            // old per-property files go.
+            if (write_persistent_file(&l)) remove_legacy_persistent();
+        }
+    }
     for (int i = 0; i < l.n; i++)
         init_set(l.a[i].k, l.a[i].v);
     plog("%d persistent properties from %s", l.n, g_persist);
@@ -1618,6 +1701,73 @@ static bool boot(void)
 }
 
 // A service that starts again: the areas are the state, adopt them.
+//
+// Only this process writes the areas, but they are files a same-user process
+// could have changed while no service ran: every object reachable from an
+// area's root must lie inside its used bytes before this process follows
+// offsets in it again.
+static bool valid_prop_info(uint8_t *b, uint32_t off, uint32_t used)
+{
+    if (off % 4 || (uint64_t)off + PROP_INFO_HDR + 1 > used) return false;
+    uint8_t *pi = pa_data(b) + off;
+    if (!memchr(pi + PROP_INFO_HDR, 0, used - off - PROP_INFO_HDR)) return false;
+    uint32_t serial = atomic_load_explicit(au32(pi), memory_order_relaxed);
+    if (serial & LONG_FLAG) {
+        uint32_t lo;
+        memcpy(&lo, pi + LONG_OFFSET_AT, 4);
+        if ((uint64_t)off + lo >= used || !memchr(pi + lo, 0, used - off - lo)) return false;
+    } else if ((serial >> 24) >= PROP_VALUE_MAX || pi[4 + (serial >> 24)] != 0) {
+        return false;
+    }
+    return true;
+}
+
+static bool valid_bt(uint8_t *b, uint32_t off, uint32_t used, bool root, uint32_t *budget)
+{
+    if (!*budget) return false;
+    (*budget)--;
+    if (off % 4 || (uint64_t)off + PROP_BT_HDR > used) return false;
+    uint8_t *bt = pa_data(b) + off;
+    if (!root) {
+        // The root node is never constructed: its "name" is the first byte
+        // of the dirty backup area.
+        uint32_t nl;
+        memcpy(&nl, bt, 4);
+        if ((uint64_t)off + PROP_BT_HDR + nl + 1 > used || bt[PROP_BT_HDR + nl] != 0) return false;
+    }
+    uint32_t po = atomic_load_explicit(au32(bt + 4), memory_order_relaxed);
+    if (po && !valid_prop_info(b, po, used)) return false;
+    for (int f = 8; f <= 16; f += 4) {
+        uint32_t o = atomic_load_explicit(au32(bt + f), memory_order_relaxed);
+        if (o && !valid_bt(b, o, used, false, budget)) return false;
+    }
+    return true;
+}
+
+static bool valid_area(uint8_t *b)
+{
+    uint32_t used = *pa_bytes_used(b);
+    uint32_t budget = PA_DATA_SIZE / PROP_BT_HDR;      // more nodes cannot fit: a cycle
+    return used <= PA_DATA_SIZE && used >= PROP_BT_HDR + ((PROP_VALUE_MAX + 3) & ~3) &&
+           valid_bt(b, 0, used, true, &budget);
+}
+
+static void close_areas(void)
+{
+    for (uint32_t i = 0; i < g_nareas; i++) {
+        if (g_areas[i].base) munmap(g_areas[i].base, PA_SIZE);
+        free(g_areas[i].ctx);
+    }
+    free(g_areas);
+    g_areas = NULL;
+    g_nareas = 0;
+    if (g_serial_area) munmap(g_serial_area, PA_SIZE);
+    g_serial_area = NULL;
+    free(g_pi);
+    g_pi = NULL;
+    g_pi_size = 0;
+}
+
 static bool adopt(void)
 {
     char pdir[PATH_MAX], path[PATH_MAX];
@@ -1625,6 +1775,11 @@ static bool adopt(void)
     snprintf(path, sizeof path, "%s/property_info", pdir);
     if (!load_property_info_file(path)) return false;
     if (!open_areas(pdir, false)) return false;
+    for (uint32_t i = 0; i < g_nareas; i++)
+        if (!valid_area(g_areas[i].base)) {
+            plog("%s/%s: an offset points outside the area", pdir, g_areas[i].ctx);
+            return false;
+        }
     g_persist_loaded = true;
     return true;
 }
@@ -1680,7 +1835,7 @@ static void send_u32(int fd, uint32_t v)
 }
 
 // handle_property_set_fd.
-static void handle_connection(int s)
+static void handle_connection(int s, int timeout)
 {
     struct xucred cr;
     socklen_t cl = sizeof cr;
@@ -1691,7 +1846,7 @@ static void handle_connection(int s)
         return;
     }
     getsockopt(s, SOL_LOCAL, LOCAL_PEERPID, &pid, &pl);
-    int timeout = 2000;
+    // init: 2 s (kDefaultSocketTimeout) for the whole message.
     uint32_t cmd = 0;
     if (!recv_fully(s, &cmd, 4, &timeout)) {
         plog("sys_prop: error while reading command from the socket");
@@ -1790,30 +1945,33 @@ int lxrt_property_service_main(int argc, char **argv)
     int lk = open(lockp, O_RDWR | O_CREAT | O_CLOEXEC, 0600);
     if (lk < 0) { plog("%s: %s", lockp, strerror(errno)); return 1; }
     bool locked = false;
-    for (int i = 0; i < 50 && !locked; i++) {
+    for (int i = 0; i < 100 && !locked; i++) {    // up to 10 s
         if (flock(lk, LOCK_EX | LOCK_NB) == 0) locked = true;
         else usleep(100000);
     }
     if (!locked) { plog("another property service holds %s", lockp); return 1; }
 
     g_vendor_api = vendor_api_level();
-    char pinfo[PATH_MAX];
-    snprintf(pinfo, sizeof pinfo, "%s/__properties__/property_info", g_dir);
     struct timespec t0, t1;
     clock_gettime(CLOCK_MONOTONIC, &t0);
     bool adopted = false;
-    if (access(pinfo, F_OK) == 0) {
-        adopted = adopt();
+    char pdir[PATH_MAX];
+    snprintf(pdir, sizeof pdir, "%s/__properties__", g_dir);
+    struct stat pst;
+    if (lstat(pdir, &pst) == 0) {
+        adopted = S_ISDIR(pst.st_mode) && adopt();
         if (!adopted) {
-            // Unreadable state: set it aside (guests that map it keep their
-            // copy) and boot afresh.
-            char pdir[PATH_MAX], aside[PATH_MAX];
-            snprintf(pdir, sizeof pdir, "%s/__properties__", g_dir);
+            // Unusable state (no property_info, a bad area, not a
+            // directory): set it aside -- guests that map it keep their
+            // copy -- and boot afresh.
+            char aside[PATH_MAX];
             snprintf(aside, sizeof aside, "%s/__properties__.bad-%d", g_dir, (int)getpid());
             plog("cannot adopt %s; moved to %s, booting again", pdir, aside);
-            rename(pdir, aside);
-            free(g_pi); g_pi = NULL;
-            free(g_areas); g_areas = NULL; g_nareas = 0;
+            close_areas();
+            if (rename(pdir, aside) != 0) {
+                plog("rename %s: %s", pdir, strerror(errno));
+                return 1;
+            }
         }
     }
     if (!adopted && !boot()) {
@@ -1875,18 +2033,24 @@ int lxrt_property_service_main(int argc, char **argv)
         int c = accept(ls, NULL, NULL);
         if (c < 0) continue;
         fcntl(c, F_SETFD, FD_CLOEXEC);
-        handle_connection(c);
+        handle_connection(c, 2000);
         close(c);
         last = time(NULL);
     }
     // Nobody can connect once the name is gone; whoever did in the meantime
-    // is still answered (a client that finds no socket starts a new
-    // service, which waits for this one's lock).
+    // is still answered, within 2 s in all (a client that finds no socket
+    // starts a new service, which waits up to 10 s for this one's lock, and
+    // the runtime waits as long for this one to leave: props.c).
     unlink(sa.sun_path);
     fcntl(ls, F_SETFL, O_NONBLOCK);
+    struct timespec d0, d1;
+    clock_gettime(CLOCK_MONOTONIC, &d0);
     for (int c; (c = accept(ls, NULL, NULL)) >= 0; close(c)) {
         fcntl(c, F_SETFL, 0);
-        handle_connection(c);
+        clock_gettime(CLOCK_MONOTONIC, &d1);
+        int left = 2000 - (int)((d1.tv_sec - d0.tv_sec) * 1000 + (d1.tv_nsec - d0.tv_nsec) / 1000000);
+        if (left <= 0) continue;                // closed unanswered: its setprop fails
+        handle_connection(c, left);
     }
     close(ls);
     unlink(pidp);
