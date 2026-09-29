@@ -1063,8 +1063,9 @@ fi
 # the protection asked for is the one in force afterwards. The stress mode
 # (callers on the pages being written; storers under RWX -> RW) also counts
 # faults a thread took while the split still held the page and whose handler
-# ran after the hand-over: those need the handler to recheck the page
-# (runtime/wxsplit.c) and are reported as expected failures until it does.
+# ran after the hand-over: the handler waits for the hand-over and rechecks
+# the page (runtime/wxsplit.c, stale_fault_retry); before that, tens of them
+# per run reached the guest as SIGSEGV (kept below as an expected failure).
 if [ -f "$STAGE/usr/lib64/libc.a" ] && [ -n "$GCCDIR" ]; then
     if err=$(glibc_cc -static-pie -O2 -pthread -o build/wx_mprotect_race tests/elf/wx_mprotect_race.c); then
         out=$(deadline 180 ./build/lxrun "$PWD/build/wx_mprotect_race" 2>&1); rc=$?

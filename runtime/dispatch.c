@@ -1402,13 +1402,26 @@ static bool prot_run(uint64_t p, uint64_t end, vm_prot_t *prot, uint64_t *next)
 // right after the forget: rescanned read-only before it becomes executable,
 // as every executable page is.
 //
-// Not closed here: a thread that faulted while the split still held its page
-// and is still waiting for the split's lock when the range is forgotten finds
-// the range gone, and the handler declines the fault although the page allows
+// A thread that faulted while the split still held its page and is still
+// waiting for the split's lock when the range is forgotten finds the range
+// gone. The handler used to decline such a fault although the page allowed
 // the access by then (tests/elf/wx_mprotect_race.c, stress mode: tens of
-// faults in 300 rounds, against ~500000 with the range forgotten first). Only
-// the handler can see that; it has to recheck the page under its lock.
+// faults in 300 rounds, against ~500000 with the range forgotten first); it
+// now waits for the hand-over (lxrt_wx_handover) and rechecks the page.
+static long wx_leave_whole_inner(uint64_t addr, uint64_t len, int prot);
+
+// A fault handled while this runs finds the range gone: the handler waits for
+// the hand-over and retries if the page allows the access (wxsplit.c,
+// stale_fault_retry).
 static long wx_leave_whole(uint64_t addr, uint64_t len, int prot)
+{
+    lxrt_wx_handover(true);
+    long r = wx_leave_whole_inner(addr, len, prot);
+    lxrt_wx_handover(false);
+    return r;
+}
+
+static long wx_leave_whole_inner(uint64_t addr, uint64_t len, int prot)
 {
     uint64_t end = addr + len, next;
     vm_prot_t cur;

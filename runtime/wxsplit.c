@@ -117,6 +117,11 @@ struct wxr { uint64_t start, end; };
 static struct wxr *g_r;
 static int g_cap;
 static _Atomic int g_n;
+static _Atomic bool g_used;                 // a range was ever split here
+// dispatch.c hands ranges back (wx_leave_whole): how many hand-overs run now,
+// and a sequence bumped at each start and end, for stale faults (below).
+static _Atomic int g_handover_active;
+static _Atomic unsigned g_handover_seq;
 
 // The page-protection lock: this table, subpage.c's records, and every
 // protection change of a host page either one owns.
@@ -249,6 +254,7 @@ static bool add_locked(uint64_t start, uint64_t end)
     g_r[i].start = start;
     g_r[i].end = end;
     atomic_store(&g_n, n + 1);
+    atomic_store(&g_used, true);
     return true;
 }
 
@@ -600,9 +606,66 @@ bool lxrt_wx_flip_locked(uint64_t hp, bool fetch)
     return ok;
 }
 
+void lxrt_wx_handover(bool begin)
+{
+    atomic_fetch_add(&g_handover_seq, 1);
+    atomic_fetch_add(&g_handover_active, begin ? 1 : -1);
+}
+
+// Would the access that faulted succeed now? mach_vm_region is a Mach trap,
+// fine in a signal handler.
+static bool access_now_allowed(uint64_t addr, bool fetch)
+{
+    mach_vm_address_t a = addr;
+    mach_vm_size_t sz = 0;
+    vm_region_basic_info_data_64_t ri;
+    mach_msg_type_number_t cnt = VM_REGION_BASIC_INFO_COUNT_64;
+    mach_port_t obj = MACH_PORT_NULL;
+    if (mach_vm_region(mach_task_self(), &a, &sz, VM_REGION_BASIC_INFO_64,
+                       (vm_region_info_t)&ri, &cnt, &obj) != KERN_SUCCESS || a > addr)
+        return false;
+    return fetch ? (ri.protection & VM_PROT_EXECUTE) != 0 : (ri.protection & VM_PROT_WRITE) != 0;
+}
+
+// A fault this thread took while the split still held the page, whose
+// handler runs after dispatch.c handed the range back (wx_leave_whole): the
+// table no longer claims it although the page allows the access by then, or
+// will once the hand-over applies the new protection. Retry it then; decline
+// once no hand-over runs and the page still forbids the access (a real fault).
+// At most 64 retries in a row for the same pc and address: a fault that keeps
+// coming back with the access allowed is not about protection.
+static _Thread_local uint64_t t_stale_pc, t_stale_addr;
+static _Thread_local unsigned t_stale_n;
+static bool stale_fault_retry(uint64_t pc, uint64_t addr, bool fetch)
+{
+    if (!atomic_load(&g_used))
+        return false;
+    if (t_stale_pc == pc && t_stale_addr == addr) {
+        if (++t_stale_n > 64)
+            return false;
+    } else {
+        t_stale_pc = pc;
+        t_stale_addr = addr;
+        t_stale_n = 0;
+    }
+    for (int i = 0; i < 20000; i++) {                       // at most ~1 s
+        unsigned s1 = atomic_load(&g_handover_seq);
+        bool allowed = access_now_allowed(addr, fetch);
+        int active = atomic_load(&g_handover_active);
+        unsigned s2 = atomic_load(&g_handover_seq);
+        if (allowed)
+            return true;
+        if (active == 0 && s1 == s2)
+            return false;
+        struct timespec ts = { 0, 50000 };
+        nanosleep(&ts, NULL);
+    }
+    return false;
+}
+
 bool lxrt_wx_handle_fault(uint64_t pc, uint64_t addr, uint32_t esr)
 {
-    if (!atomic_load(&g_n) || !addr)
+    if (!addr || !atomic_load(&g_used))
         return false;
     uint32_t ec = esr >> 26;
     // An alignment fault (data abort, DFSC 0b100001) is never about page
@@ -621,14 +684,20 @@ bool lxrt_wx_handle_fault(uint64_t pc, uint64_t addr, uint32_t esr)
     if (t_held)
         return false;
     uint64_t hp = LXRT_ALIGN_DOWN(addr, LXRT_HOST_PAGE);
+    if (!atomic_load(&g_n))
+        return stale_fault_retry(pc, addr, fetch);
 
     sigset_t old;
     lock_nosig(&old);
     // A page subpage.c tracks is subpage.c's (see the header): its handler,
     // later in the same chain, scans every RWX guest page in it.
-    if (!find_locked(addr) || lxrt_subpage_tracked_locked(hp, LXRT_HOST_PAGE)) {
+    if (lxrt_subpage_tracked_locked(hp, LXRT_HOST_PAGE)) {
         unlock_nosig(&old);
         return false;
+    }
+    if (!find_locked(addr)) {
+        unlock_nosig(&old);
+        return stale_fault_retry(pc, addr, fetch);
     }
     bool ok = lxrt_wx_flip_locked(hp, fetch);
     unlock_nosig(&old);

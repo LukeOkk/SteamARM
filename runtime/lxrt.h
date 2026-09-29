@@ -211,6 +211,7 @@ bool lxrt_wx_covered(uint64_t addr, uint64_t len);
 bool lxrt_wx_intersects(uint64_t addr, uint64_t len);
 int  lxrt_wx_count(void);
 bool lxrt_wx_handle_fault(uint64_t pc, uint64_t addr, uint32_t esr);
+void lxrt_wx_handover(bool begin);   // dispatch.c: a range is being handed back
 bool lxrt_wx_scan_for_exec(uint64_t hpage, const struct lxrt_range *r, int nr);
 void lxrt_wx_stats_flush(void);
 // rewrite.c: read-only count of the words lxrt_rewrite_range would replace.
