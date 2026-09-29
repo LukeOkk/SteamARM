@@ -1,150 +1,116 @@
 # benchmarks
 
-MIGRATION_PLAN Stage 0 (a test harness) and Stage 1 (the one measurement that
-decides the architecture).
+What was measured at each stage of taking SteamARM from a Linux VM to
+ZERO-VM, including what failed. Each `stage*.txt` file is the record of its
+stage and is not rewritten afterwards; later corrections go in a later file
+or are marked inside the old one (for example `stage2-tls.txt`).
 
-## Stage 1 — cost of intercepting one Linux syscall on Darwin
+Host for every Mac measurement unless a file says otherwise: Apple M4,
+16 GB, macOS 27. Files marked **VM-era** were measured inside, or against,
+the Fedora VM that was deleted on 2026-09-27; they are history, and
+`docs/PERFORMANCE_BASELINE.md` quotes only the ZERO-VM numbers.
+
+## Stage index
+
+| stage | file(s) | date | what it established |
+|---|---|---|---|
+| 0 | (none left) | 2026-09-23 | frame-time capture for the VM app; its tools were deleted with the VM (see below) |
+| 1 | `stage1-syscall-cost.txt` | 09-23 | Darwin ignores the `svc` immediate and runs the call in x16, so Linux `svc` cannot be trapped; a rewritten `svc` costs about as much as a native one, a trap 40-90× more |
+| 1 | `stage1-syscall-mix.txt` | 09-23 | **VM-era**: about 4,300 syscalls/s from Steam idle at the library, measured with ftrace in the guest |
+| 2 | `stage2-dynamic.txt` | 09-23 | ld.so maps libraries itself, so their `svc` sites must be rewritten at mmap time |
+| 2 | `stage2-elf-alignment.txt`, `stage2-elf-survey.txt` | 09-23 | Fedora aarch64 images use `p_align` 0x10000 and are PIE; the PIE-only rule costs little |
+| 2 | `stage2-pagezero.txt` | 09-23 | the low 4 GiB (`__PAGEZERO`) cannot be used or reclaimed, so `ET_EXEC` images cannot load |
+| 2 | `stage2-rewrite-validation.txt` | 09-23 | a linear scan for `svc #0` matches the disassembler on real libraries |
+| 2 | `stage2-tls.txt` | 09-23 | superseded by `stage3-tls.txt` (its conclusion was wrong) |
+| 3 | `stage3-tls.txt` | 09-23 | Darwin clobbers `TPIDR_EL0` on context switch: guest TLS moves to a TSD slot |
+| 3 | `stage3-threads.txt`, `stage3-signals.txt` | 09-23/24 | glibc threads, futexes and signals work; errno numbers differ between Darwin and Linux |
+| 4 | `stage4-vulkan.txt`, `stage4-shim.txt`, `stage4-vulkaninfo.txt`, `stage4-triangle.txt`, `stage4-present.txt` | 09-24 | Vulkan from a Linux ELF to MoltenVK through the shim; unmodified `vulkaninfo`; a drawn triangle; presentation with no copy |
+| 5 | `stage5-fex.txt`, `stage5-process.txt`, `stage5-selfread-deadlock.txt`, `stage5-subpage.txt`, `stage5-va.txt`, `stage5-sysreg.txt`, `stage5-idregs.txt`, `stage5-jit.txt`, `stage5-x18.txt` | 09-24/25 | FEX runs under lxrun: a process model, 4 KiB guest pages on 16 KiB, the address space, trapped system registers, W^X flips requested by the guest, and x18 zeroed by Darwin on every exception |
+| 5 | `stage5-x86-throughput.txt` | 09-25 | x86-64 through FEX under lxrun runs at 1.0× native aarch64 on `x86_bench.c`; also has **VM-era** rows |
+| 6 | `stage6-steam-gap.txt`, `stage6-bwrap-plan.txt`, `stage6-vm-lockups.txt` | 09-23..25 | **VM-era**: what Steam needs (86 distinct syscalls), the bwrap plan pressure-vessel generates, and two guest-kernel lockups |
+| 7 | `stage7-guest-base.txt` | 09-25 | a guest address base for 32-bit guests, since the low 4 GiB is unavailable |
+| 8 | `stage8-steam-zero-vm.txt` | 09-26 | the x86 Steam client runs with no VM: pressure-vessel, the webhelper, x86 memory ordering kept in software |
+| 9 | `stage9-vmfree-build.txt` | 09-26 | FEX builds on the Mac from Fedora RPMs, with no VM |
+| 10 | `stage10-vulkan-thunks.txt` | 09-26 | x86-64 Vulkan reaches MoltenVK through FEX's thunks |
+| 11 | `stage11-native-x11.txt` | 09-26 | SteamARM's own XQuartz build, rootless on `:2`: X windows are macOS windows |
+| 12 | `stage12-native-present.txt` | 09-27 | Vulkan frames hosted over X windows across processes (CALayerHost), no copy; 165 Hz pacing |
+| 13 | `stage13-wine-and-host-safety.txt` | 09-27 | Proton's Wine runs `cmd.exe`; two Mac hangs and the memory guard that followed |
+| 14 | `stage14-d3d11-d3d12.txt` | 09-27 | D3D11 (DXVK) and D3D12 (VKD3D-Proton) probes at ~162 fps |
+| 15 | `stage15-steam-proton-path.txt` | 09-27 | Windows programs launched the way Steam launches them (pressure-vessel, SLR 4) |
+| 16 | `stage16-32bit-vulkan.txt` | 09-27 | 32-bit D3D9/11/12 through the i386 Vulkan thunk |
+| 17 | `stage17-clean-install.txt` | 09-27 | a clean install up to Steam's sign-in window, with no VM |
+| 18 | `stage18-settings-audio-controllers.txt` | 09-27 | settings, sound in Steam's container, controllers; Proton ARM64 measured not viable on macOS |
+| 19 | `stage19-steamframe-base-and-arm64-limits.txt` | 09-28 | reading the Steam Frame image without btrfs-progs; the macOS limits on ARM64 Proton (written without a Mac; labelled) |
+| 20 | `stage20-ci-macos-runner.txt` | 09-29 | first build and tests on a GitHub macOS runner (a virtual M1, not the M4); x18 preserved for a pre-13 SDK binary there |
+| 21 | `stage21-native-arm64-client.txt` | 09-27..29 | Valve's native arm64 client under lxrun: starts, self-updates, loads its UI libraries, no window yet |
+
+## After stage 21 (no stage file)
+
+- `dbd1657`: the rewriter's poison word is now `brk #1`. It was
+  `0xD4000021`, which is `svc #1`, so a refused or unreachable site ran a
+  Darwin system call instead of trapping. `tests/elf/run.sh` 37/37.
+  `docs/X18_VIRTUALIZATION.md`.
+- `e4047ef`: the memory guard stops guests only on critical pressure (2
+  checks) or under 12 % free (3 checks), largest guest first. The old rule
+  (under 35 % free, once) closed Steam on a 16 GB Mac with 2.7 GB of guests.
+  `tests/launcher/safeguard.sh`, 7 checks.
+- 2026-09-29: the Steam Frame image diagnosed, extracted and inventoried
+  (`docs/STEAM_FRAME_INVENTORY.md`).
+- Stage 21's "153 packages" for the Fedora armroot: `scripts/mkarmroot.lock`
+  has 150 root and 5 build-only entries (MEASURED count).
+
+## Tools in this directory
+
+**Stage 1, syscall cost:**
 
 ```
 clang -O2 -arch arm64 -o build/syscall_cost benchmarks/syscall_cost.c
 ./build/syscall_cost
 ```
 
-Raw output of the run this document is based on: `stage1-syscall-cost.txt`
-(Apple M4, macOS 27, 2026-09-23).
+`stage1-syscall-cost.txt` has the raw output of one run (0.8 ns function
+call, 71.5 ns `svc #0x80`, 69.3 ns rewritten `svc`, 0.9 ns answered in user
+space, 2789 ns signal trap, 6111 ns Mach exception trap). An earlier run gave
+68.1, 114.2, 2794.2 and 6317.0 ns for the rewritten, native, signal and Mach
+rows. Two findings decided the design:
 
-## Stage 5 — running x86-64 programs
+1. **`svc` cannot be trapped.** `svc #0` with `x16 = 20` returned the pid:
+   Darwin dispatches on x16 and ignores the immediate. A Linux binary's `svc`
+   silently runs whatever Darwin call x16 holds. So every `svc` must be
+   rewritten at load, and FEX's JIT must call the runtime instead of emitting
+   `svc`.
+2. **Traps are possible but slow.** An out-of-range number in x16 raises a
+   catchable SIGTRAP; at 2.8-6.3 µs per call it is not a usable main path.
+   It is why a poisoned site must be a real `brk`, not an `svc`
+   (`dbd1657`).
 
-`scripts/run-fex.sh [--trace] <program> [args]` runs an x86-64 Linux program
-through FEX under the runtime (starts FEXServer if needed; env and paths
-documented in the script). `benchmarks/x86_bench.c` is the throughput
-benchmark behind `stage5-x86-throughput.txt`.
+**Stage 5, x86 throughput:** `scripts/run-fex.sh [--trace] <program> [args]`
+runs an x86-64 Linux program through FEX under lxrun. `x86_bench.c` is the
+freestanding benchmark behind `stage5-x86-throughput.txt`; it builds as
+x86-64 and as aarch64 from the same source.
 
-## Stage 5 — does a W^X flip inside a signal handler take effect?
+**Stage 5, a W^X flip inside a signal handler:**
 
 ```
 clang -O1 -o build/wx_in_handler benchmarks/wx_in_handler.c
-codesign -s - --entitlements resources/SteamARM.entitlements build/wx_in_handler
+codesign -s - --entitlements resources/lxrt.entitlements build/wx_in_handler
 ./build/wx_in_handler
 ```
 
-(`resources/SteamARM.entitlements` was the VM app's and has been deleted;
-`resources/lxrt.entitlements` is the runtime's.)
+Result (`stage5-jit.txt`): a flip made inside a handler holds for the
+handler's own stores, but not past its return. So the guest asks for each
+flip itself (private syscall `0x4C580020`; `tests/elf/jit_wx.c`).
 
-Decides how FEX's JIT can write to `MAP_JIT` memory on Apple Silicon. Result
-(`stage5-jit.txt`, REFINEMENT): a `pthread_jit_write_protect_np` issued inside
-a handler is honoured for the handler's own stores and can be flipped back
-before returning — but a flip meant to *persist* past the return is not, so the
-fault-driven design is dead and the guest asks for each flip itself (private
-syscall `0x4C580020`; proven end to end by `tests/elf/jit_wx.c`).
-
-### Finding 1 — `svc` cannot be trapped. This is the decisive one.
-
-`svc #0` with `x16 = 20` returned our own pid. **Darwin ignores the SVC
-immediate and dispatches on `x16`.**
-
-A Linux aarch64 binary issues `svc #0` with the syscall number in `x8`, and
-`x16` holding whatever the compiler last left there. On Darwin that does not
-fault — it *executes the Darwin syscall whose number happens to be in `x16`*,
-with Linux arguments in `x0`–`x5`. Silently. Sometimes destructively.
-
-Consequences, and they are not negotiable:
-
-- There is no "trap the guest syscall and service it" design. The mechanism
-  does not exist on this platform.
-- The loader **must rewrite every `svc` site** it can find statically.
-- Code that generates `svc` at runtime — which is exactly what FEX's JIT does
-  for the x86 path Steam depends on — needs a different mechanism: FEX must be
-  built to emit a call into the runtime instead of an `svc`.
-
-### Finding 2 — signals do fire, but as SIGTRAP, and they are slow
-
-An out-of-range syscall number (`x16 = 0x00ffffff`) raises a catchable
-**SIGTRAP**, not SIGSYS. The handler can step `pc` past the instruction and
-resume. So a trap-based fallback is *possible* for deliberately-poisoned
-numbers — it is just far too expensive to use as the main path.
-
-### Measured
-
-| mechanism | ns/op | vs. native syscall |
-|---|---:|---:|
-| indirect function call (floor) | 1.3 | — |
-| Darwin syscall, `svc #0x80` | 114.2 | 1× |
-| Darwin syscall, `svc #0` | 75.8 | same path (immediate ignored) |
-| in-process signal interception | **2794.2** | **~25–37×** |
-| Mach exception interception | **6317.0** | **~55–83×** |
-| rewritten `svc` → dispatcher → real syscall | **68.1** | **~1×** |
-| rewritten `svc`, serviced in userspace | **0.9** | — |
-
-### What this means for the plan
-
-The two trap-based mechanisms cost **2.8 µs and 6.3 µs** per syscall. At a
-modest 50 000 syscalls/second — ordinary for a game plus a compositor plus
-Steam — that is **0.14 s and 0.32 s of pure overhead per wall-clock second**.
-Trap-based interception is not viable, and Finding 1 says it was never
-available anyway.
-
-The rewriting path costs **68 ns** when it ends in a real kernel call — i.e.
-*less* than the native `svc #0x80` it replaces, because a direct branch is
-cheaper than a trap — and **0.9 ns** when the runtime can answer without the
-kernel (a cached value, a clock read, an uncontended futex).
-
-Compare against what it replaces. In the current architecture a guest syscall
-does **not** cause a VM exit at all: the guest kernel services it in-guest. VM
-exits happen for MMIO and virtio doorbells, not for `read()`. So the honest
-comparison is:
-
-- **VM today:** guest syscall ≈ a native Linux syscall inside the guest, zero
-  host involvement. VM exits are a *separate* cost, paid per virtio interaction
-  — see the VM exit accounting below.
-- **ZERO-VM with rewriting:** ≈ 68 ns, and better than that for anything the
-  runtime can answer itself.
-- **ZERO-VM with trapping:** 2.8–6.3 µs. Dead on arrival.
-
-**The Stage 1 exit criterion is met, and the answer is conditional:** ZERO-VM
-is viable *only* with instruction rewriting, and rewriting is fast enough to be
-a non-issue. The risk moves off performance entirely and onto correctness —
-finding every `svc` site, and getting FEX to stop emitting them.
-
-## Stage 0 — frame-time capture
-
-> Note (2026-09-27): the VM app, `frametimes.py`, `capture.sh` and the
-> `runs/vm-baseline-*` captures have been deleted with the VM.
-
-The app writes one 16-byte record per presented frame when `STEAMARM_TRACE`
-names a file:
-
-```
-STEAMARM_TRACE=/tmp/frames.bin /Applications/SteamARM.app/Contents/MacOS/SteamARM
-benchmarks/frametimes.py /tmp/frames.bin --label vm-baseline --json vm.json
-```
-
-`frametimes.py` reports median, **1% low, 0.1% low**, standard deviation and a
-histogram. Never compare on average FPS alone — the user's report that
-CrossOver *feels* smoother at a similar frame rate is a claim about the tail,
-and only the tail statistics can confirm or refute it.
-
-`capture.sh <label> [seconds]` runs the whole cycle: start with tracing and VM
-exit accounting on, wait, shut the guest down gracefully, analyse.
-
-## VM exit accounting
-
-libkrun is patched (`src/hvf/src/lib.rs`, `mod vmexit_stats`) to count exits
-and charge time to guest and host, printing every 200 000 exits when
-`LIBKRUN_VMEXIT_STATS` is set:
-
-```
-[vmexit] 200000 exits | host 2.41 us/exit | guest 18.77 us/exit | host share 11.4% | ec=0x24:… 
-```
-
-`ec` is the AArch64 exception class: `0x24` data abort (MMIO), `0x18` system
-register trap, `0x3f` a non-exception exit (vtimer or cancel). The host share
-is the fraction of vcpu wall time spent outside the guest — the part ZERO-VM
-would delete.
+**Deleted with the VM (2026-09-27):** the VM app's frame-time trace
+(`STEAMARM_TRACE`), `frametimes.py`, `capture.sh`, the `runs/vm-baseline-*`
+captures, the libkrun VM-exit counters and `resources/SteamARM.entitlements`.
+The VM-era results they produced are in `docs/history/PERFORMANCE_BASELINE.md`.
 
 ## Method
 
-Fix resolution, settings, FPS cap, vsync, display, game version, scene and
+Fix resolution, settings, FPS cap, V-Sync, display, game version, scene and
 duration across every compared run. Report median, 1% low, 0.1% low and the
-histogram. Compare four ways where possible: VM baseline, ZERO-VM, CrossOver,
-and a native macOS build where one exists.
+histogram, never the average alone: smoothness is a claim about the tail.
+Compare ZERO-VM against CrossOver and against a native macOS build where one
+exists; the VM baseline is history. No game has been measured this way yet
+(`docs/PERFORMANCE_BASELINE.md`, "Not measured").
