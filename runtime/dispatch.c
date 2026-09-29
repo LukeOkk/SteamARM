@@ -18,6 +18,7 @@
 #include <mach/mach.h>
 #include <mach/mach_vm.h>
 #include <fcntl.h>
+#include <libkern/OSCacheControl.h>
 #include <limits.h>
 #include <mach/mach_time.h>
 #include <stdatomic.h>
@@ -1353,6 +1354,136 @@ static long do_mmap(uint64_t addr, uint64_t len, long prot, long lflags,
 
 static long do_mprotect_inner(uint64_t addr, uint64_t len, long prot);
 
+// The host protection of the region holding p, and where that region ends
+// (clamped to end). False for a hole (then *next is where mapping resumes).
+static bool prot_run(uint64_t p, uint64_t end, vm_prot_t *prot, uint64_t *next)
+{
+    mach_vm_address_t ra = p;
+    mach_vm_size_t rs = 0;
+    vm_region_basic_info_data_64_t ri;
+    mach_msg_type_number_t rc = VM_REGION_BASIC_INFO_COUNT_64;
+    mach_port_t obj = MACH_PORT_NULL;
+    if (mach_vm_region(mach_task_self(), &ra, &rs, VM_REGION_BASIC_INFO_64,
+                       (vm_region_info_t)&ri, &rc, &obj) != KERN_SUCCESS || ra >= end) {
+        *next = end;
+        return false;
+    }
+    if (ra > p) {
+        *next = ra;
+        return false;
+    }
+    *prot = ri.protection;
+    *next = ra + rs < end ? ra + rs : end;
+    return true;
+}
+
+// Hand a range the W^X split holds whole (wxsplit.c) over to protection
+// prot, which is not read-write-execute. [addr, addr+len) is host-page
+// aligned.
+//
+// The split's fault handler owns every page of the range until the range is
+// forgotten; a fault it no longer claims reaches the guest as SIGSEGV. This
+// used to forget the range first and then, for an executable request, open
+// all of it read-write for rewrite_and_seal's scan: a thread running code in
+// it or storing into a read-execute page of it died in between, although both
+// the old protection and the new one allowed what it did (Linux lets such an
+// access through). So, while the handler still owns the pages, each is taken
+// to a state the new protection allows, through the handler itself -- under
+// the split's lock, so no flip of another thread's interleaves with it:
+//   executable request: every page not executable yet is flipped as a fetch
+//     flips it (read-only, scanned, rewritten until clean, read-execute);
+//     pages already read-execute were scanned when they became so. A thread
+//     that fetches meanwhile is claimed and waits for the flip.
+//   writable request: every page not writable is flipped as a store flips it.
+//   read-only or none: nothing -- reads never fault, nothing else is allowed.
+// Then the range is forgotten and the exact protection applied. A page that
+// a racing access took back in between -- a store after its fetch flip, a
+// fetch after its store flip, both forbidden by the new protection -- is put
+// right after the forget: rescanned read-only before it becomes executable,
+// as every executable page is.
+//
+// Not closed here: a thread that faulted while the split still held its page
+// and is still waiting for the split's lock when the range is forgotten finds
+// the range gone, and the handler declines the fault although the page allows
+// the access by then (tests/elf/wx_mprotect_race.c, stress mode: tens of
+// faults in 300 rounds, against ~500000 with the range forgotten first). Only
+// the handler can see that; it has to recheck the page under its lock.
+static long wx_leave_whole(uint64_t addr, uint64_t len, int prot)
+{
+    uint64_t end = addr + len, next;
+    vm_prot_t cur;
+    bool exec = prot & PROT_EXEC, write = prot & PROT_WRITE;
+    if (exec || write) {
+        vm_prot_t have = exec ? VM_PROT_EXECUTE : VM_PROT_WRITE;
+        // The syndrome of the access the flip stands for: an instruction
+        // abort, or a data abort with WnR (and pc != addr, which would read
+        // as a fetch).
+        uint32_t esr = exec ? 0x20u << 26 : (0x24u << 26) | (1u << 6);
+        for (uint64_t p = addr; p < end; p = next) {
+            if (!prot_run(p, end, &cur, &next) || (cur & have))
+                continue;
+            for (uint64_t q = p; q < next; q += LXRT_HOST_PAGE)
+                lxrt_wx_handle_fault(exec ? q : 0, q, esr);
+        }
+    }
+    lxrt_wx_forget(addr, len);
+    if (exec) {
+        for (uint64_t p = addr; p < end; p = next) {
+            if (!prot_run(p, end, &cur, &next) ||
+                ((cur & VM_PROT_EXECUTE) && !(cur & VM_PROT_WRITE)))
+                continue;
+            for (uint64_t q = p; q < next; q += LXRT_HOST_PAGE) {
+                struct lxrt_range r = { q, q + LXRT_HOST_PAGE };
+                if (lxrt_wx_scan_for_exec(q, &r, 1)) {
+                    if (mprotect((void *)(uintptr_t)q, LXRT_HOST_PAGE, prot) != 0)
+                        return LERR(errno);
+                    sys_icache_invalidate((void *)(uintptr_t)q, LXRT_HOST_PAGE);
+                    continue;
+                }
+                // The scan did not settle (or could not protect the page):
+                // what the ordinary path does with it.
+                if (mprotect((void *)(uintptr_t)q, LXRT_HOST_PAGE, PROT_READ | PROT_WRITE) != 0)
+                    return LERR(errno);
+                long rc = rewrite_and_seal((void *)(uintptr_t)q, LXRT_HOST_PAGE, prot,
+                                           LXRT_HOST_PAGE, -1, 0);
+                if (rc < 0)
+                    return rc;
+            }
+        }
+    }
+    // Exactly what was asked (R-X becomes --X if so asked; RW- pages a racing
+    // fetch made read-execute become RW- again). Nothing here makes a page
+    // executable that was not scanned.
+    return ret_of(mprotect((void *)(uintptr_t)addr, (size_t)len, prot));
+}
+
+// A non-RWX request over a range that intersects the W^X split: the pages the
+// table holds are handed over by wx_leave_whole, the rest (and host pages the
+// table holds only part of) go the ordinary way, run by run.
+static long wx_leave(uint64_t addr, uint64_t len, int prot)
+{
+    if (lxrt_wx_covered(addr, len))
+        return wx_leave_whole(addr, len, prot);
+    uint64_t end = addr + len;
+    for (uint64_t s = addr; s < end; ) {
+        bool held = lxrt_wx_covered(s, LXRT_HOST_PAGE);
+        uint64_t e = s + LXRT_HOST_PAGE;
+        while (e < end && lxrt_wx_covered(e, LXRT_HOST_PAGE) == held)
+            e += LXRT_HOST_PAGE;
+        long r;
+        if (held) {
+            r = wx_leave_whole(s, e - s, prot);
+        } else {
+            lxrt_wx_forget(s, e - s);   // a partly held host page: ends here
+            r = do_mprotect_inner(s, e - s, prot);
+        }
+        if (r != 0)
+            return r;
+        s = e;
+    }
+    return 0;
+}
+
 // Copy-on-write pages of private shared-memory mappings (privmap.c) stay
 // unwritable on the host whatever the guest asks, until their first store.
 static long do_mprotect(uint64_t addr, uint64_t len, long prot)
@@ -1372,15 +1503,19 @@ static long do_mprotect_inner(uint64_t addr, uint64_t len, long prot)
 
     // A native aarch64 guest's read-write-execute range is split W^X page by
     // page (wxsplit.c): V8 makes its whole code range RWX with one call. Any
-    // other protection ends the split for that range, and the paths below
-    // treat it as the ordinary memory it becomes (an RX request is scanned by
-    // rewrite_and_seal, PROT_NONE is PROT_NONE). Sub-page ranges go through
-    // subpage.c, whose union flips scan the RWX guest pages the same way.
+    // other protection ends the split for that range (wx_leave: the pages are
+    // handed over without a moment in which an access both protections allow
+    // faults unclaimed); what the table does not hold goes the ordinary way
+    // below. Sub-page ranges go through subpage.c, whose union flips scan the
+    // RWX guest pages the same way.
     bool rwx = (prot & PROT_WRITE) && (prot & PROT_EXEC);
     if (lxrt_wx_enabled()) {
-        if (!rwx)
+        if (!rwx) {
+            if ((addr % LXRT_HOST_PAGE) == 0 && (len % LXRT_HOST_PAGE) == 0 &&
+                lxrt_wx_intersects(addr, len) && !lxrt_subpage_tracked(addr, len))
+                return wx_leave(addr, len, (int)prot);
             lxrt_wx_forget(addr, len);
-        else if ((addr % LXRT_HOST_PAGE) == 0 && (len % LXRT_HOST_PAGE) == 0 &&
+        } else if ((addr % LXRT_HOST_PAGE) == 0 && (len % LXRT_HOST_PAGE) == 0 &&
                  !lxrt_subpage_tracked(addr, len)) {
             long wret;
             if (lxrt_wx_protect(addr, len, &wret))
