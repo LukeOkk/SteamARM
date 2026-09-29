@@ -27,6 +27,21 @@
 // fault handler below. A store executed from it into it cannot complete
 // either way, so the handler performs that store itself (storemu.c); and code
 // stored into an executable 4 KiB guest page is rewritten before it runs.
+//
+// A host page this file tracks becomes executable in ONE place, apply_prot.
+// For a native guest it first makes the page read-only and scans every RWX
+// guest page in it, and every guest page the caller just made executable
+// (an mprotect to PROT_EXEC), rewriting until a read-only count is clean
+// (lxrt_wx_scan_for_exec) -- whichever path asked: the fault handler's flip,
+// a store storemu.c performed, mmap, mprotect, dispatch.c's reapply after it
+// rewrote mapped code. Before that, four of those paths granted execute with
+// no scan at all (stage 23 review; tests/elf/wx_owner.c).
+//
+// The records sit under wxsplit.c's lock (lxrt_pageprot_lock), which is held
+// with asynchronous signals blocked: a guest handler that the runtime ran
+// nested inside this thread's fault handler, and that touched a split page,
+// waited forever for this thread's own lock, or took a SIGSEGV Linux would
+// never raise (tests/elf/wx_owner.c, "nested").
 
 #include "lxrt.h"
 #include "storemu.h"
@@ -36,6 +51,7 @@
 #include <mach/mach.h>
 #include <mach/mach_vm.h>
 #include <pthread.h>
+#include <signal.h>
 #include <stdarg.h>
 #include <stdatomic.h>
 #include <stdio.h>
@@ -64,13 +80,18 @@ struct sub {
 // retried the same fault forever (runtime/memlog.c found it).
 static struct sub *g_subs;
 static int g_nsubs, g_cap;
-static pthread_mutex_t g_lock = PTHREAD_MUTEX_INITIALIZER;
-LXRT_FORK_SAFE(subpage_g_lock, g_lock)
-// Set while this thread holds g_lock inside the mapping paths: a fault raised
-// by this module's own stores must be reported, never waited on.
-static _Thread_local bool g_in_subpage;
 
-// Room for `extra` more records. Caller holds g_lock.
+// The page-protection lock (wxsplit.c): the records here, wxsplit.c's table,
+// and every protection change of a host page either one owns. Taking it
+// blocks the asynchronous signals until it is released.
+void lxrt_pageprot_lock(sigset_t *old);
+void lxrt_pageprot_unlock(const sigset_t *old);
+bool lxrt_pageprot_held(void);
+bool lxrt_wx_contains_locked(uint64_t addr);
+bool lxrt_wx_intersects_locked(uint64_t addr, uint64_t len);
+bool lxrt_wx_flip_locked(uint64_t hpage, bool fetch);
+
+// Room for `extra` more records. Caller holds the lock.
 static bool subs_reserve(int extra)
 {
     if (g_nsubs + extra <= g_cap)
@@ -113,7 +134,8 @@ bool lxrt_subpage_needed(uint64_t addr, uint64_t len, uint64_t off)
 void lxrt_subpage_forget(uint64_t addr, uint64_t len)
 {
     lxrt_shmirror_forget(addr, len);
-    pthread_mutex_lock(&g_lock);
+    sigset_t old;
+    lxrt_pageprot_lock(&old);
     uint64_t end = addr + len;
     for (int i = 0; i < g_nsubs; i++) {
         if (g_subs[i].end <= addr || g_subs[i].start >= end)
@@ -135,7 +157,7 @@ void lxrt_subpage_forget(uint64_t addr, uint64_t len)
             i--;
         }
     }
-    pthread_mutex_unlock(&g_lock);
+    lxrt_pageprot_unlock(&old);
 }
 
 static void record(uint64_t start, uint64_t end, int prot)
@@ -197,7 +219,8 @@ static void record(uint64_t start, uint64_t end, int prot)
 // called mprotect for write, got read-execute back, and faulted again. Thirteen
 // million times in thirty seconds.
 static int union_prot(uint64_t hpage);
-static int apply_prot(uint64_t hpage, int prefer);
+static int apply_prot_fresh(uint64_t hpage, int prefer, unsigned fresh);
+static int apply_prot(uint64_t hpage, int prefer) { return apply_prot_fresh(hpage, prefer, 0); }
 static void adopt_untracked(uint64_t hpage);
 static bool page_tracked(uint64_t hpage);
 
@@ -335,8 +358,8 @@ static bool fast_file_interior(uint64_t addr, uint64_t len, int prot,
         return true;
     }
     record(addr, end, prot);
-    if ((hstart < inside && apply_prot(hstart, prot & PROT_WRITE ? PROT_WRITE : PROT_EXEC) != 0) ||
-        (inside_end < hend && apply_prot(inside_end, prot & PROT_WRITE ? PROT_WRITE : PROT_EXEC) != 0)) {
+    if ((hstart < inside && apply_prot(hstart, prot & PROT_WRITE ? PROT_WRITE : PROT_EXEC) < 0) ||
+        (inside_end < hend && apply_prot(inside_end, prot & PROT_WRITE ? PROT_WRITE : PROT_EXEC) < 0)) {
         *result = LERR(errno);
         return true;
     }
@@ -367,18 +390,17 @@ long lxrt_subpage_mmap(uint64_t addr, uint64_t len, int prot, bool anon,
          (unsigned long long)addr, (unsigned long long)len, prot, anon, fd,
          (unsigned long long)off);
     STEP("locking");
-    pthread_mutex_lock(&g_lock);
-    g_in_subpage = true;
+    sigset_t old;
+    lxrt_pageprot_lock(&old);
     long r = subpage_mmap_locked(addr, len, prot, anon, fd, off);
-    g_in_subpage = false;
-    pthread_mutex_unlock(&g_lock);
+    lxrt_pageprot_unlock(&old);
     return r;
 }
 
 // Is [addr, addr+len) free at guest-page granularity, as far as this table
 // can know? A host page it has never seen is a plain mapping and entirely in
 // use; a page it has seen was adopted whole on first contact, so a slot of it
-// without a record is free. Caller holds g_lock.
+// without a record is free. Caller holds the lock.
 static bool range_free_locked(uint64_t addr, uint64_t len)
 {
     uint64_t hstart = LXRT_ALIGN_DOWN(addr, LXRT_HOST_PAGE);
@@ -412,8 +434,8 @@ long lxrt_subpage_mmap_noreplace(uint64_t addr, uint64_t len, int prot, bool ano
 {
     if (!addr || !len)
         return LERR(EINVAL);
-    pthread_mutex_lock(&g_lock);
-    g_in_subpage = true;
+    sigset_t old;
+    lxrt_pageprot_lock(&old);
     long r;
     if (!range_free_locked(addr, len)) {
         r = LERR(EEXIST);
@@ -422,8 +444,7 @@ long lxrt_subpage_mmap_noreplace(uint64_t addr, uint64_t len, int prot, bool ano
              (unsigned long long)addr, (unsigned long long)len);
         r = subpage_mmap_locked(addr, len, prot, anon, fd, off);
     }
-    g_in_subpage = false;
-    pthread_mutex_unlock(&g_lock);
+    lxrt_pageprot_unlock(&old);
     return r;
 }
 
@@ -506,7 +527,7 @@ static long subpage_mmap_locked(uint64_t addr, uint64_t len, int prot, bool anon
     STEP("recorded, %d ranges tracked", g_nsubs);
 
     for (uint64_t p = hstart; p < hend; p += LXRT_HOST_PAGE)
-        if (apply_prot(p, prot & PROT_WRITE ? PROT_WRITE : PROT_EXEC) != 0) {
+        if (apply_prot(p, prot & PROT_WRITE ? PROT_WRITE : PROT_EXEC) < 0) {
                 return LERR(errno);
         }
     STEP("done 0x%llx", (unsigned long long)addr);
@@ -524,7 +545,7 @@ static long subpage_mmap_locked(uint64_t addr, uint64_t len, int prot, bool anon
 //
 // The guard itself is then lost: union(rw, none) is rw. A guard page is a
 // debugging aid, and a program that never touches it cannot tell.
-// Caller holds g_lock.
+// Caller holds the lock.
 static bool page_tracked(uint64_t hpage)
 {
     for (int i = 0; i < g_nsubs; i++)
@@ -556,7 +577,7 @@ static void adopt_untracked(uint64_t hpage)
     int cur = (ri.protection & VM_PROT_READ ? PROT_READ : 0)
             | (ri.protection & VM_PROT_WRITE ? PROT_WRITE : 0)
             | (ri.protection & VM_PROT_EXECUTE ? PROT_EXEC : 0);
-    bool wx = lxrt_wx_intersects(hpage, LXRT_HOST_PAGE);
+    bool wx = lxrt_wx_intersects_locked(hpage, LXRT_HOST_PAGE);
     for (uint64_t g = hpage; g < hpage + LXRT_HOST_PAGE; g += GUEST_PAGE) {
         bool covered = false;
         for (int i = 0; i < g_nsubs && !covered; i++)
@@ -566,7 +587,7 @@ static void adopt_untracked(uint64_t hpage)
         // guest whatever the host page carries at this moment.
         if (!covered)
             record(g, g + GUEST_PAGE,
-                   wx && lxrt_wx_contains(g) ? PROT_READ | PROT_WRITE | PROT_EXEC : cur);
+                   wx && lxrt_wx_contains_locked(g) ? PROT_READ | PROT_WRITE | PROT_EXEC : cur);
     }
 }
 
@@ -575,37 +596,45 @@ long lxrt_subpage_mprotect(uint64_t addr, uint64_t len, int prot)
     uint64_t hstart = LXRT_ALIGN_DOWN(addr, LXRT_HOST_PAGE);
     uint64_t hend = LXRT_ALIGN_UP(addr + len, LXRT_HOST_PAGE);
 
-    pthread_mutex_lock(&g_lock);
+    sigset_t old;
+    lxrt_pageprot_lock(&old);
     for (uint64_t p = hstart; p < hend; p += LXRT_HOST_PAGE)
         adopt_untracked(p);
     record(addr, addr + len, prot);
     // Honour what the caller just asked for: a guest calling mprotect for write
     // is about to write, so write is what it gets. Execute comes back on the
     // next instruction fetch, through the fault handler.
-    for (uint64_t p = hstart; p < hend; p += LXRT_HOST_PAGE)
-        if (apply_prot(p, prot & PROT_WRITE ? PROT_WRITE : PROT_EXEC) != 0) {
-            pthread_mutex_unlock(&g_lock);
-            return LERR(errno);
+    //
+    // A request for execute is also the last moment to rewrite what the
+    // guest wrote there while it was writable (a JIT that writes read-write
+    // and seals read-execute, 4 KiB at a time): dispatch.c's 16 KiB-aligned
+    // path rewrites at this point (rewrite_and_seal), and these guest pages
+    // go to apply_prot as `fresh`, scanned before the host page can run them.
+    // Without it they ran unscanned -- at once when nothing in the host page
+    // was writable, otherwise until the next flip (tests/elf/wx_owner.c,
+    // "rxseal").
+    for (uint64_t p = hstart; p < hend; p += LXRT_HOST_PAGE) {
+        unsigned fresh = 0;
+        if (prot & PROT_EXEC)
+            for (unsigned k = 0; k < LXRT_HOST_PAGE / GUEST_PAGE; k++) {
+                uint64_t g = p + (uint64_t)k * GUEST_PAGE;
+                if (g < addr + len && g + GUEST_PAGE > addr)
+                    fresh |= 1u << k;
+            }
+        // 1 (execute withheld, the scan could not finish) is not an error
+        // here: the next instruction fetch takes the fault path and scans.
+        if (apply_prot_fresh(p, prot & PROT_WRITE ? PROT_WRITE : PROT_EXEC, fresh) < 0) {
+            int e = errno;
+            lxrt_pageprot_unlock(&old);
+            return LERR(e);
         }
-    pthread_mutex_unlock(&g_lock);
+    }
+    lxrt_pageprot_unlock(&old);
     return 0;
 }
 
-// Apply the union to one host page, withholding whichever of write/execute the
-// caller did not prefer when both are wanted and the platform refuses both.
-// Caller holds g_lock.
-static int apply_prot(uint64_t hpage, int prefer)
-{
-    int want = union_prot(hpage);
-    if (!want)
-        return mprotect((void *)hpage, LXRT_HOST_PAGE, PROT_NONE);
-    if ((want & PROT_WRITE) && (want & PROT_EXEC))
-        want &= (prefer == PROT_WRITE) ? ~PROT_EXEC : ~PROT_WRITE;
-    return mprotect((void *)hpage, LXRT_HOST_PAGE, want);
-}
-
 // The protection the guest gave the 4 KiB page at g (0 when nothing is
-// mapped there). Only meaningful in a tracked host page. Caller holds g_lock.
+// mapped there). Only meaningful in a tracked host page. Caller holds the lock.
 static int slot_prot(uint64_t g)
 {
     int p = 0;
@@ -638,10 +667,92 @@ static bool rescan_enabled(void)
     return !no && lxrt_dispatch_rewrite_mapped();
 }
 
+// Is code that is about to become executable in a tracked host page scanned
+// first? For a native guest (the W^X split is on, wxsplit.c) once it runs --
+// the runtime's own image loading rewrites with the ELF's section windows
+// and seals before lxrt_dispatch_rewrite_mapped turns on. FEX's guest pages
+// hold x86 code, which the host never executes: no scan there, as before.
+// LXRT_NO_RESCAN=1 and LXRT_WX_SPLIT=0 turn it off (diagnostic knobs).
+static bool scan_before_exec(void)
+{
+    return lxrt_wx_enabled() && rescan_enabled();
+}
+
+// The guest pages of hpage the scan before execute covers: every page the
+// guest made read-write-execute (writable, so anything may have been stored
+// there since it last ran), and the `fresh` ones (bit k: the k-th 4 KiB page,
+// just made executable by mprotect). As 4 KiB-granular runs; returns how
+// many. Caller holds the lock.
+static int exec_scan_ranges(uint64_t hpage, unsigned fresh, struct lxrt_range *r)
+{
+    int nr = 0;
+    for (unsigned k = 0; k < LXRT_HOST_PAGE / GUEST_PAGE; k++) {
+        uint64_t g = hpage + (uint64_t)k * GUEST_PAGE;
+        int sp = slot_prot(g);
+        bool scan = ((sp & (PROT_WRITE | PROT_EXEC)) == (PROT_WRITE | PROT_EXEC)) ||
+                    ((fresh >> k) & 1);
+        if (!scan)
+            continue;
+        if (nr && r[nr - 1].end == g) {
+            r[nr - 1].end = g + GUEST_PAGE;
+        } else {
+            r[nr].start = g;
+            r[nr].end = g + GUEST_PAGE;
+            nr++;
+        }
+    }
+    return nr;
+}
+
+// Apply the union to one host page, withholding whichever of write/execute
+// the caller did not prefer when both are wanted and the platform refuses
+// both. This is the only place a tracked host page becomes executable, and
+// for a native guest it does not until the page has been made read-only and
+// its RWX and `fresh` guest pages counted, rewritten and counted again clean
+// (lxrt_wx_scan_for_exec): no thread can store into the page between that
+// count and the execute protection, and no path -- flip, performed store,
+// mmap, mprotect, reapply -- can skip it.
+//
+// Returns 0 when applied; 1 when execute was withheld because the scan could
+// not finish (the page carries the rest of its union, and the next
+// instruction fetch faults and tries again); -1 with errno when mprotect
+// failed. Caller holds the lock.
+static int apply_prot_fresh(uint64_t hpage, int prefer, unsigned fresh)
+{
+    int u = union_prot(hpage);
+    if (!u)
+        return mprotect((void *)hpage, LXRT_HOST_PAGE, PROT_NONE);
+    int want = u;
+    if ((want & PROT_WRITE) && (want & PROT_EXEC))
+        want &= (prefer == PROT_WRITE) ? ~PROT_EXEC : ~PROT_WRITE;
+    if ((want & PROT_EXEC) && scan_before_exec()) {
+        struct lxrt_range r[LXRT_HOST_PAGE / GUEST_PAGE];
+        int nr = exec_scan_ranges(hpage, fresh, r);
+        if (nr) {
+            if (!lxrt_wx_scan_for_exec(hpage, r, nr)) {
+                int rest = u & ~PROT_EXEC;
+                if (mprotect((void *)hpage, LXRT_HOST_PAGE, rest ? rest : PROT_NONE) != 0)
+                    return -1;
+                static _Atomic int said;
+                if (atomic_fetch_add(&said, 1) < 8)
+                    fprintf(lxrt_trace_stream(), "[lxrt] subpage: host page 0x%llx could not be scanned "
+                            "clean; execute withheld\n", (unsigned long long)hpage);
+                return 1;
+            }
+            // Read-only and clean: nothing can store before this.
+            if (mprotect((void *)hpage, LXRT_HOST_PAGE, want) != 0)
+                return -1;
+            sys_icache_invalidate((void *)(uintptr_t)hpage, LXRT_HOST_PAGE);
+            return 0;
+        }
+    }
+    return mprotect((void *)hpage, LXRT_HOST_PAGE, want);
+}
+
 // Rewrite every guest page in [lo, hi) the guest mapped executable. The host
 // pages must be readable (a split page always is: read-write or read-execute);
 // they are made writable here, and only when there is something to rewrite.
-// Returns how many were scanned. Caller holds g_lock.
+// Returns how many were scanned. Caller holds the lock.
 static int rescan_exec_slots(uint64_t lo, uint64_t hi)
 {
     int n = 0;
@@ -681,8 +792,13 @@ enum { EMU_PASS, EMU_DONE, EMU_FAULT };
 //                the caller keeps the old flip.
 //
 // The page is opened for writing only while this thread is parked here with
-// g_lock held; any other thread that runs into it waits on the lock in its
-// own fault handler and finds it executable again. Caller holds g_lock.
+// the lock held. Another thread that FETCHES from it meanwhile faults, waits
+// on the lock in its own fault handler, and finds it executable again; one
+// that STORES into it does not fault at all, and its bytes land -- which is
+// why the page is sealed through apply_prot, whose read-only scan of the
+// page's RWX guest pages sees them before anything can run them (resealing
+// straight to read-execute let another thread's freshly written svc run
+// live: tests/elf/wx_owner.c, "emulate"). Caller holds the lock.
 static int emulate_store_locked(uint64_t pc, uint64_t ph, void *uap)
 {
     uint32_t insn = *(const uint32_t *)(uintptr_t)pc;   // executing: readable
@@ -739,7 +855,8 @@ static int emulate_store_locked(uint64_t pc, uint64_t ph, void *uap)
         if (page_tracked(LXRT_ALIGN_DOWN(g, LXRT_HOST_PAGE)) && (slot_prot(g) & PROT_EXEC))
             code = true;
 
-    g_in_subpage = true;                    // a fault in here is ours: report it
+    // A fault in here is ours, and is reported: the fault handlers see this
+    // thread holding the lock (lxrt_pageprot_held).
     lxrt_storemu_perform(&m, uap);
     if (code) {
         // A store into an executable guest page (one the guest made writable
@@ -749,7 +866,6 @@ static int emulate_store_locked(uint64_t pc, uint64_t ph, void *uap)
             rescan_exec_slots(lo, hi);
         sys_icache_invalidate((void *)(uintptr_t)lo, (size_t)(hi - lo));
     }
-    g_in_subpage = false;
     for (int i = 0; i < nopen; i++)
         apply_prot(opened[i], opened[i] == ph ? PROT_EXEC : PROT_WRITE);
 
@@ -769,10 +885,13 @@ bool lxrt_subpage_handle_fault(uint64_t pc, uint64_t fault_addr, void *uap)
 {
     if (!fault_addr)
         return false;
-    // A fault raised by this module's own stores, with the lock held, is a
-    // genuine fault and must be reported, not waited on: taking g_lock here
-    // wedged the process forever the first time it happened.
-    if (g_in_subpage)
+    // A fault this thread raised while it holds the page-protection lock
+    // (storemu.c's or the rewriter's own access) is a genuine fault and must
+    // be reported, not waited on: waiting for its own lock wedged the process
+    // forever the first time it happened. No guest handler can run on this
+    // thread while it holds the lock: the asynchronous signals are blocked
+    // until it lets go.
+    if (lxrt_pageprot_held())
         return false;
     uint64_t hpage = LXRT_ALIGN_DOWN(fault_addr, LXRT_HOST_PAGE);
     // Instruction abort or data abort, from the syndrome; without a context,
@@ -784,24 +903,41 @@ bool lxrt_subpage_handle_fault(uint64_t pc, uint64_t fault_addr, void *uap)
         if (ec == 0x20 || ec == 0x21) {
             fetch = true;
         } else if (ec == 0x24 || ec == 0x25) {
+            // An alignment fault is never about protection: flipping the page
+            // for it retried the access forever (MEASURED ~440k SIGBUS/s, see
+            // signal.c; tests/elf/wx_owner.c, "misaligned casal").
+            if ((esr & 0x3f) == 0x21)
+                return false;
             fetch = false;
             store = (esr >> 6) & 1;
         }
     }
 
-    pthread_mutex_lock(&g_lock);
+    sigset_t old;
+    lxrt_pageprot_lock(&old);
     if (store) {
         uint64_t ph = LXRT_ALIGN_DOWN(pc, LXRT_HOST_PAGE);
         if (needs_wx_split(ph)) {
             int r = emulate_store_locked(pc, ph, uap);
             if (r != EMU_PASS) {
-                pthread_mutex_unlock(&g_lock);
+                lxrt_pageprot_unlock(&old);
                 return r == EMU_DONE;
             }
         }
     }
+    if (!page_tracked(hpage)) {
+        // Not a page of this table. wxsplit.c's handler, earlier in the same
+        // chain, passes on a page of its table while this file tracks it; if
+        // that stopped between the two handlers, the flip is its, made here
+        // under the same lock rather than reported as a fault the guest
+        // never made.
+        bool r = (fetch || store) && lxrt_wx_contains_locked(fault_addr) &&
+                 lxrt_wx_flip_locked(hpage, fetch);
+        lxrt_pageprot_unlock(&old);
+        return r;
+    }
     if (!needs_wx_split(hpage)) {
-        pthread_mutex_unlock(&g_lock);
+        lxrt_pageprot_unlock(&old);
         return false;               // nothing withheld here; a real fault
     }
     int prefer = fetch ? PROT_EXEC : PROT_WRITE;
@@ -809,11 +945,8 @@ bool lxrt_subpage_handle_fault(uint64_t pc, uint64_t fault_addr, void *uap)
     // stored into its executable guest pages. Rescan them first (a scan of
     // unchanged code finds nothing and changes nothing).
     int rescanned = 0;
-    if (prefer == PROT_EXEC && rescan_enabled()) {
-        g_in_subpage = true;
+    if (prefer == PROT_EXEC && rescan_enabled())
         rescanned = rescan_exec_slots(hpage, hpage + LXRT_HOST_PAGE);
-        g_in_subpage = false;
-    }
     // LXRT_SUBPAGE_LOG=<n>: report the first n split flips of this process
     // with the guest ranges that make the host page want write and execute.
     if (subpage_log_one()) {
@@ -827,35 +960,17 @@ bool lxrt_subpage_handle_fault(uint64_t pc, uint64_t fault_addr, void *uap)
                         (unsigned long long)g_subs[i].end, g_subs[i].prot);
         fprintf(lxrt_trace_stream(), "\n");
     }
-    // A native guest's RWX guest pages in this host page (a JIT's code at
-    // 4 KiB granularity) are scanned before the page becomes executable, the
-    // way wxsplit.c does it for whole host pages: read-only, count, rewrite,
-    // count again, and only then execute. RX guest pages were scanned when
-    // they became executable; RW ones are data and never scanned (a data word
-    // that looks like svc is not an instruction, and rewriting it would
-    // corrupt it). FEX's guest pages hold x86 code: no scan there.
-    // LXRT_NO_RESCAN=1 turns it off with the other rescans (rescan_enabled).
-    if (prefer == PROT_EXEC && lxrt_wx_enabled() && rescan_enabled()) {
-        struct lxrt_range r[LXRT_HOST_PAGE / GUEST_PAGE];
-        int nr = 0;
-        for (int i = 0; i < g_nsubs && nr < (int)(sizeof r / sizeof r[0]); i++) {
-            if ((g_subs[i].prot & (PROT_WRITE | PROT_EXEC)) != (PROT_WRITE | PROT_EXEC) ||
-                g_subs[i].start >= hpage + LXRT_HOST_PAGE || g_subs[i].end <= hpage)
-                continue;
-            r[nr].start = g_subs[i].start > hpage ? g_subs[i].start : hpage;
-            r[nr].end = g_subs[i].end < hpage + LXRT_HOST_PAGE ? g_subs[i].end : hpage + LXRT_HOST_PAGE;
-            nr++;
-        }
-        g_in_subpage = true;        // the scan's own faults are not flips
-        bool clean = !nr || lxrt_wx_scan_for_exec(hpage, r, nr);
-        g_in_subpage = false;
-        if (!clean) {
-            pthread_mutex_unlock(&g_lock);
-            return false;
-        }
-    }
+    // To execute, through apply_prot: for a native guest the page is made
+    // read-only and its RWX guest pages (a JIT's code at 4 KiB granularity,
+    // and the pages of wxsplit.c's table this file adopted) are counted,
+    // rewritten and counted again before it becomes executable. Its RX guest
+    // pages were rescanned just above, and an mprotect to PROT_EXEC scans
+    // them too (lxrt_subpage_mprotect). RW guest pages are data and never
+    // scanned (a data word that looks like svc is not an instruction, and
+    // rewriting it would corrupt it). FEX's guest pages hold x86 code: no
+    // read-only scan there.
     int rc = apply_prot(hpage, prefer);
-    pthread_mutex_unlock(&g_lock);
+    lxrt_pageprot_unlock(&old);
     return rc == 0;
 }
 
@@ -867,12 +982,11 @@ void lxrt_subpage_reapply(uint64_t addr, uint64_t len)
 {
     uint64_t hstart = LXRT_ALIGN_DOWN(addr, LXRT_HOST_PAGE);
     uint64_t hend = LXRT_ALIGN_UP(addr + len, LXRT_HOST_PAGE);
-    pthread_mutex_lock(&g_lock);
-    g_in_subpage = true;
+    sigset_t old;
+    lxrt_pageprot_lock(&old);
     for (uint64_t p = hstart; p < hend; p += LXRT_HOST_PAGE)
         apply_prot(p, PROT_EXEC);
-    g_in_subpage = false;
-    pthread_mutex_unlock(&g_lock);
+    lxrt_pageprot_unlock(&old);
 }
 
 // True when every tracked guest range overlapping [addr, addr+len) is a
@@ -880,21 +994,31 @@ void lxrt_subpage_reapply(uint64_t addr, uint64_t len)
 // 4 KiB mmap at a time, and those are tracked here) -- nothing live.
 bool lxrt_subpage_only_placeholders(uint64_t addr, uint64_t len)
 {
-    pthread_mutex_lock(&g_lock);
+    sigset_t old;
+    lxrt_pageprot_lock(&old);
     bool ok = true;
     for (int i = 0; i < g_nsubs && ok; i++)
         if (g_subs[i].start < addr + len && g_subs[i].end > addr && g_subs[i].prot != 0)
             ok = false;
-    pthread_mutex_unlock(&g_lock);
+    lxrt_pageprot_unlock(&old);
     return ok;
+}
+
+// Caller holds the page-protection lock (wxsplit.c asks, for its ownership
+// rule).
+bool lxrt_subpage_tracked_locked(uint64_t addr, uint64_t len)
+{
+    for (int i = 0; i < g_nsubs; i++)
+        if (g_subs[i].start < addr + len && g_subs[i].end > addr)
+            return true;
+    return false;
 }
 
 bool lxrt_subpage_tracked(uint64_t addr, uint64_t len)
 {
-    pthread_mutex_lock(&g_lock);
-    bool found = false;
-    for (int i = 0; i < g_nsubs && !found; i++)
-        found = g_subs[i].start < addr + len && g_subs[i].end > addr;
-    pthread_mutex_unlock(&g_lock);
+    sigset_t old;
+    lxrt_pageprot_lock(&old);
+    bool found = lxrt_subpage_tracked_locked(addr, len);
+    lxrt_pageprot_unlock(&old);
     return found;
 }

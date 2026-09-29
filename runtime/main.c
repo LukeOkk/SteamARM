@@ -24,6 +24,7 @@
 extern char **environ;
 void lxrt_dispatch_init_brk(uint64_t start);
 void lxrt_window_pump(volatile bool *guest_running);
+bool lxrt_absorb_runtime_fault(int dsig, siginfo_t *dinfo, void *uap);   // signal.c
 
 // AppKit owns the main thread: a window is only created there and only behaves
 // while a run loop is draining. So the guest runs on a second thread and the
@@ -69,20 +70,16 @@ static void fault_report(int sig, siginfo_t *info, void *uap)
     ucontext_t *uc = (ucontext_t *)uap;
     uint64_t pc = uc->uc_mcontext->__ss.__pc;
 
-    // Before reporting anything: a JIT mode transition is not a crash.
+    // Before reporting anything: a JIT mode transition is not a crash, and
+    // neither is any other fault the runtime raises itself (W^X and sub-page
+    // flips, copy-on-write, the trampolines' sp alignment). The same chain as
+    // signal.c's host_handler, alignment filter included: this copy once
+    // lacked it, and a misaligned store-release into a W^X page was taken for
+    // a write flip and retried forever.
     if (sig == SIGTRAP && lxrt_jit_stub_trap(uap))
         return;
-    if ((sig == SIGBUS || sig == SIGSEGV) && info) {
-        uint64_t faddr = (uint64_t)(uintptr_t)info->si_addr;
-        uint32_t esr = uc->uc_mcontext->__es.__esr;
-        bool write = ((esr >> 26) == 0x24 || (esr >> 26) == 0x25) && (esr & (1u << 6));
-        if (lxrt_jit_handle_fault(pc, faddr, uap) ||
-            lxrt_wx_handle_fault(pc, faddr, esr) ||
-            lxrt_privmap_handle_fault(faddr, write) ||
-            lxrt_lowptr_fixup(uap, faddr) ||
-            lxrt_subpage_handle_fault(pc, faddr, uap))
-            return;
-    }
+    if (lxrt_absorb_runtime_fault(sig, info, uap))
+        return;
     const char *name = sig == SIGILL ? "SIGILL" : sig == SIGTRAP ? "SIGTRAP"
                      : sig == SIGBUS ? "SIGBUS" : sig == SIGSYS ? "SIGSYS (a live svc: x8/x16 below)"
                      : "SIGSEGV";
