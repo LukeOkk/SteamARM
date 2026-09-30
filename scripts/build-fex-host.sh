@@ -77,7 +77,7 @@ FEX_COMMIT=08f451d3bce62a68aa6307dced5a8eaeb85c39bc      # FEX-2609-113-g08f451d
 # tracy, jemalloc_glibc): the posixtest/gvisor/gcc test-bin repos are skipped.
 FEX_SUBMODULES=(External/fmt External/range-v3 External/rpmalloc External/drm-headers
                 External/xxhash External/unordered_dense Source/Common/cpp-optparse)
-PATCHES=(fex-lxrt-x18.patch fex-lxrt-guest-base.patch fex-lxrt-wx.patch fex-lxrt-hide-hypervisor.patch fex-lxrt-shebang.patch fex-lxrt-guest-reserve.patch fex-lxrt-thunk-args.patch fex-lxrt-arch-prctl.patch fex-lxrt-lowwin-hint.patch fex-lxrt-smc-mprotect-mirrors.patch fex-lxrt-interrupt-page.patch)
+PATCHES=(fex-lxrt-x18.patch fex-lxrt-guest-base.patch fex-lxrt-wx.patch fex-lxrt-hide-hypervisor.patch fex-lxrt-shebang.patch fex-lxrt-guest-reserve.patch fex-lxrt-thunk-args.patch fex-lxrt-arch-prctl.patch fex-lxrt-lowwin-hint.patch fex-lxrt-smc-mprotect-mirrors.patch fex-lxrt-interrupt-page.patch fex-lxrt-seccomp-cap-sys-admin.patch)
 TARGETS=(FEX FEXServer FEXGetConfig)
 EMU_PREFIX=/usr/lib/lxrt-emu
 
