@@ -423,6 +423,7 @@ def wait_boot(s, timeout, t0=None):
             log("sys.boot_completed=1: %.1f s after the session started (the boot's own count: %s s)"
                 % (time.time() - t0, m.group(1)))
             trim(s)
+            keyboard_layout(s)
             return s
         if "boot failed:" in text or not boot_alive(s):
             tail = "\n".join(text.splitlines()[-5:])
@@ -431,6 +432,56 @@ def wait_boot(s, timeout, t0=None):
         time.sleep(1)
     stop_session(s, "no sys.boot_completed=1 after %d s" % timeout)
     die("no sys.boot_completed=1 after %d s (%s)" % (timeout, s.get("log")))
+
+
+# macOS keyboard layouts (com.apple.keylayout.<name>) and the Android
+# layout of the same arrangement (InputDevices' keyboard_layout_<name>).
+MAC_TO_ANDROID_LAYOUT = {
+    "US": "english_us", "ABC": "english_us", "USInternational-PC": "english_us_intl",
+    "British": "english_uk", "British-PC": "english_uk", "Australian": "english_us",
+    "Dvorak": "english_us_dvorak", "Colemak": "english_us_colemak",
+    "Spanish": "spanish", "Spanish-ISO": "spanish", "LatinAmerican": "spanish_latin",
+    "German": "german", "Austrian": "german", "French": "french", "French-PC": "french",
+    "French-numerical": "french", "Canadian-CSA": "french_ca", "CanadianFrench-PC": "french_ca",
+    "Italian": "italian", "Italian-Pro": "italian", "Portuguese": "portuguese",
+    "Brazilian": "brazilian", "Brazilian-ABNT2": "brazilian", "Brazilian-Pro": "brazilian",
+    "SwissFrench": "swiss_french", "SwissGerman": "swiss_german", "Belgian": "belgian",
+    "Danish": "danish", "Norwegian": "norwegian", "Swedish": "swedish", "Swedish-Pro": "swedish",
+    "Finnish": "finnish", "Icelandic": "icelandic", "Estonian": "estonian",
+    "Latvian": "latvian_qwerty", "Lithuanian": "lithuanian", "Polish": "polish", "PolishPro": "polish",
+    "Czech": "czech", "Czech-QWERTY": "czech", "Slovak": "slovak", "Hungarian": "hungarian",
+    "Croatian": "croatian_and_slovenian", "Slovenian": "croatian_and_slovenian",
+    "Turkish": "turkish", "Turkish-QWERTY": "turkish", "Turkish-QWERTY-PC": "turkish",
+    "Greek": "greek", "Russian": "russian_mac", "Russian-PC": "russian", "Ukrainian": "ukrainian",
+    "Ukrainian-PC": "ukrainian", "Bulgarian": "bulgarian", "Hebrew": "hebrew", "Arabic": "arabic",
+    "Persian": "persian", "Azeri": "azerbaijani",
+}
+
+
+def keyboard_layout(s):
+    """Android's layout for the Mac's keyboard, the Mac's own (the keys
+    reach Android by position; KeyboardLayout.java). Windowed sessions only;
+    STEAMARM_ANDROID_KEYBOARD=<android layout> chooses one, =none skips."""
+    if s.get("display") in (None, "headless"):
+        return
+    want = os.environ.get("STEAMARM_ANDROID_KEYBOARD")
+    if not want:
+        r = subprocess.run(["defaults", "read", "com.apple.HIToolbox", "AppleCurrentKeyboardLayoutInputSourceID"],
+                           stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+        mac = r.stdout.decode(errors="replace").strip()
+        want = MAC_TO_ANDROID_LAYOUT.get(mac.rsplit(".", 1)[-1]) if mac.startswith("com.apple.keylayout.") else None
+        if not want:
+            log("keyboard: no Android layout for the Mac's %r; Android's default (US)" % (mac or "unknown"))
+            return
+    if want == "none":
+        return
+    dex = "/data/local/tmp/steamarm-standin.dex"
+    if not os.path.isfile(s["root"] + dex):
+        log("keyboard: no stand-in dex in the root")
+        return
+    rc, out = guest(s, ["/system/bin/env", "CLASSPATH=" + dex, "/system/bin/app_process64", "/system/bin",
+                        "org.steamarm.android.KeyboardLayout", "keyboard_layout_" + want], timeout=120)
+    log("keyboard: %s" % (out.strip().splitlines()[-1] if out.strip() else "rc %d" % rc))
 
 
 def trim(s):

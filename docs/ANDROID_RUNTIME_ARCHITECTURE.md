@@ -1096,6 +1096,16 @@ system_server stops at the display in these boots.
   keyboard type reports ANSI). The same numbering is what Chromium and
   Electron (Steam's web views, Heroic) assume for `KeyboardEvent.code`.
   `STEAMARM_X11_EVDEV_KEYCODES=0` keeps XQuartz's own numbering.
+- **Keyboard layout** (stage 30). The keys reach Android by position, so
+  what they type is Android's keyboard layout's choice, US English unless
+  set. A windowed session sets the layout of the composer's keyboard
+  (`wayland_keyboard`) to the Mac's current input source
+  (`com.apple.HIToolbox AppleCurrentKeyboardLayoutInputSourceID`, a table in
+  `android-session.py`) with InputManager's own call, as Settings >
+  Physical keyboard does (`scripts/android/java/.../KeyboardLayout.java`);
+  Android keeps it in `/data/system/input-manager-state.xml`. MEASURED:
+  Spanish-ISO gives `keyboard_layout_spanish`, 3 s after the boot.
+  `STEAMARM_ANDROID_KEYBOARD=<layout>` chooses one, `none` skips.
 - **DNS.** Every app lookup (bionic's getaddrinfo, gethostbyname,
   gethostbyaddr; libnetd_client's resnsend) is a text command on netd's
   `/dev/socket/dnsproxyd`. netd is a stand-in, so there was no such socket
