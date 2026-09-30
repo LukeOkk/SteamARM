@@ -310,14 +310,29 @@ out=$(x 60 /system/bin/sh -c 'echo $((6*7)); x=$(echo sub); echo $x; toybox seq 
 if [ "$rc" -eq 0 ] && [ "$(tr '\n' ' ' <<<"$out")" = "42 sub 100 " ]; then
     ok "x86_64 sh -c: arithmetic, \$(...) fork, a toybox pipe"
 else bad "x86_64 sh -c" "rc=$rc $(tr '\n' ' ' <<<"$out")"; fi
-# A command substitution that runs a program: mksh waits for the child's
-# SIGCHLD in rt_sigsuspend, and FEX defers a signal that lands in one of its
-# own critical sections (patches/fex-lxrt-interrupt-page.patch: without it
-# this never returned).
-out=$(x 30 /system/bin/sh -c 'x=$(toybox echo x); y=$(toybox seq 3 | toybox wc -l); echo got $x $y'); rc=$?
-if [ "$rc" -eq 0 ] && [ "$out" = "got x 3" ]; then
-    ok "x86_64 sh: \$(toybox ...) returns (SIGCHLD during rt_sigsuspend)"
-else bad "x86_64 sh \$(toybox ...)" "rc=$rc '$out' (a lost SIGCHLD hangs here until the deadline)"; fi
+# A command substitution that runs a program: mksh blocks SIGCHLD around
+# fork and waits for the child's SIGCHLD in rt_sigsuspend. Three ways it was
+# lost, each once a hang until the deadline: FEX deferring a signal that lands
+# in one of its own critical sections (patches/fex-lxrt-interrupt-page.patch),
+# XNU leaving a SIGCHLD that came while the guest blocked it on the host main
+# thread (runtime/signal.c, lxrt_signal_rescue_stranded), and FEX keeping one
+# that came in its mask-update window in PendingSignals, which sigsuspend did
+# not look at (patches/fex-lxrt-sigsuspend-pending.patch). Rare each, so
+# ANDROID_SIG_RUNS runs (40): stage 27 measured ~1 in 40, stage 28 12 in 300
+# (benchmarks/stage28-android-reliability.txt).
+local runs="${ANDROID_SIG_RUNS:-40}" good=0 hung=0 other="" t0=$SECONDS
+for ((i = 0; i < runs; i++)); do
+    out=$(x 15 /system/bin/sh -c 'x=$(toybox echo x); y=$(toybox seq 3 | toybox wc -l); echo got $x $y'); rc=$?
+    if [ "$rc" -eq 0 ] && [ "$out" = "got x 3" ]; then good=$((good+1))
+    elif [ "$rc" -eq 142 ]; then hung=$((hung+1))
+    else other="rc=$rc '$out'"; fi
+done
+if [ "$good" -eq "$runs" ]; then
+    ok "x86_64 sh: \$(toybox ...) returns, $good of $runs runs ($((SECONDS - t0)) s; SIGCHLD during rt_sigsuspend)"
+elif [ -z "$other" ] && ! grep -aq lxrt-sigsuspend-pending "$X86_ROOT/usr/lib/lxrt-emu/FEX"; then
+    xfail "x86_64 sh: \$(toybox ...) returned $good of $runs times, $hung hung" \
+          "the root's FEX predates patches/fex-lxrt-sigsuspend-pending.patch (scripts/build-fex-host.sh, scripts/mkandroidroot.sh --arch x86_64 --emu)"
+else bad "x86_64 sh \$(toybox ...)" "$good of $runs returned, $hung hung until the 15 s deadline ${other}"; fi
 want=$(shasum -a 256 "$X86_ROOT/system/framework/framework.jar" | awk '{print $1}')
 out=$(x 60 /system/bin/toybox sha256sum /system/framework/framework.jar); rc=$?
 if [ "$rc" -eq 0 ] && [ "${out%% *}" = "$want" ]; then
@@ -387,6 +402,71 @@ if [ "$HAVE_DEX" = 1 ]; then
     else bad "dalvikvm64 JIT code cache churn (stale translations?)" "rc=$rc want total=$ref_churn: $(tr '\n' ' ' <<<"$out" | head -c 300)"; fi
 else
     echo "  skip  x86_64 ART checks (no $R8_JAR or no javac)"
+fi
+# 4. i386: the image's 32-bit programs under FEX's 32-bit mode (zygote_secondary,
+# dex2oat32, dalvikvm32, the 32-bit HALs), which needed
+# patches/fex-lxrt-i386-bionic.patch and runtime fixes
+# (benchmarks/stage28-android-reliability.txt). A root whose FEX predates the
+# patch (no "lxrt-i386-bionic" in it) makes these expected failures.
+local i386_fex=0 i386_why="the root's FEX predates patches/fex-lxrt-i386-bionic.patch (scripts/build-fex-host.sh; scripts/mkandroidroot.sh --arch x86_64 --emu)"
+grep -aq lxrt-i386-bionic "$X86_ROOT/usr/lib/lxrt-emu/FEX" && i386_fex=1
+local BLIBC32="$X86_ROOT/apex/com.android.runtime/lib/bionic/libc.so"
+if [ -f "$BLIBC32" ] && /opt/homebrew/opt/llvm/bin/clang --target=i686-linux-android30 -O2 -fPIE -pie -nostdlib \
+       -fno-stack-protector -fuse-ld=lld --ld-path=/opt/homebrew/opt/lld/bin/ld.lld \
+       -Wl,--dynamic-linker=/system/bin/linker -Wl,-z,max-page-size=4096 \
+       -o "$X86_ROOT/data/local/tmp/i386_bionic" tests/android/i386_bionic.c "$BLIBC32" 2>/dev/null; then
+    out=$(x 60 /data/local/tmp/i386_bionic); rc=$?
+    if [ "$rc" -eq 0 ] && grep -q '== i386_bionic: 8 ok, 0 mal' <<<"$out"; then
+        ok "i386 bionic under FEX: AT_SYSINFO, CMP_REQUEUE, sigwait, SO_RCVTIMEO, SO_DOMAIN, SCM_RIGHTS, mmap hint, msync (8 ok)"
+    elif [ "$i386_fex" = 0 ]; then
+        xfail "i386 bionic under FEX (rc=$rc $(grep '^== ' <<<"$out"))" "$i386_why"
+    else bad "i386 bionic under FEX" "rc=$rc $(grep -E 'MAL|^== |NoExec' <<<"$out" | tr '\n' ' ')"; fi
+    rm -f "$X86_ROOT/data/local/tmp/i386_bionic"
+else
+    echo "  skip  i386 bionic probe (no llvm clang/lld or no 32-bit libc.so)"
+fi
+if [ "$HAVE_DEX" = 1 ]; then
+    out=$(x 120 /apex/com.android.art/bin/dalvikvm32 -cp /data/local/tmp/hello.dex Hello); rc=$?
+    if [ "$rc" -eq 0 ] && grep -q "Hello from Java on ART, no VM" <<<"$out" && grep -q "os.arch=i686" <<<"$out"; then
+        ok "dalvikvm32 (i386) Hello: $(grep -o 'java.vm.name=[^ ]* .*os.arch=[^ ]*' <<<"$out")"
+    elif [ "$i386_fex" = 0 ]; then xfail "dalvikvm32 (i386) Hello (rc=$rc)" "$i386_why"
+    else bad "dalvikvm32 (i386) Hello" "rc=$rc $(head -c 300 <<<"$out")"; fi
+    rm -rf "$X86_ROOT/data/local/tmp/oat/x86"
+    mkdir -p "$X86_ROOT/data/local/tmp/oat/x86"
+    out=$(x 120 /apex/com.android.art/bin/dex2oat32 --dex-file=/data/local/tmp/hello.dex \
+            --oat-file=/data/local/tmp/oat/x86/hello.odex --instruction-set=x86 --compiler-filter=speed); rc=$?
+    local odex="$X86_ROOT/data/local/tmp/oat/x86/hello.odex"
+    if [ "$rc" -eq 0 ] && [ -s "$odex" ] && file -b "$odex" | grep -q 'ELF 32-bit.*80386'; then
+        out=$(x 120 /apex/com.android.art/bin/dalvikvm32 -Xusejit:false -cp /data/local/tmp/hello.dex Hello); rc=$?
+        if [ "$rc" -eq 0 ] && grep -q "Hello from Java on ART, no VM" <<<"$out"; then
+            ok "dex2oat32 (i386) compiled hello.dex to a $(wc -c <"$odex" | tr -d ' ')-byte i386 odex, and dalvikvm32 runs it"
+        else bad "dalvikvm32 with the dex2oat32 odex" "rc=$rc $(head -c 300 <<<"$out")"; fi
+    elif [ "$i386_fex" = 0 ]; then xfail "dex2oat32 (i386) hello.dex (rc=$rc)" "$i386_why"
+    else bad "dex2oat32 (i386) hello.dex" "rc=$rc odex $(wc -c <"$odex" 2>/dev/null) bytes $(tail -c 300 <<<"$out")"; fi
+    rm -rf "$X86_ROOT/data/local/tmp/oat/x86"
+fi
+# 5. A /dev/input per stack (LXRT_INPUT_DIR, runtime/evdev.c): the composer's
+# FIFO protocol between two x86-64 guests (tests/android/input_fifo.c), and a
+# guest with another LXRT_INPUT_DIR that does not see the FIFO.
+local BLIBC64I="$X86_ROOT/apex/com.android.runtime/lib64/bionic/libc.so"
+if [ -f "$BLIBC64I" ] && /opt/homebrew/opt/llvm/bin/clang --target=x86_64-linux-android30 -O2 -fPIE -pie -nostdlib \
+       -fno-stack-protector -fuse-ld=lld --ld-path=/opt/homebrew/opt/lld/bin/ld.lld \
+       -Wl,--dynamic-linker=/system/bin/linker64 -Wl,-z,max-page-size=4096 \
+       -o "$X86_ROOT/data/local/tmp/input_fifo" tests/android/input_fifo.c "$BLIBC64I" 2>/dev/null; then
+    local ia ib ilog ipid wout other same
+    ia=$(mktemp -d /tmp/lxrt-inA.XXXXXX); ib=$(mktemp -d /tmp/lxrt-inB.XXXXXX); ilog=$(mktemp -t input-fifo)
+    (ANDROID_X86_ROOT="$X86_ROOT" LXRUN="$LXRUN" ANDROID_X86_GENV="LXRT_INPUT_DIR=$ia" \
+        dlrun 60 scripts/run-android-x86.sh /data/local/tmp/input_fifo read wl_pointer_events 50 >"$ilog" 2>&1) &
+    ipid=$!
+    wout=$(ANDROID_X86_ROOT="$X86_ROOT" LXRUN="$LXRUN" ANDROID_X86_GENV="LXRT_INPUT_DIR=$ia" \
+        dlrun 60 scripts/run-android-x86.sh /data/local/tmp/input_fifo write wl_pointer_events 50 2>&1 | grep -v '^\[lxrt')
+    wait "$ipid"; rc=$?
+    other=$(ANDROID_X86_ROOT="$X86_ROOT" LXRUN="$LXRUN" ANDROID_X86_GENV="LXRT_INPUT_DIR=$ib" \
+        dlrun 30 scripts/run-android-x86.sh /data/local/tmp/input_fifo stat wl_pointer_events 2>/dev/null | grep -v '^\[lxrt')
+    if [ "$rc" -eq 0 ] && grep -q '^reader: 150 records' "$ilog" && [ -p "$ia/wl_pointer_events" ] && [ "$other" = absent ]; then
+        ok "LXRT_INPUT_DIR: a composer-style FIFO writer and an EventHub-style reader (x86-64, FEX) meet in their /dev/input; another stack's does not have it ($(sed -n 's/^reader: 150 records: //p' "$ilog"))"
+    else bad "LXRT_INPUT_DIR FIFO" "rc=$rc other='$other' $(grep -v '^\[lxrt' "$ilog" | tail -2 | tr '\n' ' ') $wout"; fi
+    rm -rf "$ia" "$ib" "$ilog" "$X86_ROOT/data/local/tmp/input_fifo"
 fi
 run_x86_64_services
 [ "$had_server" = 1 ] || ANDROID_X86_ROOT="$X86_ROOT" scripts/run-android-x86.sh --server-stop
@@ -497,6 +577,36 @@ if [ -n "$ready" ] && [ -f "$STAGE/usr/include/linux/android/binder.h" ] && [ -f
 else
     echo "  skip  x86_64 native binder service (no $STAGE headers, no x86_64 libc.so, or servicemanager not ready)"
 fi
+# The same service built for i386 (32-bit bionic under FEX's 32-bit mode): its
+# binder structures carry 32-bit addresses the runtime gives the guest base
+# (runtime/binder.c, gp(); gbase.c for the ioctl argument), and the hub hands
+# it guest addresses of its receive buffer.
+local BLIBC32B="$X86_ROOT/apex/com.android.runtime/lib/bionic/libc.so" i386_ok=0
+grep -aq lxrt-i386-bionic "$X86_ROOT/usr/lib/lxrt-emu/FEX" && i386_ok=1
+if [ -n "$ready" ] && [ -f "$STAGE/usr/include/linux/android/binder.h" ] && [ -f "$BLIBC32B" ] &&
+   /opt/homebrew/opt/llvm/bin/clang --target=i686-linux-android30 -DBIONIC_MIN -O2 -fPIE -pie -nostdlib \
+       -fno-stack-protector -Itests/android -idirafter "$STAGE/usr/include" -fuse-ld=lld \
+       --ld-path=/opt/homebrew/opt/lld/bin/ld.lld -Wl,--dynamic-linker=/system/bin/linker \
+       -Wl,-z,max-page-size=4096 -o "$X86_ROOT/data/local/tmp/binder_service32" tests/android/binder_service.c \
+       "$BLIBC32B" 2>/dev/null; then
+    local svclog32 svcpid32 got32=""
+    svclog32=$(mktemp -t binder-service-i386)
+    (xgbg 90 /data/local/tmp/binder_service32 >"$svclog32" 2>&1) &
+    svcpid32=$!
+    for _ in $(seq 1 100); do grep -q registered "$svclog32" && break; sleep 0.1; done
+    out=$(xg 30 /system/bin/service call steamarm.test 1 i32 41)
+    grep -q 'Result: Parcel(00000000 0000002a' <<<"$out" && got32=1
+    want=$(python3 -c "import sys; d=open(sys.argv[1],'rb').read(); print('%08x %08x' % (len(d), sum(d)))" "$X86_ROOT/system/etc/hosts")
+    local out2
+    out2=$(xg 30 /system/bin/service call steamarm.test 2 fd /system/etc/hosts)
+    xg 30 /system/bin/service call steamarm.test 3 >/dev/null
+    wait "$svcpid32" 2>/dev/null
+    if [ -n "$got32" ] && grep -q "Result: Parcel(00000000 $want" <<<"$out2"; then
+        ok "an i386 native service (32-bit bionic under FEX) registered and answered an x86-64 client: i32 41 -> 42, and read the descriptor it was passed ($want)"
+    elif [ "$i386_ok" = 0 ]; then xfail "i386 native binder service" "the root's FEX predates patches/fex-lxrt-i386-bionic.patch"
+    else bad "i386 native binder service" "i32: $(tr '\n' ' ' <<<"$out") fd: $(tr '\n' ' ' <<<"$out2") / $(grep -v '^\[lxrt' "$svclog32" | head -2 | tr '\n' ' ')"; fi
+    rm -f "$svclog32" "$X86_ROOT/data/local/tmp/binder_service32"
+fi
 kill "$smpid" 2>/dev/null; wait "$smpid" 2>/dev/null
 
 # vndservicemanager, the vendor context.
@@ -594,6 +704,17 @@ else bad "android-boot: zygote" "$(tail -3 "$il" | tr '\n' ' ')"; fi
 if grep -aq 'SystemServer: Entered the Android system server!' "$lc"; then
     ok "android-boot: system_server forked (Android ids, seccomp under FEX) and running: $(grep -a 'SystemServerTiming: Start' "$lc" | grep -vc took) bootstrap services started"
 else bad "android-boot: system_server" "$(grep -aE 'FatalError|Fatal signal' "$lc" | head -2 | tr '\n' ' ')"; fi
+# The secondary zygote (app_process32, i386) is started when the root's FEX
+# can run it; system_server then does not wait 20 s for it.
+if grep -aq lxrt-i386-bionic "$X86_ROOT/usr/lib/lxrt-emu/FEX"; then
+    local zs
+    zs=$(sed -n 's/.*started zygote_secondary (pid \([0-9]*\).*/\1/p' "$il" | head -1)
+    if [ -n "$zs" ] && grep -aq "tid $zs Zygote: Accepting command socket connections" "$lc" &&
+       ! grep -aq 'Failed to connect to Zygote through socket zygote_secondary' "$lc" &&
+       ! grep -q 'service zygote_secondary .* exited' "$il"; then
+        ok "android-boot: zygote_secondary (i386 app_process32) listening, system_server connected to it"
+    else bad "android-boot: zygote_secondary" "$(grep zygote_secondary "$il" | tail -2 | tr '\n' ' ') $(grep -a 'zygote_secondary\|tid '"$zs"' .*[EF] ' "$lc" | head -2 | tr '\n' ' ')"; fi
+fi
 if grep -aq "Waiting for service 'SurfaceFlinger'" "$lc"; then
     xfail "android-boot: system_server past LightsService" "it waits for SurfaceFlinger, which waits for a composer (Waydroid's is a Wayland client; no display here)"
 else bad "android-boot: the SurfaceFlinger wall moved" "$(grep -a 'SystemServerTiming' "$lc" | tail -2 | tr '\n' ' ')"; fi
@@ -715,6 +836,33 @@ else
             if [ "$teal" = 1 ] && [ -n "$f0" ] && [ -n "$f1" ] && [ "$t1" -gt "$t0" ]; then
                 ok "Android SurfaceFlinger (x86_64, FEX) presents the LineageOS boot animation in Weston's window: $(( (16#$f1 - 16#$f0) / (t1 - t0) )) page flips/s (SwiftShader GLES, gralloc default, wl_shm)"
             else bad "SurfaceFlinger boot animation" "teal=$teal flips '$f0' '$f1' $(tail -3 <<<"$out" | tr '\n' ' ')"; fi
+            # 4. Input: hwcomposer.waydroid's FIFOs are in this stack's own
+            # /dev/input (LXRT_INPUT_DIR=$ddir/input), and what it writes
+            # there when the pointer moves over its window is read the way
+            # Waydroid's EventHub reads it (tests/android/input_fifo.c; no
+            # system_server here to run InputFlinger itself).
+            local ifi="$X86_ROOT/data/local/tmp/input_fifo" ilog
+            if [ -p "$ddir/input/wl_pointer_events" ] && [ -f /opt/homebrew/lib/libX11.dylib ] &&
+               "$llvm" --target=x86_64-linux-android30 -O2 -fPIE -pie -nostdlib -fno-stack-protector -fuse-ld=lld \
+                   --ld-path=/opt/homebrew/opt/lld/bin/ld.lld -Wl,--dynamic-linker=/system/bin/linker64 \
+                   -Wl,-z,max-page-size=4096 -o "$ifi" tests/android/input_fifo.c \
+                   "$X86_ROOT/apex/com.android.runtime/lib64/bionic/libc.so" 2>/dev/null; then
+                ilog=$(mktemp -t input-fifo)
+                (ANDROID_X86_ROOT="$X86_ROOT" LXRUN="$LXRUN" ANDROID_X86_GENV="LXRT_INPUT_DIR=$ddir/input" \
+                    dlrun 45 scripts/run-android-x86.sh /data/local/tmp/input_fifo read wl_pointer_events 1000 >"$ilog" 2>&1) &
+                local ipid=$!
+                for n in $(seq 1 100); do grep -q '^reader: open' "$ilog" && break; sleep 0.1; done
+                python3 tests/android/xsend_motion.py :2 "$id" 30 >/dev/null 2>&1
+                wait "$ipid"
+                local recs
+                recs=$(sed -n 's/^reader: \([0-9]*\) records.*/\1/p' "$ilog")
+                if [ "${recs:-0}" -ge 60 ] && grep -q ' EV_ABS' "$ilog" && ! grep -q ' 0 EV_ABS' "$ilog"; then
+                    ok "input: 30 pointer motions into Weston's window came out of hwcomposer.waydroid's FIFO in this stack's own /dev/input: $(sed -n 's/^reader: //p' "$ilog" | tail -1)"
+                else bad "input through the composer's FIFO" "$(grep -v '^\[lxrt' "$ilog" | tail -3 | tr '\n' ' ')"; fi
+                rm -f "$ilog" "$ifi"
+            else
+                echo "  skip  input through the composer's FIFO (no FIFO in $ddir/input, no libX11 or no clang)"
+            fi
             ANDROID_X86_ROOT="$X86_ROOT" ANDROID_DISPLAY_DIR="$ddir" scripts/run-android-display.sh stop >/dev/null
             sleep 2
             rm -f "$shot"

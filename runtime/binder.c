@@ -130,6 +130,24 @@ static bool gcopy(void *dst, const void *src, size_t n)
     return kr == KERN_SUCCESS && out == n;
 }
 
+// A 32-bit guest (i386 Android under FEX's 32-bit mode) lives at host =
+// guest base + guest address, and the addresses inside binder's structures
+// -- binder_write_read's buffers, a transaction's data and offsets, a PTR
+// object's buffer -- are its own, 32 bits in 64-bit fields (Android's binder
+// ABI on a 64-bit kernel). Below 4 GiB an address is always a guest one on
+// this host (gbase.c's rule), so the base is added where this file reads or
+// writes through such an address. The other way, the hub is told the
+// receive buffer's guest address (lxrt_binder_mmap), so every address it
+// hands back (BR_TRANSACTION's data, PTR buffers in the target) is the
+// guest's. Before: "Binder ioctl to obtain version failed: Bad address"
+// and the 32-bit audio HAL ended there (benchmarks/stage28-android-
+// reliability.txt).
+static uint64_t gp(uint64_t a)
+{
+    uint64_t b = lxrt_gbase();
+    return (b && a && a < (1ull << 32)) ? a + b : a;
+}
+
 // ------------------------------------------------------------ files
 
 static struct bfile *file_get(int fd)
@@ -676,7 +694,7 @@ static void gather_txn(struct gbuf *b, const struct binder_transaction_data *tr,
     uint8_t *d = gb_grow(b, (size_t)ALIGN8(tr->data_size));
     if (!d) { a.fault = 12; goto out; }
     memset(d + tr->data_size, 0, ALIGN8(tr->data_size) - tr->data_size);
-    if (!gcopy(d, (const void *)(uintptr_t)tr->data.ptr.buffer, tr->data_size)) {
+    if (!gcopy(d, (const void *)(uintptr_t)gp(tr->data.ptr.buffer), tr->data_size)) {
         a.fault = 14;               // EFAULT
         b->len = dat;
         goto out;
@@ -685,7 +703,7 @@ static void gather_txn(struct gbuf *b, const struct binder_transaction_data *tr,
     uint8_t *o = gb_grow(b, (size_t)ALIGN8(tr->offsets_size));
     if (!o) { a.fault = 12; goto out; }
     memset(o + tr->offsets_size, 0, ALIGN8(tr->offsets_size) - tr->offsets_size);
-    if (!gcopy(o, (const void *)(uintptr_t)tr->data.ptr.offsets, tr->offsets_size)) {
+    if (!gcopy(o, (const void *)(uintptr_t)gp(tr->data.ptr.offsets), tr->offsets_size)) {
         a.fault = 14;
         b->len = dat;
         goto out;
@@ -723,7 +741,7 @@ static void gather_txn(struct gbuf *b, const struct binder_transaction_data *tr,
             uint8_t *s = gb_grow(b, (size_t)ALIGN8(bp.length));
             if (!s) { a.fault = 12; break; }
             memset(s + bp.length, 0, ALIGN8(bp.length) - bp.length);
-            if (!gcopy(s, (const void *)(uintptr_t)bp.buffer, bp.length)) { a.fault = 14; break; }
+            if (!gcopy(s, (const void *)(uintptr_t)gp(bp.buffer), bp.length)) { a.fault = 14; break; }
             objs[i].ptr = true;
             objs[i].sg = at;
             objs[i].len = bp.length;
@@ -785,7 +803,7 @@ static long write_read(struct tchan *tc, uint64_t ubwr, int guest_fd)
     size_t wat = b.len;
     uint8_t *w = gb_grow(&b, (size_t)wlen);
     if (wlen && !w) { free(b.p); return LERR(ENOMEM); }
-    if (!gcopy(w, (const void *)(uintptr_t)(bwr.write_buffer + bwr.write_consumed), wlen)) {
+    if (!gcopy(w, (const void *)(uintptr_t)(gp(bwr.write_buffer) + bwr.write_consumed), wlen)) {
         free(b.p);
         return LERR(EFAULT);
     }
@@ -832,13 +850,13 @@ static long write_read(struct tchan *tc, uint64_t ubwr, int guest_fd)
     }
     pthread_mutex_unlock(&f->map_lock);
     if (res.r.read_len)
-        if (!gcopy((void *)(uintptr_t)(bwr.read_buffer + bwr.read_consumed), res.rd, res.r.read_len)) {
+        if (!gcopy((void *)(uintptr_t)(gp(bwr.read_buffer) + bwr.read_consumed), res.rd, res.r.read_len)) {
             result_done(&res);
             return LERR(EFAULT);
         }
     if (res.r.spawn_looper) {
         uint32_t sl = BR_SPAWN_LOOPER;
-        gcopy((void *)(uintptr_t)bwr.read_buffer, &sl, 4);
+        gcopy((void *)(uintptr_t)gp(bwr.read_buffer), &sl, 4);
     }
     bwr.write_consumed += res.r.write_consumed;
     if (res.r.arg[0] == 1)          // the write failed: Linux zeroes read_consumed
@@ -969,7 +987,12 @@ long lxrt_binder_mmap(uint64_t addr, uint64_t len, int prot, int lflags, int fd,
         goto out;
     }
     tc->busy = true;
-    struct bh_mmap mm = { .base = (uint64_t)(uintptr_t)view, .size = size };
+    // The hub computes the addresses it hands this process from the buffer's
+    // base: give it the guest's view of it (a 32-bit guest's is below 4 GiB).
+    uint64_t ubase = (uint64_t)(uintptr_t)view, gb = lxrt_gbase();
+    if (gb && ubase >= gb && ubase - gb < (1ull << 32))
+        ubase -= gb;
+    struct bh_mmap mm = { .base = ubase, .size = size };
     struct result res = { 0 };
     ret = roundtrip(tc, BH_MMAP, &mm, sizeof mm, &bfd, 1, &res);
     tc->busy = false;

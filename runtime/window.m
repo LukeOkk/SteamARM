@@ -25,6 +25,8 @@
 #include <stdbool.h>
 #include <stdio.h>
 
+void lxrt_signal_rescue_stranded(void);   // signal.c
+
 void lxrt_window_want_ui(void);
 static NSWindow *g_window;
 static CAMetalLayer *g_layer;
@@ -131,6 +133,11 @@ void lxrt_window_pump(volatile bool *guest_running)
         ts.tv_nsec += 20 * 1000 * 1000;
         if (ts.tv_nsec >= 1000000000L) { ts.tv_sec++; ts.tv_nsec -= 1000000000L; }
         pthread_cond_timedwait(&g_ui_cond, &g_ui_lock, &ts);
+        // A process-directed signal no guest thread took when it was posted
+        // is pending on this thread: hand it on (signal.c).
+        pthread_mutex_unlock(&g_ui_lock);
+        lxrt_signal_rescue_stranded();
+        pthread_mutex_lock(&g_ui_lock);
     }
     pthread_mutex_unlock(&g_ui_lock);
     if (!*guest_running)
@@ -147,6 +154,7 @@ void lxrt_window_pump(volatile bool *guest_running)
                 // dispatch_sync from the guest thread lands on the main queue,
                 // which only drains while the main thread is in a run loop.
                 CFRunLoopRunInMode(kCFRunLoopDefaultMode, 0.005, true);
+                lxrt_signal_rescue_stranded();
             }
         }
     }

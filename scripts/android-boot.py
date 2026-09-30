@@ -46,6 +46,12 @@ service's stdout and stderr).
                           [--profile NAME] [--also SVC] [--all] [--no-zygote]
                           [--prop NAME=VALUE] [--svc-env SVC:VAR=VALUE]
                           [--trace SVC] [--persist FILE] [--bootargs ARGS]
+                          [--linkerconfig]
+
+--linkerconfig runs init's update_linker_config (the image's linkerconfig,
+with the property service up): it rewrites the root's /linkerconfig, which
+every guest of the root reads, so it is not the default. The 32-bit audio
+HAL needs it (--also vendor.audio-hal --linkerconfig).
 
 Stops, at the end, every process it started and every process those left in
 the root's state (found by the state directory in their environment), and
@@ -139,7 +145,7 @@ PROFILES = {
         # seccomp policy and abort if they cannot ("Could not set seccomp
         # filter of size 238: Invalid argument", MEASURED). Inherited by
         # system_server and every app the zygote forks.
-        "env_x86": {"zygote": {"FEX_NEEDSSECCOMP": "1"}},
+        "env_x86": {"zygote": {"FEX_NEEDSSECCOMP": "1"}, "zygote_secondary": {"FEX_NEEDSSECCOMP": "1"}},
         # Asked for by the .rc files but left out, and why (the boot logs
         # each one it skips).
         "left_out": {
@@ -150,12 +156,18 @@ PROFILES = {
             "apexd": "flattened APEXes (ro.apex.updatable unset), already under /apex",
             "netd": "exits at once: NETLINK_KOBJECT_UEVENT, route netlink, iptables, BPF; its "
                     "'onrestart restart zygote' then kills the zygote every 5 s",
-            "vendor.audio-hal": "i386 (32-bit) binary: FEX stops it at once ('NoExec instruction in "
-                                "entry block'); audioserver waits for it",
+            # Started instead with --linkerconfig when the root's FEX carries
+            # patches/fex-lxrt-i386-bionic.patch (Boot.__init__).
+            "vendor.audio-hal": "i386 (32-bit): needs a FEX with patches/fex-lxrt-i386-bionic.patch and "
+                                "--linkerconfig (the legacy /linkerconfig has no VNDK namespace for "
+                                "android.hardware.audio@4.0.so); audioserver waits for it",
             "vendor.audio-hal-2-0": "declares the same interface; no such binary in this image",
             "vendor.hwcomposer-2-1": "Waydroid's composer is a Wayland client: no display here",
-            "zygote_secondary": "app_process32 (i386): no 32-bit code runs here, and the host .prop "
-                                "declares no 32-bit ABI (HOST_ABI_PROPS)",
+            # Started instead when the root's FEX carries
+            # patches/fex-lxrt-i386-bionic.patch (Boot.__init__); otherwise the
+            # host .prop declares no 32-bit ABI (HOST_ABI_PROPS), or
+            # system_server waits 20 s for it (hasSecondZygote, "x86_64,x86").
+            "zygote_secondary": "app_process32 (i386): the root's FEX predates patches/fex-lxrt-i386-bionic.patch",
             "bootanim": "graphics",
             "statsd": "cannot link: the root's /linkerconfig (written by the image's linkerconfig "
                       "before properties existed) has no namespace for the statsd APEX",
@@ -235,9 +247,10 @@ HOST_PROPS = [
     ("ro.hardware.egl", "swiftshader"),
     ("ro.hardware.gralloc", "default"),
     # installd runs dex2oat32 unless this is set (dexopt.cpp
-    # select_execution_binary); i386 programs do not run under FEX here yet
-    # (dex2oat32 died of SIGSEGV in FEX's 32-bit mode, MEASURED), x86-64
-    # dex2oat64 does (benchmarks/stage25-art-x86-fex.txt).
+    # select_execution_binary). dex2oat32 died of SIGSEGV in FEX's 32-bit
+    # mode until patches/fex-lxrt-i386-bionic.patch (stage 28); x86-64
+    # dex2oat64 is kept: it needs no i386 fix and ran first
+    # (benchmarks/stage25-art-x86-fex.txt).
     ("dalvik.vm.dex2oat64.enabled", "true"),
     # Waydroid's sensors HAL serves stub sensors only with this (Lepton's
     # properties.sh sets it, docs/LEPTON_REUSE_ANALYSIS.md 0.3); without it
@@ -517,6 +530,7 @@ class Boot:
         self.state = a.state
         self.propdir = os.path.join(self.state, "props")
         self.binderdir = os.path.join(self.state, "binder")
+        self.inputdir = os.path.join(self.state, "input")
         self.lxrun = os.path.realpath(a.lxrun)
         self.profile = PROFILES[a.profile]
         self.props = Props(self)
@@ -527,7 +541,25 @@ class Boot:
         self.queue = []
         self.class_started = set()
         self.x86 = self.detect_x86()
+        # i386 programs run under a FEX with patches/fex-lxrt-i386-bionic.patch
+        # (it carries this string): then the secondary zygote is started too
+        # (benchmarks/stage28-android-reliability.txt).
+        # With --linkerconfig the 32-bit audio HAL links as well (binder for
+        # 32-bit guests, runtime/binder.c), and audioserver stops waiting.
+        if self.x86 and a.profile == "headless" and self.fex_has(b"lxrt-i386-bionic"):
+            extra = {"zygote_secondary"} | ({"vendor.audio-hal"} if a.linkerconfig else set())
+            prof = dict(self.profile)
+            prof["start"] = set(prof["start"]) | extra
+            prof["left_out"] = {k: v for k, v in prof["left_out"].items() if k not in extra}
+            self.profile = prof
         self.t0 = time.time()
+
+    def fex_has(self, marker):
+        try:
+            with open(self.root + "/usr/lib/lxrt-emu/FEX", "rb") as f:
+                return marker in f.read()
+        except OSError:
+            return False
 
     def detect_x86(self):
         with open(self.root + "/system/bin/toybox", "rb") as f:
@@ -541,6 +573,10 @@ class Boot:
             "OBJC_DISABLE_INITIALIZE_FORK_SAFETY": "YES",
             "LXRT_PROPERTY_DIR": self.propdir, "LXRT_BINDER_DIR": self.binderdir,
             "LXRT_BINDER_HUB_IDLE": "30",
+            # This boot's /dev/input (runtime/evdev.c): the display composer's
+            # input FIFOs and InputFlinger's EventHub meet there, not in the
+            # shared /tmp/lxrt-input of steamarm-inputd's controllers.
+            "LXRT_INPUT_DIR": self.inputdir,
         }
         if self.x86:
             # The same as scripts/run-android-x86.sh (its FEXServer is used).
@@ -1079,6 +1115,22 @@ class Boot:
                 for name in self.rc.order:
                     if a[0] in self.rc.services[name].classes:
                         self.stop(name, c + " " + a[0])
+            elif c == "update_linker_config" and self.a.linkerconfig:
+                # init's builtin (early-init, after the bootstrap APEXes): the
+                # image's linkerconfig, now with the property service up, so
+                # it writes the full layout (VNDK, statsd's APEX) instead of
+                # the "legacy" one written before properties existed. The
+                # 32-bit audio HAL needs it: "library android.hardware.audio@
+                # 4.0.so not found ... in namespace (default)" with the legacy
+                # file (MEASURED, benchmarks/stage28-android-reliability.txt).
+                # It rewrites the root's /linkerconfig, which every guest of
+                # the root reads: opt-in (--linkerconfig).
+                rc, _ = self.guest(["/system/bin/linkerconfig", "--target", "/linkerconfig"], timeout=120)
+                try:
+                    size = os.path.getsize(self.hpath("/linkerconfig/ld.config.txt"))
+                except OSError:
+                    size = -1
+                log("update_linker_config: linkerconfig exited %d, /linkerconfig/ld.config.txt %d bytes" % (rc, size))
             elif c == "exec_start":
                 svc = self.rc.services.get(a[0])
                 if svc and (a[0] in self.profile["start"] or a[0] in (self.a.also or []) or self.a.all):
@@ -1138,6 +1190,7 @@ class Boot:
         os.chmod(self.state, 0o700)
         os.makedirs(self.binderdir, mode=0o700, exist_ok=True)
         os.chmod(self.binderdir, 0o700)
+        os.makedirs(self.inputdir, mode=0o700, exist_ok=True)
         global LOGF
         LOGF = open(os.path.join(self.state, "init.log"), "a")
         log("== android-boot: root %s (%s), state %s, lxrun %s" %
@@ -1258,6 +1311,8 @@ def main():
     ap.add_argument("--all", action="store_true", help="start every service the actions ask for")
     ap.add_argument("--also", action="append", help="start this service too (outside the profile)")
     ap.add_argument("--no-zygote", action="store_true")
+    ap.add_argument("--linkerconfig", action="store_true",
+                    help="run init's update_linker_config: rewrite the root's /linkerconfig with properties up")
     ap.add_argument("--zygote-stdio", action="store_true", help="the zygote's stdio to its log too (it then refuses to fork)")
     ap.add_argument("--bootargs", default=os.environ.get("LXRT_PROPERTY_BOOTARGS", ""))
     ap.add_argument("--persist", default=None, help="persistent property file (default: the root's /data/property)")

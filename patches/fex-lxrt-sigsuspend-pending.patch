@@ -1,0 +1,154 @@
+FEX: deliver a pending signal on sigsuspend and sigtimedwait (SteamARM)
+
+A signal that reaches FEX while the guest masks it (the emulated mask is
+updated before the host mask in GuestSigProcMask, so a signal can land in
+between; a guest handler also runs with a host mask narrower than the
+guest's) is taken from the host and recorded only in PendingSignals, to be
+re-raised when the guest unmasks it. GuestSigProcMask does that
+(CheckForPendingSignals); GuestSigSuspend only checked after the host
+sigsuspend returned, and GuestSigTimedWait never did. So a guest that
+blocks SIGCHLD, forks, and waits in sigsuspend with SIGCHLD unmasked slept
+forever when its SIGCHLD had come in that window. MEASURED under SteamARM
+(x86-64 Android's mksh running `x=$(toybox echo x); y=$(toybox seq 3 |
+toybox wc -l)` under FEX, an instrumented FEX's log: "SIGCHLD -> pending
+10000", then "sigsuspend set=80000000 pend=10000" and no wake): 3 hangs in
+300 runs with this alone missing (and SteamARM's runtime fix for signals
+XNU strands on its main thread in place), 0 in 300 with it.
+benchmarks/stage28-android-reliability.txt.
+
+Now GuestSigSuspend raises each pending signal the suspend mask lets
+through again (tgkill to itself) with the host mask blocking it, so the
+host sigsuspend finds it pending, delivers it and returns, as Linux's does;
+the host mask is put back afterwards. GuestSigTimedWait does the same for
+pending signals of its set, so the host rt_sigtimedwait can take them.
+
+diff --git a/Source/Tools/LinuxEmulation/LinuxSyscalls/SignalDelegator.cpp b/Source/Tools/LinuxEmulation/LinuxSyscalls/SignalDelegator.cpp
+--- a/Source/Tools/LinuxEmulation/LinuxSyscalls/SignalDelegator.cpp
++++ b/Source/Tools/LinuxEmulation/LinuxSyscalls/SignalDelegator.cpp
+@@ -1282,6 +1282,29 @@
+ 
+   // Backup the mask
+   Thread->SignalInfo.PreviousSuspendMask = Thread->SignalInfo.CurrentSignalMask;
++
++  // A signal that arrived while the guest had it masked -- in GuestSigProcMask
++  // between the emulated mask and the host mask being updated, or while a
++  // guest handler ran with a host mask narrower than the guest's -- was taken
++  // from the host already and is only recorded in PendingSignals. If the
++  // suspend mask lets it through, Linux's sigsuspend delivers it and returns
++  // at once; the host sigsuspend below cannot see it and would sleep forever
++  // (MEASURED under SteamARM: mksh's `x=$(toybox ...)` waited for a SIGCHLD
++  // that sat in PendingSignals). Raise each such signal again with the host
++  // mask blocking it, so the host sigsuspend finds it pending and delivers it.
++  // (SteamARM's tests/android/run.sh looks for this string in the binary.)
++  [[maybe_unused]] static const char LxrtSigsuspendPending[] __attribute__((used, retain)) = "lxrt-sigsuspend-pending";
++  const uint64_t Deliverable = Thread->SignalInfo.PendingSignals & ~(*set & IgnoredSignalsMask);
++  uint64_t HostMaskBefore {};
++  if (Deliverable) {
++    ::syscall(SYS_rt_sigprocmask, SIG_BLOCK, &Deliverable, &HostMaskBefore, 8);
++    for (int32_t i = 0; i < MAX_SIGNALS; ++i) {
++      if (Deliverable & (1ULL << i)) {
++        FHU::Syscalls::tgkill(Thread->ThreadInfo.PID, Thread->ThreadInfo.TID, i + 1);
++      }
++    }
++  }
++
+   // Set the new mask
+   Thread->SignalInfo.CurrentSignalMask.Val = *set & IgnoredSignalsMask;
+   sigset_t HostSet {};
+@@ -1302,6 +1325,10 @@
+   // Spin this in a loop until we aren't sigsuspended
+   // This can happen in the case that the guest has sent signal that we can't block
+   uint64_t Result = sigsuspend(&HostSet);
++  const int SuspendErrno = errno;
++  if (Deliverable) {
++    ::syscall(SYS_rt_sigprocmask, SIG_SETMASK, &HostMaskBefore, nullptr, 8);
++  }
+ 
+   // Restore Previous signal mask we are emulating
+   // XXX: Might be unsafe if the signal handler adjusted the thread's signal mask
+@@ -1311,13 +1338,33 @@
+ 
+   CheckForPendingSignals(Thread);
+ 
+-  return Result == -1 ? -errno : Result;
++  return Result == -1 ? -SuspendErrno : Result;
+ }
+ 
+-uint64_t SignalDelegator::GuestSigTimedWait(uint64_t* set, siginfo_t* info, const struct timespec* timeout, size_t sigsetsize) {
++uint64_t SignalDelegator::GuestSigTimedWait(FEX::HLE::ThreadStateObject* Thread, uint64_t* set, siginfo_t* info,
++                                            const struct timespec* timeout, size_t sigsetsize) {
++  // The same for a wait: a signal of the set the host already handed to FEX
++  // while the guest masked it is only in PendingSignals, invisible to the host
++  // rt_sigtimedwait. Raise it again, blocked on the host, for the wait to take.
++  const uint64_t Held = sigsetsize == 8 && set ? (Thread->SignalInfo.PendingSignals & *set) : 0;
++  uint64_t HostMaskBefore {};
++  if (Held) {
++    ::syscall(SYS_rt_sigprocmask, SIG_BLOCK, &Held, &HostMaskBefore, 8);
++    Thread->SignalInfo.PendingSignals &= ~Held;
++    for (int32_t i = 0; i < MAX_SIGNALS; ++i) {
++      if (Held & (1ULL << i)) {
++        FHU::Syscalls::tgkill(Thread->ThreadInfo.PID, Thread->ThreadInfo.TID, i + 1);
++      }
++    }
++  }
++
+   uint64_t Result = ::syscall(SYS_rt_sigtimedwait, set, info, timeout, sigsetsize);
++  const int WaitErrno = errno;
++  if (Held) {
++    ::syscall(SYS_rt_sigprocmask, SIG_SETMASK, &HostMaskBefore, nullptr, 8);
++  }
+ 
+-  return Result == -1 ? -errno : Result;
++  return Result == -1 ? -WaitErrno : Result;
+ }
+ 
+ uint64_t SignalDelegator::GuestSignalFD(int fd, const uint64_t* set, size_t sigsetsize, int flags) {
+diff --git a/Source/Tools/LinuxEmulation/LinuxSyscalls/SignalDelegator.h b/Source/Tools/LinuxEmulation/LinuxSyscalls/SignalDelegator.h
+--- a/Source/Tools/LinuxEmulation/LinuxSyscalls/SignalDelegator.h
++++ b/Source/Tools/LinuxEmulation/LinuxSyscalls/SignalDelegator.h
+@@ -91,7 +91,8 @@ public:
+   uint64_t GuestSigProcMask(FEX::HLE::ThreadStateObject* Thread, int how, const uint64_t* set, uint64_t* oldset);
+   uint64_t GuestSigPending(FEX::HLE::ThreadStateObject* Thread, uint64_t* set, size_t sigsetsize);
+   uint64_t GuestSigSuspend(FEX::HLE::ThreadStateObject* Thread, uint64_t* set, size_t sigsetsize);
+-  uint64_t GuestSigTimedWait(uint64_t* set, siginfo_t* info, const struct timespec* timeout, size_t sigsetsize);
++  uint64_t GuestSigTimedWait(FEX::HLE::ThreadStateObject* Thread, uint64_t* set, siginfo_t* info, const struct timespec* timeout,
++                             size_t sigsetsize);
+   uint64_t GuestSignalFD(int fd, const uint64_t* set, size_t sigsetsize, int flags);
+   /**  @} */
+ 
+diff --git a/Source/Tools/LinuxEmulation/LinuxSyscalls/x32/Signals.cpp b/Source/Tools/LinuxEmulation/LinuxSyscalls/x32/Signals.cpp
+--- a/Source/Tools/LinuxEmulation/LinuxSyscalls/x32/Signals.cpp
++++ b/Source/Tools/LinuxEmulation/LinuxSyscalls/x32/Signals.cpp
+@@ -188,7 +188,8 @@ void RegisterSignals(FEX::HLE::SyscallHandler* Handler) {
+ 
+                               siginfo_t HostInfo {};
+                               uint64_t Result =
+-                                FEX::HLE::_SyscallHandler->GetSignalDelegator()->GuestSigTimedWait(set, &HostInfo, timeout_ptr, sigsetsize);
++                                FEX::HLE::_SyscallHandler->GetSignalDelegator()->GuestSigTimedWait(FEX::HLE::ThreadManager::GetStateObjectFromCPUState(Frame), set, &HostInfo,
++                                                                                   timeout_ptr, sigsetsize);
+                               if (Result != -1) {
+                                 FaultSafeUserMemAccess::VerifyIsWritable(info, sizeof(*info));
+                                 // We need to translate the 64-bit siginfo_t to 32-bit siginfo_t
+@@ -203,7 +204,8 @@ void RegisterSignals(FEX::HLE::SyscallHandler* Handler) {
+                                const struct timespec* timeout, size_t sigsetsize) -> uint64_t {
+                               siginfo_t HostInfo {};
+                               uint64_t Result =
+-                                FEX::HLE::_SyscallHandler->GetSignalDelegator()->GuestSigTimedWait(set, &HostInfo, timeout, sigsetsize);
++                                FEX::HLE::_SyscallHandler->GetSignalDelegator()->GuestSigTimedWait(FEX::HLE::ThreadManager::GetStateObjectFromCPUState(Frame), set, &HostInfo,
++                                                                                   timeout, sigsetsize);
+                               if (Result != -1) {
+                                 FaultSafeUserMemAccess::VerifyIsWritable(info, sizeof(*info));
+                                 // We need to translate the 64-bit siginfo_t to 32-bit siginfo_t
+diff --git a/Source/Tools/LinuxEmulation/LinuxSyscalls/x64/Signals.cpp b/Source/Tools/LinuxEmulation/LinuxSyscalls/x64/Signals.cpp
+--- a/Source/Tools/LinuxEmulation/LinuxSyscalls/x64/Signals.cpp
++++ b/Source/Tools/LinuxEmulation/LinuxSyscalls/x64/Signals.cpp
+@@ -37,7 +37,8 @@ void RegisterSignals(FEX::HLE::SyscallHandler* Handler) {
+       FaultSafeUserMemAccess::VerifyIsReadable(set, sigsetsize);
+       FaultSafeUserMemAccess::VerifyIsWritableOrNull(info, sizeof(siginfo_t));
+       FaultSafeUserMemAccess::VerifyIsReadableOrNull(timeout, sizeof(timespec));
+-      return FEX::HLE::_SyscallHandler->GetSignalDelegator()->GuestSigTimedWait(set, info, timeout, sigsetsize);
++      return FEX::HLE::_SyscallHandler->GetSignalDelegator()->GuestSigTimedWait(FEX::HLE::ThreadManager::GetStateObjectFromCPUState(Frame), set, info,
++                                                                               timeout, sigsetsize);
+     });
+ }
+ } // namespace FEX::HLE::x64

@@ -878,14 +878,22 @@ static long cmsg_to_linux(const void *dbuf, size_t dlen, void *lout, size_t lcap
 
 
 // MSG_* flags: another silent number space. Linux -> Darwin:
-//   CTRUNC 0x8 -> 0x20, TRUNC 0x20 -> 0x10, DONTWAIT 0x40 -> 0x80,
-//   EOR 0x80 -> 0x8, WAITALL 0x100 -> 0x40, NOSIGNAL 0x4000 -> 0x80000;
-//   OOB/PEEK/DONTROUTE (1/2/4) agree; CMSG_CLOEXEC has no meaning here.
+//   DONTWAIT 0x40 -> 0x80, EOR 0x80 -> 0x8, WAITALL 0x100 -> 0x40,
+//   NOSIGNAL 0x4000 -> 0x80000; OOB/PEEK/DONTROUTE (1/2/4) agree;
+//   CMSG_CLOEXEC has no meaning here.
+// TRUNC (0x20) and CTRUNC (0x8) are NOT passed on: as recvmsg input Linux
+// ignores CTRUNC and reads TRUNC only on datagram and packet sockets (return
+// the datagram's real length), while XNU copies both into msg_flags on
+// return whether or not anything was truncated (MEASURED, macOS 27: one byte
+// into a 4-byte buffer, input MSG_TRUNC -> msg_flags MSG_TRUNC, on stream
+// and datagram sockets alike). libbase's ReceiveFileDescriptorVector passes
+// both and then refuses a message that reports either: i386 Android's
+// zygote ("message was truncated when receiving file descriptors") and
+// system_server talking to it. The real-length reading of input TRUNC on a
+// datagram socket is not emulated.
 int lxrt_msgflags_to_darwin(int lf)
 {
     int d = lf & 0x7;
-    if (lf & 0x8)     d |= 0x20;
-    if (lf & 0x20)    d |= 0x10;
     if (lf & 0x40)    d |= 0x80;
     if (lf & 0x80)    d |= 0x8;
     if (lf & 0x100)   d |= 0x40;
@@ -999,13 +1007,7 @@ long lxrt_recvmsg(int fd, void *lmsg, int flags)
     long w = seqpkt_before_recv(fd, flags);
     if (w < 0)
         return w;
-    // MSG_TRUNC and MSG_CTRUNC are results. XNU's soreceive hands its input
-    // flags back in msg_flags, so passing them made every message look
-    // truncated; Linux ignores them on input for stream sockets, and XNU has
-    // no Linux-style "report the datagram's real length" to map TRUNC to.
-    // libbase's ReceiveFileDescriptorVector (every Android LocalSocket read)
-    // passes both and refuses a "truncated" message (MEASURED at stage 28).
-    ssize_t r = recvmsg(fd, &dm, lxrt_msgflags_to_darwin(flags & ~(0x8 | 0x20)));
+    ssize_t r = recvmsg(fd, &dm, lxrt_msgflags_to_darwin(flags));   // drops TRUNC/CTRUNC
     if (r < 0 && errno == ECONNRESET && lxrt_is_seqpacket(fd)) {
         lm->msg_controllen = 0;
         lm->msg_flags = 0;
@@ -1072,6 +1074,11 @@ static const struct opt_map k_so[] = {
     { 10, SO_OOBINLINE },  { 13, SO_LINGER },     { 15, SO_REUSEPORT },
     { 18, SO_RCVLOWAT },   { 19, SO_SNDLOWAT },   { 20, SO_RCVTIMEO },
     { 21, SO_SNDTIMEO },   { 30, SO_ACCEPTCONN },
+    // SO_RCVTIMEO_NEW / SO_SNDTIMEO_NEW (y2038 names): on a 64-bit ABI the
+    // same 16-byte timeval as 20/21. FEX turns an i386 guest's _OLD
+    // timeouts into these (i386 Android's zygote: ENOPROTOOPT on every
+    // connection before this).
+    { 66, SO_RCVTIMEO },   { 67, SO_SNDTIMEO },
 };
 
 // Returns false when the option has no Darwin equivalent -- SO_PASSCRED and

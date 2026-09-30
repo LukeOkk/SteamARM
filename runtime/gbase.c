@@ -17,7 +17,9 @@
 // platform (measured), so any pointer argument below 4 GiB is a guest
 // pointer. Memory-management addresses (mmap, munmap, mprotect, madvise,
 // mremap, brk, shmat, mlock, msync) are deliberately NOT in the table: FEX's
-// allocator owns them and hands over host addresses.
+// allocator owns them and hands over host addresses. (madvise and msync are
+// passed through by FEX with the guest's address; dispatch.c bases a low one
+// itself.)
 
 #include "lxrt.h"
 
@@ -154,6 +156,12 @@ void lxrt_gbase_apply(long nr, uint64_t *x)
     }
     case 29: {   // ioctl: pointer requests in the set runtime/ioctl_tty.c serves
         unsigned req = (unsigned)x[1];
+        // Binder's ('b'): every one with an argument takes a pointer
+        // (runtime/binder.c; i386 Android's HALs and apps, under FEX).
+        if (((req >> 8) & 0xff) == 'b' && (req >> 30) != 0) {
+            translate(x, A2);
+            return;
+        }
         switch (req) {
         case 0x5401: case 0x5402: case 0x5403: case 0x5404:            // TCGETS, TCSETS*
         case 0x802c542a: case 0x402c542b: case 0x402c542c: case 0x402c542d: // TCGETS2, TCSETS2*
