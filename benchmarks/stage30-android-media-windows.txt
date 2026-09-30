@@ -1,0 +1,52 @@
+Stage 30: compressed sound and one Mac window per Android app
+Mac mini M4, macOS 27; x86_64 LineageOS 18.1 root under FEX (sesstest clone).
+
+== The OMX store (i386, vendor.media.omx)
+With the legacy /linkerconfig: CANNOT LINK EXECUTABLE ... library
+"libminijail.so" not found: needed by /vendor/lib/libavservices_minijail.so.
+With android-boot.py --linkerconfig (the root's /linkerconfig rewritten):
+audioserver exited with status 1 after 0.3-0.4 s in a loop, no boot in 10 min.
+The 32-bit linker (userdebug) has LD_CONFIG_FILE: `linkerconfig --target
+/data/local/tmp/steamarm-linkerconfig`, that file for the store alone: it links.
+With FEX_NEEDSSECCOMP=1: "libminijail: logging seccomp filter failures",
+then 100% CPU, never registered; sample: the main thread in FEX's code and
+JIT, a fault at 0x0 repeating (lxrun memlog "fault repeating 1000x at 0x0").
+Without it: "prctl(seccomp_filter) failed: Invalid argument" and an abort.
+The base policy hidden: "F ... Could not read base policy file" (fatal).
+With scripts/android/shims/avservices_minijail_noop.c bound over
+/vendor/lib/libavservices_minijail.so for the store alone:
+  lshal: android.hardware.media.omx@1.0::IOmx/default, ::IOmxStore/default; 0% CPU idle.
+
+== Media services at boot vs after it
+Started with the boot (media, vendor.media.omx): "ActivityManager: No pending
+application record for pid ... dropping process" for the network stack, the
+zygote killed (signal 9) every 13-14 s, no sys.boot_completed.
+Started after sys.boot_completed=1: boot in 18-25 s; one run of about ten
+had the zygote exit (status 1) right as they started, the rest none.
+
+== Codecs
+54 codecs listed (c2.android.* and OMX.google.*). Codec2's
+c2.android.vorbis.decoder: SIGSEGV at 0x0 in the MediaCodec_loop thread
+(and in system_server's "NDK MediaCodec_" thread for system sounds).
+debug.stagefright.ccodec=0:
+  codec OMX.google.vorbis.decoder; decoded 16584 bytes in 619 ms (Effect_Tick.ogg)
+tests/android/run.sh: "compressed sound decoded in Android:
+  OMX.google.vorbis.decoder decoded 16584 bytes in 474 ms"
+MediaPlayer (app_process64) on Ring_Synth_04.ogg, volume 0: duration 3683 ms,
+played (a looping ringtone); pactl list sink-inputs during it:
+  application.name = "Waydroid", media.name = "ALSA Playback"
+
+== tests/android/run.sh with all of it: == 81 passed, 0 failed (2 expected failures)
+
+== One Mac window per app (steamarm-wlmac, ANDROID_SESSION_COMPOSITOR=wlmac)
+Composer surfaces per app window (verbose trace): root 1x1 buffer, viewport
+1920x1080, window geometry 0,0 1920x1080; the app's layer a subsurface
+528x998 at 696,25; the starting window another at the same place, unmapped
+by attach(NULL). After the fixes (geometry, attach(NULL), cut to the mapped
+subsurfaces, no window for a bare backdrop), 3 launches of 3:
+  focused window ...GameSelector; windows: "Simple Solitaire Collection"
+  528x974 (app_id waydroid.de.tobiasbielefeld.solitaire); zygote exits 0.
+
+== The runtime: a fault its handler never fixes
+tests/elf/segv_spin.c (a SIGSEGV handler that returns): "a fault its handler
+never fixes ends the process (signal 11 after 1 s)"; tests/elf: 89 passed.

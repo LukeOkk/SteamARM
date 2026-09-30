@@ -1116,6 +1116,33 @@ system_server stops at the display in these boots.
   with no network, as before.
 - **Time zone.** `android-boot.py` sets `persist.sys.timezone` from
   `/etc/localtime`'s link.
+- **Compressed sound** (stage 30). MediaCodec and MediaPlayer decode
+  through Android's own services: mediaextractor and media.swcodec
+  (x86-64; mediaextractor's watchdog needed `timer_create`), then
+  mediaserver (`media.player`) and the OMX store, both i386 and so only
+  possible since the 16-bit ids. The OMX store needs two things only it
+  gets (`android-boot.py`, profile `vendor32`): the image's generated
+  linker configuration through `LD_CONFIG_FILE` (the 32-bit linker of this
+  userdebug build honours it; the legacy `/linkerconfig` has no namespace
+  for 32-bit vendor daemons, so it could not link `libminijail.so`, and
+  rewriting the root's `/linkerconfig` made audioserver exit in a loop),
+  and a stand-in for `libavservices_minijail.so`
+  (`scripts/android/shims/avservices_minijail_noop.c`) that installs no
+  seccomp filter: under FEX's seccomp emulation its 32-bit filter crashed
+  FEX in its own code, and without the emulation the filter cannot be
+  installed and the store aborts. A seccomp filter inside a process that is
+  an ordinary Mac process of the user isolates nothing from macOS. Both
+  services start after `sys.boot_completed=1`: started with the boot they
+  slowed it enough that an app process attached to ActivityManager before
+  its pid was recorded ("No pending application record ... dropping
+  process"), and system_server went down with the zygote in a loop.
+  `debug.stagefright.ccodec=0` (AOSP's own switch) makes MediaCodec use the
+  OMX store's codecs (Google's software ones and Waydroid's FFmpeg plugin):
+  Codec2's software components crashed at 0x0 in their `MediaCodec_loop`
+  thread here. MEASURED: an `.ogg` of the image decodes with
+  `OMX.google.vorbis.decoder` (16584 bytes of PCM in 619 ms), 54 codecs are
+  listed, and a MediaPlayer prepares an `.ogg` (3683 ms) and plays it to
+  SteamARM's PulseAudio (the stream "Waydroid" / "ALSA Playback").
 - **Sound.** A session with a window starts SteamARM's PulseAudio with a
   socket in the session root (`scripts/audio.sh`, `/tmp/pulse/native` to
   Android) and boots with `--pulse`. audioserver loads Waydroid's audio HAL
@@ -1157,24 +1184,6 @@ directories in either mode (`toybox ps` shows nothing): not changed here.
 - VPN apps, tethering, per-app firewall rules, data usage accounting: the
   netd stand-in accepts and does nothing.
 - The ISO key swap follows the keyboard type macOS reports.
-- Compressed sound (system sounds, SoundPool, MediaCodec, MediaPlayer) does
-  not play yet. mediaextractor and media.swcodec (x86-64) now run: the first
-  aborted on its watchdog's `timer_create` until the runtime implemented
-  POSIX timers, and a MediaExtractor reads an `.ogg`'s track (audio/vorbis,
-  MEASURED). But MediaCodecList first asks mediaserver's `media.player`
-  and the vendor's OMX store, and both services are i386, stopped by 32-bit
-  bionic's 16-bit pid limit: it waits for IOmxStore once a second forever
-  (MEASURED). With the OMX store left out of the manifest it went on and
-  crashed (SIGSEGV at 0) instead, so that was not kept. Since the 16-bit
-  ids, mediaserver (i386) runs and registers `media.player`, but
-  MediaCodecList inside it waits for the OMX store the same way. The OMX
-  store (i386) needs the image's generated linker configuration: with
-  `--linkerconfig` rewriting the root's `/linkerconfig` audioserver exited
-  at once in a loop and the boot never completed, but the 32-bit linker
-  of this userdebug build honours `LD_CONFIG_FILE`, so `linkerconfig
-  --target <dir>` and that variable for the OMX store alone let it link;
-  it then goes silent once its minijail seccomp filter is installed under
-  FEX's seccomp emulation (MEASURED; the next step).
 
 ## APKs and the Google Play Store
 
@@ -1217,15 +1226,16 @@ directories in either mode (`toybox ps` shows nothing): not changed here.
 3. Properties: done (stage 26), for x86-64 guests too (stage 27).
 4. init, zygote64, system_server, a window, `pm install`, `am start`: done
    in the x86_64 root (stage 28, "Session"). Clicks and keys from the Mac,
-   the network and the time zone: done (stage 29). Next, in the order an
-   app meets them: sound (the audio HAL with a PulseAudio socket,
-   `--pulse`), a supplied GApps package (`scripts/android-gapps.py`), 32-bit
-   x86 apps (`--abi32`), then a GPU path (Lepton's graphics analysis, 4)
-   instead of SwiftShader, and per-app windows (Waydroid's multi-window
-   mode).
+   the network and the time zone: done (stage 29); sound, raw and
+   compressed: done (stages 29-30); one Mac window per app: done on
+   `steamarm-wlmac` (stage 30, `tools/wlmac/README.md`). Next, in the order
+   an app meets them: clicks measured in those windows, a supplied GApps
+   package (`scripts/android-gapps.py`), 32-bit x86 apps
+   (`--abi32`), then a GPU path (Lepton's graphics analysis, 4) instead of
+   SwiftShader.
    audioserver's i386 audio HAL, zygote_secondary and dex2oat32 run since
-   stage 28 (with `--linkerconfig`); 32-bit bionic's 16-bit thread ids
-   are the open limit there.
+   stage 28 (with `--linkerconfig`); 32-bit bionic's 16-bit thread ids,
+   the limit there, are met since stage 29 (`runtime/ids.c`).
 5. The rebuilt ART for arm64-v8a APKs in the native root.
 
 ## Tests and records
