@@ -23,10 +23,11 @@ x18_rewrites_ok() {
 }
 # macOS has no timeout(1). SIGALRM survives exec: exit status 142 when it fires.
 deadline() { perl -e 'alarm shift; exec @ARGV' "$@"; }
-# An lxrun linked as built against a pre-13 macOS SDK (make lxrt
-# LXRT_KEEP_X18=1) has its x18 kept by the kernel: the LXRT_NO_X18 controls
-# below then see x18 survive without the pass instead of lost
-# (tests/x18_preserve/run.sh, benchmarks/stage24-minecraft-prism.txt).
+# An lxrun linked as built against a pre-13 macOS SDK (the default since
+# stage 28; make lxrt LXRT_KEEP_X18=0 opts out) has its x18 kept by the
+# kernel in the process it exec'd: the LXRT_NO_X18 controls below then see
+# x18 survive without the pass instead of lost (tests/x18_preserve/run.sh,
+# benchmarks/stage24-minecraft-prism.txt, benchmarks/stage28-keep-x18.txt).
 LXRUN_SDK=$(otool -l build/lxrun 2>/dev/null | awk '/LC_BUILD_VERSION/{f=1} f && $1 == "sdk" {print $2; exit}')
 kernel_keeps_x18() { [ -n "$LXRUN_SDK" ] && [ "${LXRUN_SDK%%.*}" -lt 13 ]; }
 
@@ -1018,7 +1019,7 @@ if [ -f "$STAGE/usr/lib64/libc.a" ] && [ -n "$GCCDIR" ]; then
                 ok "X18_JIT: generated code keeps x18 through $(grep -o '[0-9]* signal handlers' <<<"$out") (lxrun sdk $LXRUN_SDK); a fork child loses it, as the kernel does"
             else bad "X18_JIT (lxrun sdk $LXRUN_SDK)" "rc=$rc '$verdict' $(grep -E 'lost|kept' <<<"$out" | tr '\n' ' ')"; fi
         elif [ "$verdict" = "== x18_jit: parent lost, fork child lost" ]; then
-            xfail "X18_JIT: generated code loses x18 (lxrun sdk $LXRUN_SDK)" "the kernel zeroes x18 for a binary linked against SDK 13 or later; make lxrt LXRT_KEEP_X18=1 keeps it"
+            xfail "X18_JIT: generated code loses x18 (lxrun sdk $LXRUN_SDK)" "the kernel zeroes x18 for a binary linked against SDK 13 or later (make lxrt LXRT_KEEP_X18=0); the default build keeps it"
         else bad "X18_JIT (lxrun sdk $LXRUN_SDK)" "rc=$rc '$verdict'"; fi
     else bad "build x18_jit_signal" "$err"; fi
 else

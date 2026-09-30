@@ -32,6 +32,18 @@ jobs:
       - name: Build (lxrun, vdso, Vulkan shim, inputd, launcher)
         run: make all
 
+      # The Makefile links lxrun as built against the macOS 12.3 SDK
+      # (LXRT_KEEP_X18=1, the default since stage 28) so the kernel keeps x18
+      # for code the runtime never rewrites (a JIT's); when that link fails it
+      # falls back to the current SDK and says so. Say it here too.
+      - name: lxrun records SDK 12.3 (x18 kept for JIT code)
+        run: |
+          sdk=$(otool -l build/lxrun | awk '/LC_BUILD_VERSION/{f=1} f && $1 == "sdk" {print $2; exit}')
+          echo "lxrun LC_BUILD_VERSION sdk $sdk"
+          if [ "${sdk%%.*}" -ge 13 ]; then
+            echo "::warning title=lxrun links against SDK $sdk::the SDK 12.3 link fell back (see the Build step); the kernel will zero x18 for JIT code (docs/X18_VIRTUALIZATION.md)"
+          fi
+
       - name: Launcher core (ApplicationCore, run-app.sh dispatch, sessions)
         run: make test-launcher-core
 
