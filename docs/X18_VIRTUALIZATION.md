@@ -5,7 +5,10 @@ reserves it, and zeroes it whenever the thread takes an exception. This page
 covers what lxrun does about that, what it refuses, and what is still
 unknown. Line numbers are at `b3f64c8` (updated 2026-09-29 after the
 planner changes `4534360`, `926b89a` and `c86b633`, the report change
-`416d7b4` and stage 22).
+`416d7b4` and stage 22) unless a section names another commit. Stage 28
+(2026-09-30, `benchmarks/stage28-keep-x18.txt`): lxrun is linked as SDK 12.3
+by default so the kernel keeps x18 for JIT code, the rewriter stays (a
+forked child loses the kernel's x18), and `br x18` no longer uses x16.
 
 Labels: MEASURED (a command and its result), VERIFIED IN SOURCE (file:line),
 UPSTREAM DOCUMENTED, HYPOTHESIS, UNKNOWN.
@@ -36,8 +39,28 @@ UPSTREAM DOCUMENTED, HYPOTHESIS, UNKNOWN.
    home. Preemption cannot touch the slot. The planner is `runtime/x18.c`;
    the integration is `runtime/rewrite.c`.
 
-`br x18` / `blr x18` go through x16 instead, and a `blr` puts the guest
-return address in x30 (VERIFIED IN SOURCE, `runtime/x18.c:340-354`).
+`blr x18` / `ret x18` go through x16 instead, which the procedure call
+standard lets die at a call or a return, and a `blr` puts the guest return
+address in x30 (VERIFIED IN SOURCE, `runtime/x18.c`, `lxrt_x18_plan`).
+
+`br x18` did the same up to `7492467`, and that was the cause of V8's
+TurboFan crash (stage 24): TurboFan dispatches a jump table with
+`adr x18; add x18, x18, x0, lsl #2; br x18` while w16 is live, and read the
+target address back as w16 (MEASURED by bisecting Heroic's rewritten sites
+with the keep-x18 build, stage 28). Since `cc54e05` the `br x18` trampoline
+keeps every general register (`plan_br`): it saves x16/x17, leaves
+{its last word, the target} 32 bytes below sp, restores them, and ends with
+`mrs x18, tpidrro_el0; and x18, x18, #~7; ldr x18, [x18, #slot]; br x18`.
+Where the kernel zeroes x18 in the middle of that tail, `runtime/signal.c`
+recovers: a fault at the `ldr` restarts the trampoline from its first word;
+a branch to 0 resumes at the marked target when the mark names a real
+trampoline and equals the virtual x18; a guest signal arriving on the tail
+restarts the trampoline before its frame covers the mark (MEASURED:
+X18_JUMP_TABLE forces both cases; `LXRT_X18_STATS=1` counts them at exit,
+5-12 restarts per 48M dispatches on the current-SDK build). Residual
+(HYPOTHESIS, not observed): a guest's own jump to address 0 in the same frame
+right after such a dispatch, with the virtual x18 unchanged, would be taken
+for the second case.
 
 Since stage 21, a load or store of x18 at a large `sp` offset
 (`stp x18, x17, [sp, #0x1f8]`) is addressed through a scratch copy of `sp`
@@ -102,7 +125,9 @@ whose destination was `sp` and that named x18 was refused with it.
   SOURCE).
 - `LXRT_NO_X18=1` is a diagnostic. With it the client's real x18 uses
   corrupted its package checksums (MEASURED, recorded at
-  `runtime/elfsect.c:136-137`). It is not a usable control.
+  `runtime/elfsect.c:136-137`). It is not a usable control. With the
+  SDK-12.3 build (stage 28) it runs single processes correctly, but not
+  forked children: Steam's and Heroic's forked GPU processes died.
 
 ## Poisoned sites: `brk #1` since `dbd1657`
 
@@ -148,19 +173,48 @@ macOS 13 (VERIFIED IN SOURCE of xnu, `benchmarks/stage19-steamframe-base-and-arm
   handler, `sched_yield` and `usleep`; the SDK 12.3 build ("LC_BUILD_VERSION
   sdk 12.3") keeps `0x5a18c0de12345678` through 36,000-42,000 preemption
   loops per thread, the signal handler, `sched_yield` and `usleep`.
-- `make lxrt LXRT_KEEP_X18=1` links lxrun that way (opt-in, `Makefile`).
+- Stage 24 added `make lxrt LXRT_KEEP_X18=1` to link lxrun that way.
   MEASURED with it: `tests/elf/run.sh` 69/0, its two `LXRT_NO_X18` controls
   now see x18 survive without the rewriter (they check the build and expect
   that); and the JIT code this runtime never rewrites becomes correct: Linux
   HotSpot's C1/C2 (0 wrong of 800 in 9 runs, against 474-741 wrong and
-  crashes with the default build) and llvmpipe's LLVM JIT (5 of 5 runs of
-  3000 frames, against 0 of 10). Not measured with it yet: the x86 Steam
-  client, Proton and the Windows probes, Vulkan presentation, the native
-  arm64 Steam client. So it is not the default.
-- With it the rewriter would become optional (HYPOTHESIS until the paths
-  above are measured). It would also remove one of the two ARM64 Proton
-  blockers (the Windows TEB lives in x18); the `0x7ffe0000` low-address one
-  stays (stage 19 §2).
+  crashes with the current-SDK build) and llvmpipe's LLVM JIT (5 of 5 runs of
+  3000 frames, against 0 of 10).
+- **Since stage 28 it is the default** (`LXRT_KEEP_X18 ?= 1` in the
+  `Makefile`; `make lxrt LXRT_KEEP_X18=0` links against the current SDK, and
+  switching rebuilds lxrun). MEASURED, `benchmarks/stage28-keep-x18.txt`: both
+  builds pass tests/elf (83/0 against 82/0 + the X18_JIT expected failure),
+  run_i386 18/0, test-arm64 4/0, run_vk_device 2/0, the Windows probes 11/0
+  at 150-162 fps, tests/android with 0 failures (62/0 without its boot
+  section on both, 64/0 with it), the native arm64 Steam client's sign-in
+  window at 15 s, Heroic's phase_b with and without `--no-opt`, and
+  the TurboFan reproducer 10/10 (failures seen on the way were the
+  environment, each passing on a re-run: the record says which). If the
+  12.3 link fails, the Makefile links
+  against the current SDK and says so; every build prints the SDK it
+  recorded; CI warns when it is 13 or later.
+- **A forked child loses it** (MEASURED on macOS 27, stage 28): the kernel
+  sets the flag at exec from the image, and a child of `fork()` without exec
+  -- its threads and its own children too -- has x18 zeroed again, on either
+  build. `tests/x18_preserve/run.sh` now reports the fork child.
+- **So the rewriter stays.** Guests fork without exec all the time
+  (Chromium's zygotes, Android's zygote, shells). With the keep build and
+  `LXRT_NO_X18=1` the native Steam client never showed its sign-in window
+  and Heroic exited at start: both lost their forked GPU process ("GPU
+  process isn't usable. Goodbye.") (MEASURED, stage 28). The runtime does
+  not detect the kernel's behaviour and does not skip the pass; what the
+  kernel's x18 adds is correctness for code the runtime never rewrote, in
+  the process lxrun was exec'd as.
+- Guest signal handlers used to leave the hardware x18 set to the virtual
+  one on return, which broke a JIT's live x18 at its first signal with the
+  keep build (MEASURED: generated code lost x18 after 1 signal at
+  `7492467`). Since `cc54e05` an x18 the handler left alone goes back into
+  the hardware register as it was (`runtime/signal.c`), and without the pass
+  the frame carries the hardware x18 (X18_JIT: kept through 100-122
+  handlers).
+- It would also remove one of the two ARM64 Proton blockers (the Windows TEB
+  lives in x18) for a process that does not fork; the `0x7ffe0000`
+  low-address one stays (stage 19 §2).
 
 ## JIT output
 
@@ -168,14 +222,16 @@ The rewriter works on images as they are loaded, and code generated at run
 time is only scanned for `svc`, TPIDR_EL0 and the trapped system registers
 when it becomes executable (`runtime/jit.c`, `runtime/wxsplit.c`), never for
 x18. JITs that avoid x18 are safe: FEX (patched), V8 (x18 is not
-allocatable: stage 23). JITs that allocate it are not, with the default
-build: Linux aarch64 HotSpot (`R18_RESERVED` is defined only for macOS and
-Windows builds, UPSTREAM DOCUMENTED in openjdk/jdk21u) and Mesa's llvmpipe
-(LLVM's aarch64-linux target). MEASURED in stage 24: HotSpot computed wrong
-results and died at `ldr w4, [x18, #256]` with x18 = 0; llvmpipe died at
-`stp xzr, xzr, [x18]` with x18 = 0 (the fault report prints the
-instruction and x18 for code outside the image since stage 24). Both are
-correct with `LXRT_KEEP_X18=1` (above).
+allocatable: stage 23). JITs that allocate it are not, where the kernel
+zeroes x18: Linux aarch64 HotSpot (`R18_RESERVED` is defined only for macOS
+and Windows builds, UPSTREAM DOCUMENTED in openjdk/jdk21u) and Mesa's
+llvmpipe (LLVM's aarch64-linux target). MEASURED in stage 24 with the
+current-SDK build: HotSpot computed wrong results and died at
+`ldr w4, [x18, #256]` with x18 = 0; llvmpipe died at `stp xzr, xzr, [x18]`
+with x18 = 0 (the fault report prints the instruction and x18 for code
+outside the image since stage 24). Both are correct with the SDK-12.3 build
+(the default since stage 28, above) in the process lxrun was exec'd as; in a
+forked child they are not, on either build (X18_JIT, MEASURED).
 
 ## Diagnostics
 
@@ -190,6 +246,11 @@ correct with `LXRT_KEEP_X18=1` (above).
   rewritten only, so its poisoned sites showed only as the difference.
 - With `LXRT_TRACE=1`, each refused site is named with its reason
   (`runtime/rewrite.c:529-533`).
+- `LXRT_X18_STATS=1` prints, at exit, how often the `br x18` trampoline's
+  tail was restarted after a fault, recovered from a branch to 0, and
+  restarted at a signal delivery (`runtime/signal.c`, since `cc54e05`).
+- Every lxrun build prints the SDK it recorded: "lxrun: LC_BUILD_VERSION
+  sdk 12.3: the kernel keeps x18 for JIT code" (`Makefile`).
 
 ## Tests
 
@@ -204,8 +265,13 @@ correct with `LXRT_KEEP_X18=1` (above).
 | `tests/elf/run.sh` (x18_poison) | a refused site (`ldaxr x18`) traps with `brk #1` |
 | `tests/elf/run.sh` (X18_THREAD_ISOLATION) | nine threads keep their own x18 through 20,000 raw system calls each, with signals |
 | `tests/x18_check.sh`; `build/x18_check --self-test` inside `tests/elf/run.sh` | the planner's self-test over saved objdump listings and plan words; runs no guest |
-| `tests/x18_preserve/run.sh` | whether macOS itself keeps x18 for a pre-13 SDK binary |
+| `tests/x18_preserve/run.sh` | whether macOS itself keeps x18 for a pre-13 SDK binary, and in a fork child of it (it does not: stage 28) |
+| `tests/elf/run.sh` (X18_JUMP_TABLE) | a `br x18` jump table keeps x16/x17 live across the branch, 16 preempted threads x 3M dispatches; both recoveries of the trampoline's tail forced from generated code |
+| `tests/elf/run.sh` (X18_JIT) | generated code (never rewritten) keeps x18 across 1 ms guest signal handlers with the SDK-12.3 build, and loses it in a fork child; an expected failure with the current-SDK build |
+| `tests/heroic/turbofan.sh` | V8's TurboFan in Heroic's Electron binary run as Node (stage 24's reproducer; 0 of 3 before `cc54e05`, 10 of 10 after) |
 
 The FDE filter, a large `sp` offset and a poisoned site trapping had no
 test at `dbd1657`; they have one since `9e7f4b9`. MEASURED at `5d9760a`:
-`tests/elf/run.sh` 64 passed, 0 failed, 0 expected failures.
+`tests/elf/run.sh` 64 passed, 0 failed, 0 expected failures. MEASURED in
+stage 28: 83 passed, 0 failed with the default (SDK 12.3) build; 82 passed,
+0 failed, 1 expected failure (X18_JIT) with `LXRT_KEEP_X18=0`.

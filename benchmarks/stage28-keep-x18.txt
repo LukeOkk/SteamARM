@@ -1,0 +1,263 @@
+Stage 28 -- lxrun linked as SDK 12.3 (x18 kept by the kernel) as the default; TurboFan's crash found (2026-09-30)
+===========================================================================================================
+
+ZERO-VM. Host: Mac mini M4, 16 GB, macOS 27.0 (26A428). Base commit 7492467.
+Commits: cc54e05 (runtime: br x18 and signal x18), 292236a (Makefile default,
+CI, release guard), a66be1c (Heroic without --no-opt), and the one with this
+record. Labels: MEASURED, VERIFIED IN SOURCE, UPSTREAM DOCUMENTED, HYPOTHESIS,
+UNKNOWN.
+Conditions: two other local agents ran Android guests (binder, Weston,
+android-boot, their own FEXServers) during every run below, and the owner's
+CrossOver Steam with a game was open; none of their processes was touched.
+X on :2 (scripts/run-x11-native.sh). No account was signed into, no Steam
+client other than the native arm64 one was started, run-app.sh was not used.
+Home paths are written as ~.
+
+The two builds
+--------------
+  "sdk27"  make lxrt LXRT_KEEP_X18=0   LC_BUILD_VERSION minos 27.0 sdk 27.0
+  "keep"   make lxrt  (was LXRT_KEEP_X18=1)   minos 12.0 sdk 12.3
+Both from the same sources (cc54e05 onwards). The default build of 292236a is
+byte-identical to the "keep" binary measured here (cmp).
+
+Result
+------
+1. (MEASURED) The x18 REWRITER IS STILL NEEDED with the keep build. xnu keeps
+   x18 for an SDK-12.3 binary only in the process it exec'd; a child of
+   fork() (no exec) has x18 zeroed again, and so do threads created in that
+   child and a grandchild (probe below, and tests/x18_preserve/run.sh now
+   measures it). Guests fork without exec all the time: Chromium's zygotes
+   (Steam's webhelper, Heroic), Android's zygote, shells. With the keep build
+   and LXRT_NO_X18=1 (the pass off) the native Steam client never shows its
+   sign-in window and Heroic exits at start: both lose their forked GPU
+   process ("GPU process isn't usable. Goodbye."). So the runtime does NOT
+   skip the x18 pass when the kernel keeps x18; no start-up detection was
+   added (step 2 of the plan was conditional on the matrix passing without
+   the pass, and it does not).
+2. (MEASURED) The keep build passes the whole matrix at least as well as the
+   sdk27 build (table below), so it is the Makefile default now
+   (LXRT_KEEP_X18=0 opts out). What it adds: code the runtime never rewrites,
+   a JIT's (Linux HotSpot's C1/C2, llvmpipe: stage 24), keeps x18 in the
+   process lxrun was exec'd as -- also across guest signal handlers, after a
+   runtime fix (item 4). In forked children it does not.
+3. (MEASURED) V8's TurboFan crash of stage 24 is found and fixed. The x18
+   planner rewrote `br x18` through x16, as it does blr and ret; V8's
+   TurboFan dispatches a jump table with `br x18` while w16 is live and read
+   the target address back as w16. The trampoline now keeps every general
+   register. TurboFan works on both builds (Node reproducer 10 of 10 each,
+   0 of 3 before), and Heroic runs without --js-flags=--no-opt (launcher
+   entry changed; phase_b 3 of 3 plus a Quit cycle).
+4. (MEASURED) A guest signal handler used to leave the hardware x18 set to
+   the VIRTUAL x18 on return. With the keep build that corrupted a JIT's
+   live x18 at the first signal (HotSpot takes SIGSEGV in compiled code for
+   safepoint polls and implicit null checks): generated code lost x18 after
+   1 signal at 7492467, keeps it through 100-122 handlers now.
+
+The fork probe (MEASURED, host programs, no lxrun)
+---------------------------------------------------
+Same C source built twice (clang -O1; the second with
+-Wl,-platform_version,macos,12.0,12.3), each sets x18 = 0x5a18c0de12345678 and
+reads it back after a raw `svc #0x80` (getpid), 100 sched_yield and a
+20 ms usleep, in the parent, a fork child, a thread of that child, a
+grandchild and an exec'd child:
+                                 sdk 27.0 build      sdk 12.3 build
+  parent (main thread)           0 / 0 / 0           kept / kept / kept
+  parent, new thread             -                   kept / kept / kept
+  fork child (main thread)       0 / 0 / 0           0 / 0 / 0
+  fork child, new thread         -                   0 / 0 / 0
+  grandchild (fork of fork)      -                   0 / 0 / 0
+  fork + execve of itself        0 / 0 / 0           kept / kept / kept
+mach_timebase_info is 125/3 in all of them (24 MHz: the old SDK does not
+change the timebase on this Mac). tests/x18_preserve/run.sh (extended with the
+fork child): "cur" NOT preserved; "sdk12" preserved in the process (8 threads
+19,067-23,174 preemption loops, SIGALRM, 1000 sched_yield, usleep 300 ms) and
+"x18 is NOT preserved in a fork child" (ZEROED after sched_yield and usleep).
+VERIFIED IN SOURCE (xnu, stage 19 §3a): preserve_x18 is set by
+machine_task_process_signature() from the image's LC_BUILD_VERSION at exec;
+that fork does not carry it is MEASURED here, not found in the source.
+
+TurboFan: how the cause was found (MEASURED)
+--------------------------------------------
+tests/heroic/turbofan.sh (new; the stage-24 T2 reproducer: Heroic's Electron
+43 binary as Node, ELECTRON_RUN_AS_NODE=1, LXRT_X18_ALL_TEXT=/opt/apps/heroic/),
+at 7492467, 3 runs each:
+  sdk27, pass on               small 0/3: SIGTRAP at image+0x6c5ecf4 (as T2)
+  keep,  pass on               small 0/3: the same
+  keep,  LXRT_NO_X18=1         small 3/3 ok
+("heavy", 60 functions from new Function, passes 3/3 everywhere; it is not
+stage 24's T3, whose script is not in the tree.) With the kernel keeping x18
+the rewriting became the only difference, and a site left alone stays correct,
+so the sites could be bisected: a scratch build rewrote only x18 sites at
+.text offsets [lo, hi) of the heroic image (the libraries always). 22 steps,
+83 s, converged on .text+0x3e6f600..+0x3e6f680. Rewriting single
+instructions of a sequence is not meaningful (the others then use the other
+x18), so the sequence was read instead (llvm-objdump, heroic vaddr 0x691f640):
+     691f640  sub  w16, w13, #0x38f          <- w16 computed
+     691f648  cmp  w16, #0x7b
+     691f64c  b.hi 0x691f660
+     691f650  adr  x18, 0x691f668            <- rewritten
+     691f654  ldrb w0, [x5, x16]
+     691f658  add  x18, x18, x0, lsl #2      <- rewritten
+     691f65c  br   x18                       <- rewritten: target in x16
+     691f668  bti  j ...  691f670 bti j
+     691f684  cmp  w16, #0x7c                <- w16 read after the branch
+Rewriting the three jump-table sites alone crashed 4 of 4 runs. The BR plan
+(runtime/x18.c at 7492467) loaded the target into x16 and branched with
+`br x16`: correct for blr and ret, where the procedure call standard lets
+x16 die, wrong for a jump table inside a function. TurboFan's `cmp w16`
+then compared an address, took the wrong path, and a graph CHECK fired
+later (CFGBuilder::ConnectBlocks in stage 24).
+
+The fix (cc54e05, runtime/x18.c plan_br, runtime/signal.c):
+  stp x16,x17,[sp,#-16]!; mrs x17,tpidrro_el0; and x17,x17,#~7;
+  ldr x16,[x17,#slot]; adr x17,D; stp x17,x16,[sp,#-16]!; add x17,sp,#16;
+  ldp x16,x17,[x17]; add sp,sp,#32;
+  A mrs x18,tpidrro_el0; B and x18,x18,#~7; C ldr x18,[x18,#slot]; D br x18
+No general register changes. The last four words use the hardware x18.
+Where the kernel zeroes it (every sdk27 process, every fork child of a keep
+process) an exception between A and D leaves 0: C then faults on a page-zero
+address and the runtime restarts the trampoline from its first word (x16, x17
+and sp are the guest's again, so this is idempotent), or D branches to 0 and
+the runtime resumes at the target the trampoline marked at sp-32 (checked:
+the mark names a real D and equals the virtual x18; cleared once used). A
+guest signal arriving on A..D restarts the trampoline before the guest frame
+covers the mark. Both recoveries are checked only for a pc in a trampoline
+pool (or 0) and a hardware x18 of 0, so W^X flips pay nothing more.
+Residual (HYPOTHESIS, not observed): a guest's own jump to address 0, in the
+same frame right after a br x18 dispatch, with the virtual x18 unchanged,
+would be taken for the second case.
+
+After the fix (5 runs each): sdk27 small 5/5, heavy 5/5; keep 5/5, 5/5;
+keep + LXRT_NO_X18=1 5/5, 5/5. LXRT_X18_STATS=1 on the sdk27 build (new): 5-12
+restarts after a fault per 48M-dispatch run of X18_JUMP_TABLE, 0-1 branches
+to 0 recovered.
+
+New tests (tests/elf/run.sh)
+----------------------------
+X18_JUMP_TABLE (tests/elf/x18_jumptable.c): 16 threads x 3,000,000 `br x18`
+  dispatches with x16/x17 live and checked at the target, then the two
+  recoveries forced from generated code (x18 zeroed, jump to the
+  trampoline's B, then to its D).
+    lxrun at 7492467 (keep):  every dispatch wrong ("3000015 x16/x17
+                              mismatches" per thread), FAIL
+    sdk27, cc54e05:           ok, "8 restarts after a fault, 1 branches to 0
+                              recovered"
+    keep, cc54e05:            ok, "1 restarts after a fault, 1 branches to 0
+                              recovered" (only the forced ones)
+X18_JIT (tests/elf/x18_jit_signal.c): generated code (never rewritten) holds
+  x18 through 400,000 checks while a 1 ms timer runs a guest handler; then
+  the same in a fork child.
+    sdk27:                    parent lost after 3024 checks, fork child lost
+                              (xfail: the kernel zeroes x18 for this build)
+    keep at 7492467:          parent lost after 6353 checks, at the 1st
+                              signal (the virtual x18 written back)
+    keep, cc54e05:            parent kept through 117-122 signal handlers,
+                              fork child lost (the kernel)
+build/x18_check --self-test: the new plan's words and lxrt_x18_br_restart
+  for a pc on every word of the trampoline: PASS.
+
+The matrix (MEASURED; scratch runner: every item in turn with build/lxrun
+replaced by rename; times of day in brackets)
+---------------------------------------------------------------------------
+item                         sdk27 (02:05-02:17)          keep (05:01-05:10)            keep + LXRT_NO_X18=1 (05:11-05:21)
+tests/elf/run.sh             82 passed, 0 failed,         83 passed, 0 failed (31 s)    77 passed, 6 failed: the checks
+                             1 xfail (X18_JIT) (31 s)                                   of the pass itself (site counts,
+                                                                                        poison trap, FDE filter, forced
+                                                                                        recoveries); x18_test, x18_forms,
+                                                                                        X18_THREAD_ISOLATION pass
+tests/elf/run_i386.sh        18 passed, 0 failed (45 s)   18 passed, 0 failed (44 s)    18 passed, 0 failed (44 s)
+make test-arm64              4 passed, 0 failed           4 passed, 0 failed            3 passed, 1 failed (libcef x18
+                                                                                        coverage: 0 found, pass off)
+tests/elf/run_vk_device.sh   2 passed (x86_64, i386)      2 passed                      2 passed
+tests/win/run.sh             11 passed, 0 failed          10 passed, 1 failed; the      11 passed, 0 failed
+                                                          failure was the safeguard
+                                                          (below); `tick` again: 2 of 2
+  d3d11 / d3d12 fps          158.7 / 159.3                156.6 / 156.9                 157.8 / 158.3
+  d3d9 / d3d9_32 fps         158.3 / 159.5                156.1 / 160.3                 159.5 / 160.3
+  d3d11_32 / d3d12_32 fps    160.2 / 160.9                160.3 / 150.6                 160.3 / 161.7
+  tick (Sleep(1000), ms)     QPC 1002, GetTickCount 995   QPC 1002, GetTickCount 992    QPC 1000, GetTickCount 998
+  tick_32                    QPC 1000, GetTickCount 990   QPC 1002, GetTickCount 991    QPC 1000, GetTickCount 988
+  tone, tone_32, regwin      ok                           ok                            ok
+tests/android/run.sh         62 passed, 2 failed, 2 xfail 62 passed, 0 failed, 1 xfail  64 passed, 0 failed, 2 xfail
+                             (idmap2d, SurfaceFlinger     (boot skipped: another
+                             boot animation); again with  agent's android-boot was
+                             boot skipped (05:2x): 62     running); again with the
+                             passed, 0 failed, 1 xfail    boot: 64 passed, 0 failed,
+                                                          2 xfail
+  dalvikvm64 JIT Loop        83.6 / 76.7 ms per round     167.4 (loaded Mac) /          77.9 ms
+                                                          76.6 ms
+  SurfaceFlinger flips/s     (failed) / 47                56 / 56                       -
+  zygote64 preload           12,100 classes in 1082 ms    12,100 in 1099 ms             12,100 in 2272 ms
+native arm64 Steam client,   BrowserReady +11 s,          BrowserReady +8 s,            BrowserReady +4 s, then 4
+scripts/run-steam-arm64.sh   "Sign in to Steam" 700x440   the window at 15 s (36 of     webhelper restarts ("GPU process
+--for 120, xwininfo on :2    at 15 s (36 of 41 samples    41), 0 fault reports, 0       isn't usable. Goodbye." x4), no
+every 3 s                    to the stop), 0 runtime      FATAL, 0 processes left       window in 41 samples, 1 fault
+                             fault reports, 0 FATAL in                                  report (SIGBUS in the shared
+                             cef_log this session, 0                                    cache, x18 0x6474e552)
+                             processes left
+Heroic phase_b, --no-opt     2 of 2 (window 4.7, 7.2 s)   2 of 2 (5.2, 4.7 s)           0 of 2: the browser exits at
+                                                                                        once (SIGTRAP), "GPU process
+                                                                                        isn't usable. Goodbye."
+Heroic phase_b, no V8 flags  2 of 2 (10.7, 4.7 s), 0      2 of 2 (4.4, 5.5 s)           0 of 2 (SIGTRAP / SIGABRT, same
+                             runtime faults in its logs                                 message)
+tests/heroic/turbofan.sh 5   10 of 10                     10 of 10                      10 of 10
+The sdk27 Android failures are the environment: the same build passed them
+in its second run (62/0), and the display test's SurfaceFlinger ran while
+another agent drove its own Android display. The keep run's `tick` failure:
+the safeguard stopped every guest of the Mac at 05:02:47 ("KILL: 82 lxrun
+processes > 80", safeguard.last; most were the other agents'), killing the
+probe's wine; `tests/win/run.sh tick tick` right after: 2 passed (QPC 1002;
+GetTickCount 992 and 1004). The keep dalvikvm64 167.4 ms came with the
+other agents busy; the next run of the same build: 76.6 ms.
+Frame rates of the Windows probes are within 1-6 % of each other across the
+three columns (150.6-161.7 fps); the three runs were not interleaved, so
+the difference between builds is not separable from the load of the moment.
+
+With the default build of 292236a (identical binary): tests/elf/run.sh 83
+passed, 0 failed ("X18_JIT: generated code keeps x18 through 100 signal
+handlers ... a fork child loses it"); tests/heroic/phase_b.py (no V8 flags,
+the launcher entry's command) 3 of 3 cycles (window 5.0, 4.5, 4.6 s;
+Settings route; all processes gone 0.4-0.8 s after SIGTERM, status 0) and
+--close quit 1 of 1 (window 4.2 s, gone 0.5 s after Heroic's Quit); make
+test-launcher-core: passes (application core, app entry, run_app_dispatch
+39/0 with the Heroic entry's new command, session 32/0, safeguard 10/0,
+guest_env 26/0, mkarmroot 25/0, run_steam_arm64 10/0, fex_proton_tool 35/0).
+
+Build and CI (292236a)
+----------------------
+- LXRT_KEEP_X18 ?= 1. The link adds -mmacosx-version-min=12.0
+  -Wno-unguarded-availability-new -Wl,-platform_version,macos,12.0,12.3; it
+  records the version only, no 12.3 SDK is needed (the same flag built the
+  SDK-12.3 probe on the macos-15 runner in stage 20, MEASURED there).
+- If that link fails, the rule links against the current SDK and prints
+  "lxrun: linking as SDK 12.3 (LXRT_KEEP_X18=1) failed; linking against the
+  current SDK instead. ..." (MEASURED with a bogus linker flag passed in:
+  "ld: unknown options", then the message, then "sdk 27.0"). Every build
+  prints "lxrun: LC_BUILD_VERSION sdk 12.3: the kernel keeps x18 for JIT
+  code" (or "... zeroes ...").
+- build/.lxrun-flavor holds LXRT_KEEP_X18=<n> and is rewritten only when it
+  changes, so `make lxrt LXRT_KEEP_X18=0` and back rebuild lxrun (MEASURED:
+  sdk 27.0, then sdk 12.3; an unchanged make rebuilds nothing). A first
+  version with one stamp file per value was not seen as newer by macOS's
+  GNU make 3.81 ("Prerequisite ... is newer than target" then "No need to
+  remake target"): not kept.
+- .github/workflows/macos.yml: a step after the build prints lxrun's
+  recorded SDK and raises a warning annotation when it is 13 or later.
+  scripts/make-release.sh refuses a Makefile that no longer defaults to
+  LXRT_KEEP_X18=1 (the package ships the source; the user's Mac builds lxrun
+  with scripts/setup.sh). The CI run itself was not observed (no push).
+
+Not done / open
+---------------
+- Start-up detection of x18 preservation and skipping the pass: not done
+  (result 1). A pass per fork child would have to rewrite every loaded image
+  after each fork (libcef 76,048 sites, Heroic 78,584), making most text
+  pages private per renderer: not attempted.
+- JIT code in a fork child (a JVM started by fork without exec, a forked
+  llvmpipe user) still loses x18 on both builds.
+- Whether Steam's CEF 126 was affected by the same br x18 bug: its libcef
+  has br x18 sites rewritten (x18 76,048 sites); not measured separately.
+- The residual case of the branch-to-0 recovery (above): HYPOTHESIS, not
+  observed.
+- The x86 Steam client (scripts/run-steam.sh) was not started (rules of this
+  task); its path shares FEX, vk_device and the Windows probes above.

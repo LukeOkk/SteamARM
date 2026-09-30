@@ -9,6 +9,11 @@ Amazon Games cannot work yet. The launcher installs it as **Heroic Games
 Launcher (ARM64, experimental)**; the x64 build under FEX is no longer
 installed.
 
+**Stage 28 (2026-09-30).** V8's TurboFan runs: its crash was the runtime's
+`br x18` trampoline clobbering a jump table's live x16, now fixed, and the
+entry no longer passes `--js-flags=--no-opt` (MEASURED,
+`benchmarks/stage28-keep-x18.txt`).
+
 Labels: MEASURED, VERIFIED IN SOURCE, UPSTREAM DOCUMENTED, HYPOTHESIS,
 UNKNOWN.
 
@@ -83,7 +88,7 @@ The launcher entry (`HeroicARM64` in `launcher/ApplicationCore.swift`):
 ```
 root     /tmp/lxrt-armroot                       (aarch64, no translator)
 command  /opt/apps/heroic/Heroic-2.22.3-linux-arm64/heroic
-         --no-sandbox --disable-gpu --js-flags=--no-opt
+         --no-sandbox --disable-gpu
 env      HOME_IN_GUEST=/tmp/heroichome  LXRT_X18_ALL_TEXT=/opt/apps/heroic/
 ```
 
@@ -92,18 +97,28 @@ env      HOME_IN_GUEST=/tmp/heroichome  LXRT_X18_ALL_TEXT=/opt/apps/heroic/
   indirect GLX) and exited twice per start before falling back to software;
   with the switch the window came at 4.0-4.8 s instead of 6.9-7.2 s
   (MEASURED).
-- `--js-flags=--no-opt`: **V8's TurboFan tier is off.** Under lxrun it
-  crashes: a null node input in `GraphReducer::ReduceNode`, and other graph
-  checks (`CFGBuilder::ConnectBlocks`, `EscapeAnalysisReducer`), with the
-  same binary run as plain Node on a small script, single-threaded too
-  (MEASURED). Cause: UNKNOWN (§6 of the record lists what was excluded).
-  Ignition, Sparkplug and Maglev stay on.
+- No V8 flags since stage 28. Up to then the entry passed
+  `--js-flags=--no-opt` (TurboFan off): under lxrun TurboFan crashed on a
+  null node input in `GraphReducer::ReduceNode` and other graph checks
+  (`CFGBuilder::ConnectBlocks`, `EscapeAnalysisReducer`), with the same
+  binary run as plain Node too (stage 24, cause unknown then). Stage 28 found
+  the cause by bisecting the rewritten x18 sites with the SDK-12.3 lxrun,
+  which keeps the unrewritten ones correct: TurboFan dispatches a jump table
+  with `adr x18; add x18, x18, x0, lsl #2; br x18` while w16 is live, and
+  the `br x18` trampoline carried the target in x16. The trampoline now
+  keeps every general register (`runtime/x18.c`, `plan_br`). MEASURED with
+  both lxrun builds: the Node reproducer (`tests/heroic/turbofan.sh`) 10 of
+  10 (0 of 3 before), `tests/heroic/phase_b.py` without the flag 2 of 2, and
+  3 of 3 plus a Quit cycle with the default build. An entry installed before
+  stage 28 keeps the flag until Heroic is installed again (the launcher
+  writes the command at install time); it only turns TurboFan off.
 
 From a shell, without the launcher:
 
 ```sh
 scripts/install-heroic-arm64.sh                   # into $STEAMARM_STATE/armroot/opt/apps/heroic
 tests/heroic/phase_b.py --cycles 2                # start, window, Settings, close, again
+tests/heroic/turbofan.sh 5                        # V8's TurboFan, the binary as Node
 ```
 
 ## Measured (stage 24)
@@ -119,6 +134,12 @@ tests/heroic/phase_b.py --cycles 2                # start, window, Settings, clo
 | helpers | legendary 0.21.1, gogdl 1.3.0, comet 0.2.0, vulkan-helper (Vulkan 1.4 through the shim) run; nile does not |
 | the launcher's session path (`session.py run`/`stop`) | window at 3.9-4.2 s; **Detener** ends it with SIGKILL after the grace period (see below), 0 processes left |
 
+Stage 28, without `--no-opt` (TurboFan on), `tests/heroic/phase_b.py`:
+window at 4.2-10.7 s over 8 cycles on both lxrun builds (4.2-5.0 s with the
+default build and a quiet Mac), Settings route, every process gone
+0.4-0.8 s after SIGTERM with status 0, and Heroic's own Quit 0.5 s
+(MEASURED, `benchmarks/stage28-keep-x18.txt`).
+
 ## Limits and open items
 
 - **Store sign-in, libraries, downloads, games: not verified.** Games are
@@ -128,8 +149,9 @@ tests/heroic/phase_b.py --cycles 2                # start, window, Settings, clo
   binary linked at `0x401d5c`, inside Darwin's `__PAGEZERO`; lxrun refuses it
   (MEASURED). Needs a PIE build upstream, or nile run from its Python source
   with the root's python3 (not tried).
-- **TurboFan off**, above. The reproducer (the binary as Node) is in the
-  record; whether Steam's CEF hits the same is UNKNOWN.
+- TurboFan: on since stage 28 (above). Whether Steam's CEF 126 had hit the
+  same `br x18` bug was not measured; its libcef's `br x18` sites get the
+  new trampoline too.
 - **Detener is not graceful.** `session.py stop` signals the whole process
   group at once; Heroic's browser process then does not exit (MEASURED:
   still alive 15 s after), and the stop's SIGKILL ends it. SIGTERM to the
@@ -151,8 +173,8 @@ tests/heroic/phase_b.py --cycles 2                # start, window, Settings, clo
 2. Ask upstream to publish the linux arm64 build its CI already makes (a
    release asset instead of a 14-day artifact); the installer then takes it
    directly and `scripts/heroic-asar.py` goes away.
-3. Find TurboFan's crash under lxrun (the Node reproducer), then drop
-   `--no-opt`.
+3. Done (stage 28): TurboFan's crash found in the runtime and fixed;
+   `--no-opt` dropped.
 4. nile: a PIE build upstream, or its Python source in the root.
 5. A program-first stop in `scripts/session.py`, for every Chromium-based
    app.
