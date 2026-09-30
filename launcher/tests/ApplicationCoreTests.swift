@@ -413,8 +413,12 @@ struct ApplicationCoreTests {
         let codename = try JSONDecoder().decode(AndroidPackageInfo.self, from: Data(#"{"package": "a.b", "minSdk": "Baklava"}"#.utf8))
         check(codename.minSdk == "Baklava", "a preview codename as minSdk")
         let bundle = try JSONDecoder().decode(AndroidPackageInfo.self, from: Data(
-            #"{"format": "xapk", "supported": false, "reason": "split installs are not supported yet"}"#.utf8))
-        check(bundle.installBlocker?.contains("XAPK") == true, "an XAPK is refused with the reason")
+            #"{"format": "xapk", "supported": false, "reason": "the bundle has no base APK"}"#.utf8))
+        check(bundle.installBlocker?.contains("Falta el APK base") == true, "an invalid XAPK explains its refusal")
+        let installableBundle = try JSONDecoder().decode(AndroidPackageInfo.self, from: Data(
+            #"{"format":"xapk","supported":true,"package":"org.example.app","signing":{"certificates":["abc"]},"splits":{"isSplit":false,"needsSplits":true},"bundle":{"format":"xapk","base":"base.apk","splits":["config.x86_64.apk"],"chosen":["base.apk","config.x86_64.apk"],"chosenAbi":"x86_64","obb":[]}}"#.utf8))
+        check(installableBundle.installBlocker == nil && installableBundle.bundle?.selectedSplitCount == 1
+              && installableBundle.bundle?.chosenAbi == "x86_64", "an XAPK shows its selected split")
         var unsigned = apk; unsigned.signing = nil
         check(unsigned.installBlocker?.contains("firmado") == true, "an unsigned APK is refused")
         var split = apk; split.splits = .init(split: "config.arm64_v8a", isSplit: true, needsSplits: false)

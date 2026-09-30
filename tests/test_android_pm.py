@@ -20,6 +20,9 @@ import apk_fixtures as fx  # noqa: E402
 spec = importlib.util.spec_from_file_location("android_pm", REPO / "scripts/android-pm.py")
 pm = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(pm)
+session_spec = importlib.util.spec_from_file_location("android_session", REPO / "scripts/android-session.py")
+session = importlib.util.module_from_spec(session_spec)
+session_spec.loader.exec_module(session)
 
 E, ref = fx.E, fx.ref
 CERT_A, CERT_B = fx.fake_cert("SteamARM test key A"), fx.fake_cert("SteamARM test key B")
@@ -241,19 +244,73 @@ class PMTests(unittest.TestCase):
         self.refused(2, "bad-package", pm.uninstall, self.layout, "../evil")
         self.refused(2, "bad-package", pm.install, self.layout, self.apk(package="bad/../name"))
 
-    def test_unsigned_split_and_bundles_are_refused(self):
+    def test_unsigned_and_lone_split_are_refused(self):
         self.refused(3, "unsigned", pm.install, self.layout, self.apk(signer=None))
         self.refused(3, "split-apk", pm.install, self.layout, self.apk(extra_manifest=[("split", "config.xxhdpi")]))
         self.refused(3, "needs-splits", pm.install, self.layout,
                      self.apk(meta=[("com.android.vending.splits.required", True)]))
-        base = Path(self.apk()).read_bytes()
-        xapk = fx.zip_of(str(self.dir / "g.xapk"), {"manifest.json": b"{}", "org.example.game.apk": base})
-        e = self.refused(3, "bundle", pm.install, self.layout, xapk)
-        self.assertEqual(e.extra["format"], "xapk")
         junk = self.dir / "junk.apk"
         junk.write_bytes(b"junk")
         self.refused(2, "not-apk", pm.install, self.layout, str(junk))
         self.assertFalse(self.layout.packages.exists() and any(self.layout.packages.iterdir()))
+
+    def test_bundle_install_update_and_uninstall(self):
+        files = fx.split_set(self.dir, CERT_A, package="org.example.game", code=10)
+        obb = "Android/obb/org.example.game/main.10.org.example.game.obb"
+        xapk = fx.zip_of(str(self.dir / "game.xapk"), {"manifest.json": b"{}", **files, obb: b"game-data"})
+        with mock.patch.dict(pm.os.environ, {"LANG": "es_UY.UTF-8"}):
+            out = pm.install(self.layout, xapk)
+        self.assertEqual((out["package"], out["abiVerdict"]), ("org.example.game", "x86-only"))
+        pdir = self.layout.package_dir("org.example.game")
+        meta = json.loads((pdir / "meta.json").read_text())
+        self.assertEqual(meta["splits"], ["split_config.x86_64.apk", "split_config.xxhdpi.apk", "split_config.es.apk"])
+        self.assertEqual(meta["obb"], ["obb/main.10.org.example.game.obb"])
+        self.assertEqual((pdir / "base.apk").read_bytes(), files["base.apk"])
+        self.assertEqual((pdir / meta["splits"][0]).read_bytes(), files["config.x86_64.apk"])
+        self.assertEqual((pdir / meta["obb"][0]).read_bytes(), b"game-data")
+        (self.layout.data_dir("org.example.game") / "save").write_text("kept")
+        newer = fx.split_set(self.dir, CERT_A, package="org.example.game", code=11)
+        apks = fx.zip_of(str(self.dir / "game.apks"), {"toc.pb": b"\0", **{"splits/" + k: v for k, v in newer.items()}})
+        self.assertEqual(pm.install(self.layout, apks)["action"], "updated")
+        self.assertEqual((self.layout.data_dir("org.example.game") / "save").read_text(), "kept")
+        meta = json.loads((pdir / "meta.json").read_text())
+        self.assertEqual((meta["versionCode"], meta["obb"]), (11, []))
+        self.refused(4, "downgrade", pm.install, self.layout, xapk)
+        self.assertEqual(pm.install(self.layout, xapk, allow_downgrade=True)["action"], "updated")
+        pm.uninstall(self.layout, "org.example.game")
+        self.assertFalse(pdir.exists())
+        self.assertFalse(self.layout.data_dir("org.example.game").exists())
+
+    def test_session_falls_back_to_explicit_split_install_and_copies_obb(self):
+        files = fx.split_set(self.dir, CERT_A, package="org.example.game", code=10)
+        source = fx.zip_of(str(self.dir / "game.xapk"), {"manifest.json": b"{}", **files,
+            "Android/obb/org.example.game/main.10.org.example.game.obb": b"game-data"})
+        pm.install(self.layout, source)
+        root = self.dir / "session-root"
+        (root / "data/local/tmp").mkdir(parents=True)
+        commands = []
+
+        def guest(_session, argv, timeout=120, ids="root"):
+            commands.append(argv)
+            command = argv[1]
+            if command == "install":
+                return 1, "multi-path install failed"
+            if command == "install-create":
+                return 0, "Success: created install session [23]"
+            if command == "install-write":
+                return 0, "Success: streamed bytes"
+            return 0, "Success"
+
+        with mock.patch.object(session, "ADIR", str(self.layout.root)), \
+             mock.patch.object(session, "installed_version", return_value=None), \
+             mock.patch.object(session, "guest", side_effect=guest), \
+             mock.patch.object(session, "log"):
+            self.assertTrue(session.install({"root": str(root)}, "org.example.game"))
+        self.assertEqual([c[1] for c in commands], ["install", "install-create"]
+                         + ["install-write"] * 4 + ["install-commit"])
+        self.assertEqual((root / "data/media/0/Android/obb/org.example.game/main.10.org.example.game.obb").read_bytes(),
+                         b"game-data")
+        self.assertEqual(list((root / "data/local/tmp").glob("*.apk")), [])
 
     # -- icons
 

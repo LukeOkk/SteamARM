@@ -1149,6 +1149,11 @@ system_server stops at the display in these boots.
   `armeabi-v7a`-only apps cannot run on Apple silicon (no AArch32; 1,684
   32-bit arm files in the arm64 image are unusable for the same reason) and
   have no translator in the x86 image either.
+- The local package manager selects matching split APKs from XAPK, APKS,
+  APKM and plain APK sets, stores OBB files, and the session stages those
+  APKs in one `pm` install session before launch. Selection and storage are
+  MEASURED by synthetic unit tests. Installing and launching such a set in
+  a real Android session, including an app reading its OBB, are UNTESTED.
 - Google Play Store and Google Play services are proprietary. SteamARM will
   never commit, bundle or download them; the owner supplies a GApps package
   and `scripts/android-gapps.py` layers it onto a clone of the root

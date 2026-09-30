@@ -431,3 +431,21 @@ def zip_of(path, files):
         for name, data in files.items():
             z.writestr(name, data)
     return path
+
+
+def split_set(directory, cert, package="org.example.app", code=42, required=True):
+    """Signed base and config APK bytes for an x86_64 device fixture."""
+    from pathlib import Path
+    directory = Path(directory)
+    out = {}
+    for split in (None, "config.x86_64", "config.arm64_v8a", "config.xxhdpi", "config.es"):
+        name = "base.apk" if split is None else split + ".apk"
+        attrs = [] if split is None else [("split", split)]
+        meta = [("com.android.vending.splits.required", True)] if split is None and required else []
+        files = {"lib/x86_64/libtest.so": elf()} if split == "config.x86_64" else (
+            {"lib/arm64-v8a/libtest.so": elf()} if split == "config.arm64_v8a" else {})
+        path = directory / name
+        apk(str(path), manifest(package=package, version_code=code, extra_manifest=attrs, meta=meta),
+            files=files, v1=[cert])
+        out[name] = path.read_bytes()
+    return out

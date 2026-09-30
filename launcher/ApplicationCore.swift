@@ -1072,6 +1072,17 @@ struct AndroidPackageInfo: Decodable, Equatable {
         var needsSplits: Bool?
     }
 
+    struct BundleInfo: Decodable, Equatable {
+        var format: String
+        var base: String
+        var splits: [String]
+        var chosen: [String]
+        var chosenAbi: String?
+        var obb: [String]
+
+        var selectedSplitCount: Int { chosen.filter { $0 != base }.count }
+    }
+
     var supported: Bool?
     var format: String?
     var reason: String?
@@ -1094,10 +1105,11 @@ struct AndroidPackageInfo: Decodable, Equatable {
     var icon: Icon?
     var signing: Signing?
     var splits: Splits?
+    var bundle: BundleInfo?
 
     private enum CodingKeys: String, CodingKey {
         case supported, format, reason, error, fileName, size, sha256, package, versionCode, versionName, minSdk,
-             targetSdk, label, launcherActivity, permissions, abis, glEsVersion, isGame, icon, signing, splits
+             targetSdk, label, launcherActivity, permissions, abis, glEsVersion, isGame, icon, signing, splits, bundle
     }
 
     init(from decoder: Decoder) throws {
@@ -1127,6 +1139,7 @@ struct AndroidPackageInfo: Decodable, Equatable {
         icon = try? c.decodeIfPresent(Icon.self, forKey: .icon)
         signing = try? c.decodeIfPresent(Signing.self, forKey: .signing)
         splits = try? c.decodeIfPresent(Splits.self, forKey: .splits)
+        bundle = try? c.decodeIfPresent(BundleInfo.self, forKey: .bundle)
     }
 
     var abiVerdict: AndroidABI { AndroidABI.verdict(abis: abis ?? []) }
@@ -1152,7 +1165,7 @@ struct AndroidPackageInfo: Decodable, Equatable {
     /// Why android-pm.py would refuse this file, in Spanish; nil when it can be installed.
     var installBlocker: String? {
         if supported == false {
-            if let format { return AndroidApps.bundleMessage(format: format) }
+            if let format { return AndroidApps.bundleMessage(format: format, reason: reason) }
             return "No es un APK que SteamARM pueda leer: \(error ?? "formato desconocido")."
         }
         guard let package, AndroidApps.isValidPackage(package) else {
@@ -1162,9 +1175,9 @@ struct AndroidPackageInfo: Decodable, Equatable {
             return "Es un APK dividido (\(splits?.split ?? "split")), no el APK base: "
                 + "todavía no se admiten las instalaciones divididas."
         }
-        if splits?.needsSplits == true {
+        if splits?.needsSplits == true && bundle == nil {
             return "Este APK necesita APK divididos que no están en el archivo (una instalación de Play Store): "
-                + "todavía no se admiten."
+                + "añade el paquete completo."
         }
         if (signing?.certificates ?? []).isEmpty {
             return "El APK no está firmado: Android no instala APK sin firma."
@@ -1374,7 +1387,7 @@ enum AndroidApps {
                            info: appInfo)
     }
 
-    static func bundleMessage(format: String) -> String {
+    static func bundleMessage(format: String, reason: String? = nil) -> String {
         let what: String
         switch format {
         case "xapk": what = "un XAPK"
@@ -1383,8 +1396,20 @@ enum AndroidApps {
         case "aab": what = "un Android App Bundle (.aab): no se instala tal cual, antes hay que generar los APK con bundletool"
         default: what = "un paquete con varios APK"
         }
-        return "El archivo es \(what). Todavía no se admiten las instalaciones divididas ni los datos OBB: "
-            + "usa el APK completo (universal) de la app."
+        if format == "aab" {
+            return "El archivo es \(what). Genera los APK con bundletool y una clave de firma."
+        }
+        let detail: String
+        switch reason ?? "" {
+        case let r where r.contains("no base"): detail = "Falta el APK base."
+        case let r where r.contains("mixed packages"): detail = "Los APK son de paquetes distintos."
+        case let r where r.contains("mixed versionCodes"): detail = "Los APK tienen versiones distintas."
+        case let r where r.contains("signing certificates"): detail = "Los APK tienen certificados de firma distintos."
+        case let r where r.contains("encrypted"): detail = "El APKM está cifrado y requiere una clave de descifrado."
+        case let r where r.contains("device ABIs"): detail = "No hay un APK para la arquitectura de esta sesión."
+        default: detail = "No se puede instalar este conjunto de APK."
+        }
+        return "El archivo es \(what). \(detail)"
     }
 
     /// android-pm.py's error codes in Spanish, with its detail.

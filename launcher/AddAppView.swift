@@ -230,6 +230,12 @@ struct AddAppView: View {
                         .foregroundStyle(info.abiVerdict == .arm64 || info.abiVerdict == .none ? Color.secondary : Color.orange)
                         .multilineTextAlignment(.trailing)
                 }
+                if let bundle = info.bundle {
+                    LabeledContent("APK divididos", value: "\(bundle.selectedSplitCount) se instalarán")
+                    if let abi = bundle.chosenAbi {
+                        LabeledContent("Arquitectura elegida", value: abi)
+                    }
+                }
                 LabeledContent("Actividad principal", value: info.launcherActivity ?? "ninguna: no tiene icono de inicio")
                 LabeledContent("Firma", value: info.signingSchemes.map { "\($0) (no se verifica la firma criptográfica)" } ?? "sin firma")
                 LabeledContent("Tamaño", value: ByteCountFormatter.string(fromByteCount: Int64(info.size ?? 0), countStyle: .file))
@@ -363,7 +369,7 @@ struct AddAppView: View {
         let panel = NSOpenPanel()
         panel.canChooseDirectories = false
         panel.allowsMultipleSelection = false
-        // Bundles too: they are recognised and refused with the reason.
+        // Accept installable APK sets; AAB still needs bundletool and a signing key.
         panel.allowedContentTypes = ["apk", "xapk", "apks", "apkm", "aab"].compactMap { UTType(filenameExtension: $0) }
         panel.message = "Elige un APK de Android"
         guard panel.runModal() == .OK, let url = panel.url else { return }
@@ -402,8 +408,7 @@ struct AddAppView: View {
         job = Task { @MainActor in
             let (entry, problem) = await model.installAPK(url, info: info)
             if let entry {
-                status = "\(entry.name) \(update ? "actualizada" : "instalada"). Está en la biblioteca (filtro Android), "
-                    + "pero todavía no se puede abrir: el entorno Android de SteamARM aún no ejecuta apps."
+                status = "\(entry.name) \(update ? "actualizada" : "instalada"). Está en la biblioteca (filtro Android)."
                 removeAPKIcon()
                 step = .done
             } else {

@@ -22,11 +22,11 @@ UPSTREAM DOCUMENTED, HYPOTHESIS, UNKNOWN.
 
 | piece | where | state | evidence |
 |---|---|---|---|
-| APK reader: manifest, label, icon, ABIs, splits, signing, bundles | `scripts/apk-inspect.py` (Python 3.9+, standard library only) | done | MEASURED: 10 real F-Droid APKs agree with F-Droid's `index-v2.json` on the 9 compared fields; 42 unit tests on synthetic APKs; 3,000 mutated APKs raised only its own error type |
-| Package manager | `scripts/android-pm.py` | done | MEASURED on real APKs in a scratch state: install, update with data kept, downgrade refused, uninstall with and without data; 18 unit tests |
+| APK reader: manifest, label, icon, ABIs, splits, signing, bundles | `scripts/apk-inspect.py` (Python 3.9+, standard library only) | bundle selection added | MEASURED: 10 real F-Droid APKs agree with F-Droid's `index-v2.json` on the 9 compared fields; synthetic unit tests cover XAPK, APKS, APKM, a plain APK bag and refusal cases. Bundle selection on real files is UNTESTED. |
+| Package manager | `scripts/android-pm.py` | split and OBB staging added | MEASURED on real single APKs in a scratch state: install, update with data kept, downgrade refused, uninstall with and without data. Synthetic unit tests cover split and OBB storage; real bundle install is UNTESTED. |
 | Library card, filter, context menu, disabled launch | `launcher/AddAppView.swift`, `HomeView.swift`, `LauncherModel.swift`, `ApplicationCore.swift` (`AndroidApps`, `AndroidABI`) | built; the model path was driven with real APKs; the sheet itself was not clicked | MEASURED (a harness that calls `LauncherModel`, stage 25 section E); core tests |
 | `run-app.sh` runs Android entries in the session, or refuses them with the reason | `scripts/run-app.sh` | done | `tests/launcher/run_app_dispatch.sh` (12 Android checks) |
-| Running an app | `scripts/android-session.py` (x86_64 Android under FEX) | dex-only and x86_64 apps | MEASURED: an F-Droid APK installed (`pm install` Success) and started (`am start` ok), its window focused and in the macOS window (`benchmarks/stage28-android-apk.txt`); `tests/android/run.sh` does it headless |
+| Running an app | `scripts/android-session.py` (x86_64 Android under FEX) | dex-only and x86_64 apps; split install path added | MEASURED: a single F-Droid APK installed (`pm install` Success) and started (`am start` ok), its window focused and in the macOS window (`benchmarks/stage28-android-apk.txt`); `tests/android/run.sh` does it headless. Multi-APK install and OBB copy in a real session are UNTESTED. |
 
 ## Reading an APK (`scripts/apk-inspect.py`)
 
@@ -37,8 +37,8 @@ scripts/apk-inspect.py --xml app.apk              # the decoded AndroidManifest.
 scripts/apk-inspect.py --fdroid-index index-v2.json app.apk
 ```
 
-It exits 0 for an APK it read, 2 for a file that is not an APK or cannot be
-read, and 3 for a bundle it recognises but does not support.
+It exits 0 for an APK or installable APK set, 2 for unreadable input, and 3
+for a recognised but un-installable bundle or AAB.
 
 ### The ZIP
 
@@ -155,13 +155,20 @@ serves 4 KiB-aligned images through its sub-page path
 - A base APK that needs splits sets `needsSplits`. That is
   `isSplitRequired`, `requiredSplitTypes`, or the Play meta-data
   `com.android.vending.splits.required`.
-- A ZIP without its own `AndroidManifest.xml` is recognised as one of
-  these, and refused with the reason (exit 3):
-  - XAPK (`manifest.json` + APKs);
-  - APKS (bundletool, `toc.pb`);
-  - APKM (`info.json`);
-  - AAB (`BundleConfig.pb`, `base/manifest/`);
-  - a plain bag of APKs.
+- XAPK (`manifest.json` + APKs, optionally `Android/obb/<package>/*.obb`),
+  APKS (bundletool `toc.pb` with `splits/*.apk` or `standalones/*.apk`),
+  APKM (`info.json`) and a plain bag of APKs are inspected member by member.
+  Every member must have one package, versionCode and signing certificate set.
+  Encrypted APKM is refused with the reason.
+- `bundle` in the JSON lists every member, base, all splits, chosen APKs,
+  chosen ABI and OBB files. Default device ABIs are `x86_64,x86`, density
+  320 dpi and language `$LANG` (English fallback). Selection includes the
+  base, feature splits, best matching ABI, nearest density, the chosen
+  language and English when present. `--abis`, `--density`, `--language`
+  override the defaults. Missing base, mixed identity or signer, and no
+  device ABI when native code is only in ABI splits return exit 3.
+- AAB (`BundleConfig.pb`, `base/manifest/`) remains refused (exit 3): it
+  needs bundletool to generate APKs and a signing key.
 
 ### Signing
 
@@ -203,6 +210,8 @@ The state lives under `$STEAMARM_STATE` (default `~/SteamARM-roots`) or
 
 ```
 android/packages/<package>/base.apk     a copy of the APK (checked by SHA-256 after the copy)
+android/packages/<package>/split_*.apk  selected split APKs from a bundle
+android/packages/<package>/obb/*.obb    OBB data from a bundle
 android/packages/<package>/meta.json    the apk-inspect report, installedAt, updatedAt, how it was installed
 android/packages/<package>/icon.png     the icon (a WebP is converted with sips; icon.webp if that fails)
 android/data/<package>/                 the app's data
@@ -224,9 +233,12 @@ android/kept/<package>.json             the signer of data kept by uninstall --k
 - **What it refuses, as Android does** (UPSTREAM DOCUMENTED, `PackageManager`
   install failure codes):
   - an unsigned APK (`INSTALL_PARSE_FAILED_NO_CERTIFICATES`; exit 3);
-  - a split APK, or a base that needs splits (`INSTALL_FAILED_MISSING_SPLIT`;
-    exit 3);
-  - a bundle (exit 3).
+  - a lone split APK, or a base that needs absent splits
+    (`INSTALL_FAILED_MISSING_SPLIT`; exit 3);
+  - a malformed or incompatible bundle (exit 3), and AAB (exit 3).
+- A bundle stages its selected base and splits in one package directory,
+  records their filenames and OBB filenames in `meta.json`, and uses the
+  same update, signer, downgrade and uninstall rules as a single APK.
 - **Update:** the same package with the same certificate, or a new key
   whose v3 lineage holds the old certificate (key rotation). A v3.1 rotated
   key counts as the same signer as its v3 key. The data directory is kept.
@@ -281,14 +293,15 @@ on the same cases.
 ## In the launcher
 
 - **Añadir app → Añadir APK (Android)** opens a file panel. It accepts
-  `.apk`; `.xapk`, `.apks`, `.apkm` and `.aab` are accepted only to be
-  refused with the reason. The review screen shows:
+  `.apk`, `.xapk`, `.apks` and `.apkm`. `.aab` is selected only to explain
+  why it needs bundletool and a signing key. The review screen shows:
   - the icon (extracted to a temporary file) and the label;
   - the package, the version and the SDK levels;
   - the ABI verdict in Spanish;
   - the launcher activity;
   - the signing schemes, marked as not cryptographically verified;
   - the size and the permissions;
+  - the number of selected split APKs and the chosen ABI split;
   - whether it will update an installed version (keeping its data);
   - anything that blocks the install.
 
@@ -342,9 +355,12 @@ on the same cases.
    wall), 32-bit x86 apps in the session, sound, camera, a GPU path
    (SwiftShader draws on the CPU). Clicks, keys and the network work since
    stage 29 (`benchmarks/stage29-android-input-network.txt`).
-2. **Split APKs, XAPK, APKS, APKM and OBB data.** The formats are
-   recognised and refused. Installing a base with its configuration splits
-   is the next piece a Play Store-delivered app needs.
+2. **Real-session bundle validation.** Synthetic unit tests MEASURE the
+   selection and local package storage of XAPK, APKS, APKM, plain APK bags
+   and OBB data. `scripts/android-session.py` stages chosen APKs into one
+   Android install session (with an explicit install session fallback) and
+   copies OBB data to `/data/media/0/Android/obb/<package>/`. A real Android
+   session install, launch and OBB read remain UNTESTED.
 3. **Signature verification.** It needs RSA, ECDSA and DSA over the signed
    data, and the chunked content digests. Today only the certificate an APK
    names is compared.
@@ -353,7 +369,8 @@ on the same cases.
    - runtime permission grants;
    - `/data/data/<package>` inside a runtime: today's data directory is
      where it would be bound;
-   - the OBB and media directories.
+   - general app media directories (bundle OBB files are staged, but their
+     real-session use is UNTESTED).
 5. **Google Play and Google Mobile Services.** These are policy, not code
    yet:
    - Google's proprietary components (GMS, the Play Store) are never

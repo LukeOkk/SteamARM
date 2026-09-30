@@ -10,8 +10,8 @@ blocks (docs/APK_SUPPORT.md). Pure Python 3.9+, standard library only.
   scripts/apk-inspect.py --fdroid-index index-v2.json app.apk
                                                      compare with F-Droid's index
 
-Exit status: 0 an APK was read; 2 not an APK or unreadable; 3 a bundle
-(XAPK, APKS, APKM, AAB) that is recognised but not supported yet.
+Exit status: 0 an APK or installable APK set was read; 2 unreadable; 3 an
+APK set that cannot be installed, or an AAB needing bundletool and a key.
 
 Nothing here verifies a signature cryptographically: the signing section says
 which schemes are present and which certificate each one names, not that the
@@ -19,6 +19,7 @@ signature over the APK is valid.
 """
 import argparse
 import hashlib
+import io
 import json
 import os
 import re
@@ -129,7 +130,7 @@ class APKError(Exception):
 
 
 class UnsupportedBundle(APKError):
-    """A recognised bundle format (XAPK, APKS, ...) that is not supported yet."""
+    """A recognised APK set whose members cannot be installed together."""
 
     def __init__(self, fmt, reason):
         super().__init__(reason)
@@ -933,18 +934,15 @@ def bundle_format(names, path):
     ext = os.path.splitext(path)[1].lower()
     if "base/manifest/AndroidManifest.xml" in names or "BundleConfig.pb" in names:
         return "aab", ("an Android App Bundle (.aab) is a publishing format: APKs have to be built "
-                       "from it with bundletool first")
+                       "from it with bundletool and signed with a signing key first")
     if "toc.pb" in names or ext == ".apks":
-        return "apks", ("an APKS set (bundletool build-apks) holds a base APK and split APKs; "
-                        "split installs are not supported yet")
+        return "apks", None
     if "manifest.json" in names and (apks or ext == ".xapk"):
-        return "xapk", ("an XAPK holds a base APK, split APKs and/or OBB data; "
-                        "split installs and OBB data are not supported yet")
+        return "xapk", None
     if "info.json" in names and (apks or ext == ".apkm"):
-        return "apkm", "an APKM (APKMirror bundle) holds split APKs; split installs are not supported yet"
+        return "apkm", None
     if apks:
-        return "apk-bundle", ("the archive holds %d APK files but no AndroidManifest.xml of its own; "
-                              "split installs are not supported yet" % len(apks))
+        return "apk-bundle", None
     return None, None
 
 
@@ -1126,11 +1124,11 @@ def elf_min_load_align(head):
 class APK:
     """One APK, read once."""
 
-    def __init__(self, path):
+    def __init__(self, path, data=None):
         self.path = path
         try:
-            self.size = os.path.getsize(path)
-            self.f = open(path, "rb")
+            self.size = len(data) if data is not None else os.path.getsize(path)
+            self.f = io.BytesIO(data) if data is not None else open(path, "rb")
         except OSError as e:
             raise APKError("cannot read %s: %s" % (path, e.strerror or e))
         try:
@@ -1429,13 +1427,141 @@ def sha256_file(path):
     return h.hexdigest()
 
 
-def inspect(path, with_sha256=True):
-    """The JSON-ready report of `path`. Raises APKError / UnsupportedBundle."""
-    with APK(path) as apk:
+def bundle_members(path, zf, names, fmt, device_abis, density, language):
+    """Read every member, then select one install session for this device."""
+    if fmt == "aab":
+        raise UnsupportedBundle(fmt, bundle_format(names, path)[1])
+    if fmt == "apkm":
         try:
-            r = apk.report()
-        except (struct.error, IndexError, ValueError, KeyError, TypeError, RecursionError) + ZIP_ERRORS as e:
-            raise APKError("unreadable APK: %s" % e)
+            info = json.loads(read_entry(zf, "info.json", 1 << 20))
+        except (ValueError, UnicodeError, KeyError) as e:
+            raise UnsupportedBundle(fmt, "unreadable info.json: %s" % e)
+        if any(info.get(k) for k in ("encrypted", "isEncrypted", "encryption", "encryptionInfo")):
+            raise UnsupportedBundle(fmt, "encrypted APKM cannot be read without its decryption key")
+    paths = sorted(n for n in names if n.lower().endswith(".apk") and not n.endswith("/"))
+    if not paths:
+        raise UnsupportedBundle(fmt, "the bundle contains no APK files")
+    if fmt == "apkm" and any(zf.getinfo(name).flag_bits & 1 for name in paths):
+        raise UnsupportedBundle(fmt, "encrypted APKM cannot be read without its decryption key")
+    members = []
+    for name in paths:
+        try:
+            data = read_entry(zf, name, 1 << 30)
+            with APK(name, data=data) as apk:
+                report = apk.report()
+        except APKError as e:
+            raise UnsupportedBundle(fmt, "%s: %s" % (name, e))
+        split = report["splits"]["split"]
+        members.append({"path": name, "package": report["package"], "versionCode": report["versionCode"],
+                        "split": split, "abis": report["abis"],
+                        "certificates": report["signing"]["certificates"], "report": report})
+    packages = {m["package"] for m in members}
+    versions = {m["versionCode"] for m in members}
+    signers = {tuple(m["certificates"]) for m in members}
+    if len(packages) != 1:
+        raise UnsupportedBundle(fmt, "APK members have mixed packages")
+    if len(versions) != 1:
+        raise UnsupportedBundle(fmt, "APK members have mixed versionCodes")
+    if len(signers) != 1:
+        raise UnsupportedBundle(fmt, "APK members have mismatched signing certificates")
+    if not next(iter(signers)):
+        raise UnsupportedBundle(fmt, "APK members have no readable signing certificate")
+    bases = [m for m in members if not m["split"]]
+    if not bases:
+        raise UnsupportedBundle(fmt, "the bundle has no base APK")
+    # APKS may contain several standalone alternatives beside its split set.
+    split_bases = [m for m in bases if "/standalones/" not in "/" + m["path"]]
+    if len(split_bases) > 1:
+        raise UnsupportedBundle(fmt, "the bundle has several base APKs and no unique base")
+    candidates = split_bases or bases
+    if split_bases:
+        base = next((m for m in candidates if os.path.basename(m["path"]).lower() in
+                     ("base.apk", "base-master.apk", "base.master.apk")), candidates[0])
+    else:
+        # bundletool's standalone APKs are complete alternative bases.
+        matching = [m for abi in device_abis for m in candidates if abi in m["abis"]]
+        universal = [m for m in candidates if not m["abis"]]
+        if not matching and not universal:
+            raise UnsupportedBundle(fmt, "no APK matches the device ABIs: %s" % ", ".join(device_abis))
+        base = (matching or universal)[0]
+    all_splits = [m for m in members if m["split"]]
+    splits = all_splits if split_bases else []
+    chosen = [base]
+    features = [m for m in splits if not m["split"].startswith("config.")]
+    chosen.extend(features)
+    configs = [m for m in splits if m["split"].startswith("config.")]
+    abi_configs, density_configs, language_configs = [], [], []
+    density_names = {"ldpi": 120, "mdpi": 160, "tvdpi": 213, "hdpi": 240,
+                     "xhdpi": 320, "xxhdpi": 480, "xxxhdpi": 640}
+    for m in configs:
+        value = m["split"][7:]
+        abi = value.replace("_", "-") if value.startswith(("arm64_", "armeabi_")) else value
+        if abi in KNOWN_ABIS:
+            abi_configs.append((abi, m))
+            m["config"] = {"type": "abi", "value": abi}
+        elif value in density_names or re.fullmatch(r"\d+dpi", value):
+            dpi = density_names.get(value, int(value[:-3]) if value[:-3].isdigit() else density)
+            density_configs.append((dpi, m))
+            m["config"] = {"type": "density", "value": value, "dpi": dpi}
+        else:
+            language_configs.append((value.lower().replace("_", "-"), m))
+            m["config"] = {"type": "language", "value": value.lower().replace("_", "-")}
+    chosen_abi = next(((abi, m) for wanted in device_abis for abi, m in abi_configs if abi == wanted), None)
+    if chosen_abi:
+        chosen.append(chosen_abi[1])
+    if density_configs:
+        chosen.append(min(density_configs, key=lambda item: (abs(item[0] - density), -item[0]))[1])
+    lang = language.split(".", 1)[0].split("@", 1)[0].lower().replace("_", "-") or "en"
+    if lang in ("c", "posix"):
+        lang = "en"
+    for code in dict.fromkeys((lang, lang.split("-", 1)[0], "en")):
+        chosen.extend(m for value, m in language_configs if value == code and m not in chosen)
+    # Native libraries that exist only in ABI splits must have a device match.
+    if abi_configs and not chosen_abi and not base["abis"]:
+        raise UnsupportedBundle(fmt, "no APK matches the device ABIs: %s" % ", ".join(device_abis))
+    if base["report"]["splits"]["needsSplits"] and len(chosen) == 1:
+        raise UnsupportedBundle(fmt, "the base APK needs splits but none match this device")
+    obb = sorted(n for n in names if re.fullmatch(r"Android/obb/[^/]+/[^/]+\.obb", n, re.I))
+    if any(n.split("/")[2] != base["package"] for n in obb):
+        raise UnsupportedBundle(fmt, "OBB package differs from the APK package")
+    result = dict(base["report"])
+    all_abis = sorted({abi for m in chosen for abi in m["abis"]})
+    if chosen_abi and chosen_abi[0] not in all_abis:
+        all_abis.append(chosen_abi[0])
+    result["abis"] = all_abis
+    result["abiVerdict"] = abi_verdict(all_abis)
+    result["format"] = fmt
+    result["fileName"] = os.path.basename(path)
+    result["size"] = os.path.getsize(path)
+    result["bundle"] = {
+        "format": fmt, "base": base["path"],
+        "members": [{**{k: m[k] for k in ("path", "package", "versionCode", "split", "abis", "certificates")},
+                     "config": m.get("config")}
+                    for m in members],
+        "splits": [m["path"] for m in all_splits], "chosen": [m["path"] for m in chosen],
+        "chosenAbi": chosen_abi[0] if chosen_abi else None, "obb": obb,
+    }
+    return result
+
+
+def inspect(path, with_sha256=True, device_abis=("x86_64", "x86"), density=320, language=None):
+    """The JSON-ready report of `path`. Raises APKError / UnsupportedBundle."""
+    try:
+        with zipfile.ZipFile(path) as zf:
+            names = zf.namelist()
+            fmt, reason = bundle_format(names, path) if "AndroidManifest.xml" not in names else (None, None)
+            if fmt:
+                if reason:
+                    raise UnsupportedBundle(fmt, reason)
+                r = bundle_members(path, zf, names, fmt, device_abis, density,
+                                   language or os.environ.get("LANG", "en"))
+            else:
+                with APK(path) as apk:
+                    r = apk.report()
+    except (struct.error, IndexError, ValueError, KeyError, TypeError, RecursionError) + ZIP_ERRORS as e:
+        raise APKError("unreadable APK: %s" % e)
+    except OSError as e:
+        raise APKError("cannot read %s: %s" % (path, e.strerror or e))
     if with_sha256:
         try:
             r["sha256"] = sha256_file(path)
@@ -1504,6 +1630,9 @@ def main(argv=None):
     ap.add_argument("--extract-icon", metavar="PATH", help="write the chosen icon's bytes to PATH")
     ap.add_argument("--xml", action="store_true", help="print the decoded AndroidManifest.xml instead")
     ap.add_argument("--fdroid-index", metavar="INDEX", help="compare with F-Droid's index-v2.json")
+    ap.add_argument("--abis", default="x86_64,x86", help="comma-separated device ABIs (default x86_64,x86)")
+    ap.add_argument("--density", type=int, default=320, help="device density in dpi (default 320)")
+    ap.add_argument("--language", default=None, help="device language (default $LANG or en)")
     args = ap.parse_args(argv)
     indent = 2 if args.pretty else None
     if hasattr(sys.stdout, "reconfigure"):
@@ -1513,10 +1642,17 @@ def main(argv=None):
             with APK(args.apk) as apk:
                 sys.stdout.write(xml_text(apk.manifest, apk.resources))
             return 0
-        report = inspect(args.apk)
+        report = inspect(args.apk, device_abis=tuple(a.strip() for a in args.abis.split(",") if a.strip()),
+                         density=args.density, language=args.language)
         if args.extract_icon and report["icon"].get("path"):
-            with APK(args.apk) as apk:
-                data = apk.icon_bytes(report["icon"]["path"])
+            if report.get("bundle"):
+                with zipfile.ZipFile(args.apk) as bundle:
+                    member = report["bundle"]["base"]
+                    with APK(member, data=read_entry(bundle, member, 1 << 30)) as apk:
+                        data = apk.icon_bytes(report["icon"]["path"])
+            else:
+                with APK(args.apk) as apk:
+                    data = apk.icon_bytes(report["icon"]["path"])
             with open(args.extract_icon, "wb") as f:
                 f.write(data)
             report["icon"]["extractedTo"] = args.extract_icon

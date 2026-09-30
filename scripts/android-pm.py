@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """SteamARM's Android package manager (docs/APK_SUPPORT.md). It installs
-APKs into the state directory, keeps each app's data across updates, lists
-and uninstalls them. It runs nothing: SteamARM has no Android runtime yet
-(docs/ANDROID_ZERO_VM_FEASIBILITY.md), so an installed app cannot be opened.
+APKs and selected split APKs into the state directory, keeps app data across
+updates, lists and uninstalls them. It runs nothing; android-session.py
+installs the staged APKs into the zero-VM Android session at launch.
 
   scripts/android-pm.py install [--force] [--allow-downgrade] app.apk
   scripts/android-pm.py uninstall [--keep-data] <package>
@@ -19,8 +19,8 @@ Layout, under $STEAMARM_STATE (default ~/SteamARM-roots) or --state:
   android/kept/<package>.json            the signer of data kept that way
 
 Output is JSON on stdout. Exit status: 0 done; 2 bad input (not an APK, bad
-package name); 3 not supported (a bundle, a split APK, an APK that needs
-splits, an unsigned APK); 4 refused (another signer, a downgrade: --force
+package name); 3 not supported (an invalid bundle, AAB, a lone split APK,
+an APK that needs missing splits, an unsigned APK); 4 refused (another signer, a downgrade: --force
 and --allow-downgrade override); 5 not installed; 6 I/O error.
 
 The signer check compares the certificates the APK names (its v3, else v2,
@@ -38,6 +38,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import zipfile
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
@@ -231,15 +232,15 @@ def install(layout, apk_path, force=False, allow_downgrade=False):
         raise PMError(EXIT_INPUT, "not-apk", str(e))
     package = check_package(report.get("package"))
     splits = report.get("splits") or {}
-    if splits.get("isSplit"):
+    bundle = report.get("bundle") or {}
+    if splits.get("isSplit") and not bundle:
         raise PMError(EXIT_UNSUPPORTED, "split-apk",
-                      "this is a split APK (%s) of %s, not a base APK; split installs are not supported yet"
-                      % (splits.get("split"), package))
-    if splits.get("needsSplits"):
+                      "INSTALL_FAILED_MISSING_SPLIT: %s is a split APK (%s), not a base APK"
+                      % (package, splits.get("split")))
+    if splits.get("needsSplits") and not bundle:
         # Android refuses such a base APK alone (INSTALL_FAILED_MISSING_SPLIT).
         raise PMError(EXIT_UNSUPPORTED, "needs-splits",
-                      "%s needs split APKs that are not in this file (a Play Store app bundle install); "
-                      "split installs are not supported yet" % package)
+                      "INSTALL_FAILED_MISSING_SPLIT: %s needs split APKs absent from this file" % package)
     signing = report.get("signing") or {}
     if not signing.get("certificates"):
         # Android refuses an APK without a signature (INSTALL_PARSE_FAILED_NO_CERTIFICATES).
@@ -288,14 +289,49 @@ def install(layout, apk_path, force=False, allow_downgrade=False):
         stage = Path(tempfile.mkdtemp(prefix=".install-%s-" % package, dir=str(layout.packages)))
         try:
             base = stage / "base.apk"
-            shutil.copyfile(str(apk_path), str(base))
-            if sha256(base) != report["sha256"]:
-                raise PMError(EXIT_IO, "io", "the copy of %s does not match the APK that was read" % apk_path)
+            split_files, obb_files = [], []
+            if bundle:
+                # The outer digest protects the selection from a source file
+                # replaced between inspection and staging.
+                if sha256(apk_path) != report["sha256"]:
+                    raise PMError(EXIT_IO, "io", "the bundle changed after inspection")
+                by_path = {m["path"]: m for m in bundle["members"]}
+                with zipfile.ZipFile(apk_path) as archive:
+                    for member in bundle["chosen"]:
+                        if member == bundle["base"]:
+                            target = base
+                        else:
+                            split = by_path[member]["split"]
+                            if not isinstance(split, str) or not re.fullmatch(r"[A-Za-z0-9_.-]+", split):
+                                raise PMError(EXIT_INPUT, "not-apk", "invalid split name: %r" % split)
+                            target = stage / ("split_%s.apk" % split)
+                            if target.name in split_files:
+                                raise PMError(EXIT_INPUT, "not-apk", "duplicate split name: %s" % split)
+                            split_files.append(target.name)
+                        with archive.open(member) as source, target.open("wb") as dest:
+                            shutil.copyfileobj(source, dest)
+                    if not base.exists():
+                        raise PMError(EXIT_INPUT, "not-apk", "no base APK selected")
+                    for member in bundle["obb"]:
+                        name = Path(member).name
+                        target = stage / "obb" / name
+                        target.parent.mkdir(exist_ok=True)
+                        if target.exists():
+                            raise PMError(EXIT_INPUT, "not-apk", "duplicate OBB name: %s" % name)
+                        with archive.open(member) as source, target.open("wb") as dest:
+                            shutil.copyfileobj(source, dest)
+                        obb_files.append("obb/" + name)
+            else:
+                shutil.copyfile(str(apk_path), str(base))
+                if sha256(base) != report["sha256"]:
+                    raise PMError(EXIT_IO, "io", "the copy of %s does not match the APK that was read" % apk_path)
             icon = write_icon(base, report, stage)
             meta = dict(report)
             meta.pop("fdroid", None)
             meta.update({
                 "schema": 1,
+                "splits": split_files,
+                "obb": obb_files,
                 "icon": icon.name if icon else None,
                 "installedAt": (old or {}).get("installedAt") or now(),
                 "updatedAt": now(),

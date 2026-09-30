@@ -388,27 +388,86 @@ class SplitAndBundleTests(Base):
         self.assertFalse(sp["isSplit"])
         self.assertFalse(self.report(self.build())["splits"]["needsSplits"])
 
-    def test_bundles_are_recognised_and_refused(self):
-        base = self.build("base.apk")
-        data = Path(base).read_bytes()
+    def test_bundle_formats_select_device_splits(self):
+        files = fx.split_set(self.dir, CERT_A)
+        chosen = ["base.apk", "config.x86_64.apk", "config.xxhdpi.apk", "config.es.apk"]
         cases = {
-            "game.xapk": ({"manifest.json": b"{}", "org.example.app.apk": data, "config.arm64_v8a.apk": data}, "xapk"),
-            "game.apks": ({"toc.pb": b"\0", "splits/base-master.apk": data}, "apks"),
-            "game.apkm": ({"info.json": b"{}", "base.apk": data}, "apkm"),
-            "game.aab": ({"BundleConfig.pb": b"\0", "base/manifest/AndroidManifest.xml": b"\0"}, "aab"),
-            "renamed.zip": ({"a.apk": data, "b.apk": data}, "apk-bundle"),
+            "game.xapk": ({"manifest.json": b"{}", **files,
+                           "Android/obb/org.example.app/main.42.org.example.app.obb": b"obb"}, "xapk"),
+            "game.apks": ({"toc.pb": b"\0", **{"splits/" + k: v for k, v in files.items()}}, "apks"),
+            "game.apkm": ({"info.json": b"{}", **files}, "apkm"),
+            "renamed.zip": (files, "apk-bundle"),
         }
-        for name, (files, fmt) in cases.items():
-            path = fx.zip_of(str(self.dir / name), files)
+        for name, (members, fmt) in cases.items():
+            path = fx.zip_of(str(self.dir / name), members)
+            report = ai.inspect(path, language="es_UY.UTF-8")
+            self.assertEqual((report["format"], report["package"], report["bundle"]["chosenAbi"]),
+                             (fmt, "org.example.app", "x86_64"))
+            prefix = "splits/" if fmt == "apks" else ""
+            self.assertEqual(report["bundle"]["chosen"], [prefix + k for k in chosen])
+            self.assertEqual(len(report["bundle"]["members"]), 5)
+            kinds = {m["split"]: m["config"] for m in report["bundle"]["members"] if m["split"]}
+            self.assertEqual(kinds["config.x86_64"], {"type": "abi", "value": "x86_64"})
+            self.assertEqual(kinds["config.xxhdpi"], {"type": "density", "value": "xxhdpi", "dpi": 480})
+            self.assertEqual(kinds["config.es"], {"type": "language", "value": "es"})
+            self.assertEqual(report["abis"], ["x86_64"])
+            self.assertEqual(len(report["bundle"]["obb"]), 1 if fmt == "xapk" else 0)
+        p = subprocess.run([sys.executable, str(REPO / "scripts/apk-inspect.py"), "--language", "es",
+                            str(self.dir / "game.xapk")], capture_output=True, text=True)
+        self.assertEqual((p.returncode, json.loads(p.stdout)["bundle"]["chosenAbi"]), (0, "x86_64"))
+
+    def test_invalid_bundles_are_refused_with_reason(self):
+        files = fx.split_set(self.dir, CERT_A)
+        bad = dict(files)
+        bad.pop("base.apk")
+        cases = [(bad, "no base"),
+                 ({**files, "config.es.apk": fx.split_set(self.dir, CERT_A, package="org.other.app")["config.es.apk"]},
+                  "mixed packages"),
+                 ({**files, "config.es.apk": fx.split_set(self.dir, CERT_A, code=43)["config.es.apk"]},
+                  "mixed versionCodes"),
+                 ({**files, "config.es.apk": fx.split_set(self.dir, CERT_B)["config.es.apk"]},
+                  "mismatched signing certificates")]
+        for i, (members, reason) in enumerate(cases):
+            path = fx.zip_of(str(self.dir / ("bad%d.zip" % i)), members)
             with self.assertRaises(ai.UnsupportedBundle) as cm:
                 ai.inspect(path)
-            self.assertEqual(cm.exception.format, fmt, name)
-        p = subprocess.run([sys.executable, str(REPO / "scripts/apk-inspect.py"), str(self.dir / "game.xapk")],
-                           capture_output=True, text=True)
-        self.assertEqual(p.returncode, 3)
-        out = json.loads(p.stdout)
-        self.assertEqual((out["supported"], out["format"]), (False, "xapk"))
-        self.assertIn("split", out["reason"])
+            self.assertIn(reason, cm.exception.reason)
+        path = fx.zip_of(str(self.dir / "encrypted.apkm"), {"info.json": b'{"encrypted": true}', **files})
+        with self.assertRaises(ai.UnsupportedBundle) as cm:
+            ai.inspect(path)
+        self.assertIn("encrypted", cm.exception.reason)
+        path = fx.zip_of(str(self.dir / "game.aab"), {"BundleConfig.pb": b"\0"})
+        with self.assertRaises(ai.UnsupportedBundle) as cm:
+            ai.inspect(path)
+        self.assertIn("signing key", cm.exception.reason)
+        path = fx.zip_of(str(self.dir / "arm.apks"), {"toc.pb": b"\0", "base.apk": files["base.apk"],
+                            "config.arm64_v8a.apk": files["config.arm64_v8a.apk"]})
+        with self.assertRaises(ai.UnsupportedBundle) as cm:
+            ai.inspect(path)
+        self.assertIn("device ABIs", cm.exception.reason)
+
+    def test_apks_standalone_selects_matching_base(self):
+        arm = self.dir / "standalone-arm.apk"
+        x86 = self.dir / "standalone-x86.apk"
+        fx.apk(str(arm), fx.manifest(), files={"lib/arm64-v8a/libtest.so": fx.elf()}, v1=[CERT_A])
+        fx.apk(str(x86), fx.manifest(), files={"lib/x86_64/libtest.so": fx.elf()}, v1=[CERT_A])
+        path = fx.zip_of(str(self.dir / "standalones.apks"), {
+            "toc.pb": b"\0", "standalones/arm.apk": arm.read_bytes(),
+            "standalones/x86.apk": x86.read_bytes()})
+        report = ai.inspect(path)
+        self.assertEqual(report["bundle"]["chosen"], ["standalones/x86.apk"])
+        self.assertEqual(report["abis"], ["x86_64"])
+
+    def test_feature_density_and_english_are_selected(self):
+        files = fx.split_set(self.dir, CERT_A)
+        for split in ("maps", "config.xhdpi", "config.en"):
+            path = self.dir / (split + ".apk")
+            fx.apk(str(path), fx.manifest(extra_manifest=[("split", split)]), v1=[CERT_A])
+            files[path.name] = path.read_bytes()
+        path = fx.zip_of(str(self.dir / "more.apkm"), {"info.json": b"{}", **files})
+        chosen = ai.inspect(path, language="es_UY")["bundle"]["chosen"]
+        self.assertEqual(chosen, ["base.apk", "maps.apk", "config.x86_64.apk", "config.xhdpi.apk",
+                                  "config.es.apk", "config.en.apk"])
 
 
 class RobustnessTests(Base):

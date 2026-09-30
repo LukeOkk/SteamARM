@@ -24,9 +24,9 @@ start     Weston, then the boot; returns once sys.boot_completed=1 (or fails,
           brings one back), which keeps the session near 55-60 lxrun
           processes (scripts/safeguard.sh stops every guest past its limit).
 stop      the boot (every Android process with it), then Weston.
-install   <package>'s APK from $STATE/android/packages/<package>/base.apk
-          (scripts/android-pm.py put it there), or --apk, with the image's own
-          `pm install`, unless that version is already installed.
+install   <package>'s base and selected split APKs from $STATE/android/packages,
+          or --apk, with the image's own `pm install`. Copies stored OBB data
+          into the session root. Skips an unchanged installed package.
 launch    start if needed, install if needed, then `am start` of the launcher
           activity (meta.json's launcherActivity, else the package manager's
           answer), and wait until its window has the focus.
@@ -521,26 +521,88 @@ def installed_version(s, pkg):
 def install(s, pkg, apk=None, force=False):
     if not PKG_RE.fullmatch(pkg):
         die("not a package name: %r" % pkg, 2)
-    apk = apk or os.path.join(ADIR, "packages", pkg, "base.apk")
+    package_dir = os.path.join(ADIR, "packages", pkg)
+    apk = apk or os.path.join(package_dir, "base.apk")
     if not os.path.isfile(apk):
         die("no APK for %s at %s (scripts/android-pm.py install)" % (pkg, apk), 5)
-    want = meta_field(package_meta(pkg), "versionCode")
+    meta = package_meta(pkg)
+    same_base = os.path.abspath(apk) == os.path.abspath(os.path.join(package_dir, "base.apk"))
+    split_names = (meta.get("splits") or []) if same_base else []
+    obb_names = (meta.get("obb") or []) if same_base else []
+    apks = [apk]
+    for name in split_names:
+        if not isinstance(name, str) or not re.fullmatch(r"split_[A-Za-z0-9_.-]+\.apk", name):
+            die("invalid stored split APK name for %s: %r" % (pkg, name), 5)
+        path = os.path.join(package_dir, name)
+        if not os.path.isfile(path):
+            die("missing split APK for %s: %s" % (pkg, path), 5)
+        apks.append(path)
+    # OBB data belongs to the session root, independent of whether pm
+    # already has the current version of the package.
+    for name in obb_names:
+        if not isinstance(name, str) or not re.fullmatch(r"obb/[^/]+\.obb", name):
+            die("invalid stored OBB name for %s: %r" % (pkg, name), 5)
+        source = os.path.join(package_dir, name)
+        if not os.path.isfile(source):
+            die("missing OBB for %s: %s" % (pkg, source), 5)
+        target_dir = os.path.join(s["root"], "data/media/0/Android/obb", pkg)
+        os.makedirs(target_dir, exist_ok=True)
+        target = os.path.join(target_dir, os.path.basename(name))
+        shutil.copyfile(source, target)
+        log("OBB copied for %s: %s" % (pkg, target))
+    want = meta_field(meta, "versionCode")
     have = installed_version(s, pkg)
-    if have is not None and not force and (want is None or have == want):
+    digest = meta_field(meta, "sha256") if same_base else None
+    marker = os.path.join(s["root"], "data/local/tmp/steamarm-installed-%s.sha256" % pkg)
+    try:
+        installed_digest = open(marker, encoding="ascii").read().strip()
+    except OSError:
+        installed_digest = None
+    if have is not None and not force and (want is None or have == want) and (not digest or installed_digest == digest):
         log("%s is installed (versionCode %s)" % (pkg, have))
         return True
-    staged = "/data/local/tmp/steamarm-install-%s.apk" % pkg
-    shutil.copyfile(apk, s["root"] + staged)
+    staged = ["/data/local/tmp/steamarm-install-%s-%d.apk" % (pkg, i) for i in range(len(apks))]
+    for source, dest in zip(apks, staged):
+        shutil.copyfile(source, s["root"] + dest)
     t0 = time.time()
-    log("pm install %s (%s, %.1f MB; installed now: %s)" % (pkg, apk, os.path.getsize(apk) / 1e6, have))
-    rc, out = guest(s, ["/system/bin/pm", "install", "-r", staged], timeout=900)
+    log("pm install %s (%d APKs: %s; installed now: %s)" % (pkg, len(apks), ", ".join(apks), have))
     try:
-        os.unlink(s["root"] + staged)
-    except OSError:
-        pass
+        rc, out = guest(s, ["/system/bin/pm", "install", "-r"] + staged, timeout=900)
+        if (rc or not out.strip().endswith("Success")) and len(staged) > 1:
+            # Android 11's pm accepts several paths in one install session;
+            # explicit sessions cover images whose pm wrapper rejects them.
+            log("pm install with several APKs failed: %s; using install-create/write/commit"
+                % (out.strip().splitlines()[-1] if out.strip() else "rc %d" % rc))
+            total = sum(os.path.getsize(source) for source in apks)
+            rc, created = guest(s, ["/system/bin/pm", "install-create", "-r", "-S", str(total)], timeout=120)
+            match = re.search(r"\[(\d+)\]", created)
+            if rc or not match:
+                out = created
+            else:
+                session = match.group(1)
+                for i, (source, dest) in enumerate(zip(apks, staged)):
+                    rc, out = guest(s, ["/system/bin/pm", "install-write", "-S", str(os.path.getsize(source)),
+                                        session, "base" if i == 0 else "split%d" % i, dest], timeout=900)
+                    if rc or not out.strip().startswith("Success"):
+                        guest(s, ["/system/bin/pm", "install-abandon", session], timeout=120)
+                        break
+                else:
+                    rc, out = guest(s, ["/system/bin/pm", "install-commit", session], timeout=900)
+                    if rc or not out.strip().endswith("Success"):
+                        guest(s, ["/system/bin/pm", "install-abandon", session], timeout=120)
+    finally:
+        for dest in staged:
+            try:
+                os.unlink(s["root"] + dest)
+            except OSError:
+                pass
     out = out.strip()
     log("pm install: %s (%.1f s)" % (out.splitlines()[-1] if out else "rc %d" % rc, time.time() - t0))
-    return out.endswith("Success")
+    success = rc == 0 and out.endswith("Success")
+    if success and digest:
+        with open(marker, "w", encoding="ascii") as f:
+            f.write(digest + "\n")
+    return success
 
 
 def launcher_activity(s, pkg):
