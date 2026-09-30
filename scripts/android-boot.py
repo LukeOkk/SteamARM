@@ -46,7 +46,8 @@ service's stdout and stderr).
                           [--profile NAME] [--also SVC] [--all] [--no-zygote]
                           [--prop NAME=VALUE] [--svc-env SVC:VAR=VALUE]
                           [--trace SVC] [--persist FILE] [--bootargs ARGS]
-                          [--linkerconfig]
+                          [--linkerconfig] [--wayland XDG[:SOCKET]] [--abi32]
+                          [--exit-with PID]
 
 --linkerconfig runs init's update_linker_config (the image's linkerconfig,
 with the property service up): it rewrites the root's /linkerconfig, which
@@ -151,7 +152,7 @@ PROFILES = {
         "left_out": {
             "ueventd": "no uevents and no device nodes to make (ro.cold_boot_done=true)",
             "logd": "tests/android/logd.py stands in for its write socket",
-            "lmkd": "no memory cgroups or PSI; ActivityManager keeps working without it",
+            "lmkd": "no memory cgroups or PSI; its socket has a stand-in (Boot.start_lmkd_socket)",
             "vold": "no block devices, no FUSE: /data is a directory of the root",
             "apexd": "flattened APEXes (ro.apex.updatable unset), already under /apex",
             "netd": "exits at once: NETLINK_KOBJECT_UEVENT, route netlink, iptables, BPF; its "
@@ -284,8 +285,10 @@ DISPLAY_PROPS = [("debug.sf.nobootanimation", "1")]
 # (LXRT_PROPERTY_HOST, loaded last among the image's .prop files, as Waydroid's
 # container manager writes waydroid.prop for each boot).
 HOST_ABI_PROPS = [
-    # No 32-bit code runs here (i386 under FEX's 32-bit mode fails: "NoExec
-    # instruction in entry block", stage 27), so the device declares none.
+    # Without a FEX that runs i386 bionic (patches/fex-lxrt-i386-bionic.patch;
+    # before it: "NoExec instruction in entry block", stage 27), or in the
+    # display profile without --abi32 (Boot.abi32), no 32-bit code runs, so
+    # the device declares none.
     # With the image's "x86_64,x86" the primary zygote waited 20 s for a
     # secondary one, finishBooting died telling the absent 32-bit zygote the
     # boot was complete ("Failed to inform zygote of boot_completed"), and the
@@ -546,7 +549,11 @@ class Boot:
         # (benchmarks/stage28-android-reliability.txt).
         # With --linkerconfig the 32-bit audio HAL links as well (binder for
         # 32-bit guests, runtime/binder.c), and audioserver stops waiting.
-        if self.x86 and a.profile == "headless" and self.fex_has(b"lxrt-i386-bionic"):
+        # The display profile leaves 32-bit out unless asked (--abi32): the
+        # device then declares no 32-bit ABI (HOST_ABI_PROPS) and one zygote
+        # fewer shares the CPU with the boot.
+        self.abi32 = bool(self.x86 and (a.profile == "headless" or a.abi32) and self.fex_has(b"lxrt-i386-bionic"))
+        if self.abi32:
             extra = {"zygote_secondary"} | ({"vendor.audio-hal"} if a.linkerconfig else set())
             prof = dict(self.profile)
             prof["start"] = set(prof["start"]) | extra
@@ -597,9 +604,15 @@ class Boot:
         return hashlib.sha1(self.root.encode()).hexdigest()[:12]
 
     def spawn(self, argv, env, out, pass_fds=(), what=""):
+        # cwd: the root, which is the guest's "/" (init's cwd). A relative
+        # path resolves against the host's working directory; with the Mac's
+        # "/" there, PackageManagerServiceUtils.makeDirRecursive (which walks
+        # "data", "data/app", ... relative) found none of them, tried to make
+        # "/data" and every `pm install` failed with "Failed rename"
+        # (MEASURED at stage 28). getcwd still answers "/".
         p = subprocess.Popen([self.lxrun] + argv, env=env, stdin=subprocess.DEVNULL,
                              stdout=out, stderr=subprocess.STDOUT, pass_fds=pass_fds,
-                             preexec_fn=own_group, cwd="/")
+                             preexec_fn=own_group, cwd=self.root)
         self.children.append((p, what))
         return p
 
@@ -607,7 +620,7 @@ class Boot:
         env = dict(self.base_env(), **self.env)
         env.update(env_extra or {})
         r = subprocess.run([self.lxrun] + argv, env=env, stdin=subprocess.DEVNULL,
-                           stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, timeout=timeout)
+                           stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, timeout=timeout, cwd=self.root)
         return r.returncode, r.stdout.decode(errors="replace")
 
     # -- start-up
@@ -636,7 +649,8 @@ class Boot:
         extra = [tuple(x.split("=", 1)) for x in (self.a.prop or []) if "=" in x]
         with open(hostprop, "w") as f:
             f.write("# scripts/android-boot.py: this host's properties (LXRT_PROPERTY_HOST)\n")
-            for k, v in HOST_ABI_PROPS + HOST_PROPS + (DISPLAY_PROPS if self.a.profile == "display" else []) + extra:
+            abi = [] if self.abi32 else HOST_ABI_PROPS
+            for k, v in abi + HOST_PROPS + (DISPLAY_PROPS if self.a.profile == "display" else []) + extra:
                 f.write("%s=%s\n" % (k, v))
         env = dict(self.base_env(), LXRT_PROPERTY_IDLE="0", LXRT_PROPERTY_INIT=cp,
                    LXRT_PROPERTY_HOST=hostprop)
@@ -677,6 +691,48 @@ class Boot:
             time.sleep(0.05)
         self.props.set("init.svc.logd", "running")
         log("logd stand-in on /dev/socket/logdw -> %s" % os.path.join(self.state, "logcat.txt"))
+
+    def start_lmkd_socket(self):
+        """lmkd's socket, with nothing behind it but a reader. lmkd itself
+        cannot work here (no memory cgroups, no PSI), and without its socket
+        every oom_adj change in ActivityManager waited 3 s for a connection
+        (ProcessList.writeLmkd: waitForConnection(3 * LMKD_RECONNECT_DELAY_MS))
+        with the ActivityManager lock held: 56 "SLOW OOM ADJ: 3000ms" in one
+        boot, then ANRs of SystemUI and the network stack, whose loss took
+        system_server down ("Lost network stack", MEASURED at stage 28). The
+        guest's SEQPACKET socket is a datagram socket here (runtime/socket.c),
+        so this is one too; every command is read and dropped: no process is
+        ever killed for memory, as with no lmkd. The only commands that want
+        an answer (LMK_GETKILLCNT) come from dumps (dumpsys activity lmk,
+        ActivityManagerService.reportLmkKillAtOrBelow; VERIFIED IN SOURCE, the
+        image's services.jar) and would wait for one."""
+        import threading
+        path = self.root + "/dev/socket/lmkd"
+        try:
+            os.unlink(path)
+        except FileNotFoundError:
+            pass
+        s = socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM)
+        try:
+            s.bind(path)
+        except OSError as e:
+            log("lmkd socket: %s" % e)
+            s.close()
+            return
+        os.chmod(path, 0o660)
+        self.lmkd_msgs = 0
+
+        def reader():
+            while True:
+                try:
+                    if not s.recv(4096):
+                        continue
+                except OSError:
+                    return
+                self.lmkd_msgs += 1
+
+        threading.Thread(target=reader, name="lmkd", daemon=True).start()
+        log("lmkd stand-in on /dev/socket/lmkd (commands read and dropped)")
 
     # -- identities
     def uid_of(self, name):
@@ -1203,6 +1259,7 @@ class Boot:
             self.start_fexserver()
             self.start_propsvc()
             self.start_logd()
+            self.start_lmkd_socket()
             self.rc = Rc(self.root, self.props)
             self.rc.parse_file("/system/etc/init/hw/init.rc")
             for d in ("/system/etc/init", "/system_ext/etc/init", "/product/etc/init",
@@ -1259,10 +1316,19 @@ class Boot:
             if end and time.time() >= end:
                 log("--seconds %d reached" % self.a.seconds)
                 return
+            if self.a.exit_with and time.time() >= getattr(self, "_next_parent_check", 0):
+                self._next_parent_check = time.time() + 1
+                try:
+                    os.kill(self.a.exit_with, 0)
+                except ProcessLookupError:
+                    log("--exit-with %d: that process is gone" % self.a.exit_with)
+                    return
+                except PermissionError:
+                    pass
             time.sleep(0.1)
 
     def shutdown(self):
-        log("stopping")
+        log("stopping (lmkd stand-in read %d commands)" % getattr(self, "lmkd_msgs", 0))
         for name, svc in getattr(self, "rc", Rc(self.root, {})).services.items():
             if svc.proc and svc.proc.poll() is None:
                 try:
@@ -1307,12 +1373,17 @@ def main():
     ap.add_argument("--seconds", type=int, default=300)
     ap.add_argument("--until-prop", default=None, help="NAME=VALUE: stop once the property has the value")
     ap.add_argument("--keep-running", action="store_true")
+    ap.add_argument("--exit-with", type=int, default=0, metavar="PID",
+                    help="stop the boot when this process is gone (scripts/android-session.py run)")
     ap.add_argument("--profile", default="headless", choices=sorted(PROFILES))
     ap.add_argument("--all", action="store_true", help="start every service the actions ask for")
     ap.add_argument("--also", action="append", help="start this service too (outside the profile)")
     ap.add_argument("--no-zygote", action="store_true")
     ap.add_argument("--linkerconfig", action="store_true",
                     help="run init's update_linker_config: rewrite the root's /linkerconfig with properties up")
+    ap.add_argument("--abi32", action="store_true",
+                    help="the display profile with the image's 32-bit ABI and zygote_secondary (needs a FEX with "
+                         "patches/fex-lxrt-i386-bionic.patch; the headless profile does this whenever it can)")
     ap.add_argument("--zygote-stdio", action="store_true", help="the zygote's stdio to its log too (it then refuses to fork)")
     ap.add_argument("--bootargs", default=os.environ.get("LXRT_PROPERTY_BOOTARGS", ""))
     ap.add_argument("--persist", default=None, help="persistent property file (default: the root's /data/property)")
