@@ -387,7 +387,9 @@ static long do_cap(bool set, uint64_t hdr, uint64_t data)
     if (!words) {
         if (!mem_ok(hdr, 8, true)) return LERR(EFAULT);
         h[0] = 0x20080522;                     // Linux answers with its preferred version
-        return data ? LERR(EINVAL) : 0;
+        // kernel/capability.c: capget with no data is a version probe (0);
+        // capset returns cap_validate_magic's -EINVAL whatever data is.
+        return (data || set) ? LERR(EINVAL) : 0;
     }
     if (pid < 0) return LERR(EINVAL);
     if (!set) {

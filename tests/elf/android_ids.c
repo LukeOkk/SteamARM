@@ -209,6 +209,14 @@ int main(int argc, char **argv)
     check(setcaps(BIT(CAP_NET_ADMIN), BIT(CAP_NET_ADMIN) | BIT(CAP_SYS_NICE), BIT(CAP_NET_ADMIN)) == 0,
           "capset down to NET_ADMIN|SYS_NICE (permitted), NET_ADMIN (effective, inheritable)");
     check(setcaps(BIT(CAP_SYS_ADMIN), BIT(CAP_SYS_ADMIN), 0) == -EPERM, "capset cannot add back what is not permitted");
+    {
+        // kernel/capability.c cap_validate_magic: capset of an unknown
+        // version is EINVAL even with no data (capget of one is a probe).
+        struct __user_cap_header_struct h = { 0x12345678, 0 };
+        long r = syscall(SYS_capset, &h, NULL);
+        check(r == -1 && errno == EINVAL && h.version == _LINUX_CAPABILITY_VERSION_3,
+              "capset with an unknown version: EINVAL without data too, the kernel's version written back");
+    }
     check(prctl(PR_CAP_AMBIENT, PR_CAP_AMBIENT_RAISE, CAP_NET_ADMIN, 0, 0) == 0 &&
           prctl(PR_CAP_AMBIENT, PR_CAP_AMBIENT_IS_SET, CAP_NET_ADMIN, 0, 0) == 1,
           "ambient NET_ADMIN raised");
