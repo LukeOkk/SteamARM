@@ -1,0 +1,78 @@
+Stage 31: x86 Steam starts without a window, three runtime causes; the clipboard
+Mac mini M4, macOS 27; x86 Steam (i386 client, x86_64 web helper) under FEX on
+lxrun; x86_64 LineageOS 18.1 root under FEX (sesstest clone) for Android.
+
+== x86 Steam: why some starts had no window
+Scratchpad loop: a headless Android session started and stopped (10 s), then
+scripts/run-app.sh steam, a window of at least 600 px wide titled "Steam" or
+"Sign in to Steam" looked for every 5 s for 200 s; on failure ps, `sample` of
+the busiest lxrun processes, Steam's logs.
+
+Before (runtime at 89aa9e8), 5 starts: windows at 95, 96 and 91 s; 2 none.
+  (a) SIGTRAP: "[lxrt] SIGTRAP at pc 0x19d1eec58 ... insn 0xd4200020"
+      pc pthread_jit_write_protect_np+388, from lxrt_jit_set_write+428, from
+      lxrt_dispatch. Disassembled: the function writes S3_6_C15_C1_5 from
+      the commpage's value, isb, reads it back, b.ne to brk #1. A signal whose
+      runtime handler flips the JIT mode (lxrt_jit_handle_fault) between the
+      write and the read makes them differ.
+  (b) steamui_html.txt: "Started webhelper process 43174" and "Timed out
+      waiting for webhelper init" in the same second. steamui.so: the wait is
+      2400 x { IsInit(); ThreadSleep(50); Pump() } -- two minutes -- and
+      libtier0_s.so's ThreadSleep is ThreadMicroSleepPOSIX: one nanosleep, no
+      retry. Every sleep had come back early.
+
+The EINTR, reproduced (tests/elf/quiet_interrupt.c): the main thread blocks
+SIGRTMIN, a child sends it SIGRTMIN five times while it waits 300 ms. A
+realtime signal from another process travels as the carrier (SIGEMT) to any
+thread; with SIGRTMIN blocked nothing is delivered and no handler runs.
+  runtime at 89aa9e8:                 this stage:
+  nanosleep            EINTR 33 ms    0 after 302 ms
+  clock_nanosleep ABS  EINTR 32 ms    0 after 301 ms
+  FUTEX_WAIT_PRIVATE   EINTR 28 ms    ETIMEDOUT after 302 ms
+  FUTEX_WAIT (shared)  EINTR 3 ms     ETIMEDOUT after 302 ms
+  FUTEX_WAIT_BITSET    EINTR 4 ms     ETIMEDOUT after 302 ms
+  sigpending SIGRTMIN  0 (ENOSYS)     1
+The fix at first broke tests/elf BINDER_POOL ("a signal during a blocked call:
+handler ran, EINTR x0"): the guest handler's own close() went through the
+dispatcher, which cleared the interrupted call's mark; it is now kept.
+
+With the JIT flip under blocked signals (and, from run 5, the EINTR fix
+too), 8 starts: windows at 90, 90, 91, 90, 90 s in runs 1, 3, 4, 6, 8; none in
+  run 2: the i386 client jumped to 0x1540018a, unmapped ("NoExec instruction
+      in entry block"), [esp] = steamclient.so +0x1098cb8 (after `call
+      0x1ea8950`, a destructor that starts with get_pc_thunk); its crash
+      handler ended it, status 0. Same stack at 11:34 (0x14C0037C) and 15:19
+      (0x154002E6) today. Cause UNKNOWN.
+  run 5: the web helper's browser blocked in read() (sample: lxrt_dispatch ->
+      read) while one zygote had died; the other idle in poll. Chromium waits
+      for each zygote's hello with read() on a SOCK_SEQPACKET pair, which is
+      a Darwin datagram pair here: a read already blocked is never woken when
+      the peer goes away. Linux returns 0 and Steam restarts the helper.
+      Builds and test suites were running on the Mac at the same time.
+  run 7: the client started the helper (16:08:56) and never sent it
+      CreateBrowser; the helper idle in its message loop. The client was not
+      sampled. Builds and tests were running at the same time.
+No SIGTRAP in the 8 (one in five before).
+
+read() and readv() on a seqpacket socket now wait in slices and read a dead
+peer as end of file; readv, preadv, pwritev, preadv2 and pwritev2 were ENOSYS
+(tests/elf/vector_io.c, 10 checks, incl. "read after the peer died: 0 (end of
+file) in 253 ms"). Darwin's EOPNOTSUPP (102) read as EIO; now 95.
+
+== The clipboard (steamarm-wlmac, wl_data_device_manager 3)
+tests/wlmac/run.sh 4/4: "clipboard: the Mac's text reached the client (16
+characters, 5 types), the client's selection reached the pasteboard (31
+characters)" -- on a private named pasteboard (WLMAC_PASTEBOARD).
+Android, per-app window session (Simple Solitaire), private pasteboard:
+  pasteboard "del Mac: ñandú", window made key -> Clip get: "clip: del Mac: ñandú"
+  pasteboard "segunda prueba €" -> "clip: segunda prueba €"
+  Clip set "tercera: Android → Mac" -> pasteboard "tercera: Android → Mac" (2 s)
+Clip (tests/android/java/clip) as uid 0 failed: "SecurityException: Calling
+uid 0 does not own package com.android.shell"; it now becomes the shell
+(uid 2000, READ_CLIPBOARD_IN_BACKGROUND) and runs again. A setuid in the
+process itself left binder with the uid of its start and the next binder call
+failed with "Bad file descriptor" (runtime item, open).
+
+== Release matrix (0.3.9 candidate)
+tests/elf 91/0; i386 18/0; tests/win 11/0; vk_device 2/0; arm64 4/0;
+launcher core 35/0; tests/wlmac 4/0; Python unit tests 135 OK.

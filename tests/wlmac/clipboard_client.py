@@ -12,27 +12,15 @@ import array
 import os
 import socket
 import struct
-import subprocess
 import sys
 import time
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from pasteboard import pasteboard  # noqa: E402
 
 MIME = "text/plain;charset=utf-8"
 FROM_MAC = "del Mac: ñandú €"
 FROM_CLIENT = "del cliente Wayland: pingüino ✓"
-JXA = """ObjC.import('AppKit');
-function run(argv) {
-    var pb = $.NSPasteboard.pasteboardWithName(argv[0]);
-    if (argv.length > 1) { pb.clearContents; pb.setStringForType($(argv[1]), $.NSPasteboardTypeString); return ''; }
-    var s = pb.stringForType($.NSPasteboardTypeString);
-    return s.isNil() ? '' : s.js;
-}"""
-
-
-def pasteboard(name, text=None):
-    argv = ["osascript", "-l", "JavaScript", "-e", JXA, name] + ([text] if text is not None else [])
-    return subprocess.run(argv, capture_output=True, text=True, check=True).stdout.rstrip("\n")
-
-
 def arg(*items):
     return struct.pack("<" + "I" * len(items), *items)
 

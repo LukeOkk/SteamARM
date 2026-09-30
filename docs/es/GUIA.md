@@ -57,18 +57,22 @@ icono, nombre, paquete, versión, SDK, código nativo, permisos y firmas, y lo
 instala en `~/SteamARM-roots/android/`. Una actualización conserva los datos
 de la app y se rechaza si el APK nuevo está firmado con otro certificado o
 es una versión anterior. **Abrir** arranca la sesión Android de SteamARM
-(Android 11 x86-64 bajo FEX, sin VM, `scripts/android-session.py`): una
-ventana de Weston en el servidor X nativo es la pantalla de Android, y la
-app se instala ahí con el propio `pm install` de Android y se abre. El
-primer arranque tarda uno o dos minutos; los siguientes, alrededor de medio
-minuto. **Detener** termina la sesión. Ejecuta apps
-sin código nativo y apps con código x86-64; la tarjeta queda desactivada, y
-dice por qué, si su código nativo es solo arm64-v8a (el runtime ARM64 de
-Android no arranca en macOS), solo ARM o x86 de 32 bits, o si necesita un
-Android más nuevo que el 11. Dentro de Android todavía no hay sonido ni red.
-Los paquetes XAPK, APKS, APKM y AAB aún no se admiten. Con clic derecho en
-la tarjeta: **Información…**, **Abrir carpeta de datos** y
-**Desinstalar…** (conservando o borrando sus datos).
+(Android 11 x86-64 bajo FEX, sin VM, `scripts/android-session.py`): la app
+se instala con el propio `pm install` de Android y se abre en una ventana de
+macOS propia, con su nombre, dibujada por `steamarm-wlmac`. El primer
+arranque tarda uno o dos minutos; los siguientes, alrededor de medio minuto.
+Cerrar esa ventana, o **Detener**, termina la sesión. Funcionan el ratón, el
+teclado (con la distribución del Mac: una tecla ñ escribe ñ), la red del Mac,
+el sonido (también el comprimido, Ogg y similares) y el portapapeles de
+texto en los dos sentidos: lo copiado en el Mac se pega en Android y al
+revés. Ejecuta apps sin código nativo y apps con código x86-64; la tarjeta
+queda desactivada, y dice por qué, si su código nativo es solo arm64-v8a (el
+runtime ARM64 de Android no arranca en macOS), solo ARM o x86 de 32 bits, o
+si necesita un Android más nuevo que el 11. Los paquetes XAPK, APKS y APKM
+se instalan con todas sus partes (XAPK medido con un paquete real; APKS y
+APKM, con paquetes de prueba); AAB no (es un formato de publicación, no de
+instalación). Con clic derecho en la tarjeta: **Información…**, **Abrir
+carpeta de datos** y **Desinstalar…** (conservando o borrando sus datos).
 Detalles: `docs/APK_SUPPORT.md`.
 
 ## Configuración

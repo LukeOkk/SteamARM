@@ -1229,7 +1229,10 @@ fi
 if [ -z "${ANDROID_SKIP_WLMAC:-}" ] && { [ -x build/steamarm-wlmac ] || tools/wlmac/build.sh >/dev/null 2>&1; }; then
     local wx=/dev/shm/steamarm-android-wltest wh wpid wlog wact wkeys
     wh="/tmp/lxrt-shm-$(id -u)${wx#/dev/shm}"
-    out=$(env "${senv[@]}" ANDROID_SESSION_XDG=$wx ANDROID_SESSION_COMPOSITOR=wlmac perl -e 'alarm shift; exec @ARGV' 900 \
+    # The clipboard on a private named pasteboard, never the Mac's own.
+    local board=steamarm-android-clip-$$
+    out=$(env "${senv[@]}" ANDROID_SESSION_XDG=$wx ANDROID_SESSION_COMPOSITOR=wlmac WLMAC_PASTEBOARD=$board \
+          perl -e 'alarm shift; exec @ARGV' 900 \
           python3 scripts/android-session.py launch de.tobiasbielefeld.solitaire 2>&1); rc=$?
     wlog="$wh/wayland-0.wlmac.log"
     wpid=$(cat "$wh/wayland-0.wlmac-pid" 2>/dev/null)
@@ -1244,6 +1247,34 @@ if [ -z "${ANDROID_SKIP_WLMAC:-}" ] && { [ -x build/steamarm-wlmac ] || tools/wl
         if grep -q 'GameManager' <<<"$wact" && [ "$wkeys" -ge 1 ]; then
             ok "one Mac window per app (steamarm-wlmac): \"Simple Solitaire Collection\" alone; a click opened a game, A arrived as KEYCODE_A"
         else bad "one Mac window per app" "after the click: '$wact'; KEYCODE_A events: $wkeys"; fi
+        # The clipboard both ways (tests/android/java/clip): text put on the
+        # pasteboard is Android's primary clip once the app's window is key
+        # (a test command makes it so); a clip set in Android reaches the
+        # pasteboard. Through hwcomposer.waydroid's clipboard HAL and
+        # steamarm-wlmac's wl_data_device.
+        local cd=build/android/clip cget cmac
+        rm -rf "$cd"; mkdir -p "$cd/classes"
+        if [ -f "$R8_JAR" ] && javac --release 8 -nowarn -d "$cd/classes" tests/android/java/clip/Clip.java 2>/dev/null &&
+           java -cp "$R8_JAR" com.android.tools.r8.D8 --min-api 30 --output "$cd" "$cd/classes/Clip.class" 2>/dev/null; then
+            cp "$cd/classes.dex" "$sroot/data/local/tmp/clip.dex"
+            clip() { env "${senv[@]}" ANDROID_SESSION_XDG=$wx perl -e 'alarm shift; exec @ARGV' 200 python3 scripts/android-session.py \
+                     shell --timeout 180 /system/bin/env CLASSPATH=/data/local/tmp/clip.dex /system/bin/app_process64 /system/bin Clip "$@" \
+                     2>&1 | grep -v '^\[lxrt'; }
+            python3 tests/wlmac/pasteboard.py "$board" "del Mac: ñandú"
+            echo "focus" > "$wh/wayland-0.cmd"; kill -USR1 "$wpid"; sleep 3
+            cget=$(clip get | grep '^clip:')
+            clip set "de Android: pingüino" >/dev/null
+            cmac=""
+            for n in 1 2 3 4 5 6 7 8 9 10; do
+                cmac=$(python3 tests/wlmac/pasteboard.py "$board"); [ "$cmac" = "de Android: pingüino" ] && break; sleep 1
+            done
+            if [ "$cget" = "clip: del Mac: ñandú" ] && [ "$cmac" = "de Android: pingüino" ]; then
+                ok "clipboard both ways: the Mac's text is Android's clip, Android's clip reaches the Mac (private pasteboard)"
+            else bad "clipboard both ways" "Android got '$cget'; the pasteboard has '$cmac'"; fi
+            rm -f "$sroot/data/local/tmp/clip.dex"
+        else
+            echo "  skip  clipboard (no $R8_JAR or no javac)"
+        fi
     else bad "one Mac window per app" "rc=$rc windows: $(grep 'window title' "$wlog" 2>/dev/null | tr '\n' ' ') $(tail -2 <<<"$out" | tr '\n' ' ')"; fi
     env "${senv[@]}" ANDROID_SESSION_XDG=$wx python3 scripts/android-session.py stop >/dev/null 2>&1
     rm -f "$wh/wayland-0.cmd"

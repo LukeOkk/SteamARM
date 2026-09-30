@@ -70,3 +70,9 @@ prompt). `--verbose` logs every request.
   Also needed: `wl_surface.attach(NULL)` unmaps (the app's white starting
   window stayed over it). Clicks into these windows reach the composer's
   input path (the self-test above) but were not measured in Android.
+- The clipboard (stage 31, `benchmarks/stage31-runtime-waits-clipboard.txt`):
+  `tests/wlmac/run.sh` check 4 round-trips non-ASCII text both ways on a
+  private pasteboard; with Android, hwcomposer.waydroid's clipboard HAL
+  takes the Mac's text when the app's window becomes key ("del Mac: ñandú"
+  was Android's primary clip), and a clip set in Android is on the Mac's
+  pasteboard within a second or two. `tests/android/run.sh` checks both.

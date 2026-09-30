@@ -355,9 +355,12 @@ on the same cases.
 
 1. **The rest of the runtime.** The session runs dex-only and x86_64 apps
    (stage 28). Missing: arm64-v8a-only apps (Android's arm64 ART, the heap
-   wall), 32-bit x86 apps in the session, sound, camera, a GPU path
-   (SwiftShader draws on the CPU). Clicks, keys and the network work since
-   stage 29 (`benchmarks/stage29-android-input-network.txt`).
+   wall), 32-bit x86 apps in the session, camera, a GPU path (SwiftShader
+   draws on the CPU). Clicks, keys and the network work since stage 29
+   (`benchmarks/stage29-android-input-network.txt`), sound (compressed
+   files included) since stage 30, the Mac's keyboard layout and the
+   clipboard, text both ways, since stage 31
+   (`benchmarks/stage31-runtime-waits-clipboard.txt`).
 2. **Real-session bundle validation.** Synthetic unit tests MEASURE the
    selection and local package storage of XAPK, APKS, APKM, plain APK bags
    and OBB data. `scripts/android-session.py` stages chosen APKs into one
