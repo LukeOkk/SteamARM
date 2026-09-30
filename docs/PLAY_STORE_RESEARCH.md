@@ -6,6 +6,10 @@ The record is `benchmarks/stage25-android-research.txt`. What Android
 itself needs under lxrun is in `docs/ANDROID_ZERO_VM_FEASIBILITY.md`; this
 page covers what Play Store adds on top, how Google software can lawfully
 reach a non-certified Android environment, and what SteamARM will not do.
+The owner-facing procedure that follows these rules, and
+`scripts/android-gapps.py`, which checks a GApps package the owner supplies,
+builds an overlay without touching the root and shows how to read the GSF ID,
+are in `docs/PLAY_STORE_SETUP.md` (2026-09-30).
 
 **Labels:** MEASURED (run on the owner's Mac and recorded), VERIFIED IN
 SOURCE (file read, with repository and commit), UPSTREAM DOCUMENTED (the
@@ -198,7 +202,7 @@ Every step depends on the ones before it. "Today" is this repository at
 | 7 | an app activity launched from SteamARM's launcher | nothing; the launcher must show Android as unavailable with the reason until this works | — |
 | 8 | networking that ConnectivityService reports as validated; DNS | host sockets work for Linux programs; no route netlink | VERIFIED IN SOURCE |
 | 9 | WebView | UNKNOWN (part of the image) | UNKNOWN |
-| 10 | the user's GAPPS image or package placed by the user; Play services check-in; SteamARM shows the GSF ID; the user registers it and signs in themselves | nothing; no Google proprietary app (GMS, GSF, Play Store) was obtained for this project, and the Android state directory holds a VANILLA image only | — |
+| 10 | the user's GAPPS image or package placed by the user; Play services check-in; SteamARM shows the GSF ID; the user registers it and signs in themselves | nothing; no Google proprietary app (GMS, GSF, Play Store) was obtained for this project, and the Android state directory holds a VANILLA image only. Since 2026-09-30 `scripts/android-gapps.py` checks and layers a user-supplied package and prints the GSF ID command (`docs/PLAY_STORE_SETUP.md`) | — |
 | 11 | Play Store opens, installs an arm64-v8a app, and the app launches | — | — |
 
 ## 8. Could not be checked from here
