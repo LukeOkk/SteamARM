@@ -100,13 +100,14 @@ guides, and nothing in them is ready for players yet. Start with the plan,
   needs, and why SteamARM never ships Google's apps),
   [PLAY_STORE_SETUP.md](docs/PLAY_STORE_SETUP.md) (your own GApps package,
   checked and layered onto a clone of the root by `scripts/android-gapps.py`;
-  registering the device yourself; not runnable before the framework boots).
-- Android apps: [APK_SUPPORT.md](docs/APK_SUPPORT.md) (APKs are read,
-  installed and listed; nothing Android runs yet).
-- Android userspace without a VM (bionic programs run; binder and system
-  properties work in userspace, with Android's own servicemanager; arm64
-  ART's heap does not fit macOS yet; x86-64 ART runs Java under FEX, no
-  apps yet):
+  registering the device yourself; not run yet).
+- Android apps: [APK_SUPPORT.md](docs/APK_SUPPORT.md) (APKs and split
+  APKs -- XAPK, APKS, APKM -- are read, installed and started from the
+  launcher: dex-only and x86-64 apps, in a macOS window, with clicks, keys,
+  the Mac's network and raw sound; arm64-only apps not yet).
+- Android without a VM: Android 11's x86-64 build under FEX boots to its
+  home screen in 17-27 s (binder, properties and init in userspace, with
+  Android's own servicemanager); arm64 ART's heap does not fit macOS yet:
   [ANDROID_RUNTIME_ARCHITECTURE.md](docs/ANDROID_RUNTIME_ARCHITECTURE.md).
 
 ## Build from source
