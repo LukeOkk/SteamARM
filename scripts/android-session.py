@@ -381,8 +381,15 @@ def start(a, exit_with=0):
         if not a.headless and os.environ.get("STEAMARM_ANDROID_SOUND") != "0" and start_sound():
             cmd += ["--pulse", "/tmp/pulse"]
         if kind == "wlmac":
-            # Waydroid's composer: one Wayland toplevel per Android task.
-            cmd += ["--prop", "persist.waydroid.multi_windows=true", "--prop", "waydroid.active_apps=none"]
+            # Waydroid's composer in its multi-window mode: one Wayland
+            # toplevel per Android task, titled with the app's name (its
+            # hwcomposer's select_mode, read every frame: active_apps "none"
+            # shows nothing, "Waydroid" the whole screen in one window, any
+            # other value one window per task). No window while it boots:
+            # background_start=false would make the composer open its
+            # "Waydroid" window and set active_apps=Waydroid itself.
+            cmd += ["--prop", "persist.waydroid.multi_windows=true", "--prop", "waydroid.active_apps=none",
+                    "--prop", "waydroid.background_start=true"]
         if exit_with:
             cmd += ["--exit-with", str(exit_with)]
         p = subprocess.Popen(cmd, stdin=subprocess.DEVNULL, stdout=LOGF, stderr=subprocess.STDOUT,
@@ -690,6 +697,9 @@ def launch(s, pkg, apk=None, force=False):
     act = launcher_activity(s, pkg)
     if not act:
         die("%s has no launcher activity" % pkg, 4)
+    if s.get("compositor") == "wlmac":
+        # Windows from now on, one per task (see start).
+        guest(s, ["/system/bin/setprop", "waydroid.active_apps", pkg], timeout=60)
     t0 = time.time()
     rc, out = guest(s, ["/system/bin/am", "start", "-W", "-n", "%s/%s" % (pkg, act)], timeout=300)
     status = re.search(r"Status: (\S+)", out)

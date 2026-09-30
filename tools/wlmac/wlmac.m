@@ -53,6 +53,9 @@ static void logLine(NSString *s) { fprintf(stderr,"%s\n",s.UTF8String); fflush(s
 @property(nonatomic) int fd, scale, transform, inputX, inputY, inputW, inputH;
 @property(nonatomic) int subX,subY,pendingX,pendingY,viewportW,viewportH;
 @property(nonatomic) int sourceX,sourceY,sourceW,sourceH;
+@property(nonatomic) int geoX,geoY,geoW,geoH,pendingGeoX,pendingGeoY,pendingGeoW,pendingGeoH;
+@property(nonatomic) BOOL pendingGeo;
+@property(nonatomic) double offX,offY;      // the window's origin in root-surface coordinates
 @property(nonatomic) BOOL hasPendingAttach,hasInput, synchronous, pendingSubPos, configured, maximized, fullscreen;
 @property(nonatomic,strong) NSString *kind,*title,*appID;
 @property(nonatomic,strong) CALayer *layer;
@@ -178,6 +181,7 @@ static void pointerFrame(Client *c) { Obj *p=[c object:c.pointerID]; if(p && p.v
 static void pointerEvent(WView *v,NSEvent *e, int action) {
     Obj *top=v.top; Client *c=top.client; if(!c.pointerID) return;
     NSPoint p=[v convertPoint:e.locationInWindow fromView:nil]; p.y=v.bounds.size.height-p.y;
+    p.x+=top.offX; p.y+=top.offY;       // window -> root surface (geometry or the app's layers)
     Obj *hit=hitSurface(top,p); if(!hit && action!=1) hit=top;
     if(c.pointerFocus && (!hit || hit.oid!=c.pointerFocus)) {
         NSMutableData *b=[NSMutableData data]; append32(b,serialNext()); append32(b,c.pointerFocus);
@@ -261,7 +265,18 @@ static void dumpWindow(Obj *s) {
     if(!dumpDir.length || !s.window) return;
     static NSMutableDictionary<NSString *,NSNumber *> *last; if(!last) last=[NSMutableDictionary dictionary];
     NSString *key=[NSString stringWithFormat:@"%p",s]; double now=[NSProcessInfo processInfo].systemUptime;
-    if(last[key] && now-last[key].doubleValue<1.0) return;
+    if(last[key] && now-last[key].doubleValue<1.0) {
+        // Skipped: dump once more a second later, so the last frame of a
+        // burst is on disk even if nothing is committed after it.
+        static NSMutableSet<NSString *> *pending; if(!pending) pending=[NSMutableSet set];
+        if(![pending containsObject:key]) {
+            [pending addObject:key];
+            __weak Obj *weak=s;
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW,(int64_t)(1.1*NSEC_PER_SEC)),dispatch_get_main_queue(),^{
+                [pending removeObject:key]; Obj *o=weak; if(o) dumpWindow(o); });
+        }
+        return;
+    }
     last[key]=@(now);
     CALayer *root=s.window.contentView.layer; NSSize z=s.window.contentView.bounds.size;
     if(!root || z.width<1 || z.height<1) return;
@@ -282,18 +297,29 @@ static void applySurface(Obj *s) {
     if(s.hasPendingAttach) {
         s.hasPendingAttach=NO; s.bufferID=s.pendingBuffer;
         Obj *b=[c object:s.bufferID]; Obj *pool=b.poolObject;
+        if(!s.bufferID) {
+            // attach(NULL): the surface is unmapped. Waydroid's composer hides
+            // a layer so -- the app's white starting window stayed over the
+            // app until this cleared it (MEASURED).
+            s.layer.contents=nil; s.image=nil; s.width=0; s.height=0;
+            goto attached;
+        }
         if(!b || !pool || pool.fd<0 || b.width==0 || b.height==0 || b.stride<b.width*4 ||
            (uint64_t)b.offset+(uint64_t)b.stride*b.height>pool.poolSize) {
-            if(s.bufferID) [c error:s.oid text:@"invalid shm buffer"]; return;
+            [c error:s.oid text:@"invalid shm buffer"]; return;
         }
         s.width=b.width; s.height=b.height;
-        if(!s.window && s.topID) makeWindow(s);
         uint64_t start=clock_gettime_nsec_np(CLOCK_MONOTONIC);
         size_t n=(size_t)b.stride*b.height;
         void *mapping=mmap(NULL,pool.poolSize,PROT_READ,MAP_SHARED,pool.fd,0);
         if(mapping==MAP_FAILED) { [c error:s.oid text:@"mmap failed"]; return; }
         NSData *pixels=[[NSData alloc] initWithBytes:(uint8_t *)mapping+b.offset length:n];
         munmap(mapping,pool.poolSize);
+        if(verbose) {
+            uint64_t sum=0; const uint8_t *px=pixels.bytes; for(size_t i=0;i<n;i+=4093) sum=sum*31+px[i];
+            logLine([NSString stringWithFormat:@"commit surface %u buffer %ux%u fmt %x at %d,%d viewport %dx%d src %d,%d %dx%d sum %llx",
+                     s.oid,b.width,b.height,b.format,s.subX,s.subY,s.viewportW,s.viewportH,s.sourceX/256,s.sourceY/256,s.sourceW/256,s.sourceH/256,sum]);
+        }
         CGColorSpaceRef space=CGColorSpaceCreateDeviceRGB();
         CGBitmapInfo info;
         switch(b.format) {
@@ -306,6 +332,16 @@ static void applySurface(Obj *s) {
         CGImageRef cg=CGImageCreate(b.width,b.height,8,32,b.stride,space,info,provider,NULL,NO,kCGRenderingIntentDefault);
         CGDataProviderRelease(provider); CGColorSpaceRelease(space);
         if(!cg) { [c error:s.oid text:@"invalid bitmap format"]; return; }
+        if(verbose && dumpDir.length) {     // each surface's own last buffer, at most every 2 s
+            static NSMutableDictionary<NSNumber *,NSNumber *> *lastSurf; if(!lastSurf) lastSurf=[NSMutableDictionary dictionary];
+            double now=[NSProcessInfo processInfo].systemUptime;
+            if(!lastSurf[@(s.oid)] || now-lastSurf[@(s.oid)].doubleValue>2.0) {
+                lastSurf[@(s.oid)]=@(now);
+                NSBitmapImageRep *rep=[[NSBitmapImageRep alloc] initWithCGImage:cg];
+                [[rep representationUsingType:NSBitmapImageFileTypePNG properties:@{}]
+                    writeToFile:[dumpDir stringByAppendingPathComponent:[NSString stringWithFormat:@"surface-%u-fmt%x.png",s.oid,b.format]] atomically:YES];
+            }
+        }
         s.image=[[NSImage alloc] initWithCGImage:cg size:NSMakeSize(b.width,b.height)];
         if(!s.layer) { s.layer=[CALayer layer]; s.layer.geometryFlipped=YES; Obj *parent=[c object:s.parentID]; [parent.layer addSublayer:s.layer]; }
         s.layer.contents=(__bridge id)cg; s.layer.contentsGravity=kCAGravityResize;
@@ -315,16 +351,62 @@ static void applySurface(Obj *s) {
         copyNanos+=clock_gettime_nsec_np(CLOCK_MONOTONIC)-start; copyBytes+=n; copyFrames++;
         if(verbose && copyFrames%120==0) logLine([NSString stringWithFormat:@"copy frames=%llu bytes=%llu us_per_frame=%llu",copyFrames,copyBytes,copyNanos/copyFrames/1000]);
     }
+attached:
     if(s.pendingFrames.count) { [s.frames addObjectsFromArray:s.pendingFrames]; [s.pendingFrames removeAllObjects]; }
     for(Obj *child in s.children) if(child.synchronous) applySurface(child);
     // Size and place on every commit, not only on a new buffer: Waydroid's
     // composer attaches a 1x1 buffer to its window once and then sizes the
     // window with wp_viewport (MEASURED: the window stayed 1x1).
+    if(s.pendingGeo) { s.geoX=s.pendingGeoX; s.geoY=s.pendingGeoY; s.geoW=s.pendingGeoW; s.geoH=s.pendingGeoH; s.pendingGeo=NO; }
     layoutSurface(s);
+    // A toplevel's Mac window appears once it has a real size: Waydroid's
+    // composer keeps a 1x1 "Waydroid" toplevel it never shows content in
+    // (MEASURED), which would be an empty window on the Mac.
+    // So does a 1x1 backdrop with no mapped subsurface: Waydroid's
+    // "Waydroid" toplevel in multi-window mode is only that, and on the Mac
+    // it would be an invisible window over the whole screen taking clicks.
+    BOOL bare=NO;
+    if(s==rootSurface(s) && s.width<=1 && s.height<=1) {
+        bare=YES; for(Obj *ch in s.children) if(ch.layer.contents) { bare=NO; break; }
+    }
+    if(s==rootSurface(s) && s.topID && !s.window && !bare) {
+        NSSize z=(s.geoW>1 && s.geoH>1)?NSMakeSize(s.geoW,s.geoH):surfaceSize(s);
+        if(z.width>1 && z.height>1 && s.layer) makeWindow(s);
+    }
+    if(s==rootSurface(s) && s.window && bare && s.window.isVisible) [s.window orderOut:nil];
+    if(s==rootSurface(s) && s.window && !bare && !s.window.isVisible) [s.window orderFront:nil];
     if(s==rootSurface(s) && s.window) {
+        // The window geometry, when the client gives one, is the window:
+        // Waydroid's multi-window composer draws each app's task at its
+        // place on the whole screen and names that part with it.
         NSSize z=surfaceSize(s);
+        s.offX=0; s.offY=0;
+        // A 1x1 backdrop stretched over the screen with the app's layers as
+        // subsurfaces (Waydroid's multi-window mode, whose window geometry
+        // is the whole screen too, MEASURED): the window is the union of the
+        // mapped subsurfaces. Otherwise the client's window geometry.
+        CGRect u=CGRectNull;
+        if(s.width<=1 && s.height<=1)
+            for(Obj *ch in s.children) if(ch.layer.contents) {
+                NSSize cz=surfaceSize(ch); u=CGRectUnion(u,CGRectMake(ch.subX,ch.subY,cz.width,cz.height));
+            }
+        if(!CGRectIsNull(u) && u.size.width>1 && u.size.height>1) {
+            z=u.size; s.offX=u.origin.x; s.offY=u.origin.y;
+        } else if(s.geoW>0 && s.geoH>0) {
+            z=NSMakeSize(s.geoW,s.geoH); s.offX=s.geoX; s.offY=s.geoY;
+        }
+        if(s.offX || s.offY) { CGRect f=s.layer.frame; f.origin=CGPointMake(-s.offX,-s.offY); s.layer.frame=f; }
+        if(verbose) {
+            NSMutableString *kids=[NSMutableString string];
+            for(Obj *ch in s.children) [kids appendFormat:@" %u:%dx%d@%d,%d%s(%lu)",ch.oid,(int)surfaceSize(ch).width,(int)surfaceSize(ch).height,
+                                        ch.subX,ch.subY,ch.layer.contents?"":"-",(unsigned long)ch.children.count];
+            logLine([NSString stringWithFormat:@"root %u buf %ux%u vp %dx%d window %dx%d off %.0f,%.0f kids%@",
+                     s.oid,s.width,s.height,s.viewportW,s.viewportH,(int)z.width,(int)z.height,s.offX,s.offY,kids]);
+        }
         if(z.width>1 && z.height>1 && !NSEqualSizes(s.window.contentView.bounds.size,z)) [s.window setContentSize:z];
         dumpWindow(s);
+    } else {
+        Obj *r=rootSurface(s); if(r.window) dumpWindow(r);     // a subsurface's new content
     }
 }
 
@@ -487,7 +569,10 @@ static void applySurface(Obj *s) {
         else if(op==1 && n>=4) { Obj *top=[self create:word(p) kind:@"xdg_toplevel" version:o.version]; if(!top) return;
             top.parentID=s.oid; s.topID=top.oid; configureTop(s,0,0);
         } else if(op==2 && n>=12) { Obj *pop=[self create:word(p) kind:@"xdg_popup" version:o.version]; pop.parentID=s.oid; s.topID=pop.oid; [self event:o.oid opcode:0 body:u32(serialNext()) fd:-1]; }
-        else if(op==3 && n>=16) { /* geometry hint */ }
+        else if(op==3 && n>=16) {     // set_window_geometry: applied on the surface's next commit
+            s.pendingGeoX=sint(p); s.pendingGeoY=sint(p+4); s.pendingGeoW=sint(p+8); s.pendingGeoH=sint(p+12); s.pendingGeo=YES;
+            if(verbose) logLine([NSString stringWithFormat:@"geometry surface %u: %d,%d %dx%d",s.oid,s.pendingGeoX,s.pendingGeoY,s.pendingGeoW,s.pendingGeoH]);
+        }
         else if(op==4 && n>=4) { s.configured=YES; }
         else goto malformed;
     } else if([k isEqual:@"xdg_toplevel"]) {

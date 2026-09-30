@@ -41,13 +41,23 @@ prompt). `--verbose` logs every request.
   macOS window, whose dump has the client's four colours; a host client gets
   `wl_pointer` enter, motion, BTN_LEFT and `wl_keyboard` KEY_A from the
   compositor's input path.
-- Android 11 (x86-64 under FEX) boots against it to `sys.boot_completed=1`
+- Stage 29, before the per-app mode: Android 11 (x86-64 under FEX) boots against it to `sys.boot_completed=1`
   in about 20 s and Simple Solitaire has the focus; the window (1920x974,
   the screen) shows Android's desktop mode with the app in a freeform window.
   Idle: 0.1% CPU.
-- Not yet: one macOS window per Android app. With
-  `persist.waydroid.multi_windows=true` the composer still puts everything
-  in one "Waydroid" window: it sets `waydroid.active_apps=Waydroid` itself
-  when it starts (its service passes `--desktop_file_hint=Waydroid.desktop`),
-  and setting it to `none` afterwards created no other window (UNKNOWN why:
-  its per-task windows need layer names from Waydroid's patched framework).
+- One macOS window per Android app (stage 30): the session starts with
+  `persist.waydroid.multi_windows=true`, `waydroid.background_start=true`
+  (else the composer opens its own "Waydroid" window and sets
+  `waydroid.active_apps=Waydroid` itself) and `waydroid.active_apps=none`
+  (no window while Android boots), and `launch` sets
+  `waydroid.active_apps=<package>`: the composer's `select_mode`, read every
+  frame, then gives each task a toplevel titled with the app's name and
+  app_id `waydroid.<package>` (the launcher is on its built-in blacklist).
+  Each such toplevel is a 1x1 backdrop stretched over the screen with the
+  app's layers as subsurfaces, and its window geometry is the whole screen
+  too, so the Mac window is cut to the union of the mapped subsurfaces;
+  a toplevel with nothing mapped gets no Mac window. MEASURED, 3 launches
+  of 3: Simple Solitaire in its own 528x974 window, nothing else on screen.
+  Also needed: `wl_surface.attach(NULL)` unmaps (the app's white starting
+  window stayed over it). Clicks into these windows reach the composer's
+  input path (the self-test above) but were not measured in Android.
