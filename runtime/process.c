@@ -28,6 +28,7 @@
 
 #include "lxrt.h"
 #include "android_ids.h"
+#include "ids.h"
 bool lxrt_trace_on(void);
 
 #include <errno.h>
@@ -62,10 +63,16 @@ long lxrt_fork(void)
     // child execs promptly, which is the pattern every caller here uses. A
     // child that does not exec has no run loop and no pump thread, so window
     // and dispatch calls will not work in it.
+    int child_id = lxrt_ids_reserve_child();
+    if (lxrt_ids_on() && child_id < 2)
+        return LERR(EAGAIN);
     pid_t pid = fork();
-    if (pid < 0)
+    if (pid < 0) {
+        lxrt_ids_cancel_child(child_id);
         return LERR(errno);
+    }
     if (pid == 0) {
+        lxrt_ids_child_after_fork(child_id);
         // The child is a new process: new pid, one thread, its own /proc.
         // Without this the child's /proc regeneration landed in the PARENT's
         // directory and the parent read the child's maps and fds as its own
@@ -76,8 +83,11 @@ long lxrt_fork(void)
         lxrt_host_altstack_after_fork();
         lxrt_thread_after_fork();
         lxrt_proc_after_fork();
+    } else if (lxrt_ids_on()) {
+        lxrt_ids_publish_child(child_id, pid);
+        lxrt_ids_note_child(pid, child_id);
     }
-    return pid;
+    return lxrt_ids_on() && pid > 0 ? child_id : pid;
 }
 
 long lxrt_execve(const char *path, char *const argv[], char *const envp[])
@@ -95,7 +105,7 @@ long lxrt_execve(const char *path, char *const argv[], char *const envp[])
     // replaced with the image this runtime actually loaded.
     {
         char mine[64];
-        snprintf(mine, sizeof mine, "/proc/%d/exe", getpid());
+        snprintf(mine, sizeof mine, "/proc/%d/exe", lxrt_ids_pid());
         if (!strcmp(path, "/proc/self/exe") || !strcmp(path, mine)) {
             // FEX starting an x86 bwrap (argv: FEX, guest program, args):
             // steam-runtime-check-requirements does this to test the
@@ -183,6 +193,21 @@ long lxrt_execve(const char *path, char *const argv[], char *const envp[])
             use_env = withids;
         }
     }
+    if (lxrt_ids_on()) {
+        int ec = 0;
+        bool have = false;
+        while (use_env[ec]) {
+            if (!strncmp(use_env[ec], "LXRT_SMALL_IDS=", 15)) have = true;
+            ec++;
+        }
+        if (!have) {
+            char **withids = calloc((size_t)ec + 2, sizeof(char *));
+            if (!withids) return LERR(ENOMEM);
+            for (int k = 0; k < ec; k++) withids[k] = use_env[k];
+            withids[ec] = "LXRT_SMALL_IDS=1";
+            use_env = withids;
+        }
+    }
     if (lxrt_trace_on()) {
         int ec = 0;
         while (use_env[ec]) ec++;
@@ -222,6 +247,8 @@ long lxrt_execve(const char *path, char *const argv[], char *const envp[])
 // struct left unwritten showed bash's `time` printing garbage.
 long lxrt_wait4(int pid, int *status, int loptions, void *rusage)
 {
+    int host_pid = lxrt_ids_target_pid(pid);
+    if (lxrt_ids_on() && pid > 0 && host_pid < 0) return LERR(ECHILD);
     int doptions = 0;
     if (loptions & 1) doptions |= WNOHANG;
     if (loptions & 2) doptions |= WUNTRACED;
@@ -229,7 +256,7 @@ long lxrt_wait4(int pid, int *status, int loptions, void *rusage)
 
     int st = 0;
     struct rusage ru;
-    pid_t r = wait4(pid, &st, doptions, rusage ? &ru : NULL);
+    pid_t r = wait4(host_pid, &st, doptions, rusage ? &ru : NULL);
     if (r < 0)
         return LERR(errno);
     if (r > 0) {
@@ -247,5 +274,5 @@ long lxrt_wait4(int pid, int *status, int loptions, void *rusage)
     } else if (rusage) {
         memset(rusage, 0, 144);   // WNOHANG, nothing reaped: Linux zeroes it
     }
-    return r;
+    return r > 0 ? lxrt_ids_reaped_child(r, WIFEXITED(st) || WIFSIGNALED(st)) : r;
 }

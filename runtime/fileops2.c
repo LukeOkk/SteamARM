@@ -24,6 +24,7 @@
 // flock(LOCK_EX) over its code-map file and the runtime did not implement it.
 
 #include "lxrt.h"
+#include "ids.h"
 bool lxrt_trace_on(void);
 #include "fileops2.h"
 #include "props.h"
@@ -346,6 +347,10 @@ static void status_to_siginfo(struct linux_siginfo_chld *out, pid_t pid,
 
 long lxrt_waitid(int lidtype, int id, void *uinfop, int loptions, void *urusage)
 {
+    if (lxrt_ids_on() && lidtype == L_P_PID) {
+        id = lxrt_ids_target_pid(id);
+        if (id < 0) return LERR(ECHILD);
+    }
     if (lidtype != L_P_ALL && lidtype != L_P_PID && lidtype != L_P_PGID)
         return LERR(EINVAL);   // P_PIDFD(3): no pidfds in this runtime
     // Linux insists the caller say which state transitions it wants to hear
@@ -434,6 +439,7 @@ long lxrt_waitid(int lidtype, int id, void *uinfop, int loptions, void *urusage)
         if (r > 0) {
             status_to_siginfo(&info, r, status);
             fill_si_uid(&info, r, pre_ruid, pre_ok, (pid_t)id);
+            info.si_pid = lxrt_ids_reaped_child(r, WIFEXITED(status) || WIFSIGNALED(status));
         }
         if (uinfop)
             memcpy(uinfop, &info, sizeof info);
@@ -458,6 +464,10 @@ long lxrt_waitid(int lidtype, int id, void *uinfop, int loptions, void *urusage)
         // NOT dinfo.si_uid: Darwin leaves it zero (measured against a child
         // whose real uid was 501). Read from the kernel instead.
         fill_si_uid(&info, dinfo.si_pid, pre_ruid, pre_ok, (pid_t)id);
+        bool reaped = !(loptions & L_WNOWAIT) &&
+            (dinfo.si_code == CLD_EXITED || dinfo.si_code == CLD_KILLED ||
+             dinfo.si_code == CLD_DUMPED);
+        info.si_pid = lxrt_ids_reaped_child(dinfo.si_pid, reaped);
         info.si_status = chld_status_to_linux(dinfo.si_code, dinfo.si_status);
         // si_utime/si_stime stay zero: Darwin's siginfo_t has no field for
         // them. Left at zero rather than guessed -- a guest that wants child
@@ -2137,7 +2147,7 @@ static bool resolve_prio_thread(int who, pthread_t *out)
         *out = pthread_self();
         return true;
     }
-    if (who == (int)getpid())
+    if (who == lxrt_ids_pid())
         return lxrt_main_guest_thread(out);
     if (who < 0)
         return false;

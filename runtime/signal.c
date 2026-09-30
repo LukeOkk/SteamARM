@@ -18,6 +18,8 @@
 // guest stack.
 
 #include "lxrt.h"
+#include "ids.h"
+static _Atomic int g_xsig_sender[65536];
 #include "x18.h"
 
 #include <dirent.h>
@@ -239,7 +241,10 @@ struct linux_siginfo {
     int32_t si_errno;
     int32_t si_code;
     int32_t pad_;
-    uint64_t si_addr;       // union member for the fault signals
+    union {
+        uint64_t si_addr;   // fault signals
+        struct { int32_t si_pid, si_uid; }; // sent signals and SIGCHLD
+    };
     uint8_t  rest[104];
 };
 
@@ -966,6 +971,16 @@ static void host_handler(int dsig, siginfo_t *dinfo, void *uap)
 
     f->info.si_signo = lsig;
     f->info.si_code = si_code;
+    if (lxrt_ids_on() && lsig != 4 && lsig != 5 && lsig != 7 &&
+        lsig != 8 && lsig != 11) {
+        int sender = 0;
+        int mytid = lxrt_gettid();
+        if (mytid >= 2 && mytid < 65536)
+            sender = atomic_exchange(&g_xsig_sender[mytid], 0);
+        if (!sender && dinfo && dinfo->si_pid > 0)
+            sender = lxrt_ids_reaped_child(dinfo->si_pid, false);
+        f->info.si_pid = sender ? sender : 1;
+    }
     // Only the fault signals carry an address; for the rest this union member
     // holds si_pid/si_uid and must stay zero rather than borrow the fault one.
     if (lsig == 4 /*ILL*/ || lsig == 5 /*TRAP*/ || lsig == 7 /*BUS*/ ||
@@ -1588,6 +1603,10 @@ static void note_foreign_abort(int pid, int tid)
 
 long lxrt_kill(int pid, int lsig)
 {
+    if (lxrt_ids_on() && pid > 0) {
+        pid = lxrt_ids_target_pid(pid);
+        if (pid < 0) return LERR(ESRCH);
+    }
     if (lsig == 0)
         return kill(pid, 0) != 0 ? LERR(errno) : 0;
     int d = is_rt(lsig) ? LXRT_RT_CARRIER : lxrt_signo_to_darwin(lsig);
@@ -1634,7 +1653,7 @@ long lxrt_kill(int pid, int lsig)
 // signals to another process sent the bare carrier and lost the number.
 #define XSIG_DIR "/tmp/lxrt-sig"
 #define XSIG_SLOTS 64
-struct xsig_slot { _Atomic uint32_t state; int32_t tid, sig, pad; };   // 0 free, 1 filling, 2 ready
+struct xsig_slot { _Atomic uint32_t state; int32_t tid, sig, sender; }; // 0 free, 1 filling, 2 ready
 #define XSIG_BYTES (XSIG_SLOTS * sizeof(struct xsig_slot))
 static struct xsig_slot *g_xsig;
 
@@ -1726,6 +1745,7 @@ static bool xsig_send(int pid, int tid, int lsig)
         if (atomic_compare_exchange_strong(&m[i].state, &z, 1)) {
             m[i].tid = tid;
             m[i].sig = lsig;
+            m[i].sender = lxrt_ids_on() ? lxrt_ids_pid() : 0;
             atomic_store_explicit(&m[i].state, 2, memory_order_release);
             queued = true;
         }
@@ -1744,17 +1764,29 @@ static void xsig_drain(void)
         if (atomic_load_explicit(&g_xsig[i].state, memory_order_acquire) != 2)
             continue;
         int tid = g_xsig[i].tid, sig = g_xsig[i].sig;
+        int sender = g_xsig[i].sender;
         atomic_store_explicit(&g_xsig[i].state, 0, memory_order_release);
+        if (lxrt_ids_on() && sender > 0) {
+            int target = tid ? tid : lxrt_ids_pid();
+            if (target >= 2 && target < 65536)
+                atomic_store(&g_xsig_sender[target], sender);
+        }
         if (tid)
             lxrt_tgkill(0, tid, sig);
         else
-            lxrt_kill(getpid(), sig);
+            lxrt_kill(lxrt_ids_pid(), sig);
     }
 }
 
 // Thread-directed. This is what glibc's raise() and pthread_kill() use.
 long lxrt_tgkill(int tgid, int tid, int lsig)
 {
+    if (lxrt_ids_on() && tgid > 0) {
+        int host, index;
+        if (!lxrt_ids_to_host(tid, &host, &index) ||
+            (tgid = lxrt_ids_target_pid(tgid)) < 0 || host != tgid)
+            return LERR(ESRCH);
+    }
     if (tgid > 0 && tgid != getpid()) {
         if (lsig == 0)
             return kill(tgid, 0) != 0 ? LERR(errno) : 0;

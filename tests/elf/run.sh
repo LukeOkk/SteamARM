@@ -710,6 +710,24 @@ else
     echo "  skip  POSIX timer test (run scripts/mkroot-rpm.sh first)"
 fi
 
+# 19c. 32-bit bionic needs process and thread IDs below 65536. Exercise the
+# opt-in namespace with native aarch64 first, leaving the normal run untouched.
+if [ -f "$STAGE/usr/lib64/libc.a" ] && [ -n "$GCCDIR" ]; then
+    if err=$(glibc_cc -static-pie -O2 -pthread -o build/small_ids_test tests/elf/small_ids_test.c 2>&1); then
+        out=$(deadline 90 env LXRT_SMALL_IDS=1 ./build/lxrun "$PWD/build/small_ids_test" 2>&1); rc=$?
+        n_ok=$(grep -c "^  OK  " <<<"$out"); n_bad=$(grep -c "MAL" <<<"$out")
+        if [ "$rc" -eq 0 ] && [ "$n_ok" -eq 12 ] && [ "$n_bad" -eq 0 ]; then
+            ok "small IDs: 12/12 (threads, fork, signals, proc, credentials, wait, reuse)"
+        else
+            bad "small IDs 12/12" "rc=$rc, $n_ok ok, $n_bad bad: $(tail -5 <<<"$out" | tr '\n' ' ')"
+        fi
+    else
+        bad "build small_ids_test" "$err"
+    fi
+else
+    echo "  skip  small IDs test (no $STAGE)"
+fi
+
 # 20. inotify over kqueue EVFILT_VNODE. CEF, SDL3 and pressure-vessel import it.
 # IN_OPEN/IN_ACCESS/IN_CLOSE_* cannot be observed on Darwin and the test does
 # not depend on them. Linux scores 41/41.

@@ -14,6 +14,7 @@
 
 #include "lxrt.h"
 #include "android_ids.h"
+#include "ids.h"
 
 #include <errno.h>
 #include <dirent.h>
@@ -350,7 +351,7 @@ void lxrt_proc_init(const char *exe_path, const char *exe_link, int argc, char *
     // keeps the tree walkable.
     {
         char pidname[32], pidlink[640];
-        snprintf(pidname, sizeof pidname, "%d", getpid());
+        snprintf(pidname, sizeof pidname, "%d", lxrt_ids_pid());
         snprintf(pidlink, sizeof pidlink, "%s/%s", g_dir, pidname);
         unlink(pidlink);
         symlink(".", pidlink);
@@ -384,7 +385,8 @@ void lxrt_proc_init(const char *exe_path, const char *exe_link, int argc, char *
                       "Name:\t%s\nState:\tR (running)\nTgid:\t%d\nPid:\t%d\n"
                       "PPid:\t%d\nUid:\t%d\t%d\t%d\t%d\nGid:\t%d\t%d\t%d\t%d\n"
                       "Threads:\t1\n",
-                      argc > 0 ? argv[0] : "lxrt", getpid(), getpid(), getppid(),
+                      argc > 0 ? argv[0] : "lxrt", lxrt_ids_pid(), lxrt_ids_pid(),
+                      lxrt_ids_on() ? (lxrt_ids_to_guest(getppid(), 0) ?: 1) : getppid(),
                       getuid(), getuid(), getuid(), getuid(),
                       getgid(), getgid(), getgid(), getgid());
     write_file("status", status, (size_t)sl);
@@ -403,7 +405,7 @@ void lxrt_proc_init(const char *exe_path, const char *exe_link, int argc, char *
 // how steamwebhelper's subprocesses died before this existed.
 void lxrt_proc_thread_gone(int tid)
 {
-    if (!g_ready || tid <= 0 || tid == getpid())
+    if (!g_ready || tid <= 0 || tid == lxrt_ids_pid())
         return;
     char sub[700];
     snprintf(sub, sizeof sub, "%s/task/%d", g_dir, tid);
@@ -420,8 +422,8 @@ static void regenerate_tasks(void)
     if (n > 512) n = 512;
     // The main thread may not be registered yet; it is always present.
     bool have_main = false;
-    for (int i = 0; i < n; i++) if (tids[i] == getpid()) have_main = true;
-    if (!have_main && n < 512) tids[n++] = getpid();
+    for (int i = 0; i < n; i++) if (tids[i] == lxrt_ids_pid()) have_main = true;
+    if (!have_main && n < 512) tids[n++] = lxrt_ids_pid();
     // Entries of threads that are gone go too.
     DIR *d = opendir(dir);
     if (d) {
@@ -454,7 +456,8 @@ static void regenerate_tasks(void)
         lxrt_aids_status_ids(u, g, NULL, 0);   // Android ids: the virtual ones
         bl = snprintf(b, sizeof b, "Name:\t%s\nState:\tS (sleeping)\nTgid:\t%d\nPid:\t%d\nPPid:\t%d\n"
                       "Uid:\t%u\t%u\t%u\t%u\nGid:\t%u\t%u\t%u\t%u\nThreads:\t%d\n",
-                      strrchr(g_exe, '/') ? strrchr(g_exe, '/') + 1 : g_exe, getpid(), tids[i], getppid(),
+                      strrchr(g_exe, '/') ? strrchr(g_exe, '/') + 1 : g_exe, lxrt_ids_pid(), tids[i],
+                      lxrt_ids_on() ? (lxrt_ids_to_guest(getppid(), 0) ?: 1) : getppid(),
                       u[0], u[1], u[2], u[3], g[0], g[1], g[2], g[3], n);
         snprintf(f, sizeof f, "%s/status", sub);
         path_write_if_changed(f, b, (size_t)bl);
@@ -486,7 +489,7 @@ void lxrt_proc_after_fork(void)
     // keeps the tree walkable.
     {
         char pidname[32], pidlink[640];
-        snprintf(pidname, sizeof pidname, "%d", getpid());
+        snprintf(pidname, sizeof pidname, "%d", lxrt_ids_pid());
         snprintf(pidlink, sizeof pidlink, "%s/%s", g_dir, pidname);
         unlink(pidlink);
         symlink(".", pidlink);
@@ -507,7 +510,8 @@ void lxrt_proc_after_fork(void)
     int sl = snprintf(status, sizeof status,
                       "Name:\t%s\nState:\tR (running)\nTgid:\t%d\nPid:\t%d\n"
                       "PPid:\t%d\nUid:\t%d\t%d\t%d\t%d\nGid:\t%d\t%d\t%d\t%d\n"
-                      "Threads:\t1\n", base, getpid(), getpid(), getppid(),
+                      "Threads:\t1\n", base, lxrt_ids_pid(), lxrt_ids_pid(),
+                      lxrt_ids_on() ? (lxrt_ids_to_guest(getppid(), 0) ?: 1) : getppid(),
                       getuid(), getuid(), getuid(), getuid(),
                       getgid(), getgid(), getgid(), getgid());
     write_file("status", status, (size_t)sl);
@@ -564,7 +568,13 @@ const char *lxrt_proc_untranslate(const char *host, char *out, size_t n)
     }
     // Other guest processes live under .p/<pid>/ (procpid.c).
     if (strncmp(rest, ".p/", 3) == 0) {
-        snprintf(out, n, "/proc/%s", rest + 3);
+        char *endpid;
+        long host = strtol(rest + 3, &endpid, 10);
+        int guest = lxrt_ids_on() ? lxrt_ids_to_guest((int)host, 0) : (int)host;
+        if (host > 0 && guest > 0 && (*endpid == '/' || !*endpid))
+            snprintf(out, n, "/proc/%d%s", guest, endpid);
+        else
+            snprintf(out, n, "/proc/%s", rest + 3);
         return out;
     }
     if (strncmp(rest, ".net", 4) == 0 && (rest[4] == '/' || !rest[4])) {
@@ -576,12 +586,14 @@ const char *lxrt_proc_untranslate(const char *host, char *out, size_t n)
         "statm", "comm", "auxv", "limits", "cgroup", "self",
     };
     size_t first = strcspn(rest, "/");
+    int owner_guest = lxrt_ids_on() ? lxrt_ids_to_guest((int)owner, 0) : (int)owner;
+    if (!owner_guest) owner_guest = 1;
     for (unsigned i = 0; i < sizeof per_process / sizeof per_process[0]; i++)
         if (strlen(per_process[i]) == first && strncmp(rest, per_process[i], first) == 0) {
             if (strcmp(per_process[i], "self") == 0)
-                snprintf(out, n, "/proc/%ld%s", owner, rest + first);
+                snprintf(out, n, "/proc/%d%s", owner_guest, rest + first);
             else
-                snprintf(out, n, "/proc/%ld/%s", owner, rest);
+                snprintf(out, n, "/proc/%d/%s", owner_guest, rest);
             return out;
         }
     snprintf(out, n, "/proc/%s", rest);
@@ -637,7 +649,7 @@ const char *lxrt_proc_translate(const char *path)
     // is how a program checks that /proc is mounted at all.
     {
         char mypid[32];
-        snprintf(mypid, sizeof mypid, "%d", getpid());
+        snprintf(mypid, sizeof mypid, "%d", lxrt_ids_pid());
         if (strcmp(rest, "self") == 0 || strcmp(rest, mypid) == 0) {
             regenerate_fds();
             regenerate_tasks();
@@ -657,7 +669,7 @@ const char *lxrt_proc_translate(const char *path)
     } else {
         // /proc/<pid>/ for our own pid is the same thing.
         char mypid[32];
-        int k = snprintf(mypid, sizeof mypid, "%d/", getpid());
+        int k = snprintf(mypid, sizeof mypid, "%d/", lxrt_ids_pid());
         if (strncmp(rest, mypid, (size_t)k) != 0)
             return lxrt_procpid_translate(rest, g_dir);   // another guest process
         rest += k;

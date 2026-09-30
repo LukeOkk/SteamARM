@@ -48,6 +48,7 @@
 //                         fail with EACCES and read back the old value.
 
 #include "lxrt.h"
+#include "ids.h"
 #include "proc_ext.h"
 #include "android_ids.h"
 
@@ -884,7 +885,7 @@ static size_t gen_loadavg(char *b, size_t cap)
     // The runnable count is 1: this thread. Darwin publishes no system-wide
     // run-queue depth, and counting our own threads would count sleeping ones.
     sbf(&s, "%.2f %.2f %.2f 1/%u %d\n", la[0], la[1], la[2], total,
-        (int)getpid());
+        lxrt_ids_pid());
     return sb_done(&s);
 }
 
@@ -998,7 +999,10 @@ static size_t gen_self_stat(char *b, size_t cap)
                                               //       processor rt_prio policy
         "0 0 0 "                              // 42-44 blkio guest cguest
         "0 0 0 0 0 0 0 0\n",                  // 45-52
-        (int)getpid(), comm, (int)getppid(), (int)getpgrp(), (int)getsid(0),
+        lxrt_ids_pid(), comm,
+        lxrt_ids_on() ? (lxrt_ids_to_guest(getppid(), 0) ?: 1) : (int)getppid(),
+        lxrt_ids_on() ? (lxrt_ids_to_guest(getpgrp(), 0) ?: 1) : (int)getpgrp(),
+        lxrt_ids_on() ? (lxrt_ids_to_guest(getsid(0), 0) ?: 1) : (int)getsid(0),
         (unsigned long long)minflt, (unsigned long long)major,
         (unsigned long long)utime, (unsigned long long)stime,
         thread_count(), (unsigned long long)start_ticks(),
@@ -1025,7 +1029,8 @@ static size_t gen_self_status(char *b, size_t cap)
         "Name:\t%s\nUmask:\t0022\nState:\tR (running)\nTgid:\t%d\nNgid:\t0\nPid:\t%d\nPPid:\t%d\n"
         "TracerPid:\t0\nUid:\t%u\t%u\t%u\t%u\nGid:\t%u\t%u\t%u\t%u\nFDSize:\t256\nGroups:\t%s\n"
         "Threads:\t%u\n",
-        comm, (int)getpid(), (int)getpid(), (int)getppid(),
+        comm, lxrt_ids_pid(), lxrt_ids_pid(),
+        lxrt_ids_on() ? (lxrt_ids_to_guest(getppid(), 0) ?: 1) : (int)getppid(),
         u[0], u[1], u[2], u[3], g[0], g[1], g[2], g[3], groups, thread_count());
     return sb_done(&s);
 }
@@ -1473,7 +1478,7 @@ const char *lxrt_proc_ext_translate(const char *path, const char *dir)
         rest += 5;
     } else if (rest[0] >= '0' && rest[0] <= '9') {
         char mypid[32];
-        int k = snprintf(mypid, sizeof mypid, "%d/", (int)getpid());
+        int k = snprintf(mypid, sizeof mypid, "%d/", lxrt_ids_pid());
         if (k <= 0 || strncmp(rest, mypid, (size_t)k) != 0)
             return NULL;
         scope = SC_SELF;

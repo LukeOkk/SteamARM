@@ -27,6 +27,7 @@
 
 #include "lxrt.h"
 #include "android_ids.h"
+#include "ids.h"
 
 #include <arpa/inet.h>
 #include <dirent.h>
@@ -367,6 +368,11 @@ static void gen_pid_dir(int pid, const char *pd)
     write_whole(p, line, (size_t)n);
 
     char state = bi.pbi_status == SSTOP ? 'T' : bi.pbi_status == SZOMB ? 'Z' : 'S';
+    int guest_pid = lxrt_ids_on() ? lxrt_ids_to_guest(pid, 0) : pid;
+    int guest_ppid = lxrt_ids_on() ? lxrt_ids_to_guest(bi.pbi_ppid, 0) : (int)bi.pbi_ppid;
+    int guest_pgid = lxrt_ids_on() ? lxrt_ids_to_guest(bi.pbi_pgid, 0) : (int)bi.pbi_pgid;
+    if (!guest_ppid) guest_ppid = 1;
+    if (!guest_pgid) guest_pgid = 1;
     struct proc_taskinfo ti;
     if (proc_pidinfo(pid, PROC_PIDTASKINFO, 0, &ti, sizeof ti) != sizeof ti)
         memset(&ti, 0, sizeof ti);
@@ -376,7 +382,7 @@ static void gen_pid_dir(int pid, const char *pd)
     n = snprintf(line, sizeof line,
                  "%d (%s) %c %d %d %d 0 -1 4194304 0 0 0 0 %llu %llu 0 0 20 0 %d 0 0 %llu %llu "
                  "18446744073709551615 0 0 0 0 0 0 0 0 0 0 0 0 17 0 0 0 0 0 0 0 0 0 0 0 0 0 0\n",
-                 pid, comm, state, (int)bi.pbi_ppid, (int)bi.pbi_pgid, (int)bi.pbi_pgid,
+                 guest_pid, comm, state, guest_ppid, guest_pgid, guest_pgid,
                  ut, stt, ti.pti_threadnum > 0 ? ti.pti_threadnum : 1,
                  (unsigned long long)ti.pti_virtual_size, (unsigned long long)(ti.pti_resident_size / 4096));
     snprintf(p, sizeof p, "%s/stat", pd);
@@ -394,11 +400,51 @@ static void gen_pid_dir(int pid, const char *pd)
     n = snprintf(line, sizeof line,
                  "Name:\t%s\nUmask:\t0022\nState:\t%c (%s)\nTgid:\t%d\nNgid:\t0\nPid:\t%d\nPPid:\t%d\n"
                  "TracerPid:\t0\nUid:\t%u\t%u\t%u\t%u\nGid:\t%u\t%u\t%u\t%u\nThreads:\t%d\n",
-                 comm, state, state == 'T' ? "stopped" : "sleeping", pid, pid, (int)bi.pbi_ppid,
+                 comm, state, state == 'T' ? "stopped" : "sleeping", guest_pid, guest_pid, guest_ppid,
                  ru, eu, su, eu, rg, eg, sg, eg,
                  ti.pti_threadnum > 0 ? ti.pti_threadnum : 1);
     snprintf(p, sizeof p, "%s/status", pd);
     write_whole(p, line, (size_t)n);
+
+    if (lxrt_ids_on()) {
+        char taskdir[1200];
+        snprintf(taskdir, sizeof taskdir, "%s/task", pd);
+        mkdir(taskdir, 0700);
+        int tids[512];
+        int count = lxrt_ids_threads(pid, tids, 512);
+        if (count > 512) count = 512;
+        DIR *tasks = opendir(taskdir);
+        if (tasks) {
+            struct dirent *e;
+            while ((e = readdir(tasks))) {
+                char *end;
+                long old = strtol(e->d_name, &end, 10);
+                if (end == e->d_name || *end) continue;
+                bool live = false;
+                for (int i = 0; i < count; i++) if (tids[i] == old) live = true;
+                if (!live) {
+                    char stale[1300];
+                    snprintf(stale, sizeof stale, "%s/%ld/status", taskdir, old); unlink(stale);
+                    snprintf(stale, sizeof stale, "%s/%ld/comm", taskdir, old); unlink(stale);
+                    snprintf(stale, sizeof stale, "%s/%ld", taskdir, old); rmdir(stale);
+                }
+            }
+            closedir(tasks);
+        }
+        for (int i = 0; i < count; i++) {
+            char td[1300], file[1400];
+            snprintf(td, sizeof td, "%s/%d", taskdir, tids[i]);
+            mkdir(td, 0700);
+            snprintf(file, sizeof file, "%s/comm", td);
+            n = snprintf(line, sizeof line, "%s\n", comm);
+            write_whole(file, line, (size_t)n);
+            snprintf(file, sizeof file, "%s/status", td);
+            n = snprintf(line, sizeof line,
+                         "Name:\t%s\nState:\t%c (sleeping)\nTgid:\t%d\nPid:\t%d\nPPid:\t%d\n",
+                         comm, state, guest_pid, tids[i], guest_ppid);
+            write_whole(file, line, (size_t)n);
+        }
+    }
 }
 
 static void gen_pid_fds(int pid, const char *pd)
@@ -451,6 +497,10 @@ const char *lxrt_procpid_translate(const char *rest, const char *dir)
     long pid = strtol(rest, &end, 10);
     if (end == rest || (*end != '\0' && *end != '/') || pid <= 0 || pid > INT_MAX)
         return NULL;
+    if (lxrt_ids_on()) {
+        pid = lxrt_ids_target_pid((int)pid);
+        if (pid < 0) return NULL;
+    }
     if (pid == getpid() || !lxrt_procpid_is_guest((int)pid))
         return NULL;
     const char *sub = *end == '/' ? end + 1 : "";
@@ -506,11 +556,11 @@ void lxrt_procpid_list(const char *dir)
         while ((e = readdir(d))) {
             char *x;
             long v = strtol(e->d_name, &x, 10);
-            if (x == e->d_name || *x || v == getpid())
+            if (x == e->d_name || *x || v == lxrt_ids_pid())
                 continue;
             bool live = false;
             for (int i = 0; i < np && !live; i++)
-                live = pids[i] == v;
+                live = (lxrt_ids_on() ? lxrt_ids_to_guest(pids[i], 0) : pids[i]) == v;
             if (!live) {
                 char p[1300];
                 snprintf(p, sizeof p, "%s/%s", dir, e->d_name);
@@ -522,6 +572,8 @@ void lxrt_procpid_list(const char *dir)
     for (int i = 0; i < np; i++) {
         if (pids[i] == getpid())
             continue;
+        int guest_pid = lxrt_ids_on() ? lxrt_ids_to_guest(pids[i], 0) : pids[i];
+        if (guest_pid < 2) continue;
         char pd[1100], link[1100], tgt[64];
         snprintf(pd, sizeof pd, "%s/%d", base, pids[i]);
         // Listing /proc must not rewrite every process's files: they are
@@ -529,7 +581,7 @@ void lxrt_procpid_list(const char *dir)
         struct stat st;
         if (stat(pd, &st) != 0)
             gen_pid_dir(pids[i], pd);
-        snprintf(link, sizeof link, "%s/%d", dir, pids[i]);
+        snprintf(link, sizeof link, "%s/%d", dir, guest_pid);
         snprintf(tgt, sizeof tgt, ".p/%d", pids[i]);
         lxrt_link_set(tgt, link);
     }

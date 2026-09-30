@@ -193,6 +193,7 @@ struct proc {
     bool hello;
     uint32_t id;
     int pid;
+    int host_pid;               // LOCAL_PEERPID for channel verification
     uint32_t euid;
     int context;
     char secctx[64];
@@ -2254,6 +2255,10 @@ static void proc_message(struct proc *p)
         } else {
             p->hello = true;
             p->pid = hello.pid;
+            pid_t hp = 0;
+            socklen_t hplen = sizeof hp;
+            p->host_pid = getsockopt(p->fd, SOL_LOCAL, LOCAL_PEERPID,
+                                     &hp, &hplen) == 0 ? hp : hello.pid;
             p->euid = hello.euid;
             p->context = (int)hello.context;
             memcpy(p->secctx, hello.secctx, sizeof p->secctx);
@@ -2279,7 +2284,7 @@ static void proc_message(struct proc *p)
         pid_t peer = 0;
         socklen_t pl2 = sizeof peer;
         int gp = getsockopt(fds[0], SOL_LOCAL, LOCAL_PEERPID, &peer, &pl2);
-        if (pk == 0 || !sock || (gp == 0 && peer != p->pid)) {
+        if (pk == 0 || !sock || (gp == 0 && peer != p->host_pid)) {
             // The runtime waits for BH_THREAD_ACK and makes a new channel
             // when it does not come (runtime/binder.c tchan_get).
             hub_log("%d:%d thread channel arrived %s (socket %d, peer pid %d%s); refused", p->pid, bt.tid,

@@ -5,6 +5,7 @@
 #include "lxrt.h"
 #include "binder.h"
 #include "props.h"
+#include "ids.h"
 #include <dlfcn.h>
 #include <libproc.h>
 #include <mach/mach.h>
@@ -358,6 +359,10 @@ int main(int argc, char **argv)
     if (argc >= 2 && !strcmp(argv[1], "--property-service"))
         return lxrt_property_service_main(argc, argv);
     load_debug_env();
+    if (lxrt_ids_on() && lxrt_ids_init() < 2) {
+        fprintf(stderr, "lxrun: small ID registry unavailable\n");
+        return 1;
+    }
     lxrt_mounts_load_env();   // a fake bwrap's binds, if we are its child
     // A traced runtime traces its exec'd children too: the guest's execve
     // re-runs lxrun without our flags, so the flag travels in the environment.

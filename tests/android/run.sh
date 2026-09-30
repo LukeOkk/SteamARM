@@ -685,18 +685,22 @@ for _ in $(seq 1 60); do
 done
 [ -n "$hready" ] && ok "x86_64 hwservicemanager set hwservicemanager.ready=true" || bad "x86_64 hwservicemanager.ready" "not set"
 out=$(xg 40 /system/bin/lshal list)
-grep -qE "android\.hidl\.manager@1\.0::IServiceManager/default +N/A +$hpid" <<<"$out" &&
-    ok "x86_64 lshal list: $(grep -cE "::I[A-Za-z]+/default +N/A +$hpid" <<<"$out") interfaces served by hwservicemanager (pid $hpid)" ||
+# lshal prints guest pids (small ids under LXRT_SMALL_IDS=1, runtime/ids.c).
+local ghpid gapid
+ghpid=$(python3 tests/android/guest_pid.py "$hpid")
+grep -qE "android\.hidl\.manager@1\.0::IServiceManager/default +N/A +$ghpid" <<<"$out" &&
+    ok "x86_64 lshal list: $(grep -cE "::I[A-Za-z]+/default +N/A +$ghpid" <<<"$out") interfaces served by hwservicemanager (pid $ghpid)" ||
     bad "x86_64 lshal list" "$(head -4 <<<"$out" | tr '\n' ' ')"
 (xgbg 60 /system/bin/hw/android.hidl.allocator@1.0-service >/dev/null 2>&1) &
 apid=$!
 for _ in $(seq 1 30); do
     out=$(xg 40 /system/bin/lshal list)
-    grep -qE "android\.hidl\.allocator@1\.0::IAllocator/ashmem +N/A +$apid" <<<"$out" && break
+    gapid=$(python3 tests/android/guest_pid.py "$apid")
+    grep -qE "android\.hidl\.allocator@1\.0::IAllocator/ashmem +N/A +$gapid" <<<"$out" && break
     sleep 0.3
 done
-grep -qE "android\.hidl\.allocator@1\.0::IAllocator/ashmem +N/A +$apid" <<<"$out" &&
-    ok "an x86-64 HIDL HAL registered: android.hidl.allocator@1.0::IAllocator/ashmem (pid $apid)" ||
+grep -qE "android\.hidl\.allocator@1\.0::IAllocator/ashmem +N/A +$gapid" <<<"$out" &&
+    ok "an x86-64 HIDL HAL registered: android.hidl.allocator@1.0::IAllocator/ashmem (pid $gapid)" ||
     bad "x86_64 HIDL HAL registration" "$(grep -i allocator <<<"$out" | head -2)"
 kill "$apid" "$hpid" 2>/dev/null; wait "$apid" "$hpid" 2>/dev/null
 
@@ -761,7 +765,9 @@ else bad "android-boot: system_server" "$(grep -aE 'FatalError|Fatal signal' "$l
 if grep -aq lxrt-i386-bionic "$X86_ROOT/usr/lib/lxrt-emu/FEX"; then
     local zs
     zs=$(sed -n 's/.*started zygote_secondary (pid \([0-9]*\).*/\1/p' "$il" | head -1)
-    if [ -n "$zs" ] && grep -aq "tid $zs Zygote: Accepting command socket connections" "$lc" &&
+    # init.log has the host pid, logcat the guest's (runtime/ids.c), and
+    # the process is gone by now: both zygotes' "Accepting" lines instead.
+    if [ -n "$zs" ] && [ "$(grep -ac 'Zygote: Accepting command socket connections' "$lc")" -ge 2 ] &&
        ! grep -aq 'Failed to connect to Zygote through socket zygote_secondary' "$lc" &&
        ! grep -q 'service zygote_secondary .* exited' "$il"; then
         ok "android-boot: zygote_secondary (i386 app_process32) listening, system_server connected to it"
@@ -1170,7 +1176,8 @@ xinfo=$(DISPLAY=:2 /opt/homebrew/bin/xdpyinfo 2>/dev/null)
 if [ -z "${ANDROID_SKIP_INPUT:-}" ] && grep -q XTEST <<<"$xinfo"; then
     local wid focus1 focus2 keys
     out=$(env "${senv[@]}" perl -e 'alarm shift; exec @ARGV' 900 python3 scripts/android-session.py launch de.tobiasbielefeld.solitaire 2>&1); rc=$?
-    wid=$(DISPLAY=:2 /opt/homebrew/bin/xwininfo -root -tree 2>/dev/null | grep -o '0x[0-9a-f]* "Weston Compositor' | head -1 | cut -d' ' -f1)
+    # Weston's window, by its class: its title is the app's name now.
+    wid=$(DISPLAY=:2 /opt/homebrew/bin/xwininfo -root -tree 2>/dev/null | grep '("weston' | grep -o '0x[0-9a-f]*' | head -1)
     if [ "$rc" -eq 0 ] && [ -n "$wid" ]; then
         python3 tests/android/xtest_input.py :2 "$wid" click 8 8 >/dev/null
         sleep 2

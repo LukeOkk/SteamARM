@@ -614,6 +614,10 @@ class Boot:
             # input FIFOs and InputFlinger's EventHub meet there, not in the
             # shared /tmp/lxrt-input of steamarm-inputd's controllers.
             "LXRT_INPUT_DIR": self.inputdir,
+            # Ids below 65536 for every process of the stack (runtime/ids.c),
+            # as scripts/run-android-x86.sh gives its guests: 32-bit bionic
+            # keeps them in 16 bits, and binder, /proc and kill must agree.
+            "LXRT_SMALL_IDS": os.environ.get("LXRT_SMALL_IDS", "1"),
         }
         if self.x86:
             # The same as scripts/run-android-x86.sh (its FEXServer is used).
@@ -1495,9 +1499,15 @@ def main():
         # composer (hwcomposer.cpp: XDG_RUNTIME_DIR/WAYLAND_DISPLAY from these,
         # one window with the whole screen, the window made at open).
         xdg, _, sock = a.wayland.partition(":")
-        a.prop = (a.prop or []) + ["waydroid.xdg_runtime_dir=" + xdg,
-                                   "waydroid.wayland_display=" + (sock or "wayland-0"),
-                                   "waydroid.active_apps=Waydroid", "waydroid.background_start=false"]
+        # Defaults; a --prop of the same name wins (a session in Waydroid's
+        # multi-window mode sets waydroid.active_apps=none: with "Waydroid"
+        # the composer puts the whole desktop in one window).
+        given = {x.split("=", 1)[0] for x in (a.prop or [])}
+        a.prop = (a.prop or []) + [kv for kv in ["waydroid.xdg_runtime_dir=" + xdg,
+                                                  "waydroid.wayland_display=" + (sock or "wayland-0"),
+                                                  "waydroid.active_apps=Waydroid",
+                                                  "waydroid.background_start=false"]
+                                   if kv.split("=", 1)[0] not in given]
         if a.profile == "headless":
             a.profile = "display"
     if a.pulse:

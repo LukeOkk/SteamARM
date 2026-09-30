@@ -11,6 +11,7 @@
 //      has no such thing and rejects the type outright.
 
 #include "lxrt.h"
+#include "ids.h"
 #include "android_ids.h"
 #include "props.h"
 
@@ -547,7 +548,7 @@ long lxrt_getsockname(int fd, void *lsa, uint32_t *llen, bool peer)
             return LERR(EFAULT);
         uint8_t nl[12] = {0};
         uint16_t fam = L_AF_NETLINK;
-        uint32_t pid = peer ? 0 : (uint32_t)getpid(), groups = peer ? 0 : atomic_load(&g_nl_groups[fd]);
+        uint32_t pid = peer ? 0 : (uint32_t)lxrt_ids_pid(), groups = peer ? 0 : atomic_load(&g_nl_groups[fd]);
         memcpy(nl, &fam, 2);
         memcpy(nl + 4, &pid, 4);
         memcpy(nl + 8, &groups, 4);
@@ -784,6 +785,10 @@ static bool peer_ucred(int fd, struct linux_ucred *out, bool real)
     if (lxrt_aids_lookup(out->pid, &ap)) {
         out->uid = real ? ap.ruid : ap.euid;
         out->gid = real ? ap.rgid : ap.egid;
+    }
+    if (lxrt_ids_on()) {
+        out->pid = lxrt_ids_to_guest(out->pid, 0);
+        if (!out->pid) out->pid = 1;
     }
     return true;
 }

@@ -11,6 +11,7 @@
 // fails reports which call it lacked rather than dying anonymously.
 
 #include "lxrt.h"
+#include "ids.h"
 #include "android_ids.h"
 #include "mounts.h"
 #include "offmap.h"
@@ -2231,7 +2232,7 @@ static long do_process_vm(bool write, uint64_t pid, uint64_t liov, uint64_t liov
                           uint64_t riov, uint64_t riovcnt, uint64_t flags)
 {
     if (flags) return LERR(EINVAL);
-    if ((int)pid != getpid()) return LERR(EPERM);
+    if ((int)pid != lxrt_ids_pid()) return LERR(EPERM);
     if (liovcnt > 1024 || riovcnt > 1024) return LERR(EINVAL);
     struct iov64 { uint64_t base, len; };
     const struct iov64 *l = (const struct iov64 *)(uintptr_t)liov;
@@ -2394,7 +2395,7 @@ struct linux_rlimit { uint64_t rlim_cur, rlim_max; };
 
 static long do_prlimit64(long pid, long res, uint64_t newp, uint64_t oldp)
 {
-    if (pid != 0 && pid != getpid())
+    if (pid != 0 && pid != lxrt_ids_pid())
         return LERR(EPERM);  // cross-process limits are not something we can honour
     int dres = rlimit_to_darwin(res);
     if (dres < 0)
@@ -3689,11 +3690,34 @@ restart:
         break;
     }
     case LNR_getpgid:
-        ret = ret_of(getpgid((pid_t)a0));
+        if (lxrt_ids_on() && a0 && lxrt_ids_target_pid((int)a0) < 0) {
+            ret = LERR(ESRCH); break;
+        }
+        ret = ret_of(getpgid((pid_t)(a0 ? lxrt_ids_target_pid((int)a0) : 0)));
+        if (ret > 0 && lxrt_ids_on()) {
+            ret = lxrt_ids_to_guest((int)ret, 0);
+            if (!ret) ret = 1;
+        }
         break;
     case LNR_setpgid:
-        ret = ret_of(setpgid((pid_t)a0, (pid_t)a1));
+        if (lxrt_ids_on() &&
+            ((a0 && lxrt_ids_target_pid((int)a0) < 0) ||
+             (a1 && lxrt_ids_target_pid((int)a1) < 0))) {
+            ret = LERR(ESRCH); break;
+        }
+        ret = ret_of(setpgid((pid_t)(a0 ? lxrt_ids_target_pid((int)a0) : 0),
+                             (pid_t)(a1 ? lxrt_ids_target_pid((int)a1) : 0)));
         break;
+    case 156: { // getsid
+        int host = a0 ? lxrt_ids_target_pid((int)a0) : 0;
+        if (lxrt_ids_on() && a0 && host < 0) { ret = LERR(ESRCH); break; }
+        ret = ret_of(getsid((pid_t)host));
+        if (ret > 0 && lxrt_ids_on()) {
+            ret = lxrt_ids_to_guest((int)ret, 0);
+            if (!ret) ret = 1;
+        }
+        break;
+    }
     case LNR_gettimeofday: {
         // (struct timeval *tv, struct timezone *tz). Linux's timeval is two
         // 64-bit fields; Darwin's tv_usec is a 32-bit int followed by padding,
@@ -3985,13 +4009,14 @@ restart:
         break;
 
     case LNR_getpid:
-        ret = getpid();
+        ret = lxrt_ids_pid();
         break;
     case LNR_gettid:
         ret = lxrt_gettid();
         break;
     case LNR_getppid:
-        ret = getppid();
+        ret = lxrt_ids_on() ? lxrt_ids_to_guest(getppid(), 0) : getppid();
+        if (lxrt_ids_on() && ret == 0) ret = 1;
         break;
     case LNR_set_tid_address:
         ret = lxrt_set_tid_address((uint32_t *)a0);
@@ -4126,6 +4151,8 @@ restart:
                          (uint32_t *)a4, (uint32_t)a5);
         break;
     case LNR_sched_getaffinity: {
+        if (lxrt_ids_on() && a0 &&
+            lxrt_ids_target_pid((int)a0) < 0) { ret = LERR(ESRCH); break; }
         // (pid, cpusetsize, mask). Report every core as available; Darwin does
         // not expose affinity and glibc only uses this to size thread pools.
         unsigned long *mask = (unsigned long *)a2;
@@ -4140,7 +4167,8 @@ restart:
         break;
     }
     case 122:   // sched_setaffinity: Darwin has no affinity; accept, as a
-        ret = 0;    // cgroup-less Linux with every core allowed would.
+        ret = lxrt_ids_on() && a0 && lxrt_ids_target_pid((int)a0) < 0
+            ? LERR(ESRCH) : 0;
         break;
     case 114: { // clock_getres(clk, res): every clock here is the nanosecond
         // counter (coarse ones included), so 1 ns is the true resolution.
@@ -4158,6 +4186,7 @@ restart:
         break;
     case 157:   // setsid
         ret = ret_of(setsid());
+        if (ret > 0 && lxrt_ids_on()) ret = lxrt_ids_pid();
         break;
     case 293:   // rseq: glibc registers it opportunistically; ENOSYS is its
         ret = LERR(ENOSYS);   // documented "not available" answer
@@ -4186,7 +4215,7 @@ restart:
         ret = 0;
         break;
     case LNR_tgkill:
-        if (a2 == 6 && (int)a0 == getpid())
+        if (a2 == 6 && (int)a0 == lxrt_ids_pid())
             abort_backtrace(r);
         ret = lxrt_tgkill((int)a0, (int)a1, (int)a2);
         break;
@@ -4271,6 +4300,7 @@ restart:
         lxrt_sigstats_flush();
         lxrt_sysv_exit();
         lxrt_proc_cleanup();
+        lxrt_ids_release_process();
         _exit((int)a0);
     default:
         atomic_fetch_add(&g_unimplemented, 1);

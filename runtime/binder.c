@@ -52,6 +52,7 @@
 #include "lxrt.h"
 #include "android_ids.h"
 #include "binder.h"
+#include "ids.h"
 
 #define LERR(e) (-lxrt_errno_to_linux(e))
 #define ALIGN8(x) (((x) + 7) & ~(uint64_t)7)
@@ -537,7 +538,7 @@ long lxrt_binder_open(int context, int lflags)
             if (end && !*end && v < 0x80000000ul)
                 euid = (uint32_t)v;
         }
-        struct bh_hello hello = { .version = BH_VERSION, .pid = getpid(), .euid = euid,
+        struct bh_hello hello = { .version = BH_VERSION, .pid = lxrt_ids_pid(), .euid = euid,
                                   .context = (uint32_t)context };
         const char *sc = getenv("LXRT_BINDER_SECCTX");
         snprintf(hello.secctx, sizeof hello.secctx, "%s", sc && *sc ? sc : "u:r:unlabeled:s0");

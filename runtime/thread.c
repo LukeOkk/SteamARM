@@ -9,6 +9,7 @@
 // that skips it hangs instead of failing.
 
 #include "lxrt.h"
+#include "ids.h"
 #include "binder.h"
 #include <signal.h>
 #include "fileops2.h"
@@ -243,6 +244,8 @@ static void gt_free(void *p)
 {
     struct guest_thread *gt = p;
     unregister_thread(gt->tid);   // Also cover host pthread return/cancellation.
+    if (gt->tid != lxrt_ids_pid())
+        lxrt_ids_release(gt->tid);
     free(gt);
 }
 
@@ -256,6 +259,8 @@ static void gt_free(void *p)
 static int next_tid(void)
 {
     int n = atomic_fetch_add(&g_next_tid, 1);
+    if (lxrt_ids_on())
+        return lxrt_ids_alloc_thread(n);
     return 200000 + ((int)getpid() % 100000) * 10000 + (n % 10000);
 }
 
@@ -273,7 +278,7 @@ static struct guest_thread *gt_self(void)
         gt = calloc(1, sizeof(*gt));
         if (!gt)
             return NULL;
-        gt->tid = g_main_guest_set ? next_tid() : (int)getpid();
+        gt->tid = g_main_guest_set ? next_tid() : lxrt_ids_pid();
         pthread_setspecific(g_gt_key, gt);
         register_thread(gt->tid, pthread_self(), gt);
         if (!g_main_guest_set) {
@@ -294,13 +299,13 @@ void lxrt_thread_after_fork(void)
     for (int i = 0; i < MAX_GUEST_THREADS; i++) {
         if (!g_threads[i].used) continue;
         if (pthread_equal(g_threads[i].th, me))
-            g_threads[i].tid = (int)getpid();
+            g_threads[i].tid = lxrt_ids_pid();
         else
             g_threads[i].used = false;
     }
     struct guest_thread *gt = gt_self();
     if (gt)
-        gt->tid = (int)getpid();
+        gt->tid = lxrt_ids_pid();
     atomic_store(&g_next_tid, 1);
     g_main_guest = me;
     g_main_guest_set = true;
@@ -310,7 +315,7 @@ void lxrt_thread_after_fork(void)
 int lxrt_gettid(void)
 {
     struct guest_thread *gt = gt_self();
-    return gt ? gt->tid : (int)getpid();
+    return gt ? gt->tid : lxrt_ids_pid();
 }
 
 long lxrt_set_tid_address(uint32_t *ctid)
@@ -513,6 +518,7 @@ static void *thread_start(void *arg)
         // gt_self registered a provisional tid; replace it with the one the
         // parent already reported to the guest.
         unregister_thread(gt->tid);
+        lxrt_ids_release(gt->tid);
         gt->tid = ctx.tid;
         gt->clear_child_tid = ctx.clear_ctid ? ctx.ctid : NULL;
         // A new thread starts with its creator's signal mask (pthread_create
@@ -562,10 +568,15 @@ long lxrt_clone(uint64_t flags, uint64_t child_stack, uint32_t *ptid,
 
     pthread_once(&g_once, gt_init);
     int tid = next_tid();
+    if (tid < 2)
+        return LERR(EAGAIN);
 
     struct clone_ctx *ctx = calloc(1, sizeof(*ctx));
     if (!ctx)
+    {
+        lxrt_ids_release(tid);
         return LERR(ENOMEM);
+    }
     ctx->regs = *parent;
     ctx->x18 = lxrt_x18_get();
     ctx->rt_mask = lxrt_rt_mask_get();
@@ -608,6 +619,7 @@ long lxrt_clone(uint64_t flags, uint64_t child_stack, uint32_t *ptid,
     pthread_attr_destroy(&attr);
     if (rc != 0) {
         free(ctx);
+        lxrt_ids_release(tid);
         return LERR(EAGAIN);
     }
     return tid;
@@ -670,6 +682,7 @@ void lxrt_thread_exit(int code)
             lxrt_sigstats_flush();
             lxrt_sysv_exit();
             lxrt_proc_cleanup();
+            lxrt_ids_release_process();
             _exit(code & 0xff);
         }
     }

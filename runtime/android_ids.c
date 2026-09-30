@@ -4,6 +4,7 @@
 // security/commoncap.c (cap_emulate_setxuid, cap_bprm_creds_from_file,
 // cap_task_prctl), include/uapi/linux/capability.h and prctl.h.
 #include "android_ids.h"
+#include "ids.h"
 #include "lxrt.h"
 
 #include <errno.h>
@@ -415,10 +416,11 @@ static long do_cap(bool set, uint64_t hdr, uint64_t data)
         if (!mem_ok(data, (size_t)words * 12, true)) return LERR(EFAULT);
         uint32_t *d = (uint32_t *)(uintptr_t)data;
         uint64_t e = g.eff, p = g.prm, i = g.inh;
-        if (pid != 0 && pid != getpid() && pid != lxrt_gettid()) {
-            if (kill(pid, 0) != 0 && errno == ESRCH) return LERR(ESRCH);
+        if (pid != 0 && pid != lxrt_ids_pid() && pid != lxrt_gettid()) {
+            int host = lxrt_ids_target_pid(pid);
+            if (host < 0 || (kill(host, 0) != 0 && errno == ESRCH)) return LERR(ESRCH);
             struct lxrt_aids_peer pe;
-            if (lxrt_aids_lookup(pid, &pe)) { e = pe.eff; p = pe.prm; i = pe.inh; }
+            if (lxrt_aids_lookup(host, &pe)) { e = pe.eff; p = pe.prm; i = pe.inh; }
             else e = p = i = 0;                // no Android ids: an unprivileged process
         }
         for (int w = 0; w < words; w++) {
@@ -428,7 +430,7 @@ static long do_cap(bool set, uint64_t hdr, uint64_t data)
         }
         return 0;
     }
-    if (pid != 0 && pid != getpid() && pid != lxrt_gettid()) return LERR(EPERM);
+    if (pid != 0 && pid != lxrt_ids_pid() && pid != lxrt_gettid()) return LERR(EPERM);
     if (!mem_ok(data, (size_t)words * 12, false)) return LERR(EFAULT);
     const uint32_t *d = (const uint32_t *)(uintptr_t)data;
     uint64_t e = 0, p = 0, i = 0;
