@@ -50,3 +50,25 @@ subsurfaces, no window for a bare backdrop), 3 launches of 3:
 == The runtime: a fault its handler never fixes
 tests/elf/segv_spin.c (a SIGSEGV handler that returns): "a fault its handler
 never fixes ends the process (signal 11 after 1 s)"; tests/elf: 89 passed.
+
+== The network agent across a system_server restart
+Once in a suite run: "Active default network: none" (no agent). Five headless
+boots afterwards: default network 5/5, no zygote exit. With
+`setprop ctl.restart zygote` (a new system_server, netd's stand-in kept):
+before the fix the network stayed none for 150 s (isBinderAlive stays true
+without a death recipient); with pingBinder: "ConnectivityService went away:
+registering again", network 100 again 33 s after the restart.
+
+== Launcher path (scripts/run-app.sh, scratch state, card "android-sol")
+The app's own window 35 s after the start; the compositor's "close" (the
+window's close button): the task ended, the compositor left 5 s later, the
+session was gone 10 s after the close, nothing left running.
+
+== Release matrix (0.3.8 candidate)
+tests/elf 89/0; i386 18/0; tests/win 11/0; steam_path tone 1/0; vk_device 2/0;
+arm64 4/0; launcher core 35/0; tests/wlmac 3/0; tests/android 81 passed,
+1 failed (the network check, the run above), 2 expected failures.
+Steam: x86 main window at 96 s and 91 s (2 of 2); ARM64 (Fedora root): no
+window once (the web helper died of SIGBUS inside the runtime,
+subpage_mmap_locked zero-filling 0x7effffff0000: "Timed out waiting for
+webhelper init"), then 15 s and 26 s; ARM64 (Steam Frame root) 20 s.

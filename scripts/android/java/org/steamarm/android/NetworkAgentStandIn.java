@@ -58,13 +58,33 @@ final class NetworkAgentStandIn {
     private static Messenger mine;
     private static Object info;                     // android.net.NetworkInfo
 
+    // Registers, and registers again whenever the connectivity service it
+    // registered with goes away: system_server restarts (after a crash, or
+    // the zygote's) keep this process, and a network registered with the
+    // dead ConnectivityService is gone with it (MEASURED: "Active default
+    // network: none" after such a restart). A failed registration is tried
+    // again 2 s later.
     static void start(final String spec) {
         Thread t = new Thread(new Runnable() {
             public void run() {
-                try {
-                    register(spec.split(","));
-                } catch (Throwable e) {
-                    Log.w(TAG, "no network: " + e);
+                while (true) {
+                    IBinder cs = null;
+                    try {
+                        cs = register(spec.split(","));
+                    } catch (Throwable e) {
+                        Log.w(TAG, "registration failed, again in 2 s: " + e);
+                    }
+                    try {
+                        if (cs == null) {
+                            Thread.sleep(2000);
+                            continue;
+                        }
+                        while (alive(cs)) Thread.sleep(5000);
+                        Log.w(TAG, "ConnectivityService went away: registering again");
+                        connectivity = null;
+                    } catch (InterruptedException e) {
+                        return;
+                    }
                 }
             }
         }, "network-agent");
@@ -110,18 +130,33 @@ final class NetworkAgentStandIn {
         return Enum.valueOf((Class) Class.forName("android.net.NetworkInfo$DetailedState"), name);
     }
 
-    private static void register(String[] spec) throws Exception {
+    // pingBinder, a transaction: isBinderAlive only turns false once a death
+    // notification arrived, which needs a death recipient (MEASURED: a
+    // restarted system_server went unnoticed with it).
+    private static boolean alive(IBinder b) {
+        try {
+            return (Boolean) call(b, "pingBinder");
+        } catch (Exception e) {
+            return false;
+        }
+    }
+
+    private static IBinder register(String[] spec) throws Exception {
         String iface = spec[0], addr = spec[1], gateway = spec[2];
         String[] dns = spec.length > 3 && !spec[3].isEmpty() ? spec[3].split(";") : new String[0];
         // ConnectivityService takes agents at any time, but its network
         // stack and the default-network requests are there once the system
         // has booted, as for a driver's agent after boot.
         IBinder cs = null;
-        for (int i = 0; i < 1200 && (cs == null || !"1".equals(prop("sys.boot_completed"))); i++) {
-            if (cs == null) cs = ServiceManager.getService("connectivity");
+        for (int i = 0; i < 1200 && (cs == null || !alive(cs) || !"1".equals(prop("sys.boot_completed"))); i++) {
+            if (cs == null || !alive(cs)) cs = ServiceManager.getService("connectivity");
             Thread.sleep(500);
         }
         if (cs == null) throw new IllegalStateException("no connectivity service");
+        // A restarted system_server registers "connectivity" early in its
+        // start-up with sys.boot_completed still 1 from before; its network
+        // stack comes later. Give it time, as a driver's agent would get.
+        if (mine != null) Thread.sleep(20000);
 
         Class<?> infoClass = Class.forName("android.net.NetworkInfo");
         info = infoClass.getConstructor(int.class, int.class, String.class, String.class)
@@ -153,7 +188,7 @@ final class NetworkAgentStandIn {
         Object config = call(Class.forName("android.net.NetworkAgentConfig$Builder").getConstructor().newInstance(),
                 "build");
 
-        HandlerThread thread = new HandlerThread("network-agent");
+        HandlerThread thread = new HandlerThread("network-agent-" + System.nanoTime());
         thread.start();
         mine = new Messenger(new Handler(thread.getLooper()) {
             @Override
@@ -180,6 +215,7 @@ final class NetworkAgentStandIn {
         Log.i(TAG, "registered " + iface + " (" + addr + ", gateway " + gateway + ", dns " +
                 String.join(" ", dns) + "): network " + network);
         System.out.println("NetworkAgentStandIn: network " + network + " on " + iface);
+        return cs;
     }
 
     private static void send(int what, int arg1, Object obj) throws Exception {

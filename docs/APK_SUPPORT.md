@@ -8,7 +8,7 @@ library. Since stage 28 it also **runs** the ones its Android session can
 run: `scripts/android-session.py` boots Waydroid's LineageOS 18.1 x86_64
 image under FEX with zero VM (`docs/ANDROID_RUNTIME_ARCHITECTURE.md`,
 "Session"), installs the APK with Android's own `pm install`, starts it with
-`am start`, and its window is a macOS window. That covers apps with no
+`am start`, and its window is a macOS window of its own. That covers apps with no
 native code (dex only) and apps with x86_64 native code. Apps whose native
 code is arm64-v8a only stay disabled, with the reason: Android's arm64 ART
 does not start on macOS (the ART heap wall). No button pretends to open an
@@ -335,12 +335,15 @@ on the same cases.
     and **Desinstalar y conservar sus datos**.
 - **Abrir** runs `scripts/run-app.sh`, which runs
   `scripts/android-session.py run <package>` in the launcher's session
-  wrapper: SteamARM's X server on :2, Weston on it (its window is Android's
-  screen), the x86_64 root booted to `sys.boot_completed=1` (about 20-30 s,
+  wrapper: the x86_64 root booted to `sys.boot_completed=1` (about 20-30 s,
   longer the first time), the APK installed if needed and its launcher
-  activity started. **Detener** stops the whole session (closing Weston's
-  window should end it too: `run` ends when Weston does; not measured).
-  Always native windows, whatever the display setting.
+  activity started, each app in a macOS window of its own through
+  `steamarm-wlmac` (`tools/wlmac/README.md`; `ANDROID_SESSION_COMPOSITOR=
+  weston` puts all of Android in one window instead). **Detener** stops the
+  whole session, and so does closing the app's window (MEASURED, stage 30:
+  the window 35 s after **Abrir** through `run-app.sh`; closed, the session
+  was gone 10 s later with nothing left running). Always native windows,
+  whatever the display setting.
 - **Opening is disabled**, with the reason (`AndroidApps.unavailableReason`,
   on the card, as its help, in the Información sheet and in the alert of a
   launch attempt), when the session cannot run the app: arm64-v8a-only code
