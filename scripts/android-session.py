@@ -55,6 +55,7 @@ android-boot.py on this session's directory) and the Weston on its own socket.
 """
 import argparse
 import datetime
+import filecmp
 import fcntl
 import json
 import os
@@ -209,11 +210,41 @@ def ensure_volume():
         die("no Android root at %s after attaching the volume" % BASE_ROOT)
 
 
+def refresh_emu(fex=None):
+    """A session root is cloned once; the base root's emulator side
+    (/usr/lib/lxrt-emu: FEX and its libraries, scripts/mkandroidroot.sh
+    --emu) can change after that. Take the base's again when its FEX differs,
+    so a FEX update reaches existing sessions. Guest data is not touched."""
+    if fex:
+        return
+    base, mine = BASE_ROOT + "/usr/lib/lxrt-emu", ROOT + "/usr/lib/lxrt-emu"
+    try:
+        if filecmp.cmp(base + "/FEX", mine + "/FEX", shallow=False):
+            return
+    except OSError:
+        if not os.path.isfile(base + "/FEX"):
+            return
+    tmp = "%s.new-%d" % (mine, os.getpid())
+    shutil.rmtree(tmp, ignore_errors=True)
+    subprocess.run(["cp", "-c", "-R", base, tmp], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    if not os.path.isfile(tmp + "/FEX"):
+        shutil.rmtree(tmp, ignore_errors=True)
+        log("session root: could not take %s's emulator side; keeping the old one" % BASE_ROOT)
+        return
+    old = "%s.old-%d" % (mine, os.getpid())
+    if os.path.isdir(mine):
+        os.rename(mine, old)
+    os.rename(tmp, mine)
+    shutil.rmtree(old, ignore_errors=True)
+    log("session root %s: emulator side (/usr/lib/lxrt-emu) taken again from %s" % (ROOT, BASE_ROOT))
+
+
 def ensure_root(fex=None):
     if len(ROOT) + FEX_SOCKET_TAIL > 103:
         die("the session root's path is too long for FEX's server socket (%d bytes; at most %d): %s"
             % (len(ROOT), 103 - FEX_SOCKET_TAIL, ROOT))
     if os.path.isfile(ROOT + "/system/bin/toybox"):
+        refresh_emu(fex)
         return
     if not os.path.isfile(BASE_ROOT + "/usr/lib/lxrt-emu/FEX"):
         die("%s is not an x86_64 Android root with FEX (scripts/mkandroidroot.sh --arch x86_64)" % BASE_ROOT)
