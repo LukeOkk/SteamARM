@@ -1221,6 +1221,33 @@ if [ -z "${ANDROID_SKIP_INPUT:-}" ] && grep -q XTEST <<<"$xinfo"; then
 else
     echo "  skip  input from the Mac window (no XTEST on :2, or ANDROID_SKIP_INPUT)"
 fi
+# One Mac window per app (steamarm-wlmac, Waydroid's multi-window mode; the
+# launcher's default): the app's window alone, titled with its name; a click
+# on a game's tile through the compositor's input path opens it; A arrives
+# as KEYCODE_A. The compositor's test commands (SIGUSR1, <socket>.cmd) feed
+# the same path as the Mac's mouse and keyboard. A macOS window for a while.
+if [ -z "${ANDROID_SKIP_WLMAC:-}" ] && { [ -x build/steamarm-wlmac ] || tools/wlmac/build.sh >/dev/null 2>&1; }; then
+    local wx=/dev/shm/steamarm-android-wltest wh wpid wlog wact wkeys
+    wh="/tmp/lxrt-shm-$(id -u)${wx#/dev/shm}"
+    out=$(env "${senv[@]}" ANDROID_SESSION_XDG=$wx ANDROID_SESSION_COMPOSITOR=wlmac perl -e 'alarm shift; exec @ARGV' 900 \
+          python3 scripts/android-session.py launch de.tobiasbielefeld.solitaire 2>&1); rc=$?
+    wlog="$wh/wayland-0.wlmac.log"
+    wpid=$(cat "$wh/wayland-0.wlmac-pid" 2>/dev/null)
+    sleep 3
+    if [ "$rc" -eq 0 ] && [ -n "$wpid" ] && grep -q 'window title=Simple Solitaire Collection' "$wlog"; then
+        echo "click 94 468" > "$wh/wayland-0.cmd"; kill -USR1 "$wpid"; sleep 4
+        wact=$(env "${senv[@]}" ANDROID_SESSION_XDG=$wx python3 scripts/android-session.py shell /system/bin/dumpsys activity activities 2>/dev/null |
+               grep -m1 mResumedActivity)
+        echo "key 0" > "$wh/wayland-0.cmd"; kill -USR1 "$wpid"; sleep 2
+        wkeys=$(env "${senv[@]}" ANDROID_SESSION_XDG=$wx python3 scripts/android-session.py shell /system/bin/dumpsys input 2>/dev/null |
+                grep -c 'KeyEvent(.*action=DOWN.*keyCode=29, scanCode=30,')
+        if grep -q 'GameManager' <<<"$wact" && [ "$wkeys" -ge 1 ]; then
+            ok "one Mac window per app (steamarm-wlmac): \"Simple Solitaire Collection\" alone; a click opened a game, A arrived as KEYCODE_A"
+        else bad "one Mac window per app" "after the click: '$wact'; KEYCODE_A events: $wkeys"; fi
+    else bad "one Mac window per app" "rc=$rc windows: $(grep 'window title' "$wlog" 2>/dev/null | tr '\n' ' ') $(tail -2 <<<"$out" | tr '\n' ' ')"; fi
+    env "${senv[@]}" ANDROID_SESSION_XDG=$wx python3 scripts/android-session.py stop >/dev/null 2>&1
+    rm -f "$wh/wayland-0.cmd"
+fi
 rm -rf "$st" "$sdir"
 }
 

@@ -363,7 +363,9 @@ def start(a, exit_with=0):
             if r.returncode != 0:
                 die("the X server on %s did not start: %s" % (DISPLAY, r.stdout.decode(errors="replace").strip()))
         if kind == "wlmac":
-            wargs = ["start"]
+            # The session ends with its windows, as with Weston's one window:
+            # the compositor leaves 5 s after the last app window closed.
+            wargs = ["start", "--exit-when-empty"]
         else:
             wargs = ["start", "--kiosk", "--size", a.size] + (["--headless"] if a.headless else [])
         had_weston = weston_pid(state) is not None

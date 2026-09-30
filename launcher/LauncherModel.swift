@@ -267,7 +267,9 @@ final class LauncherModel: ObservableObject {
 
     /// What the Android session (scripts/android-session.py) needs that "Instalar"
     /// does not set up: the x86_64 Android root (on its sparsebundle, which the
-    /// session attaches itself) and the Weston root. nil when both are there.
+    /// session attaches itself). Its windows come from steamarm-wlmac, which
+    /// "Instalar" builds; the Weston root is needed only with
+    /// ANDROID_SESSION_COMPOSITOR=weston. nil when the root is there.
     func androidSessionMissing() -> String? {
         let fm = FileManager.default
         let volumeRoot = "/Volumes/SteamARMAndroid/root-x86_64/system/bin/toybox"
@@ -277,7 +279,8 @@ final class LauncherModel: ObservableObject {
                 + "(descarga la imagen de Waydroid) y luego scripts/mkandroidroot.sh --arch x86_64 --emu "
                 + "(docs/ANDROID_RUNTIME_ARCHITECTURE.md)"
         }
-        if !fm.fileExists(atPath: Paths.state.appendingPathComponent("westonroot/usr").path) {
+        if ProcessInfo.processInfo.environment["ANDROID_SESSION_COMPOSITOR"] == "weston",
+           !fm.fileExists(atPath: Paths.state.appendingPathComponent("westonroot/usr").path) {
             return "falta Weston, que muestra la pantalla de Android: se crea con scripts/mkwestonroot.sh"
         }
         return nil
@@ -470,8 +473,8 @@ final class LauncherModel: ObservableObject {
 
     /// What `app` asks for: its own choices over the settings.
     func requestedDisplay(_ app: AppEntry) -> DisplayMode {
-        // The Android session's screen is a Weston window on the native X
-        // server whatever the setting (scripts/run-app.sh does the same).
+        // Android apps get macOS windows of their own through steamarm-wlmac
+        // whatever the setting (scripts/run-app.sh; no X server involved).
         if app.isAndroid { return .native }
         return DisplayMode(rawValue: app.overrides?["display"] ?? "") ?? settings.display
     }
@@ -516,8 +519,8 @@ final class LauncherModel: ObservableObject {
         }
         if app.isExperimental && !confirmExperimental(app) { return }
         // Settings that cannot work: the fallback policy decides.
-        // An Android card runs in the Android session (Weston on the native X
-        // server, SwiftShader inside Android): the Linux apps' display,
+        // An Android card runs in the Android session (its own macOS windows
+        // through steamarm-wlmac, SwiftShader inside Android): the Linux apps' display,
         // synchronization and graphics settings do not reach it.
         let issues = app.isAndroid ? [] : launchIssues(app)
         switch settings.fallback.decision(for: issues) {

@@ -1303,7 +1303,7 @@ enum AndroidApps {
     /// What "Abrir" does for an Android card, in Spanish (the card's help and
     /// the Información sheet).
     static let sessionNote = "Se abre en la sesión Android de SteamARM: Android 11 x86-64 bajo FEX, sin VM, "
-        + "en una ventana de macOS (Weston). El primer arranque de la sesión tarda uno o dos minutos."
+        + "cada app en su propia ventana de macOS. El primer arranque de la sesión tarda uno o dos minutos."
 
     /// Whether the session can run this app: no native code (ART only), or
     /// x86_64 native code (run under FEX, as the session's own Android is).

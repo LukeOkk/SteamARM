@@ -395,9 +395,13 @@ eval "$SPEC"
 # Applied to the settings above; not for the program's environment.
 unset STEAMARM_GRAPHICS_BACKEND STEAMARM_SYNCHRONIZATION
 if [ -n "$APP_ANDROID" ]; then
-    # The Android session: Weston on the native X server, the x86_64 root
-    # under FEX (scripts/android-session.py run <package>).
+    # The Android session: the x86_64 root under FEX
+    # (scripts/android-session.py run <package>), each app in a macOS window
+    # of its own through steamarm-wlmac (tools/wlmac);
+    # ANDROID_SESSION_COMPOSITOR=weston: all of Android in one window, Weston
+    # on the native X server.
     RUNNER=scripts/android-session.py; TRANSLATOR=FEX
+    export ANDROID_SESSION_COMPOSITOR="${ANDROID_SESSION_COMPOSITOR:-wlmac}"
 elif [ "$APP_ARCH" = aarch64 ]; then
     RUNNER=scripts/run-native.sh; TRANSLATOR=none
 else

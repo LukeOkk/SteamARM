@@ -14,6 +14,10 @@
 static NSString *dumpDir;
 static BOOL verbose;
 static BOOL selftestInput;
+static BOOL exitWhenEmpty;       // leave 5 s after the last window closed (an app session ends with its windows)
+static BOOL hadWindow;
+static void shutdownServer(int signalNumber);
+static void windowsChanged(void);
 static uint32_t serialNumber = 1;
 static uint32_t serialNext(void) { return ++serialNumber; }
 static uint32_t word(const uint8_t *p) { uint32_t v; memcpy(&v,p,4); return v; }
@@ -234,6 +238,7 @@ static void keyboardEvent(WView *v,NSEvent *e, BOOL down) {
 - (void)flagsChanged:(NSEvent *)e { keyboardEvent(self,e,(e.modifierFlags & NSEventModifierFlagDeviceIndependentFlagsMask)!=0); }
 @end
 
+static __weak WWindow *newestWindow;      // the target of test commands (runCommands)
 static void makeWindow(Obj *s) {
     if(s.window) return;
     NSRect r=NSMakeRect(120+clients.count*20,120+clients.count*20,MAX(1,s.width?:480),MAX(1,s.height?:320));
@@ -244,7 +249,7 @@ static void makeWindow(Obj *s) {
     NSTrackingArea *track=[[NSTrackingArea alloc] initWithRect:NSZeroRect options:NSTrackingMouseEnteredAndExited|NSTrackingMouseMoved|NSTrackingActiveAlways|NSTrackingInVisibleRect owner:v userInfo:nil];
     [v addTrackingArea:track];
     if(!s.layer) s.layer=[CALayer layer]; s.layer.geometryFlipped=YES; s.layer.frame=v.bounds; [v.layer addSublayer:s.layer];
-    s.window=w; [w makeKeyAndOrderFront:nil]; [NSApp activateIgnoringOtherApps:YES];
+    s.window=w; newestWindow=w; hadWindow=YES; [w makeKeyAndOrderFront:nil]; [NSApp activateIgnoringOtherApps:YES];
     for(Obj *output in s.client.objects.allValues) if([output.kind isEqual:@"wl_output"]) [s.client event:s.oid opcode:0 body:u32(output.oid) fd:-1];
     logLine([NSString stringWithFormat:@"window title=%@ size=%dx%d app_id=%@",w.title,(int)r.size.width,(int)r.size.height,s.appID?:@""]);
     if(selftestInput) dispatch_async(dispatch_get_main_queue(), ^{
@@ -373,7 +378,7 @@ attached:
         NSSize z=(s.geoW>1 && s.geoH>1)?NSMakeSize(s.geoW,s.geoH):surfaceSize(s);
         if(z.width>1 && z.height>1 && s.layer) makeWindow(s);
     }
-    if(s==rootSurface(s) && s.window && bare && s.window.isVisible) [s.window orderOut:nil];
+    if(s==rootSurface(s) && s.window && bare && s.window.isVisible) { [s.window orderOut:nil]; windowsChanged(); }
     if(s==rootSurface(s) && s.window && !bare && !s.window.isVisible) [s.window orderFront:nil];
     if(s==rootSurface(s) && s.window) {
         // The window geometry, when the client gives one, is the window:
@@ -445,6 +450,7 @@ attached:
     if(_dead) return; _dead=YES;
     for(NSNumber *f in _fds) close(f.intValue); [_fds removeAllObjects];
     for(Obj *o in _objects.allValues) if(o.window) { [o.window close]; o.window=nil; }
+    dispatch_async(dispatch_get_main_queue(),^{ windowsChanged(); });
     [_objects removeAllObjects];
     if(_source) { dispatch_source_cancel(_source); _source=nil; }
     close(_fd); [clients removeObject:self];
@@ -504,7 +510,7 @@ attached:
         else [self error:id text:@"invalid region request"];
     } else if([k isEqual:@"wl_surface"]) {
         switch(op) {
-            case 0: [o.window close]; o.window=nil; [self remove:id]; break;
+            case 0: [o.window close]; o.window=nil; [self remove:id]; windowsChanged(); break;
             case 1: if(n<12) goto malformed; o.pendingBuffer=word(p); o.hasPendingAttach=YES; break;
             case 2: case 9: if(n<16) goto malformed; break;
             case 3: if(n<4) goto malformed; [o.pendingFrames addObject:@(word(p))]; [self create:word(p) kind:@"wl_callback" version:1]; break;
@@ -577,7 +583,7 @@ attached:
         else goto malformed;
     } else if([k isEqual:@"xdg_toplevel"]) {
         Obj *s=[self object:o.parentID];
-        if(op==0) { [s.window close]; s.window=nil; s.topID=0; [self remove:id]; }
+        if(op==0) { [s.window close]; s.window=nil; s.topID=0; [self remove:id]; windowsChanged(); }
         else if(op==2 || op==3) { size_t a=0; NSString *value=readString(p,n,&a); if(!value) goto malformed;
             if(op==2) { s.title=value; s.window.title=value; } else s.appID=value;
         } else if(op==7 || op==8) { /* min/max size stored by client; AppKit resizing remains free */ }
@@ -634,7 +640,43 @@ static void shutdownServer(int signalNumber) {
     logLine([NSString stringWithFormat:@"exit frames=%llu copied_bytes=%llu copy_us_per_frame=%llu",copyFrames,copyBytes,copyFrames?copyNanos/copyFrames/1000:0]);
     [NSApp terminate:nil];
 }
+static int visibleWindows(void) {
+    int n=0; for(Client *c in clients) for(Obj *o in c.objects.allValues) if(o.window && o.window.isVisible) n++;
+    return n;
+}
+static void windowsChanged(void) {
+    if(visibleWindows()) { hadWindow=YES; return; }
+    if(!exitWhenEmpty || !hadWindow) return;
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW,5*NSEC_PER_SEC),dispatch_get_main_queue(),^{
+        if(!visibleWindows()) { logLine(@"no window left for 5 s: exiting (--exit-when-empty)"); shutdownServer(0); }
+    });
+}
 static void handleSignal(int signo) { dispatch_async(dispatch_get_main_queue(),^{ shutdownServer(signo); }); }
+// Test input (SIGUSR1): <socket>.cmd holds lines "click X Y" (points from the
+// top left of the newest window's content) and "key MACKEYCODE"; each goes
+// through the same path as a person's mouse and keyboard.
+static void runCommands(void) {
+    NSString *text=[NSString stringWithContentsOfFile:[socketPath stringByAppendingString:@".cmd"] encoding:NSUTF8StringEncoding error:nil];
+    WWindow *w=newestWindow; WView *v=(WView *)w.contentView;
+    if(!text || !w || ![v isKindOfClass:[WView class]]) { logLine(@"command: no window or no command file"); return; }
+    [w windowDidBecomeKey:[NSNotification notificationWithName:NSWindowDidBecomeKeyNotification object:w]];
+    for(NSString *line in [text componentsSeparatedByString:@"\n"]) {
+        NSArray<NSString *> *a=[line componentsSeparatedByString:@" "];
+        if(a.count==3 && [a[0] isEqual:@"click"]) {
+            NSPoint loc=NSMakePoint(a[1].doubleValue, v.bounds.size.height-a[2].doubleValue);
+            NSEvent *move=[NSEvent mouseEventWithType:NSEventTypeMouseMoved location:loc modifierFlags:0 timestamp:0 windowNumber:w.windowNumber context:nil eventNumber:1 clickCount:0 pressure:0];
+            NSEvent *down=[NSEvent mouseEventWithType:NSEventTypeLeftMouseDown location:loc modifierFlags:0 timestamp:0 windowNumber:w.windowNumber context:nil eventNumber:2 clickCount:1 pressure:1];
+            NSEvent *up=[NSEvent mouseEventWithType:NSEventTypeLeftMouseUp location:loc modifierFlags:0 timestamp:0 windowNumber:w.windowNumber context:nil eventNumber:3 clickCount:1 pressure:0];
+            pointerEvent(v,move,0); pointerEvent(v,down,2); pointerEvent(v,up,3);
+            logLine([NSString stringWithFormat:@"command: click %@,%@ in \"%@\"",a[1],a[2],w.title]);
+        } else if(a.count==2 && [a[0] isEqual:@"key"]) {
+            NSEvent *k=[NSEvent keyEventWithType:NSEventTypeKeyDown location:NSZeroPoint modifierFlags:0 timestamp:0 windowNumber:w.windowNumber context:nil characters:@"" charactersIgnoringModifiers:@"" isARepeat:NO keyCode:(unsigned short)a[1].intValue];
+            keyboardEvent(v,k,YES); keyboardEvent(v,k,NO);
+            logLine([NSString stringWithFormat:@"command: key %@ in \"%@\"",a[1],w.title]);
+        }
+    }
+}
+static void handleCommand(int signo) { (void)signo; dispatch_async(dispatch_get_main_queue(),^{ runCommands(); }); }
 static BOOL startSocket(void) {
     listenFD=socket(AF_UNIX,SOCK_STREAM,0); if(listenFD<0) return NO;
     struct sockaddr_un sa={0}; sa.sun_family=AF_UNIX;
@@ -655,7 +697,8 @@ int main(int argc, const char **argv) {
             else if(!strcmp(argv[i],"--dump-dir") && i+1<argc) dumpDir=[NSString stringWithUTF8String:argv[++i]];
             else if(!strcmp(argv[i],"--verbose")) verbose=YES;
             else if(!strcmp(argv[i],"--selftest-input")) selftestInput=YES;
-            else { fprintf(stderr,"usage: steamarm-wlmac --socket ABSOLUTE_PATH [--dump-dir DIR] [--verbose] [--selftest-input]\n"); return 2; }
+            else if(!strcmp(argv[i],"--exit-when-empty")) exitWhenEmpty=YES;
+            else { fprintf(stderr,"usage: steamarm-wlmac --socket ABSOLUTE_PATH [--dump-dir DIR] [--verbose] [--selftest-input] [--exit-when-empty]\n"); return 2; }
         }
         if(!socketPath.length || ![socketPath hasPrefix:@"/"]) { fprintf(stderr,"--socket requires absolute path\n"); return 2; }
         if(dumpDir.length) [[NSFileManager defaultManager] createDirectoryAtPath:dumpDir withIntermediateDirectories:YES attributes:nil error:nil];
@@ -664,7 +707,7 @@ int main(int argc, const char **argv) {
         clients=[NSMutableArray array]; [NSApplication sharedApplication]; [NSApp setActivationPolicy:NSApplicationActivationPolicyRegular];
         NSMenu *bar=[NSMenu new], *appMenu=[NSMenu new]; [appMenu addItemWithTitle:@"Quit SteamARM Android" action:@selector(terminate:) keyEquivalent:@"q"];
         NSMenuItem *item=[NSMenuItem new]; item.title=@"SteamARM Android"; item.submenu=appMenu; [bar addItem:item]; NSApp.mainMenu=bar;
-        signal(SIGPIPE,SIG_IGN); signal(SIGTERM,handleSignal); signal(SIGINT,handleSignal);
+        signal(SIGPIPE,SIG_IGN); signal(SIGTERM,handleSignal); signal(SIGINT,handleSignal); signal(SIGUSR1,handleCommand);
         if(!startSocket()) { perror("wlmac socket"); return 1; }
         frameTimer=[NSTimer scheduledTimerWithTimeInterval:1.0/60.0 repeats:YES block:^(NSTimer *t){ (void)t; tick(); }];
         logLine([NSString stringWithFormat:@"listening %@",socketPath]); [NSApp run];
