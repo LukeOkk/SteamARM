@@ -81,15 +81,21 @@ static void hide_if_new(int fd)
         lxrt_fd_hide(fd, true);
 }
 static void note_inherited_fds(void) { each_open_fd(mark_inherited); }
+static char g_exe[1024];
 static void hide_emulator_fds(void)
 {
     static bool done;
     if (done || getenv("LXRT_SHOW_ALL_FDS")) return;
     done = true;
+    // Only when this image is FEX: a native guest that moves its own argv
+    // keeps every descriptor it opened.
+    const char *b = strrchr(g_exe, '/');
+    b = b ? b + 1 : g_exe;
+    if (strncmp(b, "FEX", 3) != 0) return;
     each_open_fd(hide_if_new);
 }
 static void regenerate_tasks(void);
-static char g_exe[1024];        // the guest's name of its image
+// (g_exe, declared above: the guest's name of its image)
 static char g_exe_link[1024];   // what <procfs>/exe points at (a host path)
 static bool g_ready;
 
