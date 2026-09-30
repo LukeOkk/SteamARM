@@ -1,0 +1,367 @@
+From 95fec98b62ad0ad84fa26069ed4284b1cdf7c402 Mon Sep 17 00:00:00 2001
+From: LukeOkk <85941941+LukeOkk@users.noreply.github.com>
+Date: Wed, 30 Sep 2026 02:10:51 -0300
+Subject: [PATCH 5/9] runtime, dex2oat: boot images and oat files in the heap
+ reference window (SteamARM, HYPOTHESIS)
+
+HYPOTHESIS, UNTESTED: not compiled, not run.
+
+The boot image keeps its layout: its 32-bit references and its header's
+32-bit address fields are the low halves of addresses, the same for any
+heap reference base. The runtime puts it in the window:
+
+- the reservation is at kHeapReferenceBase + ART_BASE_ADDRESS (+ the ASLR
+  delta);
+- ImageHeader's address getters, image roots and image methods add the
+  base back;
+- relocation (SimpleRelocateVisitor, SplitRangeRelocateVisitor,
+  MaybeRelocateSpaces, the app image boot range) already ran in 32-bit
+  arithmetic through reinterpret_cast32; it keeps doing so on the low
+  halves and ORs the base into every relocated pointer, heap reference and
+  native pointer alike (ArtMethod, ArtField, dex cache arrays, code).
+
+So an upstream boot image built for the low 4 GiB relocates into the window
+as it is. Its compiled code does not decompress references, so it must not
+run: an oat file records the base its code was generated for
+("heap-reference-base", written by dex2oat for arm64 when non-zero; absent
+means 0), and a mismatch rejects the boot image's oat file and makes an
+app's oat file kOatCannotOpen, unless the runtime is interpret-only
+(-Xint). -Xint gives every non-native boot image method the interpreter
+bridge (ClassLinker::InitFromBootImage); native methods keep their compiled
+JNI stubs, which only store the low halves of references into the handle
+scope and so work with any base (see the SteamARM study).
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01L6ANQQienC2qRCeZBzUfuS
+---
+ dex2oat/dex2oat.cc              |  7 ++++
+ runtime/gc/space/image_space.cc | 61 ++++++++++++++++++++++++---------
+ runtime/image-inl.h             |  4 ++-
+ runtime/image.cc                |  5 ++-
+ runtime/image.h                 | 14 +++++---
+ runtime/oat.cc                  |  6 ++++
+ runtime/oat.h                   |  4 +++
+ runtime/oat_file_assistant.cc   |  9 +++++
+ 8 files changed, 87 insertions(+), 23 deletions(-)
+
+diff --git a/dex2oat/dex2oat.cc b/dex2oat/dex2oat.cc
+index 21d7281..d7a1c1f 100644
+--- a/dex2oat/dex2oat.cc
++++ b/dex2oat/dex2oat.cc
+@@ -1208,6 +1208,13 @@ class Dex2Oat final {
+         CompilerFilter::NameOfFilter(compiler_options_->GetCompilerFilter()));
+     key_value_store_->Put(OatHeader::kConcurrentCopying,
+                           kUseReadBarrier ? OatHeader::kTrueValue : OatHeader::kFalseValue);
++    // SteamARM: record the heap reference base the arm64 code decompresses
++    // with (none for base 0, so upstream output stays byte-identical).
++    if (compiler_options_->GetInstructionSet() == InstructionSet::kArm64 &&
++        kTargetHeapReferenceBase != 0u) {
++      key_value_store_->Put(OatHeader::kHeapReferenceBaseKey,
++                            StringPrintf("%" PRIx64, kTargetHeapReferenceBase));
++    }
+     if (invocation_file_.get() != -1) {
+       std::ostringstream oss;
+       for (int i = 0; i < argc; ++i) {
+diff --git a/runtime/gc/space/image_space.cc b/runtime/gc/space/image_space.cc
+index bda90dd..847fd8d 100644
+--- a/runtime/gc/space/image_space.cc
++++ b/runtime/gc/space/image_space.cc
+@@ -51,6 +51,7 @@
+ #include "gc/task_processor.h"
+ #include "image-inl.h"
+ #include "image_space_fs.h"
++#include "instrumentation.h"
+ #include "intern_table-inl.h"
+ #include "mirror/class-inl.h"
+ #include "mirror/executable-inl.h"
+@@ -351,6 +352,18 @@ void ImageSpace::VerifyImageAllocations() {
+   }
+ }
+ 
++// SteamARM: boot image relocation works on the low 32 bits of addresses (an
++// image has the same layout for any heap reference base, and an upstream
++// image has none), and every relocated address lies in the window.
++static ALWAYS_INLINE uint32_t ImageLowBits(const void* ptr) {
++  return CompressHeapAddress(reinterpret_cast<uintptr_t>(ptr));
++}
++
++template <typename T>
++static ALWAYS_INLINE T* ImageWindowPointer(uint32_t low_bits) {
++  return reinterpret_cast<T*>(static_cast<uintptr_t>(DecompressHeapAddress(low_bits)));
++}
++
+ // Helper class for relocating from one range of memory to another.
+ class RelocationRange {
+  public:
+@@ -773,8 +786,7 @@ class ImageSpace::Loader {
+       {
+         TimingLogger::ScopedTiming timing("RelocateImage", &logger);
+         const PointerSize pointer_size = image_header.GetPointerSize();
+-        uint32_t boot_image_begin =
+-            reinterpret_cast32<uint32_t>(boot_image_spaces.front()->Begin());
++        uint32_t boot_image_begin = ImageLowBits(boot_image_spaces.front()->Begin());
+         bool result;
+         if (pointer_size == PointerSize::k64) {
+           result = RelocateInPlace<PointerSize::k64>(boot_image_begin,
+@@ -2077,7 +2089,7 @@ bool ImageSpace::BootImageLayout::ReadHeader(const std::string& base_location,
+   }
+ 
+   if (chunks_.empty()) {
+-    base_address_ = reinterpret_cast32<uint32_t>(header.GetImageBegin());
++    base_address_ = ImageLowBits(header.GetImageBegin());
+   }
+   ImageChunk chunk;
+   chunk.base_location = base_location;
+@@ -2580,8 +2592,9 @@ class ImageSpace::BootImageLoader {
+     }
+ 
+     // Reserve address space. If relocating, choose a random address for ALSR.
+-    uint8_t* addr = reinterpret_cast<uint8_t*>(
+-        relocate_ ? ART_BASE_ADDRESS + ChooseRelocationOffsetDelta() : base_address);
++    // SteamARM: inside the heap reference window.
++    uint8_t* addr = reinterpret_cast<uint8_t*>(static_cast<uintptr_t>(kHeapReferenceBase) +
++        (relocate_ ? ART_BASE_ADDRESS + ChooseRelocationOffsetDelta() : base_address));
+     MemMap image_reservation =
+         ReserveBootImageMemory(addr, image_reservation_size + extra_reservation_size, error_msg);
+     if (!image_reservation.IsValid()) {
+@@ -2685,19 +2698,19 @@ class ImageSpace::BootImageLoader {
+     template <typename T>
+     ALWAYS_INLINE T* operator()(T* src) const {
+       DCHECK(InSource(src));
+-      uint32_t raw_src = reinterpret_cast32<uint32_t>(src);
+-      return reinterpret_cast32<T*>(raw_src + diff_);
++      uint32_t raw_src = ImageLowBits(src);
++      return ImageWindowPointer<T>(raw_src + diff_);
+     }
+ 
+     template <typename T>
+     ALWAYS_INLINE bool InSource(T* ptr) const {
+-      uint32_t raw_ptr = reinterpret_cast32<uint32_t>(ptr);
++      uint32_t raw_ptr = ImageLowBits(ptr);
+       return raw_ptr - begin_ < size_;
+     }
+ 
+     template <typename T>
+     ALWAYS_INLINE bool InDest(T* ptr) const {
+-      uint32_t raw_ptr = reinterpret_cast32<uint32_t>(ptr);
++      uint32_t raw_ptr = ImageLowBits(ptr);
+       uint32_t src_ptr = raw_ptr - diff_;
+       return src_ptr - begin_ < size_;
+     }
+@@ -2728,14 +2741,14 @@ class ImageSpace::BootImageLoader {
+     template <typename T>
+     ALWAYS_INLINE T* operator()(T* src) const {
+       DCHECK(InSource(src));
+-      uint32_t raw_src = reinterpret_cast32<uint32_t>(src);
++      uint32_t raw_src = ImageLowBits(src);
+       uint32_t diff = (raw_src < bound_) ? base_diff_ : current_diff_;
+-      return reinterpret_cast32<T*>(raw_src + diff);
++      return ImageWindowPointer<T>(raw_src + diff);
+     }
+ 
+     template <typename T>
+     ALWAYS_INLINE bool InSource(T* ptr) const {
+-      uint32_t raw_ptr = reinterpret_cast32<uint32_t>(ptr);
++      uint32_t raw_ptr = ImageLowBits(ptr);
+       return raw_ptr - begin_ < size_;
+     }
+ 
+@@ -2787,7 +2800,7 @@ class ImageSpace::BootImageLoader {
+       REQUIRES_SHARED(Locks::mutator_lock_) {
+     DCHECK(!spaces.empty());
+     const ImageHeader& first_header = spaces.front()->GetImageHeader();
+-    uint32_t image_begin = reinterpret_cast32<uint32_t>(first_header.GetImageBegin());
++    uint32_t image_begin = ImageLowBits(first_header.GetImageBegin());
+     uint32_t image_size = first_header.GetImageReservationSize();
+     DCHECK_NE(image_size, 0u);
+     uint32_t source_begin = kExtension ? first_header.GetBootImageBegin() : image_begin;
+@@ -2796,7 +2809,7 @@ class ImageSpace::BootImageLoader {
+       DCHECK_EQ(first_header.GetBootImageBegin() + first_header.GetBootImageSize(), image_begin);
+     }
+     int64_t current_diff64 = kExtension
+-        ? static_cast<int64_t>(reinterpret_cast32<uint32_t>(spaces.front()->Begin())) -
++        ? static_cast<int64_t>(ImageLowBits(spaces.front()->Begin())) -
+               static_cast<int64_t>(image_begin)
+         : base_diff64;
+     if (base_diff64 == 0 && current_diff64 == 0) {
+@@ -2987,8 +3000,8 @@ class ImageSpace::BootImageLoader {
+     ImageSpace* first_space = spaces.front().get();
+     const ImageHeader& first_space_header = first_space->GetImageHeader();
+     int64_t base_diff64 =
+-        static_cast<int64_t>(reinterpret_cast32<uint32_t>(first_space->Begin())) -
+-        static_cast<int64_t>(reinterpret_cast32<uint32_t>(first_space_header.GetImageBegin()));
++        static_cast<int64_t>(ImageLowBits(first_space->Begin())) -
++        static_cast<int64_t>(ImageLowBits(first_space_header.GetImageBegin()));
+     if (!relocate_) {
+       DCHECK_EQ(base_diff64, 0);
+     }
+@@ -3235,6 +3248,22 @@ class ImageSpace::BootImageLoader {
+         return false;
+       }
+     }
++    // SteamARM: compiled code decompresses references for one heap reference
++    // base. Code built for another cannot run here; an interpret-only runtime
++    // (-Xint) never runs it (ClassLinker gives every non-native boot image
++    // method the interpreter bridge) and keeps the image's data and JNI stubs,
++    // which only store the low halves of references.
++    if (oat_file->GetOatHeader().GetHeapReferenceBase() != kHeapReferenceBase &&
++        !Runtime::Current()->GetInstrumentation()->InterpretOnly()) {
++      *error_msg = StringPrintf("Oat file '%s' was compiled for heap reference base 0x%llx, "
++                                    "this runtime uses 0x%llx (use -Xint)",
++                                oat_filename.c_str(),
++                                static_cast<unsigned long long>(  // NOLINT(runtime/int)
++                                    oat_file->GetOatHeader().GetHeapReferenceBase()),
++                                static_cast<unsigned long long>(  // NOLINT(runtime/int)
++                                    kHeapReferenceBase));
++      return false;
++    }
+     if (validate_oat_file) {
+       TimingLogger::ScopedTiming timing("ValidateOatFile", logger);
+       if (!ImageSpace::ValidateOatFile(*oat_file, error_msg)) {
+diff --git a/runtime/image-inl.h b/runtime/image-inl.h
+index 0404e99..c73bd7e 100644
+--- a/runtime/image-inl.h
++++ b/runtime/image-inl.h
+@@ -40,8 +40,10 @@ inline ObjPtr<mirror::ObjectArray<mirror::Object>> ImageHeader::GetImageRoots()
+   // Pass in the address of the local variable to the read barrier
+   // rather than image_roots_ because it won't move (asserted below)
+   // and it's a const member.
++  // SteamARM: image_roots_ is a compressed reference.
+   mirror::ObjectArray<mirror::Object>* image_roots =
+-      reinterpret_cast<mirror::ObjectArray<mirror::Object>*>(image_roots_);
++      reinterpret_cast<mirror::ObjectArray<mirror::Object>*>(
++          static_cast<uintptr_t>(DecompressHeapAddress(image_roots_)));
+   mirror::ObjectArray<mirror::Object>* result =
+       ReadBarrier::BarrierForRoot<mirror::ObjectArray<mirror::Object>, kReadBarrierOption>(
+           &image_roots);
+diff --git a/runtime/image.cc b/runtime/image.cc
+index 782c0c6..3628892 100644
+--- a/runtime/image.cc
++++ b/runtime/image.cc
+@@ -145,7 +145,10 @@ const char* ImageHeader::GetMagic() const {
+ 
+ ArtMethod* ImageHeader::GetImageMethod(ImageMethod index) const {
+   CHECK_LT(static_cast<size_t>(index), kImageMethodsCount);
+-  return reinterpret_cast<ArtMethod*>(image_methods_[index]);
++  // SteamARM: the image (and its ArtMethods) lies in the heap reference window;
++  // relocation keeps the low 32 bits right, the base is added back here.
++  return reinterpret_cast<ArtMethod*>(static_cast<uintptr_t>(
++      DecompressHeapAddress(static_cast<uint32_t>(image_methods_[index]))));
+ }
+ 
+ std::ostream& operator<<(std::ostream& os, const ImageSection& section) {
+diff --git a/runtime/image.h b/runtime/image.h
+index 637bf1c..a9ecd76 100644
+--- a/runtime/image.h
++++ b/runtime/image.h
+@@ -152,8 +152,10 @@ class PACKED(8) ImageHeader {
+     return component_count_;
+   }
+ 
++  // SteamARM: the 32-bit address fields hold compressed addresses; the image
++  // lies in the heap reference window, whose base is added back here.
+   uint8_t* GetImageBegin() const {
+-    return reinterpret_cast<uint8_t*>(image_begin_);
++    return reinterpret_cast<uint8_t*>(static_cast<uintptr_t>(DecompressHeapAddress(image_begin_)));
+   }
+ 
+   size_t GetImageSize() const {
+@@ -179,19 +181,21 @@ class PACKED(8) ImageHeader {
+   // The location that the oat file was expected to be when the image was created. The actual
+   // oat file may be at a different location for application images.
+   uint8_t* GetOatFileBegin() const {
+-    return reinterpret_cast<uint8_t*>(oat_file_begin_);
++    return reinterpret_cast<uint8_t*>(
++        static_cast<uintptr_t>(DecompressHeapAddress(oat_file_begin_)));
+   }
+ 
+   uint8_t* GetOatDataBegin() const {
+-    return reinterpret_cast<uint8_t*>(oat_data_begin_);
++    return reinterpret_cast<uint8_t*>(
++        static_cast<uintptr_t>(DecompressHeapAddress(oat_data_begin_)));
+   }
+ 
+   uint8_t* GetOatDataEnd() const {
+-    return reinterpret_cast<uint8_t*>(oat_data_end_);
++    return reinterpret_cast<uint8_t*>(static_cast<uintptr_t>(DecompressHeapAddress(oat_data_end_)));
+   }
+ 
+   uint8_t* GetOatFileEnd() const {
+-    return reinterpret_cast<uint8_t*>(oat_file_end_);
++    return reinterpret_cast<uint8_t*>(static_cast<uintptr_t>(DecompressHeapAddress(oat_file_end_)));
+   }
+ 
+   PointerSize GetPointerSize() const;
+diff --git a/runtime/oat.cc b/runtime/oat.cc
+index 17c797a..b478754 100644
+--- a/runtime/oat.cc
++++ b/runtime/oat.cc
+@@ -16,6 +16,7 @@
+ 
+ #include "oat.h"
+ 
++#include <stdlib.h>
+ #include <string.h>
+ 
+ #include "android-base/stringprintf.h"
+@@ -392,6 +393,11 @@ bool OatHeader::IsConcurrentCopying() const {
+   return IsKeyEnabled(OatHeader::kConcurrentCopying);
+ }
+ 
++uint64_t OatHeader::GetHeapReferenceBase() const {
++  const char* value = GetStoreValueByKey(OatHeader::kHeapReferenceBaseKey);
++  return (value != nullptr) ? strtoull(value, nullptr, 16) : 0u;
++}
++
+ bool OatHeader::IsNativeDebuggable() const {
+   return IsKeyEnabled(OatHeader::kNativeDebuggableKey);
+ }
+diff --git a/runtime/oat.h b/runtime/oat.h
+index 080a706..c811193 100644
+--- a/runtime/oat.h
++++ b/runtime/oat.h
+@@ -43,6 +43,9 @@ class PACKED(4) OatHeader {
+   static constexpr const char* kBootClassPathKey = "bootclasspath";
+   static constexpr const char* kBootClassPathChecksumsKey = "bootclasspath-checksums";
+   static constexpr const char* kConcurrentCopying = "concurrent-copying";
++  // SteamARM: the heap reference base the compiled code was generated for
++  // (hex). Absent in upstream oat files, which means 0.
++  static constexpr const char* kHeapReferenceBaseKey = "heap-reference-base";
+   static constexpr const char* kCompilationReasonKey = "compilation-reason";
+ 
+   static constexpr const char kTrueValue[] = "true";
+@@ -102,6 +105,7 @@ class PACKED(4) OatHeader {
+   bool IsNativeDebuggable() const;
+   CompilerFilter::Filter GetCompilerFilter() const;
+   bool IsConcurrentCopying() const;
++  uint64_t GetHeapReferenceBase() const;
+ 
+  private:
+   bool KeyHasValue(const char* key, const char* value, size_t value_size) const;
+diff --git a/runtime/oat_file_assistant.cc b/runtime/oat_file_assistant.cc
+index f374883..7a30b9d 100644
+--- a/runtime/oat_file_assistant.cc
++++ b/runtime/oat_file_assistant.cc
+@@ -41,6 +41,7 @@
+ #include "gc/heap.h"
+ #include "gc/space/image_space.h"
+ #include "image.h"
++#include "instrumentation.h"
+ #include "oat.h"
+ #include "runtime.h"
+ #include "scoped_thread_state_change-inl.h"
+@@ -402,6 +403,14 @@ OatFileAssistant::OatStatus OatFileAssistant::GivenOatFileStatus(const OatFile&
+     return kOatCannotOpen;
+   }
+ 
++  // SteamARM: compiled code built for another heap reference base cannot run
++  // here, except in an interpret-only runtime, which never runs it.
++  if (file.GetOatHeader().GetHeapReferenceBase() != kHeapReferenceBase &&
++      !Runtime::Current()->GetInstrumentation()->InterpretOnly()) {
++    VLOG(oat) << "Oat file " << file.GetLocation() << " has another heap reference base.";
++    return kOatCannotOpen;
++  }
++
+   // Verify the dex checksum.
+   std::string error_msg;
+   VdexFile* vdex = file.GetVdexFile();

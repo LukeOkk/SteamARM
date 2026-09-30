@@ -1,0 +1,175 @@
+From e74b2ac640dd867f8d67ba95822ec0823fa39b7c Mon Sep 17 00:00:00 2001
+From: LukeOkk <85941941+LukeOkk@users.noreply.github.com>
+Date: Wed, 30 Sep 2026 02:06:56 -0300
+Subject: [PATCH 2/9] runtime: compress references relative to the heap
+ reference base (SteamARM, HYPOTHESIS)
+
+HYPOTHESIS, UNTESTED: not compiled, not run.
+
+The central encodings of a 32-bit reference, which every HeapReference,
+CompressedReference, StackReference and GcRoot goes through, keep the low
+32 bits and add kHeapReferenceBase back on decompression (0 stays null):
+
+- PtrCompression::Compress/Decompress (object_reference.h);
+- ObjPtr's debug-build encoding, which packed a below-4 GiB pointer and a
+  cookie into one word (obj_ptr.h, obj_ptr-inl.h);
+- the forwarding address the moving collectors keep in the 32-bit lock word
+  (lock_word.h, lock_word-inl.h);
+- the class table slot, a compressed class pointer with hash bits
+  (class_table-inl.h).
+
+ReferenceFromVRegValue()/VRegValueFromReference() convert a dex register or
+argument-slot value; the next patch uses them where the runtime casts
+between the two.
+
+With kHeapReferenceBase == 0 the generated code is unchanged.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01L6ANQQienC2qRCeZBzUfuS
+---
+ runtime/class_table-inl.h         |  7 +++++--
+ runtime/lock_word-inl.h           |  4 +++-
+ runtime/lock_word.h               |  6 +++++-
+ runtime/mirror/object_reference.h | 20 ++++++++++++++++++--
+ runtime/obj_ptr-inl.h             |  4 +++-
+ runtime/obj_ptr.h                 |  5 +++--
+ 6 files changed, 37 insertions(+), 9 deletions(-)
+
+diff --git a/runtime/class_table-inl.h b/runtime/class_table-inl.h
+index d043af3..331f783 100644
+--- a/runtime/class_table-inl.h
++++ b/runtime/class_table-inl.h
+@@ -121,13 +121,16 @@ inline void ClassTable::TableSlot::VisitRoot(const Visitor& visitor) const {
+   }
+ }
+ 
++// SteamARM: a slot keeps the compressed class address (and hash bits in the
++// alignment bits); the heap reference base is added back when it is read.
+ inline ObjPtr<mirror::Class> ClassTable::TableSlot::ExtractPtr(uint32_t data) {
+-  return reinterpret_cast<mirror::Class*>(data & ~kHashMask);
++  return reinterpret_cast<mirror::Class*>(
++      static_cast<uintptr_t>(DecompressHeapAddress(data & ~kHashMask)));
+ }
+ 
+ inline uint32_t ClassTable::TableSlot::Encode(ObjPtr<mirror::Class> klass, uint32_t hash_bits) {
+   DCHECK_LE(hash_bits, kHashMask);
+-  return reinterpret_cast<uintptr_t>(klass.Ptr()) | hash_bits;
++  return CompressHeapAddress(reinterpret_cast<uintptr_t>(klass.Ptr())) | hash_bits;
+ }
+ 
+ inline ClassTable::TableSlot::TableSlot(ObjPtr<mirror::Class> klass, uint32_t descriptor_hash)
+diff --git a/runtime/lock_word-inl.h b/runtime/lock_word-inl.h
+index 4a2a293..cf5b472 100644
+--- a/runtime/lock_word-inl.h
++++ b/runtime/lock_word-inl.h
+@@ -43,7 +43,9 @@ inline Monitor* LockWord::FatLockMonitor() const {
+ 
+ inline size_t LockWord::ForwardingAddress() const {
+   DCHECK_EQ(GetState(), kForwardingAddress);
+-  return value_ << kForwardingAddressShift;
++  // SteamARM: value_ holds the compressed address (see FromForwardingAddress()).
++  return static_cast<size_t>(
++      DecompressHeapAddress(static_cast<uint32_t>(value_ << kForwardingAddressShift)));
+ }
+ 
+ inline LockWord::LockWord() : value_(0) {
+diff --git a/runtime/lock_word.h b/runtime/lock_word.h
+index 30559a0..54ebc5a 100644
+--- a/runtime/lock_word.h
++++ b/runtime/lock_word.h
+@@ -23,6 +23,7 @@
+ #include <android-base/logging.h>
+ 
+ #include "base/bit_utils.h"
++#include "base/globals.h"
+ #include "read_barrier.h"
+ 
+ namespace art {
+@@ -150,7 +151,10 @@ class LockWord {
+ 
+   static LockWord FromForwardingAddress(size_t target) {
+     DCHECK_ALIGNED(target, (1 << kStateSize));
+-    return LockWord((target >> kForwardingAddressShift) | kStateForwardingAddressShifted);
++    // SteamARM: the compressed (low 32-bit) address; ForwardingAddress() adds the base.
++    DCHECK(IsInHeapReferenceWindow(target));
++    return LockWord((CompressHeapAddress(target) >> kForwardingAddressShift) |
++                    kStateForwardingAddressShifted);
+   }
+ 
+   static LockWord FromHashCode(uint32_t hash_code, uint32_t gc_state) {
+diff --git a/runtime/mirror/object_reference.h b/runtime/mirror/object_reference.h
+index f01bcbd..ed6d3ab 100644
+--- a/runtime/mirror/object_reference.h
++++ b/runtime/mirror/object_reference.h
+@@ -36,15 +36,18 @@ template<bool kPoisonReferences, class MirrorType>
+ class PtrCompression {
+  public:
+   // Compress reference to its bit representation.
++  // SteamARM: the low 32 bits of an address in [kHeapReferenceBase, +4 GiB).
+   static uint32_t Compress(MirrorType* mirror_ptr) {
+     uintptr_t as_bits = reinterpret_cast<uintptr_t>(mirror_ptr);
++    DCHECK(as_bits == 0u || IsInHeapReferenceWindow(as_bits)) << mirror_ptr;
+     return static_cast<uint32_t>(kPoisonReferences ? -as_bits : as_bits);
+   }
+ 
+   // Uncompress an encoded reference from its bit representation.
++  // SteamARM: the base is ORed back in; 0 stays null.
+   static MirrorType* Decompress(uint32_t ref) {
+-    uintptr_t as_bits = kPoisonReferences ? -ref : ref;
+-    return reinterpret_cast<MirrorType*>(as_bits);
++    uint32_t bits = kPoisonReferences ? -ref : ref;
++    return reinterpret_cast<MirrorType*>(static_cast<uintptr_t>(DecompressHeapAddress(bits)));
+   }
+ 
+   // Convert an ObjPtr to a compressed reference.
+@@ -160,6 +163,19 @@ class MANAGED HeapReference {
+ static_assert(sizeof(mirror::HeapReference<mirror::Object>) == kHeapReferenceSize,
+               "heap reference size does not match");
+ 
++// SteamARM: a 32-bit dex register or argument-slot value that holds a
++// reference, as the object it names, and back. Upstream code converts between
++// the two with plain casts, which drop or never add the heap reference base.
++template <class MirrorType = Object>
++inline MirrorType* ReferenceFromVRegValue(uint32_t value) {
++  return PtrCompression</*kPoisonReferences=*/ false, MirrorType>::Decompress(value);
++}
++
++template <class MirrorType>
++inline uint32_t VRegValueFromReference(MirrorType* ptr) {
++  return PtrCompression</*kPoisonReferences=*/ false, MirrorType>::Compress(ptr);
++}
++
+ // Standard compressed reference used in the runtime. Used for StackReference and GC roots.
+ template<class MirrorType>
+ class MANAGED CompressedReference : public mirror::ObjectReference<false, MirrorType> {
+diff --git a/runtime/obj_ptr-inl.h b/runtime/obj_ptr-inl.h
+index ae13465..c3401fe 100644
+--- a/runtime/obj_ptr-inl.h
++++ b/runtime/obj_ptr-inl.h
+@@ -55,7 +55,9 @@ inline uintptr_t ObjPtr<MirrorType>::Encode(MirrorType* ptr) {
+   uintptr_t ref = reinterpret_cast<uintptr_t>(ptr);
+   DCHECK_ALIGNED(ref, kObjectAlignment);
+   if (kObjPtrPoisoning && ref != 0) {
+-    DCHECK_LE(ref, 0xFFFFFFFFU);
++    // SteamARM: keep the compressed address (PtrUnchecked() adds the base back).
++    DCHECK(IsInHeapReferenceWindow(ref)) << ptr;
++    ref = CompressHeapAddress(ref);
+     ref >>= kObjectAlignmentShift;
+     // Put cookie in high bits.
+     ref |= GetCurrentTrimedCookie() << kCookieShift;
+diff --git a/runtime/obj_ptr.h b/runtime/obj_ptr.h
+index a03b67b..a893bf4 100644
+--- a/runtime/obj_ptr.h
++++ b/runtime/obj_ptr.h
+@@ -90,8 +90,9 @@ class ObjPtr {
+   // Ptr unchecked does not check that object pointer is valid. Do not use if you can avoid it.
+   OBJPTR_INLINE MirrorType* PtrUnchecked() const {
+     if (kObjPtrPoisoning) {
+-      return reinterpret_cast<MirrorType*>(
+-          static_cast<uintptr_t>(static_cast<uint32_t>(reference_ << kObjectAlignmentShift)));
++      // SteamARM: the low 32 bits, shifted; the heap reference base is added back.
++      return reinterpret_cast<MirrorType*>(static_cast<uintptr_t>(DecompressHeapAddress(
++          static_cast<uint32_t>(reference_ << kObjectAlignmentShift))));
+     } else {
+       return reinterpret_cast<MirrorType*>(reference_);
+     }

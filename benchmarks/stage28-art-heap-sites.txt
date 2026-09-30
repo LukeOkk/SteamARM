@@ -1,0 +1,691 @@
+Stage 28 -- ART with its heap above 4 GiB: site counts and patch checks (2026-09-30)
+
+Research only. No Android program, no ART, no lxrun guest was run for this
+record; nothing here was compiled for Android. Study:
+docs/ART_HEAP_ABOVE_4GB.md. Patches: patches/art-heap-base/.
+
+Sources (shallow clones, read 2026-09-30)
+  LineageOS/android_art   lineage-18.1       7f2b48980eaa  (the ART of the Waydroid
+                                                             18.1 image, as in stage 25)
+  AOSP platform/art       android11-release  34f62af4d642  (Snap 6683823, rvc-release)
+
+What was run, and where
+  1. patches/art-heap-base/count_sites.py on both trees (unpatched). The two
+     tables below are its output; the listing after the first is every hit,
+     file:line, for the LineageOS tree. The patterns and what each action
+     means are in the script's docstring.
+  2. The patch series, exported with git format-patch from a branch of the
+     LineageOS clone, then re-applied with `git am` to a fresh 7f2b489
+     (applies; the result is identical to the branch it was exported from)
+     and with `git am -3` to AOSP 34f62af (applies, 9 of 9).
+  3. On this Mac (Apple clang, macOS 27.0): the assembly macros of patch 0007
+     (DECOMPRESS_HEAP_REF*, the invoke stubs' 24-byte LOADREF entries, the
+     introspection entrypoint's `orr xIP1, xIP0, #base`) assembled for
+     aarch64-linux-gnu with ART_HEAP_REFERENCE_BASE=0x4000000000: every ORR
+     encodes as one instruction (b25a0042 orr x2, x2, #0x4000000000), a
+     LOADREF entry is 24 bytes.
+  4. libartbase/base/globals.h of patch 0001, -fsyntax-only with a test file
+     of constexpr checks: passes with base 0x4000000000 and with no base;
+     base 0x180000000 (not a single bit) fails its static_assert, as
+     intended.
+  Nothing else: the series was not built in an AOSP tree (none here).
+
+Patch series size (git diff --stat 7f2b489..series)
+  38 files changed, 534 insertions(+), 101 deletions(-)
+  runtime + libartbase C++   ~230 lines; arm64 runtime assembly 111 lines;
+  arm64 compiler + JNI       ~195 lines; build 28 lines.
+
+==== AOSP android11-release (summary)
+ART tree: aosp-art (34f62af4d642)
+
+| id | group | action | count | what |
+|---|---|---|---:|---|
+| R1 | runtime C++ | EDIT | 8 | central encode/decode of a reference (PtrCompression, ObjPtr debug encoding, LockWord forwarding address, ClassTable slot) |
+| R2 | runtime C++ | CENTRAL | 681 | typed 32-bit references: HeapReference, CompressedReference, StackReference, GcRoot |
+| R3 | runtime C++ | CENTRAL | 3937 | ObjPtr<> (a full pointer in release builds) |
+| R4 | runtime C++ | EDIT | 15 | uint32 (vreg, argument slot) turned into an object pointer outside the typed references |
+| R5 | runtime C++ | EDIT | 24 | object pointer truncated to uint32 outside the typed references (the truncation is the compression; debug checks refuse a high base) |
+| R5b | runtime C++ | NONE | 7 | 32-bit native pointers of 32-bit images (PointerSize::k32 paths, not taken by a 64-bit runtime) |
+| R6 | runtime C++ | CENTRAL | 14 | heap, image, JIT and LOS mappings requested in the low 4 GiB (low_4gb = true): served by MemMap's window instead |
+| R7 | runtime C++ | EDIT | 14 | explicit below-4 GiB bounds and width checks on addresses |
+| R8 | runtime C++ | EDIT | 6 | 32-bit address fields read back as pointers (ImageHeader, Heap boot image range) |
+| R9 | runtime C++ | EDIT | 14 | boot image relocation done in 32-bit address arithmetic (reinterpret_cast32) |
+| R10 | runtime C++ | EDIT | 5 | boot image base address used by the runtime (ART_BASE_ADDRESS: reservation, relocation delta) |
+| R10b | runtime C++ | NONE | 12 | boot image base address in the build (the image keeps its low-half layout; the runtime adds the base when it maps it) |
+| R11 | runtime C++ | CENTRAL | 576 | JNI: references reach native code only as indirect references or handles |
+| C1 | arm64 compiler | EDIT | 24 | heap-reference load hooks (Unpoison): become 'decompress' in the hook |
+| C2 | arm64 compiler | NONE | 6 | heap-reference store hooks (Poison): the 32-bit store of the low half is the compression |
+| C3 | arm64 compiler | EDIT | 5 | GC root loads (ArtMethod declaring class, .bss, JIT roots): one helper, decompress at its end |
+| C4 | arm64 compiler | EDIT | 16 | Baker read-barrier reference loads (field, array, acquire, CAS old value): decompress after the return label |
+| C5 | arm64 compiler | EDIT | 5 | Baker read-barrier thunk kinds (the GC-root thunk dereferences the loaded root) |
+| C6 | arm64 compiler | EDIT | 11 | 32-bit literals and table slots holding addresses (boot image objects, JIT root slots, .data.bimg.rel.ro, .bss) |
+| C7 | arm64 compiler | EDIT | 3 | Thread fields holding objects read or cleared as 32 bits (exception, peer) |
+| C8 | arm64 compiler | EDIT | 15 | address arithmetic on a W reference register (32-bit add/shift of obj, array, card index) |
+| C9 | arm64 compiler | EDIT | 3 | moves and selects of reference registers (W moves drop the base; 32-bit spill slots reload) |
+| C10 | arm64 compiler | CONSUMER | 61 | dereferences through a reference register (HeapOperand) |
+| C11 | arm64 compiler | CONSUMER | 16 | read-barrier slow paths and mark entrypoints (the runtime gets full pointers) |
+| C12 | arm64 compiler | EVIDENCE | 81 | register-width decision points (WRegisterFrom, RegisterFrom(..., kReference)) |
+| C13 | arm64 compiler | EVIDENCE | 3 | comments stating that a reference is 32-bit and zero-extended |
+| C14 | arm64 compiler | EDIT | 11 | intrinsic generators whose body handles references (review each) |
+| A1 | arm64 runtime asm | EDIT | 5 | UNPOISON_HEAP_REF after a reference load (the macro becomes 'decompress') |
+| A2 | arm64 runtime asm | NONE | 5 | POISON_HEAP_REF before a 32-bit reference store |
+| A3 | arm64 runtime asm | EDIT | 5 | 32-bit loads of reference fields (class, component type, declaring class, READ_BARRIER) |
+| A4 | arm64 runtime asm | EDIT | 2 | forwarding address decoded from a lock word |
+| A5 | arm64 runtime asm | EDIT | 2 | a returned reference moved as a W register |
+| A6 | arm64 runtime asm | EDIT | 3 | invoke stubs load reference arguments (and 'this') as W registers |
+| A7 | arm64 runtime asm | CONSUMER | 2 | card marking from the object's full address |
+| A8 | arm64 runtime asm | EVIDENCE | 16 | comments stating 'compress/uncompress = do nothing, already zero-extended' |
+| M1 | arm64 mterp | EDIT | 1 | UNPOISON_HEAP_REF after a reference load |
+| M2 | arm64 mterp | NONE | 8 | SET_VREG_OBJECT (a 32-bit vreg store) |
+| M3 | arm64 mterp | EDIT | 11 | a vreg object (GET_VREG w) used as a memory base (heuristic) |
+| M4 | arm64 mterp | EDIT | 6 | a vreg object passed to a C++ helper in x0-x3 (heuristic) |
+| M5 | arm64 mterp | EDIT | 2 | Thread::exception_ written from a register |
+| J1 | arm64 JNI stubs | EDIT | 7 | JNI macro assembler reference operations (LoadRef decompresses; handle-scope helpers) |
+| J2 | arm64 JNI stubs | CONSUMER | 16 | JNI stub generator calls to those operations (ISA-independent) |
+| I1 | dex2oat, oat, image | EDIT | 9 | dex2oat's 32-bit address conversions (image writer, oat writer) |
+| I2 | dex2oat, oat, image | CENTRAL | 1 | .data.bimg.rel.ro filled with 32-bit boot image addresses at load (compressed values) |
+| L1 | 64-bit references (design C) | LAYOUT | 96 | sizes of the reference types used in layout code |
+| L2 | 64-bit references (design C) | LAYOUT | 154 | object layout constants shared with assembly (ASM_DEFINE) |
+| L3 | 64-bit references (design C) | LAYOUT | 312 | DataType::Type::kReference in the optimizing compiler, all back ends |
+| L4 | 64-bit references (design C) | LAYOUT | 26 | kVRegSize (a reference is one 32-bit dex register) |
+
+lines per action: CENTRAL 5209, CONSUMER 95, EDIT 232, EVIDENCE 100, LAYOUT 588, NONE 38
+
+==== LineageOS lineage-18.1 (summary, then every hit except CENTRAL and LAYOUT)
+ART tree: lineage-art (7f2b48980eaa)
+
+| id | group | action | count | what |
+|---|---|---|---:|---|
+| R1 | runtime C++ | EDIT | 8 | central encode/decode of a reference (PtrCompression, ObjPtr debug encoding, LockWord forwarding address, ClassTable slot) |
+| R2 | runtime C++ | CENTRAL | 681 | typed 32-bit references: HeapReference, CompressedReference, StackReference, GcRoot |
+| R3 | runtime C++ | CENTRAL | 3940 | ObjPtr<> (a full pointer in release builds) |
+| R4 | runtime C++ | EDIT | 15 | uint32 (vreg, argument slot) turned into an object pointer outside the typed references |
+| R5 | runtime C++ | EDIT | 24 | object pointer truncated to uint32 outside the typed references (the truncation is the compression; debug checks refuse a high base) |
+| R5b | runtime C++ | NONE | 7 | 32-bit native pointers of 32-bit images (PointerSize::k32 paths, not taken by a 64-bit runtime) |
+| R6 | runtime C++ | CENTRAL | 14 | heap, image, JIT and LOS mappings requested in the low 4 GiB (low_4gb = true): served by MemMap's window instead |
+| R7 | runtime C++ | EDIT | 14 | explicit below-4 GiB bounds and width checks on addresses |
+| R8 | runtime C++ | EDIT | 6 | 32-bit address fields read back as pointers (ImageHeader, Heap boot image range) |
+| R9 | runtime C++ | EDIT | 14 | boot image relocation done in 32-bit address arithmetic (reinterpret_cast32) |
+| R10 | runtime C++ | EDIT | 5 | boot image base address used by the runtime (ART_BASE_ADDRESS: reservation, relocation delta) |
+| R10b | runtime C++ | NONE | 12 | boot image base address in the build (the image keeps its low-half layout; the runtime adds the base when it maps it) |
+| R11 | runtime C++ | CENTRAL | 576 | JNI: references reach native code only as indirect references or handles |
+| C1 | arm64 compiler | EDIT | 24 | heap-reference load hooks (Unpoison): become 'decompress' in the hook |
+| C2 | arm64 compiler | NONE | 6 | heap-reference store hooks (Poison): the 32-bit store of the low half is the compression |
+| C3 | arm64 compiler | EDIT | 5 | GC root loads (ArtMethod declaring class, .bss, JIT roots): one helper, decompress at its end |
+| C4 | arm64 compiler | EDIT | 16 | Baker read-barrier reference loads (field, array, acquire, CAS old value): decompress after the return label |
+| C5 | arm64 compiler | EDIT | 5 | Baker read-barrier thunk kinds (the GC-root thunk dereferences the loaded root) |
+| C6 | arm64 compiler | EDIT | 11 | 32-bit literals and table slots holding addresses (boot image objects, JIT root slots, .data.bimg.rel.ro, .bss) |
+| C7 | arm64 compiler | EDIT | 3 | Thread fields holding objects read or cleared as 32 bits (exception, peer) |
+| C8 | arm64 compiler | EDIT | 15 | address arithmetic on a W reference register (32-bit add/shift of obj, array, card index) |
+| C9 | arm64 compiler | EDIT | 3 | moves and selects of reference registers (W moves drop the base; 32-bit spill slots reload) |
+| C10 | arm64 compiler | CONSUMER | 61 | dereferences through a reference register (HeapOperand) |
+| C11 | arm64 compiler | CONSUMER | 16 | read-barrier slow paths and mark entrypoints (the runtime gets full pointers) |
+| C12 | arm64 compiler | EVIDENCE | 81 | register-width decision points (WRegisterFrom, RegisterFrom(..., kReference)) |
+| C13 | arm64 compiler | EVIDENCE | 3 | comments stating that a reference is 32-bit and zero-extended |
+| C14 | arm64 compiler | EDIT | 11 | intrinsic generators whose body handles references (review each) |
+| A1 | arm64 runtime asm | EDIT | 5 | UNPOISON_HEAP_REF after a reference load (the macro becomes 'decompress') |
+| A2 | arm64 runtime asm | NONE | 5 | POISON_HEAP_REF before a 32-bit reference store |
+| A3 | arm64 runtime asm | EDIT | 5 | 32-bit loads of reference fields (class, component type, declaring class, READ_BARRIER) |
+| A4 | arm64 runtime asm | EDIT | 2 | forwarding address decoded from a lock word |
+| A5 | arm64 runtime asm | EDIT | 2 | a returned reference moved as a W register |
+| A6 | arm64 runtime asm | EDIT | 3 | invoke stubs load reference arguments (and 'this') as W registers |
+| A7 | arm64 runtime asm | CONSUMER | 2 | card marking from the object's full address |
+| A8 | arm64 runtime asm | EVIDENCE | 16 | comments stating 'compress/uncompress = do nothing, already zero-extended' |
+| M1 | arm64 mterp | EDIT | 1 | UNPOISON_HEAP_REF after a reference load |
+| M2 | arm64 mterp | NONE | 8 | SET_VREG_OBJECT (a 32-bit vreg store) |
+| M3 | arm64 mterp | EDIT | 11 | a vreg object (GET_VREG w) used as a memory base (heuristic) |
+| M4 | arm64 mterp | EDIT | 6 | a vreg object passed to a C++ helper in x0-x3 (heuristic) |
+| M5 | arm64 mterp | EDIT | 2 | Thread::exception_ written from a register |
+| J1 | arm64 JNI stubs | EDIT | 7 | JNI macro assembler reference operations (LoadRef decompresses; handle-scope helpers) |
+| J2 | arm64 JNI stubs | CONSUMER | 16 | JNI stub generator calls to those operations (ISA-independent) |
+| I1 | dex2oat, oat, image | EDIT | 9 | dex2oat's 32-bit address conversions (image writer, oat writer) |
+| I2 | dex2oat, oat, image | CENTRAL | 1 | .data.bimg.rel.ro filled with 32-bit boot image addresses at load (compressed values) |
+| L1 | 64-bit references (design C) | LAYOUT | 96 | sizes of the reference types used in layout code |
+| L2 | 64-bit references (design C) | LAYOUT | 154 | object layout constants shared with assembly (ASM_DEFINE) |
+| L3 | 64-bit references (design C) | LAYOUT | 312 | DataType::Type::kReference in the optimizing compiler, all back ends |
+| L4 | 64-bit references (design C) | LAYOUT | 26 | kVRegSize (a reference is one 32-bit dex register) |
+
+lines per action: CENTRAL 5212, CONSUMER 95, EDIT 232, EVIDENCE 100, LAYOUT 588, NONE 38
+
+## R1 (EDIT) central encode/decode of a reference (PtrCompression, ObjPtr debug encoding, LockWord forwarding address, ClassTable slot): 8
+runtime/class_table-inl.h:124: inline ObjPtr<mirror::Class> ClassTable::TableSlot::ExtractPtr(uint32_t data) {
+runtime/class_table-inl.h:128: inline uint32_t ClassTable::TableSlot::Encode(ObjPtr<mirror::Class> klass, uint32_t hash_bits) {
+runtime/lock_word-inl.h:44: inline size_t LockWord::ForwardingAddress() const {
+runtime/lock_word.h:151: static LockWord FromForwardingAddress(size_t target) {
+runtime/mirror/object_reference.h:39: static uint32_t Compress(MirrorType* mirror_ptr) {
+runtime/mirror/object_reference.h:45: static MirrorType* Decompress(uint32_t ref) {
+runtime/obj_ptr-inl.h:54: inline uintptr_t ObjPtr<MirrorType>::Encode(MirrorType* ptr) {
+runtime/obj_ptr.h:91: OBJPTR_INLINE MirrorType* PtrUnchecked() const {
+
+## R4 (EDIT) uint32 (vreg, argument slot) turned into an object pointer outside the typed references: 15
+runtime/interpreter/interpreter_common.cc:319: reinterpret_cast32<mirror::Object*>(shadow_frame->GetVReg(i)));
+runtime/interpreter/interpreter_common.cc:322: reinterpret_cast32<mirror::Object*>(shadow_frame->GetVReg(i)));
+runtime/interpreter/unstarted_runtime.cc:1737: ObjPtr<mirror::Object> element_class = reinterpret_cast32<mirror::Object*>(args[0])->AsClass();
+runtime/interpreter/unstarted_runtime.cc:1839: ObjPtr<mirror::Object> rhs = reinterpret_cast32<mirror::Object*>(args[0]);
+runtime/interpreter/unstarted_runtime.cc:1907: ObjPtr<mirror::Object> obj = reinterpret_cast32<mirror::Object*>(args[0]);
+runtime/interpreter/unstarted_runtime.cc:1941: ObjPtr<mirror::Object> obj = reinterpret_cast32<mirror::Object*>(args[0]);
+runtime/interpreter/unstarted_runtime.cc:1956: ObjPtr<mirror::Object> obj = reinterpret_cast32<mirror::Object*>(args[0]);
+runtime/interpreter/unstarted_runtime.cc:1962: ObjPtr<mirror::Object> new_value = reinterpret_cast32<mirror::Object*>(args[3]);
+runtime/interpreter/unstarted_runtime.cc:1980: ObjPtr<mirror::Object> component = reinterpret_cast32<mirror::Object*>(args[0]);
+runtime/interpreter/unstarted_runtime.cc:1995: ObjPtr<mirror::Object> component = reinterpret_cast32<mirror::Object*>(args[0]);
+runtime/monitor.cc:1522: ObjPtr<mirror::Object> o = reinterpret_cast<mirror::Object*>(value);
+runtime/quick_exception_handler.cc:526: new_frame->SetVRegReference(vreg, reinterpret_cast<mirror::Object*>(value));
+runtime/stack.cc:186: return reinterpret_cast<mirror::Object*>(value);
+runtime/stack.cc:253: mirror::Object* out = reinterpret_cast<mirror::Object*>(static_cast<uintptr_t>(*val));
+runtime/string_builder_append.cc:217: hs_.NewHandle(reinterpret_cast32<mirror::String*>(*current_arg));
+
+## R5 (EDIT) object pointer truncated to uint32 outside the typed references (the truncation is the compression; debug checks refuse a high base): 24
+runtime/dex/dex_file_annotations.cc:403: uint32_t args[2] = { static_cast<uint32_t>(reinterpret_cast<uintptr_t>(annotation_class.Get())),
+runtime/dex/dex_file_annotations.cc:404: static_cast<uint32_t>(reinterpret_cast<uintptr_t>(h_element_array.Get())) };
+runtime/dex/dex_file_annotations.cc:767: uint32_t args[5] = { static_cast<uint32_t>(reinterpret_cast<uintptr_t>(new_member.Get())),
+runtime/dex/dex_file_annotations.cc:768: static_cast<uint32_t>(reinterpret_cast<uintptr_t>(string_name.Get())),
+runtime/dex/dex_file_annotations.cc:769: static_cast<uint32_t>(reinterpret_cast<uintptr_t>(value_object.Get())),
+runtime/dex/dex_file_annotations.cc:770: static_cast<uint32_t>(reinterpret_cast<uintptr_t>(method_return.Get())),
+runtime/dex/dex_file_annotations.cc:771: static_cast<uint32_t>(reinterpret_cast<uintptr_t>(method_object.Get()))
+runtime/gc/heap.cc:437: boot_images_start_address_ = PointerToLowMemUInt32(boot_image_spaces_.front()->Begin());
+runtime/gc/heap.cc:439: PointerToLowMemUInt32(boot_image_spaces_.back()->GetImageHeader().GetOatFileEnd());
+runtime/hprof/hprof.cc:204: AddU4(PointerToLowMemUInt32(value));
+runtime/hprof/hprof.cc:213: AddU4(1 | PointerToLowMemUInt32(value));
+runtime/hprof/hprof.cc:217: AddU4(PointerToLowMemUInt32(value));
+runtime/hprof/hprof.cc:622: return PointerToLowMemUInt32(c);
+runtime/hprof/hprof.cc:993: uint64_t key = (static_cast<uint64_t>(heap_tag) << 32) | PointerToLowMemUInt32(obj);
+runtime/interpreter/interpreter_common.cc:1178: if (src_value == reinterpret_cast32<uint32_t>(o.Ptr())) {
+runtime/interpreter/unstarted_runtime.cc:651: args[0] = reinterpret_cast32<uint32_t>(h_array.Get());
+runtime/mirror/method_handles_lookup.cc:57: static_cast<uint32_t>(reinterpret_cast<uintptr_t>(this)),
+runtime/mirror/method_handles_lookup.cc:58: static_cast<uint32_t>(reinterpret_cast<uintptr_t>(klass.Get())),
+runtime/mirror/method_handles_lookup.cc:59: static_cast<uint32_t>(reinterpret_cast<uintptr_t>(method_type.Get()))
+runtime/monitor.cc:386: (obj == nullptr ? -1 : static_cast<int32_t>(reinterpret_cast<uintptr_t>(obj.Ptr()))),
+runtime/native/java_lang_Class.cc:973: uint32_t args[1] = { static_cast<uint32_t>(reinterpret_cast<uintptr_t>(receiver.Get())) };
+runtime/native/java_lang_reflect_Executable.cc:233: uint32_t args[5] = { PointerToLowMemUInt32(parameter.Get()),
+runtime/native/java_lang_reflect_Executable.cc:234: PointerToLowMemUInt32(name.Get()),
+runtime/native/java_lang_reflect_Executable.cc:236: PointerToLowMemUInt32(executable.Get()),
+
+## R5b (NONE) 32-bit native pointers of 32-bit images (PointerSize::k32 paths, not taken by a 64-bit runtime): 7
+runtime/imt_conflict_table.h:192: return reinterpret_cast32<ArtMethod*>(data32_[index]);
+runtime/imt_conflict_table.h:200: data32_[index] = reinterpret_cast32<uint32_t>(method);
+runtime/imtable.h:50: return reinterpret_cast32<ArtMethod*>(value);
+runtime/mirror/dex_cache-inl.h:318: return NativeDexCachePair<T>(reinterpret_cast32<T*>(value.first), value.second);
+runtime/mirror/dex_cache-inl.h:333: ConversionPair32 v(reinterpret_cast32<uint32_t>(pair.object),
+runtime/mirror/object.h:581: field_offset, reinterpret_cast32<int32_t>(new_value));
+runtime/mirror/object.h:683: return reinterpret_cast32<T>(v);
+
+## R7 (EDIT) explicit below-4 GiB bounds and width checks on addresses: 14
+libartbase/base/mem_map.cc:97: static constexpr uintptr_t LOW_MEM_START = 64 * KB;
+libartbase/base/mem_map.cc:132: return (input & mask) + LOW_MEM_START;
+libartbase/base/mem_map.cc:143: return LOW_MEM_START;
+libartbase/base/mem_map.cc:268: if (reinterpret_cast<uintptr_t>(actual) + page_aligned_byte_count >= 4 * GB) {
+libartbase/base/mem_map.cc:1047: for (uintptr_t ptr = next_mem_pos_; ptr < 4 * GB; ptr += kPageSize) {
+libartbase/base/mem_map.cc:1078: if (4U * GB - ptr < length) {
+libartbase/base/mem_map.cc:1082: ptr = LOW_MEM_START - kPageSize;
+libartbase/base/mem_map.cc:1141: (reinterpret_cast<uintptr_t>(addr) >> 32) != 0 ||
+libartbase/base/mem_map.cc:1143: ((reinterpret_cast<uintptr_t>(addr) + length) >> 32) != 0)) {
+libartbase/base/mem_map.cc:1189: flags |= MAP_32BIT;
+libartbase/base/utils.h:38: DCHECK_LE(intp, 0xFFFFFFFFU);
+runtime/gc/heap.cc:631: 4 * GB - kMinHeapAddress));
+runtime/obj_ptr-inl.h:58: DCHECK_LE(ref, 0xFFFFFFFFU);
+runtime/stack.cc:255: DCHECK_LT(ptr_out, std::numeric_limits<uint32_t>::max());
+
+## R8 (EDIT) 32-bit address fields read back as pointers (ImageHeader, Heap boot image range): 6
+runtime/gc/heap.h:715: return reinterpret_cast<uintptr_t>(p) - boot_images_start_address_ < boot_images_size_;
+runtime/image.h:156: return reinterpret_cast<uint8_t*>(image_begin_);
+runtime/image.h:182: return reinterpret_cast<uint8_t*>(oat_file_begin_);
+runtime/image.h:186: return reinterpret_cast<uint8_t*>(oat_data_begin_);
+runtime/image.h:190: return reinterpret_cast<uint8_t*>(oat_data_end_);
+runtime/image.h:194: return reinterpret_cast<uint8_t*>(oat_file_end_);
+
+## R9 (EDIT) boot image relocation done in 32-bit address arithmetic (reinterpret_cast32): 14
+runtime/gc/space/image_space.cc:583: T* old_value = reinterpret_cast32<T*>(*raw_entry);
+runtime/gc/space/image_space.cc:777: reinterpret_cast32<uint32_t>(boot_image_spaces.front()->Begin());
+runtime/gc/space/image_space.cc:2080: base_address_ = reinterpret_cast32<uint32_t>(header.GetImageBegin());
+runtime/gc/space/image_space.cc:2688: uint32_t raw_src = reinterpret_cast32<uint32_t>(src);
+runtime/gc/space/image_space.cc:2689: return reinterpret_cast32<T*>(raw_src + diff_);
+runtime/gc/space/image_space.cc:2694: uint32_t raw_ptr = reinterpret_cast32<uint32_t>(ptr);
+runtime/gc/space/image_space.cc:2700: uint32_t raw_ptr = reinterpret_cast32<uint32_t>(ptr);
+runtime/gc/space/image_space.cc:2731: uint32_t raw_src = reinterpret_cast32<uint32_t>(src);
+runtime/gc/space/image_space.cc:2733: return reinterpret_cast32<T*>(raw_src + diff);
+runtime/gc/space/image_space.cc:2738: uint32_t raw_ptr = reinterpret_cast32<uint32_t>(ptr);
+runtime/gc/space/image_space.cc:2790: uint32_t image_begin = reinterpret_cast32<uint32_t>(first_header.GetImageBegin());
+runtime/gc/space/image_space.cc:2799: ? static_cast<int64_t>(reinterpret_cast32<uint32_t>(spaces.front()->Begin())) -
+runtime/gc/space/image_space.cc:2990: static_cast<int64_t>(reinterpret_cast32<uint32_t>(first_space->Begin())) -
+runtime/gc/space/image_space.cc:2991: static_cast<int64_t>(reinterpret_cast32<uint32_t>(first_space_header.GetImageBegin()));
+
+## R10 (EDIT) boot image base address used by the runtime (ART_BASE_ADDRESS: reservation, relocation delta): 5
+libartbase/base/mem_map.cc:122: CHECK_NE(0, ART_BASE_ADDRESS);
+libartbase/base/mem_map.cc:125: constexpr size_t leading_zeros = CLZ(static_cast<uint32_t>(ART_BASE_ADDRESS));
+runtime/gc/space/image_space.cc:179: << "art base address of 0x" << std::hex << ART_BASE_ADDRESS;
+runtime/gc/space/image_space.cc:180: arg_vector.push_back(StringPrintf("--base=0x%x", ART_BASE_ADDRESS + base_offset));
+runtime/gc/space/image_space.cc:2584: relocate_ ? ART_BASE_ADDRESS + ChooseRelocationOffsetDelta() : base_address);
+
+## R10b (NONE) boot image base address in the build (the image keeps its low-half layout; the runtime adds the base when it maps it): 12
+build/Android.common_build.mk:59: ifndef LIBART_IMG_HOST_BASE_ADDRESS
+build/Android.common_build.mk:60: $(error LIBART_IMG_HOST_BASE_ADDRESS unset)
+build/Android.common_build.mk:63: ifndef LIBART_IMG_TARGET_BASE_ADDRESS
+build/Android.common_build.mk:64: $(error LIBART_IMG_TARGET_BASE_ADDRESS unset)
+build/Android.oat.mk:95: --base=$$(LIBART_IMG_HOST_BASE_ADDRESS) \
+build/Android.oat.mk:211: --base=$$(LIBART_IMG_TARGET_BASE_ADDRESS) \
+build/art.go:140: minDelta := ctx.Config().GetenvWithDefault("LIBART_IMG_TARGET_MIN_BASE_ADDRESS_DELTA", "-0x1000000")
+build/art.go:141: maxDelta := ctx.Config().GetenvWithDefault("LIBART_IMG_TARGET_MAX_BASE_ADDRESS_DELTA", "0x1000000")
+build/art.go:162: minDelta := ctx.Config().GetenvWithDefault("LIBART_IMG_HOST_MIN_BASE_ADDRESS_DELTA", "-0x1000000")
+build/art.go:163: maxDelta := ctx.Config().GetenvWithDefault("LIBART_IMG_HOST_MAX_BASE_ADDRESS_DELTA", "0x1000000")
+build/makevars.go:33: ctx.Strict("LIBART_IMG_HOST_BASE_ADDRESS", ctx.Config().LibartImgHostBaseAddress())
+build/makevars.go:34: ctx.Strict("LIBART_IMG_TARGET_BASE_ADDRESS", ctx.Config().LibartImgDeviceBaseAddress())
+
+## C1 (EDIT) heap-reference load hooks (Unpoison): become 'decompress' in the hook: 24
+compiler/optimizing/code_generator_arm64.cc:2699: GetAssembler()->MaybeUnpoisonHeapReference(temp);
+compiler/optimizing/code_generator_arm64.cc:2714: GetAssembler()->MaybeUnpoisonHeapReference(temp);
+compiler/optimizing/code_generator_arm64.cc:4015: GetAssembler()->MaybeUnpoisonHeapReference(WRegisterFrom(maybe_temp3_loc));
+compiler/optimizing/code_generator_arm64.cc:4140: GetAssembler()->MaybeUnpoisonHeapReference(temp.W());
+compiler/optimizing/code_generator_arm64.cc:4331: GetAssembler()->MaybeUnpoisonHeapReference(temp.W());
+compiler/optimizing/code_generator_arm64.cc:5940: GetAssembler()->MaybeUnpoisonHeapReference(out_reg);
+compiler/optimizing/code_generator_arm64.cc:5976: GetAssembler()->MaybeUnpoisonHeapReference(out_reg);
+compiler/optimizing/code_generator_arm64.cc:6135: __ neg(ref_reg, Operand(ref_reg));
+compiler/optimizing/code_generator_arm64.cc:6243: __ neg(ref_reg, Operand(ref_reg));
+compiler/optimizing/code_generator_arm64.cc:6304: GetAssembler()->UnpoisonHeapReference(WRegisterFrom(out));
+compiler/optimizing/intrinsics_arm64.cc:188: codegen->GetAssembler()->MaybeUnpoisonHeapReference(tmp_reg);
+compiler/optimizing/intrinsics_arm64.cc:1063: assembler->MaybeUnpoisonHeapReference(tmp);
+compiler/optimizing/intrinsics_arm64.cc:1069: assembler->MaybeUnpoisonHeapReference(value);
+compiler/optimizing/intrinsics_arm64.cc:1131: assembler->MaybeUnpoisonHeapReference(old_value);
+compiler/optimizing/intrinsics_arm64.cc:1140: assembler->MaybeUnpoisonHeapReference(value);
+compiler/optimizing/intrinsics_arm64.cc:2601: codegen_->GetAssembler()->MaybeUnpoisonHeapReference(temp1);
+compiler/optimizing/intrinsics_arm64.cc:2602: codegen_->GetAssembler()->MaybeUnpoisonHeapReference(temp2);
+compiler/optimizing/intrinsics_arm64.cc:2611: codegen_->GetAssembler()->MaybeUnpoisonHeapReference(temp3);
+compiler/optimizing/intrinsics_arm64.cc:2623: codegen_->GetAssembler()->MaybeUnpoisonHeapReference(temp3);
+compiler/optimizing/intrinsics_arm64.cc:2636: codegen_->GetAssembler()->MaybeUnpoisonHeapReference(temp1);
+compiler/optimizing/intrinsics_arm64.cc:2640: codegen_->GetAssembler()->MaybeUnpoisonHeapReference(temp1);
+compiler/optimizing/intrinsics_arm64.cc:2676: codegen_->GetAssembler()->MaybeUnpoisonHeapReference(temp1);
+compiler/optimizing/intrinsics_arm64.cc:2680: codegen_->GetAssembler()->MaybeUnpoisonHeapReference(temp2);
+compiler/optimizing/intrinsics_arm64.cc:2920: codegen_->GetAssembler()->MaybeUnpoisonHeapReference(out);
+
+## C2 (NONE) heap-reference store hooks (Poison): the 32-bit store of the low half is the compression: 6
+compiler/optimizing/code_generator_arm64.cc:2050: GetAssembler()->PoisonHeapReference(temp.W());
+compiler/optimizing/code_generator_arm64.cc:2739: GetAssembler()->PoisonHeapReference(temp_source);
+compiler/optimizing/intrinsics_arm64.cc:213: codegen->GetAssembler()->MaybePoisonHeapReference(tmp_reg);
+compiler/optimizing/intrinsics_arm64.cc:903: codegen->GetAssembler()->PoisonHeapReference(temp.W());
+compiler/optimizing/intrinsics_arm64.cc:1067: assembler->MaybePoisonHeapReference(value);
+compiler/optimizing/intrinsics_arm64.cc:1136: assembler->MaybePoisonHeapReference(value);
+
+## C3 (EDIT) GC root loads (ArtMethod declaring class, .bss, JIT roots): one helper, decompress at its end: 5
+compiler/optimizing/code_generator_arm64.cc:4810: codegen_->GenerateGcRootFieldLoad(cls,
+compiler/optimizing/code_generator_arm64.cc:4857: codegen_->GenerateGcRootFieldLoad(cls,
+compiler/optimizing/code_generator_arm64.cc:4877: codegen_->GenerateGcRootFieldLoad(cls,
+compiler/optimizing/code_generator_arm64.cc:5033: codegen_->GenerateGcRootFieldLoad(load,
+compiler/optimizing/code_generator_arm64.cc:5057: codegen_->GenerateGcRootFieldLoad(load,
+
+## C4 (EDIT) Baker read-barrier reference loads (field, array, acquire, CAS old value): decompress after the return label: 16
+compiler/optimizing/code_generator_arm64.cc:1986: codegen_->GenerateFieldLoadWithBakerReadBarrier(
+compiler/optimizing/code_generator_arm64.cc:2475: codegen_->GenerateFieldLoadWithBakerReadBarrier(instruction,
+compiler/optimizing/code_generator_arm64.cc:2483: codegen_->GenerateArrayLoadWithBakerReadBarrier(
+compiler/optimizing/code_generator_arm64.cc:5918: codegen_->GenerateFieldLoadWithBakerReadBarrier(instruction,
+compiler/optimizing/code_generator_arm64.cc:5959: codegen_->GenerateFieldLoadWithBakerReadBarrier(instruction,
+compiler/optimizing/code_generator_arm64.cc:6164: GenerateFieldLoadWithBakerReadBarrier(
+compiler/optimizing/intrinsics_arm64.cc:760: codegen->GenerateFieldLoadWithBakerReadBarrier(invoke,
+compiler/optimizing/intrinsics_arm64.cc:1038: arm64_codegen->GenerateUnsafeCasOldValueMovWithBakerReadBarrier(marked, old_value);
+compiler/optimizing/intrinsics_arm64.cc:2495: codegen_->GenerateFieldLoadWithBakerReadBarrier(invoke,
+compiler/optimizing/intrinsics_arm64.cc:2504: codegen_->GenerateFieldLoadWithBakerReadBarrier(invoke,
+compiler/optimizing/intrinsics_arm64.cc:2521: codegen_->GenerateFieldLoadWithBakerReadBarrier(invoke,
+compiler/optimizing/intrinsics_arm64.cc:2538: codegen_->GenerateFieldLoadWithBakerReadBarrier(invoke,
+compiler/optimizing/intrinsics_arm64.cc:2557: codegen_->GenerateFieldLoadWithBakerReadBarrier(invoke,
+compiler/optimizing/intrinsics_arm64.cc:2571: codegen_->GenerateFieldLoadWithBakerReadBarrier(invoke,
+compiler/optimizing/intrinsics_arm64.cc:2655: codegen_->GenerateFieldLoadWithBakerReadBarrier(invoke,
+compiler/optimizing/intrinsics_arm64.cc:2663: codegen_->GenerateFieldLoadWithBakerReadBarrier(invoke,
+
+## C5 (EDIT) Baker read-barrier thunk kinds (the GC-root thunk dereferences the loaded root): 5
+compiler/optimizing/code_generator_arm64.cc:6426: case BakerReadBarrierKind::kField:
+compiler/optimizing/code_generator_arm64.cc:6427: case BakerReadBarrierKind::kAcquire: {
+compiler/optimizing/code_generator_arm64.cc:6477: case BakerReadBarrierKind::kArray: {
+compiler/optimizing/code_generator_arm64.cc:6502: case BakerReadBarrierKind::kGcRoot: {
+compiler/optimizing/code_generator_arm64.cc:6549: case BakerReadBarrierKind::kField:
+
+## C6 (EDIT) 32-bit literals and table slots holding addresses (boot image objects, JIT root slots, .data.bimg.rel.ro, .bss): 11
+compiler/optimizing/code_generator_arm64.cc:4246: EmitLdrOffsetPlaceholder(ldr_label, WRegisterFrom(temp), XRegisterFrom(temp));
+compiler/optimizing/code_generator_arm64.cc:4524: EmitLdrOffsetPlaceholder(ldr_label, reg.W(), reg.X());
+compiler/optimizing/code_generator_arm64.cc:4530: __ Ldr(reg.W(), DeduplicateBootImageAddressLiteral(reinterpret_cast<uintptr_t>(address)));
+compiler/optimizing/code_generator_arm64.cc:4842: codegen_->EmitLdrOffsetPlaceholder(ldr_label, out.W(), out.X());
+compiler/optimizing/code_generator_arm64.cc:4870: __ Ldr(out.W(), codegen_->DeduplicateBootImageAddressLiteral(address));
+compiler/optimizing/code_generator_arm64.cc:4874: __ Ldr(out, codegen_->DeduplicateJitClassLiteral(cls->GetDexFile(),
+compiler/optimizing/code_generator_arm64.cc:5018: codegen_->EmitLdrOffsetPlaceholder(ldr_label, out.W(), out.X());
+compiler/optimizing/code_generator_arm64.cc:5050: __ Ldr(out.W(), codegen_->DeduplicateBootImageAddressLiteral(address));
+compiler/optimizing/code_generator_arm64.cc:5054: __ Ldr(out, codegen_->DeduplicateJitStringLiteral(load->GetDexFile(),
+compiler/optimizing/code_generator_arm64.cc:6045: EmitLdrOffsetPlaceholder(fixup_label, root_reg, obj.X());
+compiler/optimizing/code_generator_arm64.cc:6357: reinterpret_cast<uint32_t*>(data)[0] = dchecked_integral_cast<uint32_t>(address);
+
+## C7 (EDIT) Thread fields holding objects read or cleared as 32 bits (exception, peer): 3
+compiler/optimizing/code_generator_arm64.cc:4940: __ Ldr(OutputRegister(instruction), GetExceptionTlsAddress());
+compiler/optimizing/code_generator_arm64.cc:4948: __ Str(wzr, GetExceptionTlsAddress());
+compiler/optimizing/intrinsics_arm64.cc:736: MemOperand(tr, Thread::PeerOffset<kArm64PointerSize>().Int32Value()));
+
+## C8 (EDIT) address arithmetic on a W reference register (32-bit add/shift of obj, array, card index): 15
+compiler/optimizing/code_generator_arm64.cc:1268: __ Lsr(temp, object, gc::accounting::CardTable::kCardShift);
+compiler/optimizing/code_generator_arm64.cc:2313: void InstructionCodeGeneratorARM64::VisitIntermediateAddress(HIntermediateAddress* instruction) {
+compiler/optimizing/code_generator_arm64.cc:2527: Register temp = temps.AcquireSameSizeAs(obj);
+compiler/optimizing/code_generator_arm64.cc:2638: Register temp = temps.AcquireSameSizeAs(array);
+compiler/optimizing/code_generator_arm64.cc:2681: Register temp = temps.AcquireSameSizeAs(array);
+compiler/optimizing/code_generator_arm64.cc:2682: Register temp2 = temps.AcquireSameSizeAs(array);
+compiler/optimizing/code_generator_arm64.cc:2736: Register temp_source = temps.AcquireSameSizeAs(array);
+compiler/optimizing/code_generator_arm64.cc:2747: Register temp_base = temps.AcquireSameSizeAs(array);
+compiler/optimizing/code_generator_arm64.cc:6154: __ Add(base, obj, offset);
+compiler/optimizing/code_generator_arm64.cc:6160: __ Add(base, obj, Operand(offset & ~(kReferenceLoadMinFarOffset - 1u)));
+compiler/optimizing/instruction_simplifier_arm64.cc:199: if (TryExtractArrayAccessAddress(instruction,
+compiler/optimizing/instruction_simplifier_arm64.cc:210: if (TryExtractArrayAccessAddress(instruction,
+compiler/optimizing/instruction_simplifier_arm64.cc:270: && TryExtractVecArrayAccessAddress(instruction, instruction->GetIndex())) {
+compiler/optimizing/instruction_simplifier_arm64.cc:276: if (TryExtractVecArrayAccessAddress(instruction, instruction->GetIndex())) {
+compiler/optimizing/intrinsics_arm64.cc:759: __ Add(temp, base, offset.W());  // Offset should not exceed 32 bits.
+
+## C9 (EDIT) moves and selects of reference registers (W moves drop the base; 32-bit spill slots reload): 3
+compiler/optimizing/code_generator_arm64.cc:1059: void ParallelMoveResolverARM64::EmitMove(size_t index) {
+compiler/optimizing/code_generator_arm64.cc:1400: void CodeGeneratorARM64::MoveLocation(Location destination,
+compiler/optimizing/code_generator_arm64.cc:3467: void InstructionCodeGeneratorARM64::VisitSelect(HSelect* select) {
+
+## C10 (CONSUMER) dereferences through a reference register (HeapOperand): 61
+compiler/optimizing/code_generator_arm64.cc:1823: __ Ldrb(temp, HeapOperand(class_reg, status_byte_offset));
+compiler/optimizing/code_generator_arm64.cc:1838: __ Ldrh(temp, HeapOperand(temp, mirror::Class::StatusOffset()));
+compiler/optimizing/code_generator_arm64.cc:1841: __ Ldr(temp, HeapOperand(temp, mirror::Class::StatusOffset()));
+compiler/optimizing/code_generator_arm64.cc:1975: MemOperand field = HeapOperand(InputRegisterAt(instruction, 0), field_info.GetFieldOffset());
+compiler/optimizing/code_generator_arm64.cc:2056: instruction, field_type, source, HeapOperand(obj, offset), /* needs_null_check= */ true);
+compiler/optimizing/code_generator_arm64.cc:2060: codegen_->Store(field_type, source, HeapOperand(obj, offset));
+compiler/optimizing/code_generator_arm64.cc:2488: MemOperand source = HeapOperand(obj);
+compiler/optimizing/code_generator_arm64.cc:2504: __ Ldr(length, HeapOperand(obj, count_offset));
+compiler/optimizing/code_generator_arm64.cc:2516: HeapOperand(obj, offset + Int64FromLocation(index)));
+compiler/optimizing/code_generator_arm64.cc:2520: HeapOperand(obj, offset + (Int64FromLocation(index) << 1)));
+compiler/optimizing/code_generator_arm64.cc:2524: source = HeapOperand(obj, offset);
+compiler/optimizing/code_generator_arm64.cc:2546: HeapOperand(temp, XRegisterFrom(index), LSL, 0));
+compiler/optimizing/code_generator_arm64.cc:2550: HeapOperand(temp, XRegisterFrom(index), LSL, 1));
+compiler/optimizing/code_generator_arm64.cc:2553: source = HeapOperand(temp, XRegisterFrom(index), LSL, DataType::SizeShift(type));
+compiler/optimizing/code_generator_arm64.cc:2589: __ Ldr(out, HeapOperand(InputRegisterAt(instruction, 0), offset));
+compiler/optimizing/code_generator_arm64.cc:2628: MemOperand destination = HeapOperand(array);
+compiler/optimizing/code_generator_arm64.cc:2635: destination = HeapOperand(array, offset);
+compiler/optimizing/code_generator_arm64.cc:2651: destination = HeapOperand(temp,
+compiler/optimizing/code_generator_arm64.cc:2696: __ Ldr(temp, HeapOperand(array, class_offset));
+compiler/optimizing/code_generator_arm64.cc:2702: __ Ldr(temp, HeapOperand(temp, component_offset));
+compiler/optimizing/code_generator_arm64.cc:2704: __ Ldr(temp2, HeapOperand(Register(value), class_offset));
+compiler/optimizing/code_generator_arm64.cc:2717: __ Ldr(temp, HeapOperand(temp, super_offset));
+compiler/optimizing/code_generator_arm64.cc:2745: destination = HeapOperand(array, offset);
+compiler/optimizing/code_generator_arm64.cc:2749: destination = HeapOperand(temp_base,
+compiler/optimizing/code_generator_arm64.cc:3725: __ Ldrh(out, HeapOperand(out, primitive_offset));
+compiler/optimizing/code_generator_arm64.cc:3974: __ Ldrh(temp, HeapOperand(temp, primitive_offset));
+compiler/optimizing/code_generator_arm64.cc:4009: __ Ldr(WRegisterFrom(maybe_temp2_loc), HeapOperand(temp.W(), array_length_offset));
+compiler/optimizing/code_generator_arm64.cc:4014: __ Ldr(WRegisterFrom(maybe_temp3_loc), HeapOperand(temp.W(), object_array_data_offset));
+compiler/optimizing/code_generator_arm64.cc:4123: __ Ldr(temp.W(), HeapOperand(temp.W(), class_offset));
+compiler/optimizing/code_generator_arm64.cc:4129: __ Ldr(temp.W(), HeapOperandFrom(receiver, class_offset));
+compiler/optimizing/code_generator_arm64.cc:4322: __ Ldr(temp.W(), HeapOperandFrom(LocationFrom(receiver), class_offset));
+compiler/optimizing/code_generator_arm64.cc:5256: __ Ldr(wzr, HeapOperandFrom(obj, Offset(0)));
+compiler/optimizing/code_generator_arm64.cc:5933: __ Ldr(out_reg, HeapOperand(out_reg, offset));
+compiler/optimizing/code_generator_arm64.cc:5939: __ Ldr(out_reg, HeapOperand(out_reg, offset));
+compiler/optimizing/code_generator_arm64.cc:5969: __ Ldr(out_reg, HeapOperand(obj_reg, offset));
+compiler/optimizing/code_generator_arm64.cc:5975: __ Ldr(out_reg, HeapOperand(obj_reg, offset));
+compiler/optimizing/code_generator_vector_arm64.cc:1423: return HeapOperand(base, offset);
+compiler/optimizing/code_generator_vector_arm64.cc:1427: return HeapOperand(*scratch, offset);
+compiler/optimizing/code_generator_vector_arm64.cc:1454: __ Ldr(length, HeapOperand(InputRegisterAt(instruction, 0), count_offset));
+compiler/optimizing/common_arm64.h:198: return HeapOperand(base, offset.SizeValue());
+compiler/optimizing/common_arm64.h:202: return HeapOperand(RegisterFrom(location, DataType::Type::kReference), offset);
+compiler/optimizing/intrinsics_arm64.cc:1241: __ Ldr(temp3, HeapOperand(str, count_offset));
+compiler/optimizing/intrinsics_arm64.cc:1242: __ Ldr(temp2, HeapOperand(arg, count_offset));
+compiler/optimizing/intrinsics_arm64.cc:1248: __ Ldr(temp0, HeapOperand(str, count_offset));
+compiler/optimizing/intrinsics_arm64.cc:1249: __ Ldr(temp1, HeapOperand(arg, count_offset));
+compiler/optimizing/intrinsics_arm64.cc:2515: __ Ldrh(temp1, HeapOperand(temp1, primitive_offset));
+compiler/optimizing/intrinsics_arm64.cc:2549: __ Ldrh(temp2, HeapOperand(temp2, primitive_offset));
+compiler/optimizing/intrinsics_arm64.cc:2583: __ Ldr(temp1, HeapOperand(temp1, super_offset));
+compiler/optimizing/intrinsics_arm64.cc:2609: __ Ldr(temp3, HeapOperand(temp1, component_offset));
+compiler/optimizing/intrinsics_arm64.cc:2613: __ Ldrh(temp3, HeapOperand(temp3, primitive_offset));
+compiler/optimizing/intrinsics_arm64.cc:2621: __ Ldr(temp3, HeapOperand(temp2, component_offset));
+compiler/optimizing/intrinsics_arm64.cc:2625: __ Ldrh(temp3, HeapOperand(temp3, primitive_offset));
+compiler/optimizing/intrinsics_arm64.cc:2639: __ Ldr(temp1, HeapOperand(temp1, component_offset));
+compiler/optimizing/intrinsics_arm64.cc:2642: __ Ldr(temp1, HeapOperand(temp1, super_offset));
+compiler/optimizing/intrinsics_arm64.cc:2675: __ Ldr(temp1, HeapOperand(src.W(), class_offset));
+compiler/optimizing/intrinsics_arm64.cc:2678: __ Ldr(temp2, HeapOperand(temp1, component_offset));
+compiler/optimizing/intrinsics_arm64.cc:2683: __ Ldrh(temp2, HeapOperand(temp2, primitive_offset));
+compiler/optimizing/intrinsics_arm64.cc:2740: __ Ldr(tmp, HeapOperand(src.W(), monitor_offset));
+compiler/optimizing/intrinsics_arm64.cc:2902: __ Str(temp.W(), HeapOperand(out.W(), info.value_offset));
+compiler/optimizing/intrinsics_arm64.cc:2917: MemOperand source = HeapOperand(
+compiler/optimizing/intrinsics_arm64.cc:2926: __ Str(in.W(), HeapOperand(out.W(), info.value_offset));
+
+## C11 (CONSUMER) read-barrier slow paths and mark entrypoints (the runtime gets full pointers): 16
+compiler/optimizing/code_generator_arm64.cc:2012: codegen_->MaybeGenerateReadBarrierSlow(instruction, out, out, base_loc, offset);
+compiler/optimizing/code_generator_arm64.cc:2569: codegen_->MaybeGenerateReadBarrierSlow(instruction, out, out, obj_loc, offset);
+compiler/optimizing/code_generator_arm64.cc:2571: codegen_->MaybeGenerateReadBarrierSlow(instruction, out, out, obj_loc, offset, index);
+compiler/optimizing/code_generator_arm64.cc:5934: codegen_->GenerateReadBarrierSlow(instruction, out, out, maybe_temp, offset);
+compiler/optimizing/code_generator_arm64.cc:5970: codegen_->GenerateReadBarrierSlow(instruction, out, out, obj, offset);
+compiler/optimizing/code_generator_arm64.cc:6037: GenerateReadBarrierForRootSlow(instruction, root, root);
+compiler/optimizing/code_generator_arm64.cc:6263: void CodeGeneratorARM64::GenerateReadBarrierSlow(HInstruction* instruction,
+compiler/optimizing/code_generator_arm64.cc:6290: void CodeGeneratorARM64::MaybeGenerateReadBarrierSlow(HInstruction* instruction,
+compiler/optimizing/code_generator_arm64.cc:6302: GenerateReadBarrierSlow(instruction, out, ref, obj, offset, index);
+compiler/optimizing/code_generator_arm64.cc:6308: void CodeGeneratorARM64::GenerateReadBarrierForRootSlow(HInstruction* instruction,
+compiler/optimizing/code_generator_arm64.cc:6417: Thread::ReadBarrierMarkEntryPointsOffset<kArm64PointerSize>(ip0.GetCode());
+compiler/optimizing/code_generator_arm64.h:745: void GenerateReadBarrierSlow(HInstruction* instruction,
+compiler/optimizing/code_generator_arm64.h:755: void MaybeGenerateReadBarrierSlow(HInstruction* instruction,
+compiler/optimizing/code_generator_arm64.h:773: void GenerateReadBarrierForRootSlow(HInstruction* instruction, Location out, Location root);
+compiler/optimizing/intrinsics_arm64.cc:210: Thread::ReadBarrierMarkEntryPointsOffset<kArm64PointerSize>(tmp_.reg());
+compiler/optimizing/intrinsics_arm64.cc:777: codegen->MaybeGenerateReadBarrierSlow(invoke, trg_loc, trg_loc, base_loc, 0u, offset_loc);
+
+## C12 (EVIDENCE) register-width decision points (WRegisterFrom, RegisterFrom(..., kReference)): 81
+compiler/optimizing/code_generator_arm64.cc:157: RegisterFrom(calling_convention.GetReturnLocation(DataType::Type::kReference),
+compiler/optimizing/code_generator_arm64.cc:1981: Register base = RegisterFrom(base_loc, DataType::Type::kReference);
+compiler/optimizing/code_generator_arm64.cc:3850: Register temp = WRegisterFrom(temp_loc);
+compiler/optimizing/code_generator_arm64.cc:4009: __ Ldr(WRegisterFrom(maybe_temp2_loc), HeapOperand(temp.W(), array_length_offset));
+compiler/optimizing/code_generator_arm64.cc:4013: __ Cbz(WRegisterFrom(maybe_temp2_loc), type_check_slow_path->GetEntryLabel());
+compiler/optimizing/code_generator_arm64.cc:4014: __ Ldr(WRegisterFrom(maybe_temp3_loc), HeapOperand(temp.W(), object_array_data_offset));
+compiler/optimizing/code_generator_arm64.cc:4015: GetAssembler()->MaybeUnpoisonHeapReference(WRegisterFrom(maybe_temp3_loc));
+compiler/optimizing/code_generator_arm64.cc:4018: __ Sub(WRegisterFrom(maybe_temp2_loc), WRegisterFrom(maybe_temp2_loc), 2);
+compiler/optimizing/code_generator_arm64.cc:4020: __ Cmp(cls, WRegisterFrom(maybe_temp3_loc));
+compiler/optimizing/code_generator_arm64.cc:4246: EmitLdrOffsetPlaceholder(ldr_label, WRegisterFrom(temp), XRegisterFrom(temp));
+compiler/optimizing/code_generator_arm64.cc:5988: Register root_reg = RegisterFrom(root, DataType::Type::kReference);
+compiler/optimizing/code_generator_arm64.cc:6122: Register ref_reg = RegisterFrom(ref, DataType::Type::kReference);
+compiler/optimizing/code_generator_arm64.cc:6153: base = WRegisterFrom(maybe_temp);
+compiler/optimizing/code_generator_arm64.cc:6158: base = WRegisterFrom(maybe_temp);
+compiler/optimizing/code_generator_arm64.cc:6205: Register ref_reg = RegisterFrom(ref, DataType::Type::kReference);
+compiler/optimizing/code_generator_arm64.cc:6223: temp = WRegisterFrom(instruction->GetLocations()->GetTemp(0));
+compiler/optimizing/code_generator_arm64.cc:6257: Register temp = temp_loc.IsValid() ? WRegisterFrom(temp_loc) : temps.AcquireW();
+compiler/optimizing/code_generator_arm64.cc:6304: GetAssembler()->UnpoisonHeapReference(WRegisterFrom(out));
+compiler/optimizing/code_generator_vector_arm64.cc:1426: __ Add(*scratch, base, Operand(WRegisterFrom(index), LSL, shift));
+compiler/optimizing/common_arm64.h:71: inline vixl::aarch64::Register WRegisterFrom(Location location) {
+compiler/optimizing/common_arm64.h:78: return type == DataType::Type::kInt64 ? XRegisterFrom(location) : WRegisterFrom(location);
+compiler/optimizing/common_arm64.h:202: return HeapOperand(RegisterFrom(location, DataType::Type::kReference), offset);
+compiler/optimizing/intrinsics_arm64.cc:182: Register tmp_reg = WRegisterFrom(tmp_);
+compiler/optimizing/intrinsics_arm64.cc:257: __ Fmov(is64bit ? XRegisterFrom(output) : WRegisterFrom(output),
+compiler/optimizing/intrinsics_arm64.cc:265: is64bit ? XRegisterFrom(input) : WRegisterFrom(input));
+compiler/optimizing/intrinsics_arm64.cc:319: __ Rev16(WRegisterFrom(out), WRegisterFrom(in));
+compiler/optimizing/intrinsics_arm64.cc:320: __ Sxth(WRegisterFrom(out), WRegisterFrom(out));
+compiler/optimizing/intrinsics_arm64.cc:605: Register out_reg = is_double ? XRegisterFrom(l->Out()) : WRegisterFrom(l->Out());
+compiler/optimizing/intrinsics_arm64.cc:647: __ Ldrsb(WRegisterFrom(invoke->GetLocations()->Out()),
+compiler/optimizing/intrinsics_arm64.cc:657: __ Ldr(WRegisterFrom(invoke->GetLocations()->Out()),
+compiler/optimizing/intrinsics_arm64.cc:677: __ Ldrsh(WRegisterFrom(invoke->GetLocations()->Out()),
+compiler/optimizing/intrinsics_arm64.cc:694: __ Strb(WRegisterFrom(invoke->GetLocations()->InAt(1)),
+compiler/optimizing/intrinsics_arm64.cc:704: __ Str(WRegisterFrom(invoke->GetLocations()->InAt(1)),
+compiler/optimizing/intrinsics_arm64.cc:724: __ Strh(WRegisterFrom(invoke->GetLocations()->InAt(1)),
+compiler/optimizing/intrinsics_arm64.cc:735: codegen_->Load(DataType::Type::kReference, WRegisterFrom(invoke->GetLocations()->Out()),
+compiler/optimizing/intrinsics_arm64.cc:748: Register base = WRegisterFrom(base_loc);      // Object pointer.
+compiler/optimizing/intrinsics_arm64.cc:756: Register temp = WRegisterFrom(locations->GetTemp(0));
+compiler/optimizing/intrinsics_arm64.cc:888: Register base = WRegisterFrom(locations->InAt(1));    // Object pointer.
+compiler/optimizing/intrinsics_arm64.cc:1028: Register base = WRegisterFrom(locations->InAt(1));              // Object pointer.
+compiler/optimizing/intrinsics_arm64.cc:1030: Register expected = WRegisterFrom(locations->InAt(3));          // Expected.
+compiler/optimizing/intrinsics_arm64.cc:1031: Register value = WRegisterFrom(locations->InAt(4));             // Value.
+compiler/optimizing/intrinsics_arm64.cc:1033: Register old_value = WRegisterFrom(locations->GetTemp(0));      // The old value from main path.
+compiler/optimizing/intrinsics_arm64.cc:1034: Register marked = WRegisterFrom(locations->GetTemp(1));         // The marked old value.
+compiler/optimizing/intrinsics_arm64.cc:1082: Register out = WRegisterFrom(locations->Out());                 // Boolean result.
+compiler/optimizing/intrinsics_arm64.cc:1083: Register base = WRegisterFrom(locations->InAt(1));              // Object pointer.
+compiler/optimizing/intrinsics_arm64.cc:1115: old_value = WRegisterFrom(locations->GetTemp(0));
+compiler/optimizing/intrinsics_arm64.cc:1206: Register temp0 = WRegisterFrom(locations->GetTemp(0));
+compiler/optimizing/intrinsics_arm64.cc:1207: Register temp1 = WRegisterFrom(locations->GetTemp(1));
+compiler/optimizing/intrinsics_arm64.cc:1208: Register temp2 = WRegisterFrom(locations->GetTemp(2));
+compiler/optimizing/intrinsics_arm64.cc:1211: temp3 = WRegisterFrom(locations->GetTemp(3));
+compiler/optimizing/intrinsics_arm64.cc:1440: Register str = WRegisterFrom(locations->InAt(0));
+compiler/optimizing/intrinsics_arm64.cc:1441: Register arg = WRegisterFrom(locations->InAt(1));
+compiler/optimizing/intrinsics_arm64.cc:1622: Register char_reg = WRegisterFrom(locations->InAt(1));
+compiler/optimizing/intrinsics_arm64.cc:1631: Register tmp_reg = WRegisterFrom(locations->GetTemp(0));
+compiler/optimizing/intrinsics_arm64.cc:1692: Register byte_array = WRegisterFrom(locations->InAt(0));
+compiler/optimizing/intrinsics_arm64.cc:1737: Register string_to_copy = WRegisterFrom(locations->InAt(0));
+compiler/optimizing/intrinsics_arm64.cc:2147: __ Cbnz(WRegisterFrom(pos), slow_path->GetEntryLabel());
+compiler/optimizing/intrinsics_arm64.cc:2150: Register pos_reg = WRegisterFrom(pos);
+compiler/optimizing/intrinsics_arm64.cc:2234: __ Cmp(WRegisterFrom(length), kSystemArrayCopyCharThreshold);
+compiler/optimizing/intrinsics_arm64.cc:2242: Register src_curr_addr = WRegisterFrom(locations->GetTemp(0));
+compiler/optimizing/intrinsics_arm64.cc:2243: Register dst_curr_addr = WRegisterFrom(locations->GetTemp(1));
+compiler/optimizing/intrinsics_arm64.cc:2244: Register src_stop_addr = WRegisterFrom(locations->GetTemp(2));
+compiler/optimizing/intrinsics_arm64.cc:2388: Register temp1 = WRegisterFrom(locations->GetTemp(0));
+compiler/optimizing/intrinsics_arm64.cc:2390: Register temp2 = WRegisterFrom(locations->GetTemp(1));
+compiler/optimizing/intrinsics_arm64.cc:2421: __ Cmp(WRegisterFrom(dest_pos), src_pos_constant);
+compiler/optimizing/intrinsics_arm64.cc:2453: __ Cmp(WRegisterFrom(length), kSystemArrayCopyThreshold);
+compiler/optimizing/intrinsics_arm64.cc:2481: temp3 = WRegisterFrom(temp3_loc);
+compiler/optimizing/intrinsics_arm64.cc:2700: __ Cbz(WRegisterFrom(length), &done);
+compiler/optimizing/intrinsics_arm64.cc:2842: out = WRegisterFrom(locations->Out());
+compiler/optimizing/intrinsics_arm64.cc:3140: Register length = WRegisterFrom(locations->InAt(3));
+compiler/optimizing/intrinsics_arm64.cc:3157: Register crc = WRegisterFrom(locations->InAt(0));
+compiler/optimizing/intrinsics_arm64.cc:3158: Register out = WRegisterFrom(locations->Out());
+compiler/optimizing/intrinsics_arm64.cc:3202: Register crc = WRegisterFrom(locations->InAt(0));
+compiler/optimizing/intrinsics_arm64.cc:3203: Register length = WRegisterFrom(locations->InAt(3));
+compiler/optimizing/intrinsics_arm64.cc:3204: Register out = WRegisterFrom(locations->Out());
+compiler/optimizing/intrinsics_arm64.cc:3249: Register out = WRegisterFrom(invoke->GetLocations()->Out());
+compiler/optimizing/intrinsics_arm64.cc:3263: Register out = WRegisterFrom(locations->Out());
+compiler/optimizing/intrinsics_arm64.cc:3265: __ Fmov(half, WRegisterFrom(locations->InAt(0)));
+compiler/optimizing/intrinsics_arm64.cc:3326: Register out = WRegisterFrom(locations->Out());
+compiler/optimizing/intrinsics_arm64.cc:3329: __ Fmov(half0, WRegisterFrom(locations->InAt(0)));
+compiler/optimizing/intrinsics_arm64.cc:3330: __ Fmov(half1, WRegisterFrom(locations->InAt(1)));
+
+## C13 (EVIDENCE) comments stating that a reference is 32-bit and zero-extended: 3
+compiler/optimizing/code_generator_vector_arm64.cc:1457: // Zero extend 8 compressed bytes into 8 chars.
+compiler/optimizing/common_arm64.h:182: // A heap reference must be 32bit, so fit in a W register.
+compiler/optimizing/common_arm64.h:191: // A heap reference must be 32bit, so fit in a W register.
+
+## C14 (EDIT) intrinsic generators whose body handles references (review each): 11
+compiler/optimizing/intrinsics_arm64.cc:734: VisitThreadCurrentThread
+compiler/optimizing/intrinsics_arm64.cc:836: VisitUnsafeGetObject
+compiler/optimizing/intrinsics_arm64.cc:839: VisitUnsafeGetObjectVolatile
+compiler/optimizing/intrinsics_arm64.cc:941: VisitUnsafePutObject
+compiler/optimizing/intrinsics_arm64.cc:948: VisitUnsafePutObjectOrdered
+compiler/optimizing/intrinsics_arm64.cc:955: VisitUnsafePutObjectVolatile
+compiler/optimizing/intrinsics_arm64.cc:1169: VisitUnsafeCASObject
+compiler/optimizing/intrinsics_arm64.cc:1196: VisitStringCompareTo
+compiler/optimizing/intrinsics_arm64.cc:1436: VisitStringEquals
+compiler/optimizing/intrinsics_arm64.cc:2369: VisitSystemArrayCopy
+compiler/optimizing/intrinsics_arm64.cc:2879: VisitIntegerValueOf
+
+## A1 (EDIT) UNPOISON_HEAP_REF after a reference load (the macro becomes 'decompress'): 5
+runtime/arch/arm64/quick_entrypoints_arm64.S:1067: UNPOISON_HEAP_REF \wDest
+runtime/arch/arm64/quick_entrypoints_arm64.S:1098: UNPOISON_HEAP_REF \wDest
+runtime/arch/arm64/quick_entrypoints_arm64.S:1598: UNPOISON_HEAP_REF \wTemp0
+runtime/arch/arm64/quick_entrypoints_arm64.S:1717: UNPOISON_HEAP_REF wIP0
+runtime/arch/arm64/quick_entrypoints_arm64.S:2533: UNPOISON_HEAP_REF wIP0
+
+## A2 (NONE) POISON_HEAP_REF before a 32-bit reference store: 5
+runtime/arch/arm64/quick_entrypoints_arm64.S:1118: POISON_HEAP_REF w2
+runtime/arch/arm64/quick_entrypoints_arm64.S:1149: POISON_HEAP_REF w2
+runtime/arch/arm64/quick_entrypoints_arm64.S:1415: POISON_HEAP_REF w0
+runtime/arch/arm64/quick_entrypoints_arm64.S:1492: POISON_HEAP_REF w0
+runtime/arch/arm64/quick_entrypoints_arm64.S:1560: POISON_HEAP_REF \wClass
+
+## A3 (EDIT) 32-bit loads of reference fields (class, component type, declaring class, READ_BARRIER): 5
+runtime/arch/arm64/quick_entrypoints_arm64.S:1066: ldr \wDest, [\xObj, #\offset]   // Heap reference = 32b. This also zero-extends to \xDest.
+runtime/arch/arm64/quick_entrypoints_arm64.S:1097: ldr \wDest, [\xObj, #\offset]   // Heap reference = 32b. This also zero-extends to \xDest.
+runtime/arch/arm64/quick_entrypoints_arm64.S:1597: ldr    \wTemp0, [\xClass, #MIRROR_CLASS_COMPONENT_TYPE_OFFSET] // Load component type
+runtime/arch/arm64/quick_entrypoints_arm64.S:1713: ldp wIP0, w15, [xIP0, #ART_METHOD_DECLARING_CLASS_OFFSET]
+runtime/arch/arm64/quick_entrypoints_arm64.S:1716: ldr wIP0, [xIP0, #MIRROR_CLASS_DEX_CACHE_OFFSET]  // Load the DexCache (without read barrier).
+
+## A4 (EDIT) forwarding address decoded from a lock word: 2
+runtime/arch/arm64/quick_entrypoints_arm64.S:2302: lsl   \wreg, wIP0, #LOCK_WORD_STATE_FORWARDING_ADDRESS_SHIFT
+runtime/arch/arm64/quick_entrypoints_arm64.S:2557: lsl   wIP0, wIP1, #LOCK_WORD_STATE_FORWARDING_ADDRESS_SHIFT
+
+## A5 (EDIT) a returned reference moved as a W register: 2
+runtime/arch/arm64/quick_entrypoints_arm64.S:1084: mov \wDest, w0              // save return value in wDest
+runtime/arch/arm64/quick_entrypoints_arm64.S:2268: mov   \wreg, w0                   // Return result into `wreg`
+
+## A6 (EDIT) invoke stubs load reference arguments (and 'this') as W registers: 3
+runtime/arch/arm64/quick_entrypoints_arm64.S:510: ldr w1, [x9],#4         // Load "this" parameter, and increment arg pointer.
+runtime/arch/arm64/quick_entrypoints_arm64.S:546: .LisOther:                  // Everything else takes one vReg.
+runtime/arch/arm64/quick_entrypoints_arm64.S:679: .LisOther2:                 // Everything else takes one vReg.
+
+## A7 (CONSUMER) card marking from the object's full address: 2
+runtime/arch/arm64/quick_entrypoints_arm64.S:1121: lsr x0, x0, #CARD_TABLE_CARD_SHIFT
+runtime/arch/arm64/quick_entrypoints_arm64.S:1152: lsr x0, x0, #CARD_TABLE_CARD_SHIFT
+
+## A8 (EVIDENCE) comments stating 'compress/uncompress = do nothing, already zero-extended': 16
+runtime/arch/arm64/quick_entrypoints_arm64.S:1066: ldr \wDest, [\xObj, #\offset]   // Heap reference = 32b. This also zero-extends to \xDest.
+runtime/arch/arm64/quick_entrypoints_arm64.S:1097: ldr \wDest, [\xObj, #\offset]   // Heap reference = 32b. This also zero-extends to \xDest.
+runtime/arch/arm64/quick_entrypoints_arm64.S:1107: READ_BARRIER x3, w3, x0, x3, w3, MIRROR_OBJECT_CLASS_OFFSET, 0  // Heap reference = 32b
+runtime/arch/arm64/quick_entrypoints_arm64.S:1108: // This also zero-extends to x3
+runtime/arch/arm64/quick_entrypoints_arm64.S:1109: READ_BARRIER x3, w3, x3, x4, w4, MIRROR_CLASS_COMPONENT_TYPE_OFFSET, 1 // Heap reference = 32b
+runtime/arch/arm64/quick_entrypoints_arm64.S:1110: // This also zero-extends to x3
+runtime/arch/arm64/quick_entrypoints_arm64.S:1111: READ_BARRIER x4, w4, x2, x4, w4, MIRROR_OBJECT_CLASS_OFFSET, 2  // Heap reference = 32b
+runtime/arch/arm64/quick_entrypoints_arm64.S:1112: // This also zero-extends to x4
+runtime/arch/arm64/quick_entrypoints_arm64.S:1117: // "Compress" = do nothing
+runtime/arch/arm64/quick_entrypoints_arm64.S:1119: str w2, [x3, x1, lsl #2]                             // Heap reference = 32b
+runtime/arch/arm64/quick_entrypoints_arm64.S:1126: // "Compress" = do nothing
+runtime/arch/arm64/quick_entrypoints_arm64.S:1127: str w2, [x3, x1, lsl #2]                             // Heap reference = 32b
+runtime/arch/arm64/quick_entrypoints_arm64.S:1135: mov x0, x3              // Heap reference, 32b, "uncompress" = do nothing, already zero-extended
+runtime/arch/arm64/quick_entrypoints_arm64.S:1136: mov x1, x4              // Heap reference, 32b, "uncompress" = do nothing, already zero-extended
+runtime/arch/arm64/quick_entrypoints_arm64.S:1148: // "Compress" = do nothing
+runtime/arch/arm64/quick_entrypoints_arm64.S:1150: str w2, [x3, x1, lsl #2]                              // Heap reference = 32b
+
+## M1 (EDIT) UNPOISON_HEAP_REF after a reference load: 1
+runtime/interpreter/mterp/arm64/object.S:53: UNPOISON_HEAP_REF w0
+
+## M2 (NONE) SET_VREG_OBJECT (a 32-bit vreg store): 8
+runtime/interpreter/mterp/arm64/array.S:56: SET_VREG_OBJECT w0, w2
+runtime/interpreter/mterp/arm64/object.S:67: SET_VREG_OBJECT w0, w2               // fp[A]<- w0
+runtime/interpreter/mterp/arm64/object.S:116: SET_VREG_OBJECT w0, w2              // fp[A]<- w0
+runtime/interpreter/mterp/arm64/other.S:184: SET_VREG_OBJECT w2, w0              // fp[A]<- x2
+runtime/interpreter/mterp/arm64/other.S:199: SET_VREG_OBJECT w2, w0              // fp[AAAA]<- w2
+runtime/interpreter/mterp/arm64/other.S:211: SET_VREG_OBJECT w3, w2              // fp[AA]<- exception obj
+runtime/interpreter/mterp/arm64/other.S:225: SET_VREG_OBJECT w2, w0              // fp[AA]<- r2
+runtime/interpreter/mterp/arm64/other.S:249: SET_VREG_OBJECT w0, w2, w1          // fp[AA]<- r0
+
+## M3 (EDIT) a vreg object (GET_VREG w) used as a memory base (heuristic): 11
+runtime/interpreter/mterp/arm64/array.S:20: ldr     w3, [x0, #MIRROR_ARRAY_LENGTH_OFFSET]    // w3<- arrayObj->length
+runtime/interpreter/mterp/arm64/array.S:77: ldr     w3, [x0, #MIRROR_ARRAY_LENGTH_OFFSET]    // w3<- arrayObj->length
+runtime/interpreter/mterp/arm64/array.S:106: ldr     w3, [x0, #MIRROR_ARRAY_LENGTH_OFFSET]     // w3<- arrayObj->length
+runtime/interpreter/mterp/arm64/array.S:156: ldr     w3, [x0, #MIRROR_ARRAY_LENGTH_OFFSET]    // w3<- arrayObj->length
+runtime/interpreter/mterp/arm64/array.S:175: ldr     w3, [x0, #MIRROR_ARRAY_LENGTH_OFFSET]    // w3<- array length
+runtime/interpreter/mterp/arm64/object.S:48: ldr      x0, [x2, x1]                // x0<- obj.field
+runtime/interpreter/mterp/arm64/object.S:50: ${load}  w0, [x2, x1]                // w0<- obj.field
+runtime/interpreter/mterp/arm64/object.S:129: $load   w0, [x3, x1]                // w0<- obj.field
+runtime/interpreter/mterp/arm64/object.S:152: ldr     x0, [x3, x4]                // x0<- obj.field
+runtime/interpreter/mterp/arm64/object.S:227: $store     w0, [x3, x1]             // obj.field<- w0
+runtime/interpreter/mterp/arm64/object.S:249: str     x0, [x2, x3]                // obj.field<- x0
+
+## M4 (EDIT) a vreg object passed to a C++ helper in x0-x3 (heuristic): 6
+runtime/interpreter/mterp/arm64/array.S:51: bl       artAGetObjectFromMterp     // (array, index)
+runtime/interpreter/mterp/arm64/array.S:189: bl      MterpFillArrayData          // (obj, payload)
+runtime/interpreter/mterp/arm64/object.S:60: bl artReadBarrierMark                // x0 <- artReadBarrierMark(x0)
+runtime/interpreter/mterp/arm64/object.S:111: bl      artIGetObjectFromMterp      // (obj, offset)
+runtime/interpreter/mterp/arm64/other.S:146: bl       artLockObjectFromCode
+runtime/interpreter/mterp/arm64/other.S:167: bl       artUnlockObjectFromCode    // w0<- success for unlock(self, obj)
+
+## M5 (EDIT) Thread::exception_ written from a register: 2
+runtime/interpreter/mterp/arm64/control_flow.S:222: str      x1, [xSELF, #THREAD_EXCEPTION_OFFSET]  // thread->exception<- obj
+runtime/interpreter/mterp/arm64/other.S:213: str     x1, [xSELF, #THREAD_EXCEPTION_OFFSET]  // clear exception
+
+## J1 (EDIT) JNI macro assembler reference operations (LoadRef decompresses; handle-scope helpers): 7
+compiler/utils/arm64/jni_macro_assembler_arm64.cc:152: void Arm64JNIMacroAssembler::StoreRef(FrameOffset offs, ManagedRegister m_src) {
+compiler/utils/arm64/jni_macro_assembler_arm64.cc:299: void Arm64JNIMacroAssembler::LoadRef(ManagedRegister m_dst, FrameOffset offs) {
+compiler/utils/arm64/jni_macro_assembler_arm64.cc:305: void Arm64JNIMacroAssembler::LoadRef(ManagedRegister m_dst,
+compiler/utils/arm64/jni_macro_assembler_arm64.cc:386: void Arm64JNIMacroAssembler::CopyRef(FrameOffset dest, FrameOffset src, ManagedRegister m_scratch) {
+compiler/utils/arm64/jni_macro_assembler_arm64.cc:574: void Arm64JNIMacroAssembler::CreateHandleScopeEntry(ManagedRegister m_out_reg,
+compiler/utils/arm64/jni_macro_assembler_arm64.cc:602: void Arm64JNIMacroAssembler::CreateHandleScopeEntry(FrameOffset out_off,
+compiler/utils/arm64/jni_macro_assembler_arm64.cc:623: void Arm64JNIMacroAssembler::LoadReferenceFromHandleScope(ManagedRegister m_out_reg,
+
+## J2 (CONSUMER) JNI stub generator calls to those operations (ISA-independent): 16
+compiler/jni/quick/jni_compiler.cc:259: __ LoadRef(main_jni_conv->InterproceduralScratchRegister(),
+compiler/jni/quick/jni_compiler.cc:263: __ StoreRef(handle_scope_offset, main_jni_conv->InterproceduralScratchRegister());
+compiler/jni/quick/jni_compiler.cc:287: __ StoreRef(handle_scope_offset, in_reg);
+compiler/jni/quick/jni_compiler.cc:291: __ CopyRef(handle_scope_offset, in_off,
+compiler/jni/quick/jni_compiler.cc:356: __ CreateHandleScopeEntry(out_off, class_handle_scope_offset,
+compiler/jni/quick/jni_compiler.cc:361: __ CreateHandleScopeEntry(out_reg, class_handle_scope_offset,
+compiler/jni/quick/jni_compiler.cc:406: __ CreateHandleScopeEntry(out_off, locked_object_handle_scope_offset,
+compiler/jni/quick/jni_compiler.cc:410: __ CreateHandleScopeEntry(out_reg, locked_object_handle_scope_offset,
+compiler/jni/quick/jni_compiler.cc:480: __ CreateHandleScopeEntry(out_off, handle_scope_offset,
+compiler/jni/quick/jni_compiler.cc:485: __ CreateHandleScopeEntry(out_reg, handle_scope_offset,
+compiler/jni/quick/jni_compiler.cc:614: __ CreateHandleScopeEntry(out_off, locked_object_handle_scope_offset,
+compiler/jni/quick/jni_compiler.cc:619: __ CreateHandleScopeEntry(out_reg, locked_object_handle_scope_offset,
+compiler/jni/quick/jni_compiler.cc:715: __ CreateHandleScopeEntry(out_reg, handle_scope_offset, in_reg, null_allowed);
+compiler/jni/quick/jni_compiler.cc:727: __ CreateHandleScopeEntry(out_off, handle_scope_offset, mr_conv->InterproceduralScratchRegister(),
+compiler/jni/quick/jni_compiler.cc:741: __ CreateHandleScopeEntry(out_reg, handle_scope_offset, ManagedRegister::NoRegister(), null_allowed);
+compiler/jni/quick/jni_compiler.cc:755: __ CreateHandleScopeEntry(out_off, handle_scope_offset, mr_conv->InterproceduralScratchRegister(),
+
+## I1 (EDIT) dex2oat's 32-bit address conversions (image writer, oat writer): 9
+dex2oat/dex2oat.cc:742: reinterpret_cast32<uint32_t>(new_field_value.Get()),
+dex2oat/linker/image_writer.cc:2499: image_info.image_roots_address_ = PointerToLowMemUInt32(GetImageAddress(image_roots[i].Get()));
+dex2oat/linker/image_writer.cc:2696: PointerToLowMemUInt32(image_info.image_begin_),
+dex2oat/linker/image_writer.cc:2701: PointerToLowMemUInt32(oat_file_begin),
+dex2oat/linker/image_writer.cc:2702: PointerToLowMemUInt32(image_info.oat_data_begin_),
+dex2oat/linker/image_writer.cc:2703: PointerToLowMemUInt32(oat_data_end),
+dex2oat/linker/image_writer.cc:2704: PointerToLowMemUInt32(oat_file_end),
+dex2oat/linker/image_writer.cc:3263: reinterpret_cast<void**>(&new_pair->first), reinterpret_cast32<void*>(orig_pair->first));
+dex2oat/linker/image_writer.cc:3384: uint32_t quick_oat_code_offset = PointerToLowMemUInt32(quick_oat_entry_point);

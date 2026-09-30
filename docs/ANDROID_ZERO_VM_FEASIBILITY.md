@@ -258,6 +258,13 @@ and the quick entrypoints skip x18 when they save and restore registers
 Unlike Linux HotSpot and llvmpipe (stage 24), ART's JIT output is not
 exposed to Darwin's x18 zeroing.
 
+**The heap below 4 GiB.** Stage 25 found the larger ART wall: native arm64
+ART needs its heap below 4 GiB, which macOS never maps
+(`docs/ANDROID_RUNTIME_ARCHITECTURE.md`, "The ART heap wall"). Stage 28
+studies an ART with its heap in a window above 4 GiB, with counts, designs,
+a prototype patch series and a go/no-go: `docs/ART_HEAP_ABOVE_4GB.md`,
+`patches/art-heap-base/`.
+
 | | |
 |---|---|
 | lxrun today | fork, threads, signals (ART's implicit null and suspend checks are SIGSEGV-driven), `membarrier`, memfd, madvise; no dual view |
@@ -754,6 +761,8 @@ with the reason (the stage that has not passed), never as a working card.
   AOT-compiled `.oat`.
 - Exit: `toybox`, the NDK program and `dalvikvm64` print their output,
   repeatedly, with no poisoned site hit and no unexplained `ENOSYS`.
+- Update: `dalvikvm64` stops at the ART heap wall (stage 25); the rebuilt
+  ART it needs is `docs/ART_HEAP_ABOVE_4GB.md` (stage 28).
 
 **Stage 2: binder and servicemanager.**
 - Write the broker (3.3, option 1) and lxrun's `/dev/binder`,

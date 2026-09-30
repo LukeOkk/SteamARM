@@ -1,0 +1,45 @@
+From d2e33654a0abc93423bfc1ee6edbbbc7669443f4 Mon Sep 17 00:00:00 2001
+From: LukeOkk <85941941+LukeOkk@users.noreply.github.com>
+Date: Wed, 30 Sep 2026 02:14:05 -0300
+Subject: [PATCH 6/9] interpreter: use the switch interpreter with a heap
+ reference base (SteamARM, HYPOTHESIS)
+
+HYPOTHESIS, UNTESTED: not compiled, not run.
+
+The arm64 assembly interpreter (mterp) loads a dex register with GET_VREG
+into a W register and uses the X register as a base address (iget/iput
+fast paths, array-length, aget/aput) or passes it to C++ helpers as a
+mirror::Object* (artIGetObjectFromMterp, artAGetObjectFromMterp,
+artLockObjectFromCode, MterpFillArrayData, ...); throw stores it into
+Thread::exception_ and return-object hands it back as a JValue. Each would
+need the base ORed in (SteamARM counts about 20 sites).
+
+Until that port exists, CanUseMterp() is false when the base is non-zero:
+every thread runs the switch interpreter, which reads and writes dex
+registers through StackReference and so follows the central compression.
+Building with ART_USE_CXX_INTERPRETER=true removes mterp altogether.
+arm64 has no nterp in Android 11 (nterp_stub.cc).
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01L6ANQQienC2qRCeZBzUfuS
+---
+ runtime/interpreter/mterp/mterp.cc | 6 ++++++
+ 1 file changed, 6 insertions(+)
+
+diff --git a/runtime/interpreter/mterp/mterp.cc b/runtime/interpreter/mterp/mterp.cc
+index c6d3258..d5d6177 100644
+--- a/runtime/interpreter/mterp/mterp.cc
++++ b/runtime/interpreter/mterp/mterp.cc
+@@ -147,6 +147,12 @@ bool CanUseMterp()
+     REQUIRES_SHARED(Locks::mutator_lock_) {
+   const Runtime* const runtime = Runtime::Current();
+   return
++      // SteamARM (HYPOTHESIS): the arm64 assembly interpreter dereferences
++      // 32-bit dex register values directly and passes them to C++ helpers as
++      // pointers (runtime/interpreter/mterp/arm64/*.S, about 20 sites). It is
++      // not ported to a heap reference base; the switch interpreter (C++,
++      // through the typed references) runs instead.
++      kHeapReferenceBase == 0u &&
+       runtime->IsStarted() &&
+       !runtime->IsAotCompiler() &&
+       !runtime->GetInstrumentation()->IsActive() &&
