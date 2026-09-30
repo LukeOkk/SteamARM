@@ -13,6 +13,7 @@
 // written once.
 
 #include "lxrt.h"
+#include "android_ids.h"
 
 #include <errno.h>
 #include <dirent.h>
@@ -449,10 +450,12 @@ static void regenerate_tasks(void)
         int bl = snprintf(b, sizeof b, "%s\n", nm);
         snprintf(f, sizeof f, "%s/comm", sub);
         path_write_if_changed(f, b, (size_t)bl);
+        uint32_t u[4], g[4];
+        lxrt_aids_status_ids(u, g, NULL, 0);   // Android ids: the virtual ones
         bl = snprintf(b, sizeof b, "Name:\t%s\nState:\tS (sleeping)\nTgid:\t%d\nPid:\t%d\nPPid:\t%d\n"
-                      "Uid:\t%d\t%d\t%d\t%d\nGid:\t%d\t%d\t%d\t%d\nThreads:\t%d\n",
+                      "Uid:\t%u\t%u\t%u\t%u\nGid:\t%u\t%u\t%u\t%u\nThreads:\t%d\n",
                       strrchr(g_exe, '/') ? strrchr(g_exe, '/') + 1 : g_exe, getpid(), tids[i], getppid(),
-                      getuid(), getuid(), getuid(), getuid(), getgid(), getgid(), getgid(), getgid(), n);
+                      u[0], u[1], u[2], u[3], g[0], g[1], g[2], g[3], n);
         snprintf(f, sizeof f, "%s/status", sub);
         path_write_if_changed(f, b, (size_t)bl);
     }

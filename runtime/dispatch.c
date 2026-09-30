@@ -42,6 +42,7 @@
 #include <sys/stat.h>
 #include <sys/time.h>
 #include <sys/uio.h>
+#include <sys/xattr.h>
 #include <pthread.h>
 #include <unistd.h>
 
@@ -112,9 +113,10 @@ enum {
     LNR_setsockopt = 208, LNR_getsockopt = 209, LNR_shutdown = 210,
     LNR_sendmsg = 211, LNR_recvmsg = 212, LNR_accept4 = 242,
     LNR_pipe2 = 59, LNR_eventfd2 = 19,
-    // Extended attributes: Darwin has them, but the names, the namespaces and
-    // the security semantics differ; ENOTSUP is the answer a filesystem
-    // without xattr support gives on Linux and every caller handles it.
+    // Extended attributes: Darwin has them, but the namespaces and security
+    // semantics differ. "user." names map to the same Darwin names
+    // (do_xattr); the other namespaces are ENOTSUP, the answer a filesystem
+    // without them gives on Linux, which every caller handles.
     LNR_setxattr = 5, LNR_lsetxattr = 6, LNR_fsetxattr = 7, LNR_getxattr = 8,
     LNR_lgetxattr = 9, LNR_fgetxattr = 10, LNR_listxattr = 11, LNR_llistxattr = 12,
     LNR_flistxattr = 13, LNR_removexattr = 14, LNR_lremovexattr = 15,
@@ -2112,11 +2114,149 @@ static long do_fstat(int fd, uint64_t out)
         return LERR(errno);
     lxrt_evdev_fix_stat(pf, fd, &d);
     lxrt_props_fix_stat(pf, fd, &d);
+    lxrt_aids_fix_stat(pf, pf ? -1 : fd, false, &d);
     stat_to_linux(&d, (struct linux_stat *)out);
     return 0;
 }
 
 static const char *translate(const char *path);
+static const char *translate_follow(const char *path);
+
+// ---------------------------------------------------------------- xattrs
+//
+// Linux's "user." namespace is the one ordinary programs use, and Darwin
+// keeps arbitrary names on the same files: a "user.X" attribute is stored as
+// the Darwin attribute "user.X". Android's framework needs it: UserDataPreparer
+// marks every user directory with user.serial and, when getxattr failed,
+// destroyed /data/user_de/0 and /data/system_ce/0 at every boot and
+// system_server died right after (MEASURED at stage 28); installd marks app
+// data with user.default and user.inode_cache. The other namespaces
+// (security., trusted., system.) stay ENOTSUP -- what a filesystem without
+// them answers -- and a listing shows only user. names, so Darwin's own
+// com.apple.* attributes and the runtime's (android_ids.h) stay out of sight.
+static bool xattr_user(const char *name)
+{
+    return name && !strncmp(name, "user.", 5) && name[5];
+}
+
+static long xattr_err(int e)
+{
+    return e == ENOATTR ? -61 : LERR(e);        // Linux ENODATA
+}
+
+// nr: the aarch64 number (5 setxattr .. 16 fremovexattr). a0 is a path or a
+// descriptor; the l* forms do not follow a final symlink.
+static long do_xattr(long nr, uint64_t a0, uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4)
+{
+    int kind = (int)((nr - 5) % 3);             // 0 path, 1 lpath, 2 fd
+    int op = (int)((nr - 5) / 3);               // 0 set, 1 get, 2 list, 3 remove
+    const char *path = NULL;
+    int fd = -1;
+    char full[PATH_MAX];
+    if (kind == 2) {
+        fd = (int)a0;
+        const char *pf = lxrt_pathfd_path(fd);
+        if (pf) { snprintf(full, sizeof full, "%s", pf); path = full; kind = 0; }
+    } else {
+        if (!a0) return LERR(EFAULT);
+        snprintf(full, sizeof full, "%s", kind == 1 ? translate((const char *)a0) : translate_follow((const char *)a0));
+        path = full;
+    }
+    int opt = kind == 1 ? XATTR_NOFOLLOW : 0;
+    const char *name = (const char *)a1;
+    if (op != 2) {
+        if (!name) return LERR(EFAULT);
+        if (strlen(name) > 255) return LERR(ERANGE);
+        if (!xattr_user(name)) return LERR(ENOTSUP);
+    }
+    ssize_t r;
+    switch (op) {
+    case 0: {                                   // set: value a2, size a3, flags a4
+        int lf = (int)a4;
+        if (lf & ~3) return LERR(EINVAL);
+        if (a3 > 65536) return LERR(E2BIG);
+        int o = opt | ((lf & 1) ? XATTR_CREATE : 0) | ((lf & 2) ? XATTR_REPLACE : 0);
+        int rc = path ? setxattr(path, name, (const void *)a2, (size_t)a3, 0, o)
+                      : fsetxattr(fd, name, (const void *)a2, (size_t)a3, 0, o);
+        return rc != 0 ? xattr_err(errno) : 0;
+    }
+    case 1:                                     // get: buffer a2, size a3
+        r = path ? getxattr(path, name, a3 ? (void *)a2 : NULL, (size_t)a3, 0, opt)
+                 : fgetxattr(fd, name, a3 ? (void *)a2 : NULL, (size_t)a3, 0, 0);
+        return r < 0 ? xattr_err(errno) : (long)r;
+    case 2: {                                   // list: buffer a1, size a2
+        ssize_t n = path ? listxattr(path, NULL, 0, opt) : flistxattr(fd, NULL, 0, 0);
+        if (n < 0) return xattr_err(errno);
+        char *all = malloc((size_t)n + 1);
+        if (!all) return LERR(ENOMEM);
+        n = path ? listxattr(path, all, (size_t)n, opt) : flistxattr(fd, all, (size_t)n, 0);
+        if (n < 0) { int e = errno; free(all); return xattr_err(e); }
+        size_t out = 0;
+        for (ssize_t i = 0; i < n; ) {
+            size_t l = strlen(all + i) + 1;
+            if (xattr_user(all + i)) {
+                if (a2 && out + l > a2) { free(all); return LERR(ERANGE); }
+                if (a2) memcpy((char *)a1 + out, all + i, l);
+                out += l;
+            }
+            i += (ssize_t)l;
+        }
+        free(all);
+        return (long)out;
+    }
+    default: {                                  // remove
+        int rc = path ? removexattr(path, name, opt) : fremovexattr(fd, name, 0);
+        return rc != 0 ? xattr_err(errno) : 0;
+    }
+    }
+}
+// process_vm_readv / process_vm_writev (270 / 271) on the calling process.
+// ART reads the faulting instruction this way before it turns a fault into a
+// NullPointerException (art::SafeCopy, GetInstructionSize in its x86-64 fault
+// handler); the ENOSYS it got made SafeCopy return 0 bytes, the handler gave
+// up, and every NullPointerException in compiled code killed the process with
+// SIGSEGV -- system_server included (MEASURED at stage 28). Mach's
+// vm_read_overwrite copies within the task and fails on unmapped or
+// unreadable memory instead of faulting, which is what these calls promise.
+// Another process's memory would need its task port: EPERM, as for a
+// process one may not ptrace. Low-window guest addresses (below 4 GiB under
+// a guest base) inside the iovecs are translated as the table does for the
+// arrays themselves (gbase.c).
+static long do_process_vm(bool write, uint64_t pid, uint64_t liov, uint64_t liovcnt,
+                          uint64_t riov, uint64_t riovcnt, uint64_t flags)
+{
+    if (flags) return LERR(EINVAL);
+    if ((int)pid != getpid()) return LERR(EPERM);
+    if (liovcnt > 1024 || riovcnt > 1024) return LERR(EINVAL);
+    struct iov64 { uint64_t base, len; };
+    const struct iov64 *l = (const struct iov64 *)(uintptr_t)liov;
+    const struct iov64 *r = (const struct iov64 *)(uintptr_t)riov;
+    if ((liovcnt && !l) || (riovcnt && !r)) return LERR(EFAULT);
+    uint64_t gb = lxrt_gbase();
+#define PVM_ADDR(a) ((gb && (a) && (a) < (1ull << 32)) ? (a) + gb : (a))
+    uint64_t total = 0, li = 0, loff = 0;
+    for (uint64_t ri = 0; ri < riovcnt && li < liovcnt; ri++) {
+        uint64_t rbase = PVM_ADDR(r[ri].base), rlen = r[ri].len, roff = 0;
+        while (roff < rlen && li < liovcnt) {
+            uint64_t lbase = PVM_ADDR(l[li].base), llen = l[li].len;
+            if (loff >= llen) { li++; loff = 0; continue; }
+            uint64_t n = rlen - roff < llen - loff ? rlen - roff : llen - loff;
+            mach_vm_size_t got = 0;
+            kern_return_t kr = write
+                ? mach_vm_read_overwrite(mach_task_self(), lbase + loff, n, rbase + roff, &got)
+                : mach_vm_read_overwrite(mach_task_self(), rbase + roff, n, lbase + loff, &got);
+            if (kr != KERN_SUCCESS || got != n)
+                // Linux transfers whole remote elements or none of one: stop here.
+                return total ? (long)total : LERR(EFAULT);
+            roff += n;
+            loff += n;
+            total += n;
+        }
+    }
+#undef PVM_ADDR
+    return (long)total;
+}
+
 static long do_nanosleep(uint64_t req, uint64_t rem);
 static long do_nanosleep_abs(long clk, uint64_t req);
 
@@ -2148,6 +2288,7 @@ static long do_fstatat(int dirfd, const char *path, uint64_t out, int flags)
     }
     lxrt_evdev_fix_stat(hp, -1, &d);
     lxrt_props_fix_stat(hp, -1, &d);
+    lxrt_aids_fix_stat_at(lxrt_dirfd_to_darwin(dirfd), hp, (flags & 0x100) != 0, &d);
     stat_to_linux(&d, (struct linux_stat *)out);
     return 0;
 }
@@ -3006,12 +3147,12 @@ restart:
         break;
     case LNR_fchown:
         if (lxrt_aids_on()) {
-            // Android ids: a chown Linux would allow these ids succeeds
-            // without changing the file (every file stays the Mac user's).
-            int k = lxrt_aids_chown((uint32_t)a1, (uint32_t)a2);
-            struct stat cst;
-            if (k < 0) { ret = k; break; }
-            if (k == 0) { ret = fstat((int)a0, &cst) != 0 ? LERR(errno) : 0; break; }
+            // Android ids: a chown Linux would allow these ids succeeds; the
+            // file stays the Mac user's and the owner is recorded for stat
+            // (android_ids.h, virtual file ownership).
+            const char *pf = lxrt_pathfd_path((int)a0);
+            ret = lxrt_aids_chown_file(pf, pf ? -1 : (int)a0, false, (uint32_t)a1, (uint32_t)a2);
+            break;
         }
         ret = ret_of(fchown((int)a0, (uid_t)a1, (gid_t)a2));
         break;
@@ -3044,18 +3185,18 @@ restart:
     }
     case LNR_fchownat:
         if (lxrt_aids_on()) {
-            int k = lxrt_aids_chown((uint32_t)a2, (uint32_t)a3);
-            struct stat cst;
-            if (k < 0) { ret = k; break; }
-            if (k == 0) {
-                const char *cp = (const char *)a1;
-                if (cp && !*cp && ((int)a4 & 0x1000))           // AT_EMPTY_PATH
-                    ret = fstat((int)a0, &cst) != 0 ? LERR(errno) : 0;
-                else
-                    ret = ret_of(fstatat(lxrt_dirfd_to_darwin((int)a0), translate(cp), &cst,
-                                         lxrt_at_flags_to_darwin((int)a4 & 0x100)));
+            const char *cp = (const char *)a1;
+            if (!cp) { ret = LERR(EFAULT); break; }
+            if (!*cp && ((int)a4 & 0x1000)) {                 // AT_EMPTY_PATH: the descriptor
+                int dfd = lxrt_dirfd_to_darwin((int)a0);
+                const char *pf = lxrt_pathfd_path(dfd);
+                ret = lxrt_aids_chown_file(pf, pf ? -1 : dfd, false, (uint32_t)a2, (uint32_t)a3);
                 break;
             }
+            bool nof = ((int)a4 & 0x100) != 0;              // AT_SYMLINK_NOFOLLOW (lchown)
+            ret = lxrt_aids_chown_at(lxrt_dirfd_to_darwin((int)a0), nof ? translate(cp) : translate_follow(cp),
+                                     nof, (uint32_t)a2, (uint32_t)a3);
+            break;
         }
         ret = ret_of(fchownat(lxrt_dirfd_to_darwin((int)a0),
                               translate((const char *)a1), (uid_t)a2, (gid_t)a3,
@@ -3490,7 +3631,10 @@ restart:
     case LNR_getxattr: case LNR_lgetxattr: case LNR_fgetxattr:
     case LNR_listxattr: case LNR_llistxattr: case LNR_flistxattr:
     case LNR_removexattr: case LNR_lremovexattr: case LNR_fremovexattr:
-        ret = LERR(ENOTSUP);
+        ret = do_xattr(nr, a0, a1, a2, a3, a4);
+        break;
+    case 270: case 271:     // process_vm_readv, process_vm_writev
+        ret = do_process_vm(nr == 271, a0, a1, a2, a3, a4, a5);
         break;
     case LNR_timerfd_create:
         ret = lxrt_timerfd_create((int)a0, (int)a1);

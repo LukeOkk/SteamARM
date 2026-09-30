@@ -816,6 +816,16 @@ static long cmsg_to_darwin(const void *lbuf, size_t llen, void *dst, size_t dcap
             in_off += LALIGN((uint32_t)lc->cmsg_len);
             continue;
         }
+        // SCM_RIGHTS without a descriptor: Linux attaches nothing
+        // (net/core/scm.c scm_fp_copy, num <= 0), Darwin delivers an empty
+        // SCM_RIGHTS the receiver has to cope with. Android's LocalSocket
+        // sends one whenever its outbound descriptor array is empty, and
+        // libbase's ReceiveFileDescriptorVector aborts on it ("cmsg_len(16)
+        // not long enough to hold any data": the zygote, MEASURED at stage 28).
+        if (lc->cmsg_level == L_SOL_SOCKET && lc->cmsg_type == L_SCM_RIGHTS && payload < sizeof(int)) {
+            in_off += LALIGN((uint32_t)lc->cmsg_len);
+            continue;
+        }
         size_t need = CMSG_SPACE(payload);
         if (out_off + need > dcap)
             return -1;
@@ -843,6 +853,10 @@ static long cmsg_to_linux(const void *dbuf, size_t dlen, void *lout, size_t lcap
         if (dc->cmsg_len < sizeof(*dc) || in_off + dc->cmsg_len > dlen)
             break;
         size_t payload = (size_t)dc->cmsg_len - sizeof(*dc);
+        if (dc->cmsg_level == SOL_SOCKET && dc->cmsg_type == SCM_RIGHTS && payload < sizeof(int)) {
+            in_off += (size_t)((dc->cmsg_len + 3u) & ~3u);     // an empty SCM_RIGHTS: Linux never has one
+            continue;
+        }
         size_t need = LALIGN((uint32_t)(sizeof(struct linux_cmsghdr) + payload));
         if (out_off + need > lcap)
             return -1;
@@ -985,7 +999,13 @@ long lxrt_recvmsg(int fd, void *lmsg, int flags)
     long w = seqpkt_before_recv(fd, flags);
     if (w < 0)
         return w;
-    ssize_t r = recvmsg(fd, &dm, lxrt_msgflags_to_darwin(flags));
+    // MSG_TRUNC and MSG_CTRUNC are results. XNU's soreceive hands its input
+    // flags back in msg_flags, so passing them made every message look
+    // truncated; Linux ignores them on input for stream sockets, and XNU has
+    // no Linux-style "report the datagram's real length" to map TRUNC to.
+    // libbase's ReceiveFileDescriptorVector (every Android LocalSocket read)
+    // passes both and refuses a "truncated" message (MEASURED at stage 28).
+    ssize_t r = recvmsg(fd, &dm, lxrt_msgflags_to_darwin(flags & ~(0x8 | 0x20)));
     if (r < 0 && errno == ECONNRESET && lxrt_is_seqpacket(fd)) {
         lm->msg_controllen = 0;
         lm->msg_flags = 0;
@@ -1205,6 +1225,35 @@ long lxrt_getsockopt(int fd, int llevel, int lopt, void *val, unsigned *len)
         if (*len < sizeof uc) return LERR(EINVAL);
         memcpy(val, &uc, sizeof uc);
         *len = sizeof uc;
+        return 0;
+    }
+    if (llevel == L_SOL_SOCKET_OPT && (lopt == 38 || lopt == 39)) {
+        // SO_PROTOCOL (38) and SO_DOMAIN (39): read-only, Linux 2.6.32+.
+        // Darwin has neither; the answer follows from the socket's address
+        // family and type. Android's BlockGuardOs asks SO_DOMAIN of every
+        // accepted socket (isInetSocket), and the zygote died on the
+        // ENOPROTOOPT with system_server's first connection ("accept failed:
+        // ENOPROTOOPT", MEASURED at stage 28).
+        if (!val || !len) return LERR(EFAULT);
+        if (*len < 4) return LERR(EINVAL);
+        int32_t v;
+        if (is_netlink(fd)) {
+            v = lopt == 39 ? L_AF_NETLINK : 0;
+        } else {
+            struct sockaddr_storage ss;
+            socklen_t sl = sizeof ss;
+            int type = 0;
+            socklen_t tl = sizeof type;
+            if (getsockname(fd, (struct sockaddr *)&ss, &sl) != 0 ||
+                getsockopt(fd, SOL_SOCKET, SO_TYPE, &type, &tl) != 0)
+                return LERR(errno);
+            int fam = ss.ss_family == AF_INET6 ? 10 : ss.ss_family;   // Darwin AF_INET6 is 30
+            if (lopt == 39) v = fam;
+            else if (fam == AF_UNIX) v = 0;
+            else v = type == SOCK_STREAM ? 6 : type == SOCK_DGRAM ? 17 : 0;   // IPPROTO_TCP/UDP
+        }
+        *(int32_t *)val = v;
+        *len = 4;
         return 0;
     }
     int dlevel, dopt;
