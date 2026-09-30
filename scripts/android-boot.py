@@ -192,9 +192,25 @@ PROFILES["display"] = {
         "mediaextractor",          # media.extractor and media.swcodec, which SoundPool and
         "media.swcodec",           # MediaCodec need ("extractor service not running", MEASURED);
                                    # both x86-64; mediaextractor's watchdog needs timer_create
-                                   # (runtime/posixtimer.c). MediaCodecList still waits for the
-                                   # OMX store and media.player, both i386 (16-bit pids)
+                                   # (runtime/posixtimer.c)
+        "media",                   # mediaserver (media.player) and the OMX store, which
+        "vendor.media.omx",        # MediaCodecList asks first; both i386 (runtime/ids.c)
     },
+    # Started after sys.boot_completed=1: started with the boot they slowed it
+    # enough that an app process attached to ActivityManager before its pid
+    # was recorded ("No pending application record ... dropping process"),
+    # the network stack was killed with it and system_server went down with
+    # the zygote, again and again (MEASURED).
+    "after_boot": {"media", "vendor.media.omx"},
+    # 32-bit vendor daemons: their own linker configuration (the legacy
+    # /linkerconfig has no namespace for them: the OMX store could not link
+    # libminijail.so, MEASURED) and image libraries replaced by stand-ins
+    # (scripts/android/shims) for them alone. The OMX store's minijail setup:
+    # under FEX's seccomp emulation its 32-bit filter crashed FEX in its own
+    # code and the store spun at 100% CPU instead of registering; without
+    # the emulation the filter cannot be installed and the store aborts
+    # (MEASURED). The stand-in installs no filter.
+    "vendor32": {"vendor.media.omx": {"/vendor/lib/libavservices_minijail.so": "avservices_minijail_noop.c"}},
     # audioserver loads Waydroid's audio HAL in-process (vintf_passthrough,
     # below), 64-bit, and the HAL opens ALSA's "pulse" device; the image's
     # 64-bit alsa-lib was built with /vendor/lib/hw/ as its plugin
@@ -268,6 +284,11 @@ HOST_PROPS = [
     ("bpf.progs_loaded", "1"),
     # No ueventd, no cold boot to wait for (Lepton, Waydroid 0013).
     ("ro.cold_boot_done", "true"),
+    # Media codecs from the OMX store (Google's software codecs and
+    # Waydroid's FFmpeg plugin), not Codec2: Codec2's software components
+    # crashed at 0x0 in their MediaCodec_loop thread here, and the OMX
+    # vorbis decoder decodes (MEASURED). AOSP's own switch (0: no Codec2).
+    ("debug.stagefright.ccodec", "0"),
     # No /dev/ashmem: libcutils uses memfd (Lepton; Waydroid's init lets it be
     # set before boot, base-patches-30/system/core/0009).
     ("sys.use_memfd", "true"),
@@ -573,6 +594,7 @@ class Boot:
         self.not_started = {}
         self.queue = []
         self.class_started = set()
+        self.deferred = {}
         self.x86 = self.detect_x86()
         # i386 programs run under a FEX with patches/fex-lxrt-i386-bionic.patch
         # (it carries this string): then the secondary zygote is started too
@@ -884,6 +906,12 @@ class Boot:
         if not svc:
             log("start %s (%s): no such service" % (name, why))
             return False
+        if name in self.profile.get("after_boot", ()) and self.props.get("sys.boot_completed") != "1":
+            # Started once the system has booted (profile "after_boot").
+            if name not in self.deferred:
+                log("start %s (%s): after sys.boot_completed=1" % (name, why))
+            self.deferred[name] = why
+            return False
         if name not in self.profile["start"] and name not in (self.a.also or []) and not self.a.all:
             if name not in self.not_started:
                 reason = self.profile.get("left_out", {}).get(name)
@@ -923,6 +951,17 @@ class Boot:
                 # One bind in the runtime's table (runtime/mounts.c): this
                 # process reads the copy at the image's path.
                 env["LXRT_MOUNTS"] = "/vendor/etc/vintf/manifest.xml\x1e%s\x1e1\x1f" % m
+        # 32-bit vendor daemons (profile "vendor32"): the image's generated
+        # linker configuration for them alone, and no seccomp policy.
+        v32 = self.profile.get("vendor32", {}).get(name)
+        if v32 is not None:
+            cfg = self.side_linkerconfig()
+            if cfg:
+                env["LD_CONFIG_FILE"] = cfg
+            for guest_lib, src in v32.items():
+                so = self.shim(src, os.path.basename(guest_lib))
+                if so:      # one bind for this process: the image's library path -> the shim
+                    env["LXRT_MOUNTS"] = env.get("LXRT_MOUNTS", "") + "%s\x1e%s\x1e1\x1f" % (guest_lib, so)
         for spec in self.a.svc_env or []:
             who, _, kv = spec.partition(":")
             if who in (name, "all") and "=" in kv:
@@ -954,6 +993,46 @@ class Boot:
         log("started %s (pid %d, %s): %s%s [%s]" % (name, svc.proc.pid, why, " ".join(argv),
                                                     " (stand-in)" if stand_in else "", env["LXRT_ANDROID_IDS"]))
         return True
+
+    def shim(self, src, soname):
+        """scripts/android/shims/<src> built for i686 Android with Homebrew
+        clang into build/android/shims (again when the source is newer).
+        Its host path, or None."""
+        c = os.path.join(HERE, "android", "shims", src)
+        out = os.path.join(REPO, "build", "android", "shims", os.path.splitext(src)[0] + ".so")
+        try:
+            if not os.path.exists(out) or os.path.getmtime(out) < os.path.getmtime(c):
+                os.makedirs(os.path.dirname(out), exist_ok=True)
+                subprocess.run(["/opt/homebrew/opt/llvm/bin/clang", "--target=i686-linux-android30", "-O2",
+                                "-fPIC", "-shared", "-nostdlib", "-fuse-ld=lld",
+                                "--ld-path=/opt/homebrew/opt/lld/bin/ld.lld",
+                                "-Wl,-soname," + soname, "-Wl,-z,max-page-size=4096",
+                                "-o", out, c], check=True, timeout=120,
+                               stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+        except (OSError, subprocess.SubprocessError) as e:
+            log("shim %s: %s" % (src, e))
+            return None
+        return out
+
+    def side_linkerconfig(self):
+        """The image's linker configuration generated into the root's
+        /data/local/tmp/steamarm-linkerconfig by its own linkerconfig (with
+        the property service up), for the processes given it through
+        LD_CONFIG_FILE, which the linker of this userdebug build honours.
+        The root's own /linkerconfig stays as it is: rewritten there,
+        audioserver exited at once in a loop and the boot never completed
+        (MEASURED). Its guest path, or None."""
+        if getattr(self, "_side_cfg", False) is not False:
+            return self._side_cfg
+        self._side_cfg = None
+        target = "/data/local/tmp/steamarm-linkerconfig"
+        os.makedirs(self.root + target, exist_ok=True)
+        rc, _ = self.guest(["/system/bin/linkerconfig", "--target", target], timeout=120)
+        cfg = target + "/ld.config.txt"
+        if rc == 0 and os.path.isfile(self.root + cfg):
+            self._side_cfg = cfg
+        log("side linker configuration: %s" % (cfg if self._side_cfg else "none (linkerconfig exited %d)" % rc))
+        return self._side_cfg
 
     def passthrough_manifest(self, hals):
         """A copy of the image's vendor VINTF manifest in the state directory
@@ -1312,6 +1391,10 @@ class Boot:
                     if x in self.watch:
                         log("property %s=%s" % (x, y))
                     self.property_changed(x)
+                    if x == "sys.boot_completed" and y == "1":
+                        for n, why in list(self.deferred.items()):
+                            del self.deferred[n]
+                            self.start(n, why + ", after boot")
             elif kind == "ctl":
                 log("ctl.%s %s (from pid %s)" % (x, y, pid))
                 name = y

@@ -1157,6 +1157,30 @@ if grep -q 'Active default network: [0-9]' <<<"$conn" && grep -q 'type: Ethernet
         echo "  skip  network validation and curl (the Mac itself got no 204)"
     fi
 else bad "network: a default network" "$(grep -E 'Active default network|NetworkAgentInfo' <<<"$conn" | head -2 | cut -c1-200 | tr '\n' ' ')"; fi
+# Compressed sound decoded in Android: an .ogg of the image through
+# MediaExtractor and MediaCodec, which pick the OMX store's vorbis decoder
+# (i386 under FEX, started after the boot; tests/android/java/media).
+local dd=build/android/decode dout
+rm -rf "$dd"; mkdir -p "$dd/classes"
+if [ -f "$R8_JAR" ] && javac --release 8 -nowarn -d "$dd/classes" -sourcepath tests/android/java/media/stubs \
+       tests/android/java/media/Decode.java 2>/dev/null &&
+   java -cp "$R8_JAR" com.android.tools.r8.D8 --min-api 30 --output "$dd" "$dd/classes/Decode.class" 2>/dev/null; then
+    cp "$dd/classes.dex" "$sroot/data/local/tmp/decode.dex"
+    for n in $(seq 1 30); do
+        env "${senv[@]}" python3 scripts/android-session.py shell --timeout 60 /system/bin/lshal list -i 2>/dev/null |
+            grep -q 'IOmxStore/default' && break
+        sleep 2
+    done
+    dout=$(env "${senv[@]}" perl -e 'alarm shift; exec @ARGV' 200 python3 scripts/android-session.py shell --timeout 180 \
+           /system/bin/env CLASSPATH=/data/local/tmp/decode.dex /system/bin/app_process64 /system/bin Decode \
+           /system/product/media/audio/ui/Effect_Tick.ogg 2>&1 | grep -v '^\[lxrt')
+    if grep -q '^codec OMX\.' <<<"$dout" && grep -qE '^decoded [1-9][0-9]* bytes' <<<"$dout"; then
+        ok "compressed sound decoded in Android: $(grep '^codec' <<<"$dout" | cut -d' ' -f2) $(grep -o 'decoded .*' <<<"$dout")"
+    else bad "compressed sound decoded in Android" "$(tail -3 <<<"$dout" | tr '\n' ' ')"; fi
+    rm -f "$sroot/data/local/tmp/decode.dex"
+else
+    echo "  skip  compressed sound (no $R8_JAR or no javac)"
+fi
 env "${senv[@]}" python3 scripts/android-session.py stop >/dev/null 2>&1
 local left
 left=$(ps -axEww -o pid=,command= 2>/dev/null | grep -F "LXRT_PROPERTY_DIR=$sdir/props" | grep -v grep | wc -l | tr -d ' ')
