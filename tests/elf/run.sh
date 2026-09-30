@@ -863,8 +863,10 @@ if [ -d "$SYSROOT" ] && [ -x "$GUEST_ROOT/tmp/evdev_test" ]; then
     out=$(LXRT_ROOT="$GUEST_ROOT" LXRT_INPUT_DIR="$idir" ./build/lxrun /tmp/evdev_test 2>&1)
     sleep 0.3
     kill $fake 2>/dev/null; wait $fake 2>/dev/null
-    # Something that is in /tmp/lxrt-input now (read only; nothing is made there).
-    probe=$(ls /tmp/lxrt-input 2>/dev/null | head -1)
+    # Something that is in /tmp/lxrt-input now and not in the private
+    # directory (fake_inputd.py writes a "meta" there too, as steamarm-inputd
+    # does in the shared one) -- read only; nothing is made there.
+    probe=$(comm -23 <(ls /tmp/lxrt-input 2>/dev/null | sort) <(ls "$idir" 2>/dev/null | sort) | head -1)
     shared="" private=""
     if [ -n "$probe" ]; then
         shared=$(LXRT_ROOT="$GUEST_ROOT" ./build/lxrun /usr/bin/bash -c "test -e '/dev/input/$probe' && echo yes" 2>/dev/null)

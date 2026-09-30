@@ -53,10 +53,10 @@ HAVE_DEX=0
 if [ -f "$R8_JAR" ] && command -v javac >/dev/null; then
     mkdir -p build/android/classes build/android/dex build/android/churn/classes
     if javac --release 8 -nowarn -d build/android/classes tests/android/java/Hello.java \
-            tests/android/java/Loop.java tests/android/java/HeapRef.java 2>/dev/null &&
+            tests/android/java/Loop.java tests/android/java/HeapRef.java tests/android/java/NullCheck.java 2>/dev/null &&
        java -cp "$R8_JAR" com.android.tools.r8.D8 --min-api 30 --release --output build/android/dex \
             build/android/classes/Hello.class build/android/classes/Loop.class \
-            build/android/classes/HeapRef.class &&
+            build/android/classes/HeapRef.class build/android/classes/NullCheck.class &&
        python3 tests/android/gen_jitchurn.py build/android/churn 400 &&
        javac --release 8 -nowarn -d build/android/churn/classes build/android/churn/JitChurn.java 2>/dev/null &&
        java -cp "$R8_JAR" com.android.tools.r8.D8 --min-api 30 --release --output build/android/churn \
@@ -353,6 +353,16 @@ if command -v clang >/dev/null &&
     if [ "$rc" -eq 0 ] && grep -q '== x86_lowwin: 5 ok, 0 mal' <<<"$out"; then
         ok "x86_lowwin: MAP_32BIT below 4 GiB, MADV_DONTNEED zeroes there, a low hint honoured, startstack, RLIM_INFINITY"
     else bad "x86_lowwin" "rc=$rc $(grep -E 'MAL|==' <<<"$out" | tr '\n' ' ')"; fi
+    # ART's implicit null checks: the registers its SIGSEGV handler reads
+    # (RIP, RSP, [RSP]) as the code left them, from a file, anonymous and
+    # dual-mapped code and a second thread (benchmarks/stage28-android-apk.txt).
+    if clang --target=x86_64-linux-gnu -O1 -ffreestanding -fno-stack-protector -nostdlib -static-pie -fPIE \
+             -fuse-ld=lld -o "$X86_ROOT/data/local/tmp/x86_segv_ctx" tests/android/x86_segv_ctx.c 2>/dev/null; then
+        out=$(x 60 /data/local/tmp/x86_segv_ctx); rc=$?
+        if [ "$rc" -eq 0 ] && grep -q '== x86_segv_ctx: [0-9]* ok, 0 mal' <<<"$out"; then
+            ok "x86_segv_ctx: a SIGSEGV handler sees si_addr, RIP, RSP and [RSP] as ART's fault handler needs ($(grep -o '[0-9]* ok' <<<"$out"))"
+        else bad "x86_segv_ctx" "rc=$rc $(grep -E 'MAL|==' <<<"$out" | tr '\n' ' ')"; fi
+    fi
     out=$(x 60 /data/local/tmp/x86_dualview low toggle); rc=$?
     if [ "$rc" -eq 0 ] && grep -q ' 0 mal' <<<"$out"; then
         ok "x86_dualview low toggle: code rewritten in a dual-mapped memfd is never stale ($(grep -o '[0-9]* ok' <<<"$out"))"
@@ -395,6 +405,12 @@ if [ "$HAVE_DEX" = 1 ]; then
     if [ "$rc" -eq 0 ] && grep -q "LOOP OK" <<<"$out" && grep -q "result=$ref_jit " <<<"$out"; then
         ok "dalvikvm64 JIT Loop: the Mac JVM's result, $(grep -o 'ms=[0-9.]*' <<<"$out" | tail -1) per round after warm-up"
     else bad "dalvikvm64 JIT Loop" "rc=$rc want $ref_jit: $(tr '\n' ' ' <<<"$out" | head -c 300)"; fi
+    # Implicit null checks in JIT-compiled code: the fault becomes a
+    # NullPointerException (process_vm_readv for ART's SafeCopy, stage 28).
+    out=$(x 200 $dvm -Xjitthreshold:50 -cp $cp NullCheck 200000); rc=$?
+    if [ "$rc" -eq 0 ] && grep -q "NullCheck: sum 198000 caught 2000 of 2000" <<<"$out"; then
+        ok "dalvikvm64 NullCheck: 2000 NullPointerExceptions from JIT-compiled field reads caught"
+    else bad "dalvikvm64 NullCheck" "rc=$rc $(tr '\n' ' ' <<<"$out" | head -c 300)"; fi
     out=$(x 300 $dvm -Xjitinitialsize:64K -Xjitmaxsize:128K -Xjitthreshold:100 \
             -cp /data/local/tmp/churn.dex JitChurn 6 300); rc=$?
     if [ "$rc" -eq 0 ] && grep -qx "total=$ref_churn" <<<"$out"; then
@@ -1037,7 +1053,53 @@ done
 [ -e "$pdir/service.pid" ] || [ -e "$pdir2/service.pid" ] && bad "property services still running" "$pdir $pdir2"
 rm -rf "$pdir" "$pdir2"
 
+run_session() {
+# An APK end to end (scripts/android-session.py, benchmarks/stage28-android-
+# apk.txt): Weston headless, the x86_64 root booted with its display profile to
+# sys.boot_completed=1, the APK installed with the image's `pm install` and
+# its launcher activity started with `am start`, its window focused. In a
+# root of its own ($ANDROID_TEST_SESSION_ROOT, an APFS clone of the x86_64
+# root made once and kept, so later runs boot warm) with a private state
+# directory; the APK is Simple Solitaire Collection (F-Droid, dex only) from
+# ~/SteamARM-roots/android/apk-samples, skipped when it is not there.
+echo "== tests/android (an APK in the Android session)"
+local apk="${ANDROID_TEST_APK:-${STEAMARM_STATE:-$HOME/SteamARM-roots}/android/apk-samples/de.tobiasbielefeld.solitaire_71.apk}"
+local wroot="${WESTON_ROOT:-${STEAMARM_STATE:-$HOME/SteamARM-roots}/westonroot}"
+if [ -n "${ANDROID_SKIP_SESSION:-}" ]; then echo "  skip  the Android session (ANDROID_SKIP_SESSION)"; return 0; fi
+if [ ! -f "$apk" ] || [ ! -x "$wroot/usr/bin/weston" ] || [ ! -x "$X86_ROOT/usr/lib/lxrt-emu/FEX" ]; then
+    echo "  skip  the Android session (needs $apk, a Weston root and the x86_64 root)"
+    return 0
+fi
+local st sdir sroot="${ANDROID_TEST_SESSION_ROOT:-${X86_ROOT%/*}/sesstest}"
+st=$(mktemp -d /tmp/lxrt-session-test.XXXXXX)
+sdir="/tmp/lxrt-stest-$$"
+local senv=(STEAMARM_STATE="$st" ANDROID_X86_ROOT="$X86_ROOT" ANDROID_SESSION_ROOT="$sroot"
+            ANDROID_SESSION_DIR="$sdir" ANDROID_SESSION_XDG=/dev/shm/steamarm-android-test
+            WESTON_ROOT="$wroot" LXRUN="$LXRUN" STEAMARM_NO_SAFEGUARD=1)
+env "${senv[@]}" python3 scripts/android-pm.py install "$apk" >/dev/null 2>&1
+local t0=$SECONDS out rc
+out=$(env "${senv[@]}" perl -e 'alarm shift; exec @ARGV' 1500 python3 scripts/android-session.py launch de.tobiasbielefeld.solitaire --headless 2>&1); rc=$?
+local boot inst start focus
+boot=$(grep -o 'sys.boot_completed=1: [0-9.]* s' <<<"$out")
+inst=$(grep -oE 'pm install: [A-Za-z_]+|is installed' <<<"$out" | tail -1)
+start=$(grep -o 'am start -W .*: [a-z]*, TotalTime [0-9]* ms' <<<"$out" | sed 's/.*: //')
+focus=$(grep -o 'focused window: [^ ]*' <<<"$out")
+if [ -n "$boot" ]; then ok "Android session: $boot (display profile, headless Weston)"
+else bad "Android session: boot" "rc=$rc $(tail -3 <<<"$out" | tr '\n' ' ')"; fi
+if grep -qE 'Success|is installed' <<<"$inst"; then ok "pm install of an F-Droid APK (dex only): $inst"
+else bad "pm install" "$(grep -E 'pm install' <<<"$out" | tail -2 | tr '\n' ' ')"; fi
+if [ "$rc" -eq 0 ] && grep -q '^ok' <<<"$start" && grep -q 'de.tobiasbielefeld.solitaire/' <<<"$focus"; then
+    ok "am start: $start; $focus ($((SECONDS - t0)) s in all)"
+else bad "am start and focus" "rc=$rc start='$start' $(grep -E 'focus|am start' <<<"$out" | tail -2 | tr '\n' ' ')"; fi
+env "${senv[@]}" python3 scripts/android-session.py stop >/dev/null 2>&1
+local left
+left=$(ps -axEww -o pid=,command= 2>/dev/null | grep -F "LXRT_PROPERTY_DIR=$sdir/props" | grep -v grep | wc -l | tr -d ' ')
+[ "$left" = 0 ] && ok "android-session.py stop: nothing of the session left" || bad "session stop" "$left processes left"
+rm -rf "$st" "$sdir"
+}
+
 run_display
+run_session
 
 echo
 summary="== $PASS passed, $FAIL failed"
