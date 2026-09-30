@@ -831,8 +831,9 @@ scripts/run-weston.sh stop
   32-bit arm files in the arm64 image are unusable for the same reason) and
   have no translator in the x86 image either.
 - Google Play Store and Google Play services are proprietary. SteamARM will
-  never commit or bundle them; if it ever fetches them, it does so on the
-  owner's Mac from Google's official source, and only if that is legal. The
+  never commit, bundle or download them; the owner supplies a GApps package
+  and `scripts/android-gapps.py` layers it onto a clone of the root
+  (`docs/PLAY_STORE_SETUP.md`). The
   Play Store also expects a device registered as certified and Play
   Integrity verdicts; SteamARM must not falsify certification or bypass
   Play Integrity or SafetyNet, so apps that require them will refuse to run

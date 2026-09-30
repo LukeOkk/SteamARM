@@ -343,12 +343,13 @@ on the same cases.
 5. **Google Play and Google Mobile Services.** These are policy, not code
    yet:
    - Google's proprietary components (GMS, the Play Store) are never
-     committed or bundled.
-   - SteamARM may download them only on the owner's Mac, from their
-     official source, and only where that is legal, as it does with Steam.
+     committed, bundled or downloaded by SteamARM: no source licenses them
+     for this use (`docs/PLAY_STORE_RESEARCH.md`, rules 1-2). The owner
+     supplies a GApps package; `scripts/android-gapps.py` checks it and
+     layers it onto a clone of the root (`docs/PLAY_STORE_SETUP.md`).
    - Device certification is never falsified, and Play Integrity and
      SafetyNet are never bypassed.
-   - None of this exists today.
+   - Nothing of it runs yet: the framework does not boot.
 
 ## Tests
 
