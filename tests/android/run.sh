@@ -403,6 +403,48 @@ if [ "$HAVE_DEX" = 1 ]; then
 else
     echo "  skip  x86_64 ART checks (no $R8_JAR or no javac)"
 fi
+# 4. i386: the image's 32-bit programs under FEX's 32-bit mode (zygote_secondary,
+# dex2oat32, dalvikvm32, the 32-bit HALs), which needed
+# patches/fex-lxrt-i386-bionic.patch and runtime fixes
+# (benchmarks/stage28-android-reliability.txt). A root whose FEX predates the
+# patch (no "lxrt-i386-bionic" in it) makes these expected failures.
+local i386_fex=0 i386_why="the root's FEX predates patches/fex-lxrt-i386-bionic.patch (scripts/build-fex-host.sh; scripts/mkandroidroot.sh --arch x86_64 --emu)"
+grep -aq lxrt-i386-bionic "$X86_ROOT/usr/lib/lxrt-emu/FEX" && i386_fex=1
+local BLIBC32="$X86_ROOT/apex/com.android.runtime/lib/bionic/libc.so"
+if [ -f "$BLIBC32" ] && /opt/homebrew/opt/llvm/bin/clang --target=i686-linux-android30 -O2 -fPIE -pie -nostdlib \
+       -fno-stack-protector -fuse-ld=lld --ld-path=/opt/homebrew/opt/lld/bin/ld.lld \
+       -Wl,--dynamic-linker=/system/bin/linker -Wl,-z,max-page-size=4096 \
+       -o "$X86_ROOT/data/local/tmp/i386_bionic" tests/android/i386_bionic.c "$BLIBC32" 2>/dev/null; then
+    out=$(x 60 /data/local/tmp/i386_bionic); rc=$?
+    if [ "$rc" -eq 0 ] && grep -q '== i386_bionic: 8 ok, 0 mal' <<<"$out"; then
+        ok "i386 bionic under FEX: AT_SYSINFO, CMP_REQUEUE, sigwait, SO_RCVTIMEO, SO_DOMAIN, SCM_RIGHTS, mmap hint, msync (8 ok)"
+    elif [ "$i386_fex" = 0 ]; then
+        xfail "i386 bionic under FEX (rc=$rc $(grep '^== ' <<<"$out"))" "$i386_why"
+    else bad "i386 bionic under FEX" "rc=$rc $(grep -E 'MAL|^== |NoExec' <<<"$out" | tr '\n' ' ')"; fi
+    rm -f "$X86_ROOT/data/local/tmp/i386_bionic"
+else
+    echo "  skip  i386 bionic probe (no llvm clang/lld or no 32-bit libc.so)"
+fi
+if [ "$HAVE_DEX" = 1 ]; then
+    out=$(x 120 /apex/com.android.art/bin/dalvikvm32 -cp /data/local/tmp/hello.dex Hello); rc=$?
+    if [ "$rc" -eq 0 ] && grep -q "Hello from Java on ART, no VM" <<<"$out" && grep -q "os.arch=i686" <<<"$out"; then
+        ok "dalvikvm32 (i386) Hello: $(grep -o 'java.vm.name=[^ ]* .*os.arch=[^ ]*' <<<"$out")"
+    elif [ "$i386_fex" = 0 ]; then xfail "dalvikvm32 (i386) Hello (rc=$rc)" "$i386_why"
+    else bad "dalvikvm32 (i386) Hello" "rc=$rc $(head -c 300 <<<"$out")"; fi
+    rm -rf "$X86_ROOT/data/local/tmp/oat/x86"
+    mkdir -p "$X86_ROOT/data/local/tmp/oat/x86"
+    out=$(x 120 /apex/com.android.art/bin/dex2oat32 --dex-file=/data/local/tmp/hello.dex \
+            --oat-file=/data/local/tmp/oat/x86/hello.odex --instruction-set=x86 --compiler-filter=speed); rc=$?
+    local odex="$X86_ROOT/data/local/tmp/oat/x86/hello.odex"
+    if [ "$rc" -eq 0 ] && [ -s "$odex" ] && file -b "$odex" | grep -q 'ELF 32-bit.*80386'; then
+        out=$(x 120 /apex/com.android.art/bin/dalvikvm32 -Xusejit:false -cp /data/local/tmp/hello.dex Hello); rc=$?
+        if [ "$rc" -eq 0 ] && grep -q "Hello from Java on ART, no VM" <<<"$out"; then
+            ok "dex2oat32 (i386) compiled hello.dex to a $(wc -c <"$odex" | tr -d ' ')-byte i386 odex, and dalvikvm32 runs it"
+        else bad "dalvikvm32 with the dex2oat32 odex" "rc=$rc $(head -c 300 <<<"$out")"; fi
+    elif [ "$i386_fex" = 0 ]; then xfail "dex2oat32 (i386) hello.dex (rc=$rc)" "$i386_why"
+    else bad "dex2oat32 (i386) hello.dex" "rc=$rc odex $(wc -c <"$odex" 2>/dev/null) bytes $(tail -c 300 <<<"$out")"; fi
+    rm -rf "$X86_ROOT/data/local/tmp/oat/x86"
+fi
 run_x86_64_services
 [ "$had_server" = 1 ] || ANDROID_X86_ROOT="$X86_ROOT" scripts/run-android-x86.sh --server-stop
 }
@@ -609,6 +651,17 @@ else bad "android-boot: zygote" "$(tail -3 "$il" | tr '\n' ' ')"; fi
 if grep -aq 'SystemServer: Entered the Android system server!' "$lc"; then
     ok "android-boot: system_server forked (Android ids, seccomp under FEX) and running: $(grep -a 'SystemServerTiming: Start' "$lc" | grep -vc took) bootstrap services started"
 else bad "android-boot: system_server" "$(grep -aE 'FatalError|Fatal signal' "$lc" | head -2 | tr '\n' ' ')"; fi
+# The secondary zygote (app_process32, i386) is started when the root's FEX
+# can run it; system_server then does not wait 20 s for it.
+if grep -aq lxrt-i386-bionic "$X86_ROOT/usr/lib/lxrt-emu/FEX"; then
+    local zs
+    zs=$(sed -n 's/.*started zygote_secondary (pid \([0-9]*\).*/\1/p' "$il" | head -1)
+    if [ -n "$zs" ] && grep -aq "tid $zs Zygote: Accepting command socket connections" "$lc" &&
+       ! grep -aq 'Failed to connect to Zygote through socket zygote_secondary' "$lc" &&
+       ! grep -q 'service zygote_secondary .* exited' "$il"; then
+        ok "android-boot: zygote_secondary (i386 app_process32) listening, system_server connected to it"
+    else bad "android-boot: zygote_secondary" "$(grep zygote_secondary "$il" | tail -2 | tr '\n' ' ') $(grep -a 'zygote_secondary\|tid '"$zs"' .*[EF] ' "$lc" | head -2 | tr '\n' ' ')"; fi
+fi
 if grep -aq "Waiting for service 'SurfaceFlinger'" "$lc"; then
     xfail "android-boot: system_server past LightsService" "it waits for SurfaceFlinger, which waits for a composer (Waydroid's is a Wayland client; no display here)"
 else bad "android-boot: the SurfaceFlinger wall moved" "$(grep -a 'SystemServerTiming' "$lc" | tail -2 | tr '\n' ' ')"; fi

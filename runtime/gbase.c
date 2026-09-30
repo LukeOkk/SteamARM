@@ -17,7 +17,9 @@
 // platform (measured), so any pointer argument below 4 GiB is a guest
 // pointer. Memory-management addresses (mmap, munmap, mprotect, madvise,
 // mremap, brk, shmat, mlock, msync) are deliberately NOT in the table: FEX's
-// allocator owns them and hands over host addresses.
+// allocator owns them and hands over host addresses. (madvise and msync are
+// passed through by FEX with the guest's address; dispatch.c bases a low one
+// itself.)
 
 #include "lxrt.h"
 

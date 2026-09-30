@@ -1,0 +1,203 @@
+FEX: what i386 Android (32-bit bionic) needs under a guest base (SteamARM)
+
+i386 programs of an Android 11 x86_64 image (dex2oat32, dalvikvm32,
+app_process32 as zygote_secondary, the 32-bit HALs) all died under FEX's
+32-bit mode on SteamARM's runtime; the i386 Steam client did not, because
+it is glibc and brings FEX's VDSO thunk. MEASURED, one after the other
+(SteamARM benchmarks/stage28-android-reliability.txt):
+
+1. ELFCodeLoader: with no VDSO thunk, FEX makes a fallback vsyscall page
+   (int 0x80; ret) with GuestMmap and a HOST mprotect, so its VMA tracking
+   keeps the page as read-write: bionic calls AT_SYSINFO for every syscall
+   and died at once, "NoExec instruction in entry block: F76AF000". The
+   page is now tracked as executable (AddVirtualPage).
+2. x32 futex: the guest-base syscall thunk bases every pointer-typed
+   argument, and futex's fourth one is an integer for (CMP_)REQUEUE and
+   WAKE_OP (val2): nr_requeue INT_MAX arrived negative, EINVAL, and ART
+   aborted ("futex requeue failed for task queue condition").
+3. x32 rt_sigtimedwait: a NULL siginfo (sigwait) hit FaultSafeUserMemAccess'
+   "Unexpected nullptr syscall argument" (ART's signal catcher at exit); and
+   an error (-errno, never -1) was copied out as a siginfo.
+4. MemAllocator32Bit ignored mmap hints; Linux honours a free one. Under a
+   guest base the window is the allocator's own and the bitset is the
+   truth, so a free hint is taken. i386 ART's boot image is reserved at
+   its link address: "Failed to mmap at expected address, mapped at
+   0xee785000 instead of 0x70d32000", then an imageless start (6 s for a
+   hello world; 1.6 s with the image).
+5. x32 setsockopt/getsockopt dereferenced the guest's optval without the
+   base (SO_RCVTIMEO_OLD/SO_SNDTIMEO_OLD, SO_ATTACH_FILTER): the zygote sets
+   SO_RCVTIMEO on every connection and FEX faulted on 0xffff5ab0.
+
+The binary carries the string "lxrt-i386-bionic" for SteamARM's tests.
+
+diff --git a/Source/Tools/FEXInterpreter/ELFCodeLoader.h b/Source/Tools/FEXInterpreter/ELFCodeLoader.h
+--- a/Source/Tools/FEXInterpreter/ELFCodeLoader.h
++++ b/Source/Tools/FEXInterpreter/ELFCodeLoader.h
+@@ -666,6 +666,13 @@
+         };
+         memcpy(FEX::HLE::G2H(VSyscallPage), VSyscallCode, sizeof(VSyscallCode));
+         mprotect(FEX::HLE::G2H(VSyscallPage), FEXCore::Utils::FEX_PAGE_SIZE, PROT_READ);
++        // The frontend decodes guest code only from ranges FEX's VMA tracking
++        // knows as executable, and the host mprotect above leaves this page
++        // recorded as the read-write anonymous mapping GuestMmap made: the
++        // first call through AT_SYSINFO (every syscall of i386 bionic, which
++        // uses it whenever it is set) died with "NoExec instruction in entry
++        // block" at this page. Track it as the executable page it is.
++        Handler->AddVirtualPage(Thread, reinterpret_cast<uint64_t>(VSyscallPage), FEXCore::Utils::FEX_PAGE_SIZE, PROT_READ | PROT_EXEC);
+         VSyscallEntry = reinterpret_cast<uint64_t>(VSyscallPage);
+       }
+ 
+diff --git a/Source/Tools/LinuxEmulation/LinuxSyscalls/LinuxAllocator.cpp b/Source/Tools/LinuxEmulation/LinuxSyscalls/LinuxAllocator.cpp
+--- a/Source/Tools/LinuxEmulation/LinuxSyscalls/LinuxAllocator.cpp
++++ b/Source/Tools/LinuxEmulation/LinuxSyscalls/LinuxAllocator.cpp
+@@ -170,6 +170,29 @@
+   // Check reserved range
+   if (Fixed && PageAddr < 16) {
+     return reinterpret_cast<void*>(-EINVAL);
++  }
++
++  // Linux places a mapping at its hint when the range there is free. Under a
++  // guest base the whole 4 GiB window is this allocator's own reservation and
++  // the bitset is the truth, so a free hint can be taken as a fixed mapping.
++  // i386 ART reserves its boot image at the address the image was built for
++  // and gives up on the image otherwise ("Failed to mmap at expected address,
++  // mapped at 0xee785000 instead of 0x70d32000", then an imageless start,
++  // 6 s for a hello world). A file mapping that must start on a host page
++  // (below) keeps the search when the hint is not on one.
++  if (!Fixed && Addr && GuestBase && PageAddr >= 16 && Addr + length <= (1ULL << 32) &&
++      !(fd != -1 && (offset & 0x3fff) == 0 && (G2H(Addr) & 0x3fff) != 0)) {
++    bool Free = true;
++    for (size_t i = 0; i < PagesLength; ++i) {
++      if (MappedPages.test(PageAddr + i)) {
++        Free = false;
++        break;
++      }
++    }
++    if (Free) {
++      flags |= MAP_FIXED;
++      Fixed = true;
++    }
+   }
+ 
+   if (!Fixed) {
+diff --git a/Source/Tools/LinuxEmulation/LinuxSyscalls/x32/Signals.cpp b/Source/Tools/LinuxEmulation/LinuxSyscalls/x32/Signals.cpp
+--- a/Source/Tools/LinuxEmulation/LinuxSyscalls/x32/Signals.cpp
++++ b/Source/Tools/LinuxEmulation/LinuxSyscalls/x32/Signals.cpp
+@@ -190,7 +190,10 @@
+                               uint64_t Result =
+                                 FEX::HLE::_SyscallHandler->GetSignalDelegator()->GuestSigTimedWait(FEX::HLE::ThreadManager::GetStateObjectFromCPUState(Frame), set, &HostInfo,
+                                                                                    timeout_ptr, sigsetsize);
+-                              if (Result != -1) {
++                              // info may be NULL (sigwait passes none: ART's signal catcher's
++                              // wait ended the process with "Unexpected nullptr syscall argument"),
++                              // and GuestSigTimedWait reports an error as -errno, never -1.
++                              if (static_cast<int64_t>(Result) >= 0 && info) {
+                                 FaultSafeUserMemAccess::VerifyIsWritable(info, sizeof(*info));
+                                 // We need to translate the 64-bit siginfo_t to 32-bit siginfo_t
+                                 CopySigInfo(info, HostInfo);
+@@ -206,7 +209,10 @@
+                               uint64_t Result =
+                                 FEX::HLE::_SyscallHandler->GetSignalDelegator()->GuestSigTimedWait(FEX::HLE::ThreadManager::GetStateObjectFromCPUState(Frame), set, &HostInfo,
+                                                                                    timeout, sigsetsize);
+-                              if (Result != -1) {
++                              // info may be NULL (sigwait passes none: ART's signal catcher's
++                              // wait ended the process with "Unexpected nullptr syscall argument"),
++                              // and GuestSigTimedWait reports an error as -errno, never -1.
++                              if (static_cast<int64_t>(Result) >= 0 && info) {
+                                 FaultSafeUserMemAccess::VerifyIsWritable(info, sizeof(*info));
+                                 // We need to translate the 64-bit siginfo_t to 32-bit siginfo_t
+                                 CopySigInfo(info, HostInfo);
+diff --git a/Source/Tools/LinuxEmulation/LinuxSyscalls/x32/Socket.cpp b/Source/Tools/LinuxEmulation/LinuxSyscalls/x32/Socket.cpp
+--- a/Source/Tools/LinuxEmulation/LinuxSyscalls/x32/Socket.cpp
++++ b/Source/Tools/LinuxEmulation/LinuxSyscalls/x32/Socket.cpp
+@@ -439,23 +439,26 @@
+         return -EINVAL;
+       }
+ 
+-      sock_fprog32* prog = reinterpret_cast<sock_fprog32*>(optval.Ptr);
++      // optval.Ptr is the guest's address: under a guest base the host view
++      // is G2H of it (the timeouts below, too; i386 Android's zygote set
++      // SO_RCVTIMEO on every connection and FEX faulted on 0xffff5ab0).
++      sock_fprog32* prog = reinterpret_cast<sock_fprog32*>(FEX::HLE::G2H(optval.Ptr));
+       sock_fprog64 prog64 {};
+       prog64.len = prog->len;
+-      prog64.filter = prog->filter;
++      prog64.filter = FEX::HLE::G2H(prog->filter);
+ 
+       Result = ::syscall(SYSCALL_DEF(setsockopt), sockfd, level, optname, &prog64, sizeof(sock_fprog64));
+       break;
+     }
+     case SO_RCVTIMEO_OLD: {
+       // _OLD uses old_timeval32. Needs to be converted
+-      struct timeval tv64 = *reinterpret_cast<timeval32*>(optval.Ptr);
++      struct timeval tv64 = *reinterpret_cast<timeval32*>(FEX::HLE::G2H(optval.Ptr));
+       Result = ::syscall(SYSCALL_DEF(setsockopt), sockfd, level, SO_RCVTIMEO_NEW, &tv64, sizeof(tv64));
+       break;
+     }
+     case SO_SNDTIMEO_OLD: {
+       // _OLD uses old_timeval32. Needs to be converted
+-      struct timeval tv64 = *reinterpret_cast<timeval32*>(optval.Ptr);
++      struct timeval tv64 = *reinterpret_cast<timeval32*>(FEX::HLE::G2H(optval.Ptr));
+       Result = ::syscall(SYSCALL_DEF(setsockopt), sockfd, level, SO_SNDTIMEO_NEW, &tv64, sizeof(tv64));
+       break;
+     }
+@@ -537,10 +540,10 @@
+     case SO_RCVMARK:
+     case SO_PASSPIDFD:
+     case SO_PEERPIDFD:
+-    default: Result = ::syscall(SYSCALL_DEF(setsockopt), sockfd, level, optname, reinterpret_cast<const void*>(optval.Ptr), optlen); break;
++    default: Result = ::syscall(SYSCALL_DEF(setsockopt), sockfd, level, optname, reinterpret_cast<const void*>(FEX::HLE::G2H(optval.Ptr)), optlen); break;
+     }
+   } else {
+-    Result = ::syscall(SYSCALL_DEF(setsockopt), sockfd, level, optname, reinterpret_cast<const void*>(optval.Ptr), optlen);
++    Result = ::syscall(SYSCALL_DEF(setsockopt), sockfd, level, optname, reinterpret_cast<const void*>(FEX::HLE::G2H(optval.Ptr)), optlen);
+   }
+ 
+   SYSCALL_ERRNO();
+@@ -555,7 +558,7 @@
+       struct timeval tv64 {};
+       socklen_t tv64size = sizeof(tv64);
+       Result = ::syscall(SYSCALL_DEF(getsockopt), sockfd, level, SO_RCVTIMEO_NEW, &tv64, &tv64size);
+-      *reinterpret_cast<timeval32*>(optval.Ptr) = tv64;
++      *reinterpret_cast<timeval32*>(FEX::HLE::G2H(optval.Ptr)) = tv64;
+       break;
+     }
+     case SO_SNDTIMEO_OLD: {
+@@ -563,7 +566,7 @@
+       struct timeval tv64 {};
+       socklen_t tv64size = sizeof(tv64);
+       Result = ::syscall(SYSCALL_DEF(getsockopt), sockfd, level, SO_SNDTIMEO_NEW, &tv64, &tv64size);
+-      *reinterpret_cast<timeval32*>(optval.Ptr) = tv64;
++      *reinterpret_cast<timeval32*>(FEX::HLE::G2H(optval.Ptr)) = tv64;
+       break;
+     }
+     // Each optname as a reminder which setting has been manually checked
+diff --git a/Source/Tools/LinuxEmulation/LinuxSyscalls/x32/Thread.cpp b/Source/Tools/LinuxEmulation/LinuxSyscalls/x32/Thread.cpp
+--- a/Source/Tools/LinuxEmulation/LinuxSyscalls/x32/Thread.cpp
++++ b/Source/Tools/LinuxEmulation/LinuxSyscalls/x32/Thread.cpp
+@@ -33,6 +33,10 @@
+ 
+ ARG_TO_STR(FEX::HLE::x32::compat_ptr<FEX::HLE::x32::stack_t32>, "%x")
+ ARG_TO_STR(FEX::HLE::x32::compat_ptr<FEXCore::x86::siginfo_t>, "%x")
++
++// SteamARM: this FEX carries patches/fex-lxrt-i386-bionic.patch (tests and
++// scripts/android-boot.py look for this string in the binary).
++[[maybe_unused]] static const char LxrtI386Bionic[] __attribute__((used, retain)) = "lxrt-i386-bionic";
+ 
+ namespace FEX::HLE::x32 {
+ // The kernel only gives 32-bit userspace 3 TLS segments
+@@ -224,6 +228,14 @@
+         // Otherwise just an integer
+         tp64 = *timeout;
+         timeout_ptr = &tp64;
++      } else {
++        // For the other commands the slot is an integer (val2: REQUEUE's and
++        // CMP_REQUEUE's nr_requeue, WAKE_OP's nr_wake2), which the guest-base
++        // syscall thunk based like a pointer because of its declared type:
++        // take the base off again. (CMP_REQUEUE with nr_requeue INT_MAX arrived
++        // as a negative count, EINVAL: i386 ART aborted "futex requeue failed
++        // for task queue condition: Invalid argument".)
++        timeout_ptr = reinterpret_cast<const void*>(FEX::HLE::H2G(reinterpret_cast<uint64_t>(timeout)));
+       }
+ 
+       uint64_t Result = syscall(SYSCALL_DEF(futex), uaddr, futex_op, val, timeout_ptr, uaddr2, val3);

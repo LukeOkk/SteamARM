@@ -139,7 +139,7 @@ PROFILES = {
         # seccomp policy and abort if they cannot ("Could not set seccomp
         # filter of size 238: Invalid argument", MEASURED). Inherited by
         # system_server and every app the zygote forks.
-        "env_x86": {"zygote": {"FEX_NEEDSSECCOMP": "1"}},
+        "env_x86": {"zygote": {"FEX_NEEDSSECCOMP": "1"}, "zygote_secondary": {"FEX_NEEDSSECCOMP": "1"}},
         # Asked for by the .rc files but left out, and why (the boot logs
         # each one it skips).
         "left_out": {
@@ -150,11 +150,16 @@ PROFILES = {
             "apexd": "flattened APEXes (ro.apex.updatable unset), already under /apex",
             "netd": "exits at once: NETLINK_KOBJECT_UEVENT, route netlink, iptables, BPF; its "
                     "'onrestart restart zygote' then kills the zygote every 5 s",
-            "vendor.audio-hal": "i386 (32-bit) binary: FEX stops it at once ('NoExec instruction in "
-                                "entry block'); audioserver waits for it",
+            "vendor.audio-hal": "i386 (32-bit) binary: runs under FEX with patches/fex-lxrt-i386-bionic.patch, "
+                                "then stops at binder ('Binder driver /dev/vndbinder could not be opened': the "
+                                "runtime's binder takes a 32-bit guest's pointers as host ones, BINDER_VERSION "
+                                "fails with EFAULT); audioserver waits for it",
             "vendor.audio-hal-2-0": "declares the same interface; no such binary in this image",
             "vendor.hwcomposer-2-1": "Waydroid's composer is a Wayland client: no display here",
-            "zygote_secondary": "app_process32 (i386): 32-bit apps only",
+            # Started instead when the root's FEX carries
+            # patches/fex-lxrt-i386-bionic.patch (Boot.__init__); system_server
+            # waits 20 s for it otherwise (hasSecondZygote, "x86_64,x86").
+            "zygote_secondary": "app_process32 (i386): the root's FEX predates patches/fex-lxrt-i386-bionic.patch",
             "bootanim": "graphics",
             "statsd": "cannot link: the root's /linkerconfig (written by the image's linkerconfig "
                       "before properties existed) has no namespace for the statsd APEX",
@@ -185,9 +190,10 @@ HOST_PROPS = [
     ("ro.hardware.egl", "swiftshader"),
     ("ro.hardware.gralloc", "default"),
     # installd runs dex2oat32 unless this is set (dexopt.cpp
-    # select_execution_binary); i386 programs do not run under FEX here yet
-    # (dex2oat32 died of SIGSEGV in FEX's 32-bit mode, MEASURED), x86-64
-    # dex2oat64 does (benchmarks/stage25-art-x86-fex.txt).
+    # select_execution_binary). dex2oat32 died of SIGSEGV in FEX's 32-bit
+    # mode until patches/fex-lxrt-i386-bionic.patch (stage 28); x86-64
+    # dex2oat64 is kept: it needs no i386 fix and ran first
+    # (benchmarks/stage25-art-x86-fex.txt).
     ("dalvik.vm.dex2oat64.enabled", "true"),
 ]
 
@@ -408,7 +414,22 @@ class Boot:
         self.queue = []
         self.class_started = set()
         self.x86 = self.detect_x86()
+        # i386 programs run under a FEX with patches/fex-lxrt-i386-bionic.patch
+        # (it carries this string): then the secondary zygote is started too
+        # (benchmarks/stage28-android-reliability.txt).
+        if self.x86 and a.profile == "headless" and self.fex_has(b"lxrt-i386-bionic"):
+            prof = dict(self.profile)
+            prof["start"] = set(prof["start"]) | {"zygote_secondary"}
+            prof["left_out"] = {k: v for k, v in prof["left_out"].items() if k != "zygote_secondary"}
+            self.profile = prof
         self.t0 = time.time()
+
+    def fex_has(self, marker):
+        try:
+            with open(self.root + "/usr/lib/lxrt-emu/FEX", "rb") as f:
+                return marker in f.read()
+        except OSError:
+            return False
 
     def detect_x86(self):
         with open(self.root + "/system/bin/toybox", "rb") as f:

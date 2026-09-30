@@ -2666,6 +2666,13 @@ restart:
         // MS_ASYNC 1 | MS_INVALIDATE 2 | MS_SYNC 4, not ASYNC and SYNC
         // together; ENOMEM if any page of the range is unmapped.
         if ((a0 & 4095) || (a2 & ~7ull) || ((a2 & 1) && (a2 & 4))) { ret = LERR(EINVAL); break; }
+        // FEX passes msync straight through (its allocator never sees it),
+        // so a 32-bit guest's address arrives as the guest's: below 4 GiB it
+        // is base + address, as for madvise (gbase.c's rule). i386 dex2oat's
+        // msync(MS_SYNC) of its vdex failed with ENOMEM on __PAGEZERO and
+        // the compile was thrown away ("Failed to Sync() dex2dex output").
+        if (lxrt_gbase() && a0 && a0 < (1ull << 32))
+            a0 += lxrt_gbase();
         uint64_t end = a0 + LXRT_ALIGN_UP(a1, 4096);
         if (end < a0) { ret = LERR(ENOMEM); break; }
         ret = 0;
