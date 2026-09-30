@@ -97,6 +97,23 @@ static void fault_report(int sig, siginfo_t *info, void *uap)
         n += snprintf(buf + n, sizeof buf - n, " addr %p sp 0x%llx lr 0x%llx",
                       info->si_addr, (unsigned long long)uc->uc_mcontext->__ss.__sp,
                       (unsigned long long)uc->uc_mcontext->__ss.__lr);
+    // What the faulting address is to the kernel: a SIGBUS inside the
+    // runtime's own zero-fill (subpage_mmap_locked, once in four ARM64
+    // Steam starts) said nothing about the page it hit.
+    if ((sig == SIGBUS || sig == SIGSEGV) && info) {
+        mach_vm_address_t ra = (mach_vm_address_t)(uintptr_t)info->si_addr;
+        mach_vm_size_t rs = 0;
+        vm_region_extended_info_data_t ri;
+        mach_msg_type_number_t rc = VM_REGION_EXTENDED_INFO_COUNT;
+        mach_port_t obj = MACH_PORT_NULL;
+        if (mach_vm_region(mach_task_self(), &ra, &rs, VM_REGION_EXTENDED_INFO,
+                           (vm_region_info_t)&ri, &rc, &obj) == KERN_SUCCESS)
+            n += snprintf(buf + n, sizeof buf - n,
+                          " [region 0x%llx+0x%llx prot %d share %d pager %d refs %d tag %d%s]",
+                          (unsigned long long)ra, (unsigned long long)rs, ri.protection,
+                          ri.share_mode, ri.external_pager, ri.ref_count, ri.user_tag,
+                          ra > (mach_vm_address_t)(uintptr_t)info->si_addr ? " (next region: address unmapped)" : "");
+    }
     if (g_img) {
         uint64_t base = (uint64_t)g_img->base;
         if (pc >= base && pc < base + g_img->span)
