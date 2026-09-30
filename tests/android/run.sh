@@ -791,8 +791,10 @@ if ! "$llvm" --target=aarch64-linux-gnu $cflags -o build/wl_shm_client.aarch64 t
     bad "build wl_shm_client" "llvm clang"
     return 0
 fi
-local have_x86=0
+local have_x86=0 had_server=0
 [ -x "$X86_ROOT/usr/lib/lxrt-emu/FEX" ] && have_x86=1
+# The x86_64 root's FEXServer, if x86c() starts it, is stopped at the end.
+[ -n "$(ANDROID_X86_ROOT="$X86_ROOT" scripts/run-android-x86.sh --server-pid)" ] && had_server=1
 cp build/wl_shm_client.aarch64 "$wroot/tmp/wl_shm_client"
 [ "$have_x86" = 1 ] && cp build/wl_shm_client.x86_64 "$X86_ROOT/data/local/tmp/wl_shm_client"
 local xdg=/dev/shm/steamarm-wltest-$$ sock=wayland-0 out rc n
@@ -917,6 +919,7 @@ else
 fi
 rm -f "$wroot/tmp/wl_shm_client"
 [ "$have_x86" = 1 ] && rm -f "$X86_ROOT/data/local/tmp/wl_shm_client"
+[ "$have_x86" = 0 ] || [ "$had_server" = 1 ] || ANDROID_X86_ROOT="$X86_ROOT" scripts/run-android-x86.sh --server-stop
 rm -rf "/tmp/lxrt-shm-$(id -u)/${xdg#/dev/shm/}"
 unset WESTON_XDG WESTON_SOCKET
 }
@@ -1122,6 +1125,8 @@ else bad "am start and focus" "rc=$rc start='$start' $(grep -E 'focus|am start' 
 env "${senv[@]}" python3 scripts/android-session.py stop >/dev/null 2>&1
 local left
 left=$(ps -axEww -o pid=,command= 2>/dev/null | grep -F "LXRT_PROPERTY_DIR=$sdir/props" | grep -v grep | wc -l | tr -d ' ')
+# The session root's FEXServer too (android-boot.py starts it and must stop it).
+[ -z "$(ANDROID_X86_ROOT="$sroot" scripts/run-android-x86.sh --server-pid)" ] || left=$((left + 1))
 [ "$left" = 0 ] && ok "android-session.py stop: nothing of the session left" || bad "session stop" "$left processes left"
 rm -rf "$st" "$sdir"
 }

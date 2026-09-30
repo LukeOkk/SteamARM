@@ -629,9 +629,32 @@ class Boot:
             return
         # scripts/run-android-x86.sh starts the root's own FEXServer (and
         # writes /linkerconfig once); a no-op program is enough.
+        # It outlives its clients (FEXServer ignores --persistent's timeout
+        # with --foreground), so shutdown() stops it again unless it was
+        # already running: each one left counts toward the memory guard.
         env = dict(os.environ, ANDROID_X86_ROOT=self.root, LXRUN=self.lxrun)
+        self.fexserver_env = env
+        self.fexserver_was_running = bool(self.fexserver_pid())
         subprocess.run([os.path.join(HERE, "run-android-x86.sh"), "/system/bin/toybox", "true"],
                        env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=120)
+
+    def fexserver_pid(self):
+        env = dict(os.environ, ANDROID_X86_ROOT=self.root, LXRUN=self.lxrun)
+        try:
+            return subprocess.run([os.path.join(HERE, "run-android-x86.sh"), "--server-pid"], env=env,
+                                  stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                                  timeout=30).stdout.decode(errors="replace").strip()
+        except (OSError, subprocess.SubprocessError):
+            return ""
+
+    def stop_fexserver(self):
+        if getattr(self, "fexserver_was_running", True):
+            return
+        try:
+            subprocess.run([os.path.join(HERE, "run-android-x86.sh"), "--server-stop"], env=self.fexserver_env,
+                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=30)
+        except (OSError, subprocess.SubprocessError):
+            pass
 
     def start_propsvc(self):
         os.makedirs(self.propdir, mode=0o700, exist_ok=True)
@@ -1368,6 +1391,7 @@ class Boot:
                 p.wait(timeout=5)
             except subprocess.TimeoutExpired:
                 pass
+        self.stop_fexserver()
         log("stopped %d processes" % len(mine))
 
 
