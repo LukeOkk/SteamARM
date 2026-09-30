@@ -84,6 +84,14 @@ stop_guests() {
     /usr/bin/python3 scripts/session.py stop "$LDIR" 3
     for p in $(guest_pids); do kill -9 "$p" 2>/dev/null; done
     rm -f "$ROOT/tmp/fexhome/.steam/steam.pid" "$PIDFILE" "$IDFILE" "$MODEFILE" "$ARCHFILE" "$PGIDFILE"
+    # Steam's shared memory objects (/dev/shm/u<uid>-Shm_<hex>, 26 MB each,
+    # in the runtime's /tmp/lxrt-shm-<uid>) outlive a client that is stopped
+    # rather than quit: 193 of them, 4.4 GB, after a day of starts (MEASURED
+    # 2026-09-30). With no guest program left, none of them is in use.
+    sleep 1
+    if [ -z "$(guest_pids)" ]; then
+        rm -f "/tmp/lxrt-shm-$(id -u)/u$(id -u)-Shm_"* 2>/dev/null
+    fi
 }
 
 # Guest programs (as guest_pids) in session $1: the session a launcher

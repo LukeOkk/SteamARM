@@ -70,9 +70,32 @@ Android, per-app window session (Simple Solitaire), private pasteboard:
 Clip (tests/android/java/clip) as uid 0 failed: "SecurityException: Calling
 uid 0 does not own package com.android.shell"; it now becomes the shell
 (uid 2000, READ_CLIPBOARD_IN_BACKGROUND) and runs again. A setuid in the
-process itself left binder with the uid of its start and the next binder call
-failed with "Bad file descriptor" (runtime item, open).
+process itself leaves binder with the uid of its start: the hub takes the
+euid once, at BH_HELLO, where Linux takes it per transaction. Tried: the
+runtime sending the caller's euid with every BINDER_WRITE_READ. The in-process
+setuid then worked ("a clip" instead of SecurityException), but the per-app
+window stopped appearing in 3 of 5 launches (the composer got only its 1x1
+backdrop; tests/android/run.sh failed "one Mac window per app"); without it,
+4 of 4 on the same root and binary otherwise. Reverted; why UNKNOWN.
+
+== Clean loop on the release runtime (ec6169e), nothing else running
+x86catch2: the same loop; on failure `sample` of the client, the browser and
+the zygotes. 8 starts: windows at 96, 90, 95, 91, 91, 96, 90 s (7 of 8).
+Run 6: no window. The client's HTMLController thread was in the web helper
+wait (nanosleep 50 ms, as it should be now: no early EINTR) 3 min after
+"Started webhelper process"; its main thread in a futex wait. The web
+helper's browser idle (message loop in poll), one thread in a process-shared
+futex wait (lxrt shared_wait); the client never sent CreateBrowser. Both
+sides waiting on the other through their shared memory: a lost wake between
+processes is the HYPOTHESIS; not reproduced on demand.
+
+Steam's shared memory objects (u501-Shm_<hex>, 26 MB) were left by every
+stopped client: 193 files, 4.4 GB in /tmp/lxrt-shm-501 after the day's starts.
+scripts/run-app.sh --stop now removes them once no guest is left: 0 files,
+7.5 MB.
 
 == Release matrix (0.3.9 candidate)
 tests/elf 91/0; i386 18/0; tests/win 11/0; vk_device 2/0; arm64 4/0;
-launcher core 35/0; tests/wlmac 4/0; Python unit tests 135 OK.
+launcher core 35/0; tests/wlmac 4/0; Python unit tests 135 OK;
+tests/android 83 passed, 0 failed, 2 expected failures (clipboard included).
+x86 Steam 7 of 8 (above).
