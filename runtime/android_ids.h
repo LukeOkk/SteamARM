@@ -12,9 +12,10 @@
 // Switched on by LXRT_ANDROID_IDS in the environment (the boot script,
 // scripts/android-boot.py, sets it per service from its .rc file):
 //
-//   LXRT_ANDROID_IDS=ruid,euid,suid:rgid,egid,sgid:g1,g2,...:eff,prm,inh,bnd,amb[:kn]
+//   LXRT_ANDROID_IDS=ruid,euid,suid:rgid,egid,sgid:g1,g2,...:eff,prm,inh,bnd,amb[:knb<hex>]
 //
-// (caps as hex masks; "k" = PR_SET_KEEPCAPS on, "n" = no_new_privs set;
+// (caps as hex masks; "k" = PR_SET_KEEPCAPS on, "n" = no_new_privs set,
+// "b<hex>" = the securebits;
 // "root" is uid/gid 0 with
 // every capability). With it, the credential calls act on those numbers with
 // Linux's rules (kernel/sys.c, security/commoncap.c): CAP_SETUID/CAP_SETGID
@@ -25,10 +26,13 @@
 // what Android asks and checks; see docs/ANDROID_RUNTIME_ARCHITECTURE.md,
 // "Identities".
 //
-// Other processes see the virtual ids too: SO_PEERCRED and SCM_CREDENTIALS
-// (runtime/socket.c) and the binder sender euid (runtime/binder.c) come from
+// Other processes see the virtual ids too: SO_PEERCRED (effective ids) and
+// SCM_CREDENTIALS (real ids, as Linux attaches them) in runtime/socket.c,
+// capget of another pid, and the binder sender euid (runtime/binder.c), from
 // a table shared by this user's lxrun processes (/tmp/lxrt-shm-<uid>/
-// android-ids), keyed by pid and checked against the process start time.
+// android-ids.v2), keyed by pid and checked against the process start time.
+// SO_PEERCRED answers with the peer's ids now, not those it had when it
+// connected, as Linux would.
 #ifndef LXRT_ANDROID_IDS_H
 #define LXRT_ANDROID_IDS_H
 
@@ -60,8 +64,9 @@ int lxrt_aids_chown(uint32_t uid, uint32_t gid);
 // when off.
 const char *lxrt_aids_exec_env(void);
 
-// The virtual uid/gid of another lxrun process of this user, if it runs with
-// Android ids (the shared table). False otherwise.
-bool lxrt_aids_lookup(int pid, uint32_t *uid, uint32_t *gid);
+// The virtual ids of another lxrun process of this user, if it runs with
+// Android ids (the shared table, a consistent snapshot). False otherwise.
+struct lxrt_aids_peer { uint32_t ruid, euid, rgid, egid; uint64_t eff, prm, inh; };
+bool lxrt_aids_lookup(int pid, struct lxrt_aids_peer *out);
 
 #endif

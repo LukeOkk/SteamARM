@@ -54,7 +54,15 @@ static bool cap_has(uint64_t set, int cap) { return cap >= 0 && cap <= CAP_LAST_
 bool lxrt_aids_capable(int cap) { return lxrt_aids_on() && cap_has(g.eff, cap); }
 
 // ---- the shared table: pid -> virtual ids, for SO_PEERCRED and binder ----
-struct ent { _Atomic int32_t pid; uint32_t r, e, rg, eg; uint32_t pad; uint64_t start; };
+// One slot per pid. `seq` is odd while the owner rewrites the slot; a
+// reader takes a copy between two equal even values (a seqlock), so it
+// never mixes two updates.
+struct ent {
+    _Atomic uint32_t seq;
+    _Atomic int32_t pid;
+    _Atomic uint32_t r, e, rg, eg;
+    _Atomic uint64_t eff, prm, inh, start;
+};
 #define TABLE_SLOTS 100000                     // Darwin's PID_MAX is 99999
 static struct ent *g_table;
 
@@ -73,7 +81,7 @@ static struct ent *table(void)
         atomic_store(&state, 2);
         return NULL;
     }
-    snprintf(path + strlen(path), sizeof path - strlen(path), "/android-ids");
+    snprintf(path + strlen(path), sizeof path - strlen(path), "/android-ids.v2");
     int fd = open(path, O_RDWR | O_CREAT | O_CLOEXEC | O_NOFOLLOW, 0600);
     size_t sz = sizeof(struct ent) * TABLE_SLOTS;
     void *p = MAP_FAILED;
@@ -102,23 +110,40 @@ static void publish(void)
     int pid = getpid();
     if (!t || pid <= 0 || pid >= TABLE_SLOTS) return;
     struct ent *e = &t[pid];
-    atomic_store(&e->pid, 0);                  // readers see a whole entry or none
-    e->r = g.r; e->e = g.e; e->rg = g.rg; e->eg = g.eg;
-    e->start = start_time(pid);
+    uint64_t st = start_time(pid);
+    uint32_t s = atomic_load(&e->seq) & ~1u;   // one writer: this process, under g_mu
+    atomic_store(&e->seq, s + 1);              // odd: being written
     atomic_store(&e->pid, pid);
+    atomic_store(&e->r, g.r); atomic_store(&e->e, g.e);
+    atomic_store(&e->rg, g.rg); atomic_store(&e->eg, g.eg);
+    atomic_store(&e->eff, g.eff); atomic_store(&e->prm, g.prm); atomic_store(&e->inh, g.inh);
+    atomic_store(&e->start, st);
+    atomic_store(&e->seq, s + 2);              // even again, and different
 }
 
-bool lxrt_aids_lookup(int pid, uint32_t *uid, uint32_t *gid)
+bool lxrt_aids_lookup(int pid, struct lxrt_aids_peer *out)
 {
     struct ent *t = table();
     if (!t || pid <= 0 || pid >= TABLE_SLOTS) return false;
     struct ent *e = &t[pid];
-    if (atomic_load(&e->pid) != pid) return false;
-    uint32_t u = e->e, gg = e->eg;
-    uint64_t st = e->start;
+    struct lxrt_aids_peer p;
+    uint64_t st = 0;
+    for (int tries = 0; ; tries++) {
+        uint32_t s1 = atomic_load(&e->seq);
+        if (s1 & 1) {                          // being written: try again shortly
+            if (tries > 1000) return false;
+            continue;
+        }
+        if (atomic_load(&e->pid) != pid) return false;
+        p.ruid = atomic_load(&e->r); p.euid = atomic_load(&e->e);
+        p.rgid = atomic_load(&e->rg); p.egid = atomic_load(&e->eg);
+        p.eff = atomic_load(&e->eff); p.prm = atomic_load(&e->prm); p.inh = atomic_load(&e->inh);
+        st = atomic_load(&e->start);
+        if (atomic_load(&e->seq) == s1) break;
+        if (tries > 1000) return false;
+    }
     if (!st || st != start_time(pid)) return false;   // a later process with the same pid
-    if (uid) *uid = u;
-    if (gid) *gid = gg;
+    if (out) *out = p;
     return true;
 }
 
@@ -198,7 +223,11 @@ static bool parse(const char *v)
     for (const char *c = nf > 4 ? f[4] : fe[0]; nf > 4 && c < fe[4]; c++) {
         if (*c == 'k') g.securebits |= 1u << SECURE_KEEP_CAPS;
         else if (*c == 'n') g.nnp = true;
-        else return false;
+        else if (*c == 'b') {                  // b<hex>: the securebits
+            char *q;
+            g.securebits |= (uint32_t)strtoul(c + 1, &q, 16);
+            c = q - 1;
+        } else return false;
     }
     return true;
 }
@@ -368,7 +397,9 @@ static long do_cap(bool set, uint64_t hdr, uint64_t data)
         uint64_t e = g.eff, p = g.prm, i = g.inh;
         if (pid != 0 && pid != getpid() && pid != lxrt_gettid()) {
             if (kill(pid, 0) != 0 && errno == ESRCH) return LERR(ESRCH);
-            e = p = i = 0;                     // another process: not known here
+            struct lxrt_aids_peer pe;
+            if (lxrt_aids_lookup(pid, &pe)) { e = pe.eff; p = pe.prm; i = pe.inh; }
+            else e = p = i = 0;                // no Android ids: an unprivileged process
         }
         for (int w = 0; w < words; w++) {
             d[w * 3 + 0] = (uint32_t)(e >> (32 * w));
@@ -411,6 +442,7 @@ static bool do_prctl(uint64_t op, uint64_t a1, uint64_t a2, uint64_t a3, uint64_
         return true;
     case 8:                                    // PR_SET_KEEPCAPS
         if (a1 > 1) { *ret = LERR(EINVAL); return true; }
+        if (g.securebits & (1u << (SECURE_KEEP_CAPS + 1))) { *ret = LERR(EPERM); return true; }  // locked
         if (a1) g.securebits |= 1u << SECURE_KEEP_CAPS;
         else g.securebits &= ~(1u << SECURE_KEEP_CAPS);
         *ret = 0;
@@ -426,10 +458,17 @@ static bool do_prctl(uint64_t op, uint64_t a1, uint64_t a2, uint64_t a3, uint64_
     case 27:                                   // PR_GET_SECUREBITS
         *ret = g.securebits;
         return true;
-    case 28:                                   // PR_SET_SECUREBITS
-        if (!cap_has(g.eff, CAP_SETPCAP)) *ret = LERR(EPERM);
-        else { g.securebits = (uint32_t)a1; *ret = 0; }
+    case 28: {                                 // PR_SET_SECUREBITS
+        // security/commoncap.c: a locked bit cannot change, a lock cannot
+        // be released, unknown bits and a missing CAP_SETPCAP are EPERM.
+        const uint32_t locks = 0xaa, bits = 0x55;
+        uint32_t old = g.securebits, nw = (uint32_t)a1;
+        if ((((old & locks) >> 1) & (old ^ nw)) || (old & locks & ~nw) ||
+            (a1 & ~(uint64_t)(locks | bits)) || !cap_has(g.eff, CAP_SETPCAP))
+            *ret = LERR(EPERM);
+        else { g.securebits = nw; *ret = 0; }
         return true;
+    }
     case 47:                                   // PR_CAP_AMBIENT
         if (a1 == 4) {                         // CLEAR_ALL
             *ret = (a2 || a3 || a4) ? LERR(EINVAL) : (g.amb = 0, 0);
@@ -456,6 +495,7 @@ bool lxrt_aids_syscall(long nr, uint64_t a0, uint64_t a1, uint64_t a2, uint64_t 
     bool handled = true;
     pthread_mutex_lock(&g_mu);
     uint32_t old_e = g.e, old_eg = g.eg, old_r = g.r, old_rg = g.rg;
+    uint64_t old_eff = g.eff, old_prm = g.prm, old_inh = g.inh;
     switch (nr) {
     case 174: *ret = g.r; break;               // getuid
     case 175: *ret = g.e; break;               // geteuid
@@ -530,7 +570,10 @@ bool lxrt_aids_syscall(long nr, uint64_t a0, uint64_t a1, uint64_t a2, uint64_t 
     case 97: {                                 // unshare
         const uint64_t ns = 0x00020000 | 0x02000000 | 0x04000000 | 0x08000000 |
                             0x10000000 | 0x20000000 | 0x40000000;   // NEWNS..NEWNET
-        const uint64_t plain = 0x200 | 0x400 | 0x40000;             // CLONE_FS, FILES, SYSVSEM
+        const uint64_t plain = 0x200 | 0x40000;                     // CLONE_FS, CLONE_SYSVSEM
+        // CLONE_FILES would need a descriptor table of the thread's own,
+        // which a Darwin thread cannot have (runtime/thread.c refuses a
+        // thread without CLONE_FILES for the same reason).
         if (a0 & ~(ns | plain)) { *ret = LERR(EINVAL); break; }
         if ((a0 & ns & ~0x10000000ull) && !cap_has(g.eff, 21)) { *ret = LERR(EPERM); break; }
         *ret = 0;
@@ -564,26 +607,28 @@ bool lxrt_aids_syscall(long nr, uint64_t a0, uint64_t a1, uint64_t a2, uint64_t 
     default:
         handled = false;
     }
-    bool changed = g.e != old_e || g.eg != old_eg || g.r != old_r || g.rg != old_rg;
+    if (g.e != old_e || g.eg != old_eg || g.r != old_r || g.rg != old_rg ||
+        g.eff != old_eff || g.prm != old_prm || g.inh != old_inh)
+        publish();                             // under g_mu: one writer of the slot
     pthread_mutex_unlock(&g_mu);
-    if (changed) publish();
     return handled;
 }
 
 int lxrt_aids_chown(uint32_t uid, uint32_t gid)
 {
     const uint32_t N = 0xffffffffu;
+    if (!cap_has(g.eff, CAP_CHOWN)) {
+        // Without CAP_CHOWN Linux lets the owner (every file here is this
+        // process's) give the file to itself and to one of its groups.
+        if (uid != N && uid != g.fs) return (int)LERR(EPERM);
+        if (gid != N && gid != g.fsg) {
+            bool in = false;
+            for (int i = 0; i < g.ngroups && !in; i++) in = g.groups[i] == gid;
+            if (!in) return (int)LERR(EPERM);
+        }
+    }
     if ((uid == N || uid == (uint32_t)getuid()) && (gid == N || gid == (uint32_t)getgid()))
         return 1;                              // the host's own ids: a real call
-    if (cap_has(g.eff, CAP_CHOWN)) return 0;
-    // Without CAP_CHOWN Linux lets the owner (every file here is this
-    // process's) give the file to itself and to one of its groups.
-    if (uid != N && uid != g.fs) return (int)LERR(EPERM);
-    if (gid != N && gid != g.fsg) {
-        bool in = false;
-        for (int i = 0; i < g.ngroups && !in; i++) in = g.groups[i] == gid;
-        if (!in) return (int)LERR(EPERM);
-    }
     return 0;
 }
 
@@ -610,8 +655,10 @@ const char *lxrt_aids_exec_env(void)
     int o = snprintf(buf, sizeof buf, "LXRT_ANDROID_IDS=%u,%u,%u:%u,%u,%u:", n.r, n.e, n.s, n.rg, n.eg, n.sg);
     for (int i = 0; i < n.ngroups && o < (int)sizeof buf - 16; i++)
         o += snprintf(buf + o, sizeof buf - (size_t)o, "%s%u", i ? "," : "", n.groups[i]);
-    snprintf(buf + o, sizeof buf - (size_t)o, ":%llx,%llx,%llx,%llx,%llx%s",
-             (unsigned long long)n.eff, (unsigned long long)n.prm, (unsigned long long)n.inh,
-             (unsigned long long)n.bnd, (unsigned long long)n.amb, n.nnp ? ":n" : "");
+    o += snprintf(buf + o, sizeof buf - (size_t)o, ":%llx,%llx,%llx,%llx,%llx",
+                  (unsigned long long)n.eff, (unsigned long long)n.prm, (unsigned long long)n.inh,
+                  (unsigned long long)n.bnd, (unsigned long long)n.amb);
+    if (n.nnp || n.securebits)
+        snprintf(buf + o, sizeof buf - (size_t)o, ":%sb%x", n.nnp ? "n" : "", n.securebits);
     return buf;
 }

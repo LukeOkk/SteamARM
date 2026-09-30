@@ -74,6 +74,7 @@ static int after_exec(const char *tmp)
           "after execve: permitted = effective = the ambient set (NET_ADMIN), as for a non-root exec");
     check(prctl(PR_GET_KEEPCAPS) == 0, "after execve: keepcaps cleared");
     check(prctl(PR_GET_NO_NEW_PRIVS, 0, 0, 0, 0) == 1, "after execve: no_new_privs kept");
+    check(prctl(PR_GET_SECUREBITS) == 0x3, "after execve: securebits NOROOT and its lock kept (0x3)");
     // The bind the "zygote" made before exec is still there.
     char p2[512], buf[16] = {0};
     snprintf(p2, sizeof p2, "%s/b/file", tmp);
@@ -157,6 +158,32 @@ int main(int argc, char **argv)
     waitpid(kid, &ws, 0);
     check(WIFEXITED(ws) && WEXITSTATUS(ws) == 0, "fork: the child has its own ids (2000), the parent keeps root");
     check(getuid() == 0, "parent still uid 0");
+
+    // capget of another process: a child with ids (root: all) and launchd
+    // (no ids: an unprivileged process's empty sets).
+    int cp[2];
+    pipe(cp);
+    pid_t ck = fork();
+    if (ck == 0) { char z; close(cp[1]); read(cp[0], &z, 1); _exit(0); }
+    close(cp[0]);
+    usleep(200000);
+    {
+        struct __user_cap_header_struct h = { _LINUX_CAPABILITY_VERSION_3, ck };
+        struct __user_cap_data_struct d[2];
+        memset(d, 0, sizeof d);
+        long r1 = syscall(SYS_capget, &h, d);
+        uint64_t ce = d[0].effective | (uint64_t)d[1].effective << 32;
+        struct __user_cap_header_struct h1 = { _LINUX_CAPABILITY_VERSION_3, 1 };
+        memset(d, 0xff, sizeof d);
+        long r2 = syscall(SYS_capget, &h1, d);
+        check(r1 == 0 && ce == ALL && r2 == 0 && d[0].effective == 0 && d[0].permitted == 0,
+              "capget of a child with ids: every capability; of launchd (no ids): none");
+    }
+    close(cp[1]);
+    waitpid(ck, NULL, 0);
+    check(sc(SYS_unshare, CLONE_FILES, 0, 0) == -EINVAL, "unshare(CLONE_FILES): EINVAL (no per-thread descriptor tables here)");
+    check(prctl(PR_SET_SECUREBITS, 0x3) == 0 && prctl(PR_SET_SECUREBITS, 0x2) == -1 && errno == EPERM,
+          "PR_SET_SECUREBITS: NOROOT set and locked, then clearing the locked bit is EPERM");
 
     // PR_CAPBSET_*: 41 capabilities (0..40), then EINVAL, which is what the
     // zygote's DropCapabilitiesBoundingSet loop stops on.

@@ -175,7 +175,7 @@ long lxrt_execve(const char *path, char *const argv[], char *const envp[])
             int k = 0;
             for (int j = 0; j < ec; j++)
                 if (strncmp(use_env[j], "LXRT_ANDROID_IDS=", 17) &&
-                    (!mnt || strncmp(use_env[j], "LXRT_MOUNTS=", 12)))
+                    strncmp(use_env[j], "LXRT_MOUNTS=", 12))
                     withids[k++] = use_env[j];
             withids[k++] = (char *)aids;
             if (mnt) withids[k++] = (char *)mnt;

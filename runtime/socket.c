@@ -562,10 +562,13 @@ long lxrt_getsockname(int fd, void *lsa, uint32_t *llen, bool peer)
     if (rc != 0)
         return LERR(errno);
     addr_to_linux((struct sockaddr *)&ss, dlen, lsa, llen);
-    if (lxrt_trace_on() && ss.ss_family == AF_UNIX && lsa && llen)
-        fprintf(lxrt_trace_stream(), "[lxrt]    %s fd %d: host \"%s\" -> guest len %u \"%.*s\"\n",
-                peer ? "getpeername" : "getsockname", fd, ((struct sockaddr_un *)&ss)->sun_path,
+    if (lxrt_trace_on() && ss.ss_family == AF_UNIX && lsa && llen) {
+        size_t off = offsetof(struct sockaddr_un, sun_path);
+        int hl = dlen > off ? (int)(dlen - off) : 0;
+        fprintf(lxrt_trace_stream(), "[lxrt]    %s fd %d: host \"%.*s\" -> guest len %u \"%.*s\"\n",
+                peer ? "getpeername" : "getsockname", fd, hl, ((struct sockaddr_un *)&ss)->sun_path,
                 *llen, *llen > 2 ? (int)(*llen - 2) : 0, (const char *)lsa + 2);
+    }
     return 0;
 }
 
@@ -632,10 +635,8 @@ static void passcred_set(int fd, bool on)
     if (on) g_passcred[fd >> 3] |= (uint8_t)(1u << (fd & 7));
     else    g_passcred[fd >> 3] &= (uint8_t)~(1u << (fd & 7));
 }
-static void cred_forget(int fd);
 void lxrt_socket_close(int fd)
 {
-    cred_forget(fd);
     passcred_set(fd, false);
     if (fd >= 0 && fd < 65536) {
         int peer = atomic_exchange(&g_nl_peer[fd], 0);
@@ -662,7 +663,6 @@ void lxrt_socket_dup(int oldfd, int newfd) { passcred_set(newfd, passcred_get(ol
 struct cred_ent { _Atomic uint64_t so; _Atomic int32_t pid; };
 #define CRED_SLOTS 8192
 static struct cred_ent *g_creds;
-static _Atomic bool g_cred_sent;       // this process has recorded itself as a sender
 
 static struct cred_ent *cred_table(void)
 {
@@ -701,7 +701,6 @@ static void cred_note_send(int fd)
 {
     uint64_t self, peer;
     struct cred_ent *t;
-    atomic_store(&g_cred_sent, true);
     if (!unix_ids(fd, &self, &peer) || !self || !(t = cred_table()))
         return;
     uint32_t h = (uint32_t)((self * 0x9E3779B97F4A7C15ull) >> 51) % CRED_SLOTS;
@@ -713,31 +712,6 @@ static void cred_note_send(int fd)
             atomic_store(&e->pid, (int32_t)getpid());
             return;
         }
-    }
-}
-
-// A socket this process recorded itself as the sender on is closing: its
-// kernel identity will be handed to some later socket, which must not
-// inherit this process as its "sender" (MEASURED: SO_PEERCRED of a fresh
-// socketpair named a FEXServer that had once sent on a socket at the same
-// kernel address). The slot keeps its key, for the probe chains; pid 0 means
-// "nobody recorded", and the next send on the reused socket records again.
-static void cred_forget(int fd)
-{
-    uint64_t self, peer;
-    struct cred_ent *t;
-    if (!atomic_load(&g_cred_sent) || !unix_ids(fd, &self, &peer) || !self || !(t = cred_table()))
-        return;
-    uint32_t h = (uint32_t)((self * 0x9E3779B97F4A7C15ull) >> 51) % CRED_SLOTS;
-    for (int k = 0; k < 64; k++) {
-        struct cred_ent *e = &t[(h + (uint32_t)k) % CRED_SLOTS];
-        uint64_t cur = atomic_load(&e->so);
-        if (cur == self) {
-            int32_t me = (int32_t)getpid();
-            atomic_compare_exchange_strong(&e->pid, &me, 0);
-            return;
-        }
-        if (cur == 0) return;
     }
 }
 
@@ -786,7 +760,9 @@ static pid_t cred_peer_pid(int fd)
     return 0;
 }
 
-static bool peer_ucred(int fd, struct linux_ucred *out)
+// `real`: SCM_CREDENTIALS, which Linux fills with the sender's real ids;
+// SO_PEERCRED reports the effective ones.
+static bool peer_ucred(int fd, struct linux_ucred *out, bool real)
 {
     // The recorded sender first (see cred_note_send); LOCAL_PEERPID and
     // LOCAL_PEERCRED only answer for connected stream sockets -- a DGRAM
@@ -804,10 +780,10 @@ static bool peer_ucred(int fd, struct linux_ucred *out)
     out->gid = have_cred ? (xu.cr_ngroups > 0 ? xu.cr_groups[0] : 0) : getgid();
     // A peer with Android ids (runtime/android_ids.h) is who it says it is:
     // its effective uid and gid, as Linux's SO_PEERCRED reports.
-    uint32_t au, ag;
-    if (lxrt_aids_lookup(out->pid, &au, &ag)) {
-        out->uid = au;
-        out->gid = ag;
+    struct lxrt_aids_peer ap;
+    if (lxrt_aids_lookup(out->pid, &ap)) {
+        out->uid = real ? ap.ruid : ap.euid;
+        out->gid = real ? ap.rgid : ap.egid;
     }
     return true;
 }
@@ -1032,7 +1008,7 @@ long lxrt_recvmsg(int fd, void *lmsg, int flags)
             // SO_PASSCRED: every message carries the sender's credentials.
             struct linux_ucred uc;
             size_t need = LALIGN((uint32_t)(sizeof(struct linux_cmsghdr) + sizeof uc));
-            if (peer_ucred(fd, &uc) && (size_t)n + need <= (size_t)lm->msg_controllen) {
+            if (peer_ucred(fd, &uc, true) && (size_t)n + need <= (size_t)lm->msg_controllen) {
                 struct linux_cmsghdr *lc = (struct linux_cmsghdr *)((uint8_t *)(uintptr_t)lm->msg_control + n);
                 lc->cmsg_len = sizeof(*lc) + sizeof uc;
                 lc->cmsg_level = L_SOL_SOCKET_OPT;
@@ -1225,7 +1201,7 @@ long lxrt_getsockopt(int fd, int llevel, int lopt, void *val, unsigned *len)
             return 0;
         }
         struct linux_ucred uc;
-        if (!peer_ucred(fd, &uc)) return LERR(errno);
+        if (!peer_ucred(fd, &uc, false)) return LERR(errno);
         if (*len < sizeof uc) return LERR(EINVAL);
         memcpy(val, &uc, sizeof uc);
         *len = sizeof uc;
