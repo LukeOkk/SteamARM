@@ -1255,6 +1255,21 @@ if err=$(/opt/homebrew/opt/llvm/bin/clang --target=aarch64-linux-gnu -O2 -ffrees
     else bad "SIMD_SYSCALL" "rc=$rc $(grep -E 'MAL|round|==' <<<"$out" | tr '\n' ' ')"; fi
 else bad "build simd_syscall" "$err"; fi
 
+# SIG_STRANDED: a process-directed signal that arrives while every thread
+# blocks it stays pending for the process and is delivered once a thread
+# unblocks it (runtime/signal.c, lxrt_signal_rescue_stranded). XNU binds it to
+# the process's first thread -- the host main thread, which blocks everything
+# -- and it stayed there: the intermittent `sh -c $(toybox ...)` hang under FEX
+# (benchmarks/stage28-android-reliability.txt). Freestanding.
+if err=$(/opt/homebrew/opt/llvm/bin/clang --target=aarch64-linux-gnu -O2 -ffreestanding -fno-stack-protector \
+             -fno-builtin -nostdlib -static-pie -fPIE -fuse-ld=lld --ld-path=$CROSS_LD \
+             -o build/sig_stranded tests/elf/sig_stranded.c 2>&1); then
+    out=$(deadline 60 ./build/lxrun build/sig_stranded 2>&1); rc=$?
+    if [ "$rc" -eq 0 ] && grep -q '== sig_stranded: 3 ok, 0 mal' <<<"$out"; then
+        ok "SIG_STRANDED: SIGCHLD and a kill() that came while blocked are delivered on unblock and wake rt_sigsuspend"
+    else bad "SIG_STRANDED" "rc=$rc $(grep -E 'MAL|==' <<<"$out" | tr '\n' ' ')"; fi
+else bad "build sig_stranded" "$err"; fi
+
 # SHM_MREMAP: growing a MAP_SHARED file mapping maps more of the file
 # (runtime/mremap.c, remap_shared_file): a Wayland compositor's wl_shm pool
 # grown with MREMAP_MAYMOVE sees what the client writes past the old end.

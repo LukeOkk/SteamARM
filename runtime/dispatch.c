@@ -3990,7 +3990,12 @@ restart:
                         sigaddset(&set, d);
                 }
         }
+        // For the duration, this thread accepts what the suspend mask lets
+        // through (signal.c aims stray process-directed signals by it).
+        uint64_t noted = lxrt_thread_noted_mask();
+        lxrt_thread_note_mask(a0 ? *(const uint64_t *)a0 : 0);
         sigsuspend(&set);
+        lxrt_thread_note_mask(noted);
         ret = LERR(EINTR);   // sigsuspend always returns -1/EINTR
         break;
     }

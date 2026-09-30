@@ -310,14 +310,29 @@ out=$(x 60 /system/bin/sh -c 'echo $((6*7)); x=$(echo sub); echo $x; toybox seq 
 if [ "$rc" -eq 0 ] && [ "$(tr '\n' ' ' <<<"$out")" = "42 sub 100 " ]; then
     ok "x86_64 sh -c: arithmetic, \$(...) fork, a toybox pipe"
 else bad "x86_64 sh -c" "rc=$rc $(tr '\n' ' ' <<<"$out")"; fi
-# A command substitution that runs a program: mksh waits for the child's
-# SIGCHLD in rt_sigsuspend, and FEX defers a signal that lands in one of its
-# own critical sections (patches/fex-lxrt-interrupt-page.patch: without it
-# this never returned).
-out=$(x 30 /system/bin/sh -c 'x=$(toybox echo x); y=$(toybox seq 3 | toybox wc -l); echo got $x $y'); rc=$?
-if [ "$rc" -eq 0 ] && [ "$out" = "got x 3" ]; then
-    ok "x86_64 sh: \$(toybox ...) returns (SIGCHLD during rt_sigsuspend)"
-else bad "x86_64 sh \$(toybox ...)" "rc=$rc '$out' (a lost SIGCHLD hangs here until the deadline)"; fi
+# A command substitution that runs a program: mksh blocks SIGCHLD around
+# fork and waits for the child's SIGCHLD in rt_sigsuspend. Three ways it was
+# lost, each once a hang until the deadline: FEX deferring a signal that lands
+# in one of its own critical sections (patches/fex-lxrt-interrupt-page.patch),
+# XNU leaving a SIGCHLD that came while the guest blocked it on the host main
+# thread (runtime/signal.c, lxrt_signal_rescue_stranded), and FEX keeping one
+# that came in its mask-update window in PendingSignals, which sigsuspend did
+# not look at (patches/fex-lxrt-sigsuspend-pending.patch). Rare each, so
+# ANDROID_SIG_RUNS runs (40): stage 27 measured ~1 in 40, stage 28 12 in 300
+# (benchmarks/stage28-android-reliability.txt).
+local runs="${ANDROID_SIG_RUNS:-40}" good=0 hung=0 other="" t0=$SECONDS
+for ((i = 0; i < runs; i++)); do
+    out=$(x 15 /system/bin/sh -c 'x=$(toybox echo x); y=$(toybox seq 3 | toybox wc -l); echo got $x $y'); rc=$?
+    if [ "$rc" -eq 0 ] && [ "$out" = "got x 3" ]; then good=$((good+1))
+    elif [ "$rc" -eq 142 ]; then hung=$((hung+1))
+    else other="rc=$rc '$out'"; fi
+done
+if [ "$good" -eq "$runs" ]; then
+    ok "x86_64 sh: \$(toybox ...) returns, $good of $runs runs ($((SECONDS - t0)) s; SIGCHLD during rt_sigsuspend)"
+elif [ -z "$other" ] && ! grep -aq lxrt-sigsuspend-pending "$X86_ROOT/usr/lib/lxrt-emu/FEX"; then
+    xfail "x86_64 sh: \$(toybox ...) returned $good of $runs times, $hung hung" \
+          "the root's FEX predates patches/fex-lxrt-sigsuspend-pending.patch (scripts/build-fex-host.sh, scripts/mkandroidroot.sh --arch x86_64 --emu)"
+else bad "x86_64 sh \$(toybox ...)" "$good of $runs returned, $hung hung until the 15 s deadline ${other}"; fi
 want=$(shasum -a 256 "$X86_ROOT/system/framework/framework.jar" | awk '{print $1}')
 out=$(x 60 /system/bin/toybox sha256sum /system/framework/framework.jar); rc=$?
 if [ "$rc" -eq 0 ] && [ "${out%% *}" = "$want" ]; then

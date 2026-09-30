@@ -65,6 +65,11 @@ struct linux_timespec64 { int64_t tv_sec; int64_t tv_nsec; };
 struct guest_thread {
     int       tid;
     uint32_t *clear_child_tid;  // written to 0 and woken when the thread exits
+    // The Linux signal mask the guest last set on this thread (signal.c keeps
+    // it: rt_sigprocmask, rt_sigsuspend, a handler's sigreturn). Read by other
+    // threads to aim a process-directed signal that no thread took when it was
+    // posted at one that accepts it (lxrt_thread_signal_target).
+    _Atomic uint64_t lmask;
 };
 
 // tid -> Darwin thread, so a thread-directed signal actually reaches the thread
@@ -82,6 +87,9 @@ static struct {
     // enough -- each delivery has to come back out in order.
     uint8_t rt[RT_QUEUE_DEPTH];
     uint8_t rt_head, rt_tail;
+    // The thread's state; freed only after unregister_thread (gt_free), so it
+    // may be read under g_threads_lock while the slot is used.
+    struct guest_thread *gt;
 } g_threads[MAX_GUEST_THREADS];
 static pthread_mutex_t g_threads_lock = PTHREAD_MUTEX_INITIALIZER;
 
@@ -105,7 +113,7 @@ static void threads_unlock(void)
 }
 LXRT_FORK_SAFE(thread_g_threads_lock, g_threads_lock)
 
-static void register_thread(int tid, pthread_t th)
+static void register_thread(int tid, pthread_t th, struct guest_thread *gt)
 {
     threads_lock();
     for (int i = 0; i < MAX_GUEST_THREADS; i++)
@@ -113,6 +121,7 @@ static void register_thread(int tid, pthread_t th)
             memset(&g_threads[i], 0, sizeof(g_threads[i]));
             g_threads[i].tid = tid;
             g_threads[i].th = th;
+            g_threads[i].gt = gt;
             g_threads[i].used = true;
             break;
         }
@@ -180,6 +189,55 @@ bool lxrt_main_guest_thread(pthread_t *out)
 static pthread_key_t g_gt_key;
 static pthread_once_t g_once = PTHREAD_ONCE_INIT;
 static atomic_int g_next_tid;
+static void gt_init(void);
+
+// Is the calling thread a guest thread (one that has run guest code or is
+// about to)? The host main thread, the runtime's helper threads and threads
+// Darwin's frameworks start are not. Async-signal-safe (a TSD read).
+bool lxrt_thread_is_guest(void)
+{
+    pthread_once(&g_once, gt_init);
+    return pthread_getspecific(g_gt_key) != NULL;
+}
+
+// The Linux signal mask the calling guest thread now has, as signal.c sees
+// it change (no-op on other threads).
+void lxrt_thread_note_mask(uint64_t lmask)
+{
+    pthread_once(&g_once, gt_init);
+    struct guest_thread *gt = pthread_getspecific(g_gt_key);
+    if (gt)
+        atomic_store_explicit(&gt->lmask, lmask, memory_order_relaxed);
+}
+
+uint64_t lxrt_thread_noted_mask(void)
+{
+    pthread_once(&g_once, gt_init);
+    struct guest_thread *gt = pthread_getspecific(g_gt_key);
+    return gt ? atomic_load_explicit(&gt->lmask, memory_order_relaxed) : 0;
+}
+
+// Where a process-directed signal goes that reached a thread other than a
+// guest thread (signal.c, forward_stray): Linux hands it to a thread that does
+// not block it, so the first guest thread whose noted mask lets `lsig`
+// through; if every one blocks it, the first guest thread, where it stays
+// pending until that thread unblocks it (Linux would keep it for whichever
+// thread unblocks first).
+bool lxrt_thread_signal_target(int lsig, pthread_t *out)
+{
+    bool found = false;
+    uint64_t bit = (lsig >= 1 && lsig <= 64) ? 1ull << (lsig - 1) : 0;
+    threads_lock();
+    for (int i = 0; i < MAX_GUEST_THREADS && bit; i++)
+        if (g_threads[i].used && g_threads[i].gt &&
+            !(atomic_load_explicit(&g_threads[i].gt->lmask, memory_order_relaxed) & bit)) {
+            *out = g_threads[i].th;
+            found = true;
+            break;
+        }
+    threads_unlock();
+    return found || lxrt_main_guest_thread(out);
+}
 
 static void gt_free(void *p)
 {
@@ -217,7 +275,7 @@ static struct guest_thread *gt_self(void)
             return NULL;
         gt->tid = g_main_guest_set ? next_tid() : (int)getpid();
         pthread_setspecific(g_gt_key, gt);
-        register_thread(gt->tid, pthread_self());
+        register_thread(gt->tid, pthread_self(), gt);
         if (!g_main_guest_set) {
             g_main_guest = pthread_self();
             g_main_guest_set = true;
@@ -428,6 +486,7 @@ struct clone_ctx {
     uint64_t  tls;
     uint64_t  x18;           // the parent's virtual x18: registers are inherited
     uint64_t  rt_mask;       // the parent's realtime signal mask (signal.c)
+    uint64_t  lmask;         // the parent's Linux signal mask, as last noted
     uint32_t *ctid;
     int       tid;
     bool      set_tls;
@@ -446,7 +505,10 @@ static void *thread_start(void *arg)
         unregister_thread(gt->tid);
         gt->tid = ctx.tid;
         gt->clear_child_tid = ctx.clear_ctid ? ctx.ctid : NULL;
-        register_thread(gt->tid, pthread_self());
+        // A new thread starts with its creator's signal mask (pthread_create
+        // inherits the host one; Linux's clone the same).
+        atomic_store_explicit(&gt->lmask, ctx.lmask, memory_order_relaxed);
+        register_thread(gt->tid, pthread_self(), gt);
     }
     if (ctx.set_tls)
         lxrt_tls_set(ctx.tls);
@@ -497,6 +559,7 @@ long lxrt_clone(uint64_t flags, uint64_t child_stack, uint32_t *ptid,
     ctx->regs = *parent;
     ctx->x18 = lxrt_x18_get();
     ctx->rt_mask = lxrt_rt_mask_get();
+    ctx->lmask = lxrt_thread_noted_mask();
     ctx->stack = child_stack;
     // Without CLONE_SETTLS the child starts with the parent's thread pointer:
     // Linux copies TPIDR_EL0 into the new task (arm64 copy_thread). bionic's

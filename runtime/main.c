@@ -600,8 +600,10 @@ int main(int argc, char **argv)
     // CoreFoundation entirely (a plain sleep loop) -- to tell whether a kill
     // of the process comes through the run loop.
     if (getenv("LXRT_NO_PUMP")) {
-        while (g_guest_running)
+        while (g_guest_running) {
             usleep(10000);
+            lxrt_signal_rescue_stranded();
+        }
     } else
         lxrt_window_pump(&g_guest_running);
     pthread_join(th, NULL);
