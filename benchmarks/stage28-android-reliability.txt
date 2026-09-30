@@ -1,90 +1,455 @@
-Stage 28 (Android reliability) -- the sh $(toybox) hang, i386 Android under FEX, a /dev/input per Android stack, binder for 32-bit guests (2026-09-30)
-===============================================================================================================================================
+Stage 28 -- Android reliability: the sh $(toybox) hang's root cause, i386 Android under FEX, a /dev/input per stack (2026-09-30)
+===============================================================================================================================
 
-ZERO-VM. Every process is an ordinary macOS process: lxrun, or lxrun running
-SteamARM's FEX. Host: Mac mini M4, macOS 27.0. No account, no Google
-software, no Steam client.
+ZERO-VM. No virtual machine, no guest kernel: every program below is an
+ordinary macOS process (lxrun running a Linux aarch64 program, or lxrun
+running FEX running an x86-64 or i386 program). Host: Mac mini M4, macOS
+27.0. Base: main at 7492467; the work of a previous session (branch
+worktree-wf_f2c065ea-b4f-2: 1519c69, cc9c9cf, 29c324b, eb02249, c52265b and
+an untested WIP commit bf864de) merged, reviewed, finished and measured
+here. Nothing was signed in to, no Steam client was started,
+scripts/run-app.sh was not called, nothing under /Applications or
+~/Library was touched, no Google software was fetched.
 
-How this record was made. The session that did this work (branch
-worktree-wf_f2c065ea-b4f-2, commits 1519c69, cc9c9cf, 29c324b, eb02249,
-c52265b, and bf864de marked WIP) was interrupted before it wrote its record.
-Its measurements are in those commit messages; they are gathered here as
-they were written there, labelled as that session labelled them. The branch
-was merged at b35745f together with the APK work of the same stage
-(benchmarks/stage28-android-apk.txt), and what is re-measured after the
-merge is in that record's final checks. Labels: MEASURED, VERIFIED IN SOURCE,
-HYPOTHESIS, UNKNOWN.
+Two other sessions ran on the same Mac the whole time (an Android APK
+session booting its own x86_64 root, 25-55 lxrun processes in bursts, and
+an x18 build evaluation running FEX guests and Proton probes). This session
+wrote only to its own places: APFS clones of the Android roots
+(/Volumes/SteamARMAndroid/r28a, r28x, r28o, r28f, r28L; seconds and no
+space to make), a clone of the Weston root and a private FEX build
+directory (both under ~/SteamARM-build-stage28), the Steam root's /tmp and
+wine prefix that tests/win/run.sh uses, and /tmp. Every process it started
+was stopped by its PID or process group. Home paths are written as ~.
+Labels: MEASURED, VERIFIED IN SOURCE, UPSTREAM DOCUMENTED, HYPOTHESIS,
+UNKNOWN.
 
-1. The intermittent hang of x86-64 Android's mksh under FEX (1519c69)
----------------------------------------------------------------------
-Stage 27 saw `sh -c '$(toybox ...)'` hang about 1 run in 40 (12 of 300
-here). Two causes, each MEASURED:
-- XNU binds a process-directed signal to one thread when it is posted and,
-  if every thread blocks it, leaves it on the process's first thread: under
-  lxrun the host main thread, which blocks everything. A SIGCHLD that came
-  while the guest blocked it (or during the runtime's own all-signals-blocked
-  sections) was never delivered. The main thread now looks at its pending
-  set on every turn of its loop and hands such signals to a guest thread
-  (runtime/signal.c, runtime/thread.c). tests/elf/sig_stranded.c: 0 ok 3 mal
-  before, 3 ok after.
-- FEX kept a SIGCHLD that arrived in its mask-update window in
-  PendingSignals, and GuestSigSuspend never looked there before sleeping:
-  patches/fex-lxrt-sigsuspend-pending.patch re-raises such signals for the
-  host sigsuspend (and rt_sigtimedwait).
-300 runs each: HEAD 12 hangs, runtime fix only 4, FEX fix only 3, both 0.
-tests/android/run.sh runs the command 40 times.
+Result
+------
+MEASURED:
+1. The intermittent hang of x86-64 Android's mksh under FEX
+   (`sh -c 'x=$(toybox echo x); y=$(toybox seq 3 | toybox wc -l); echo got
+   $x $y'`, stage 27: about 1 run in 40) is gone: 0 hangs in 720 runs with
+   both fixes (960 counting the suite runs), against 3 in 240 with main's
+   lxrun and FEX on the same Mac
+   at the same time. It had two independent causes, and each fix alone
+   still hangs (1 in 240 with the runtime fix only, 6 in 240 with the FEX
+   fix only). Part 1.
+2. The FEX patches (patches/fex-lxrt-sigsuspend-pending.patch and the
+   finished patches/fex-lxrt-i386-bionic.patch) apply to a clean FEX tree
+   at the pinned commit through scripts/build-fex-host.sh and the build
+   reproduces the previous session's binary bit for bit (FEX-emu sha256
+   731ec126...). Part 2.
+3. The Steam/Proton route does not regress with that FEX: run_i386.sh 18
+   passed 0 failed, tests/win/run.sh 11 passed 0 failed with D3D frame
+   rates within ~1 fps of the installed FEX in alternating runs,
+   run_vk_device.sh 2 passed -- the same as the installed FEX. Part 3.
+4. i386 Android runs under FEX's 32-bit mode: an i386 bionic program
+   passes 8 of 8 checks, dalvikvm32 runs Java, dex2oat32 compiles an odex
+   that dalvikvm32 runs, an i386 binder service answers an x86-64 client,
+   zygote_secondary serves system_server, the 32-bit audio HAL registers
+   and AudioFlinger starts (--linkerconfig). Limited by 32-bit bionic's
+   16-bit thread ids: nothing i386 starts while the Mac's pid is above
+   65535, and a second thread cannot relock its own recursive mutex
+   (tests/android/i386_rmutex.c). Part 4.
+5. A /dev/input per Android stack (LXRT_INPUT_DIR): a composer-style FIFO
+   writer and an EventHub-style reader meet in their directory and another
+   stack's guest does not see it. Part 5.
+6. Tests: tests/elf/run.sh 83 passed 0 failed (after a fix to one of the
+   new checks, below), make test-launcher-core rc 0, tests/android/run.sh:
+   Part 6.
 
-2. i386 Android under FEX: zygote_secondary, dex2oat32, dalvikvm32 (cc9c9cf)
-------------------------------------------------------------------------------
-The image's 32-bit programs died in FEX's 32-bit mode. Fixed one after the
-other in patches/fex-lxrt-i386-bionic.patch: the fallback vsyscall page was
-not tracked as executable ("NoExec instruction in entry block" on bionic's
-first AT_SYSINFO call); x32 futex REQUEUE's integer val2 was rebased
-(EINVAL, "futex requeue failed"); x32 rt_sigtimedwait with a NULL siginfo
-asserted; the 32-bit allocator ignored free mmap hints (ART's boot image:
-imageless start, 6 s -> 1.6 s for a hello world); x32 set/getsockopt
-dereferenced the guest's optval without the base. In the runtime: msync of
-a 32-bit guest address gets the base; getsockopt SO_DOMAIN/SO_PROTOCOL;
-SO_RCVTIMEO_NEW/SO_SNDTIMEO_NEW; MSG_TRUNC/MSG_CTRUNC are not passed to
-Darwin's recvmsg, which echoes them into msg_flags (libbase's
-ReceiveFileDescriptorVector refused every message); an SCM_RIGHTS with no
-descriptor is dropped, as Linux never delivers one. MEASURED then: dex2oat32
-compiles a dex whose odex dalvikvm32 runs, zygote_secondary listens and
-serves system_server, which enters in ~7 s instead of ~30 s.
-tests/android/i386_bionic.c: 8 checks, one per fix. The last WIP commit
-(bf864de) made a shared mapping take its hint only when the 16 KiB host
-pages it touches are free as a whole; the FEX built from these patches after
-the merge (FEX-emu sha256 731ec126..., 43 s of ninja, Release) is
-byte-identical to the one that session had installed in its own clone
-(MEASURED, stage28-android-apk.txt).
+Part 1: the hang (MEASURED)
+---------------------------
+mksh blocks SIGCHLD around fork and waits for the child's SIGCHLD in
+rt_sigsuspend with SIGCHLD let through. The SIGCHLD was lost in two places:
 
-3. A /dev/input per Android stack (29c324b)
--------------------------------------------
-LXRT_INPUT_DIR=<host dir> gives a guest (and what it runs) its own
-/dev/input; unset, it is /tmp/lxrt-input as before (runtime/evdev.c).
-hwcomposer.waydroid's input FIFOs (wl_pointer_events, wl_keyboard_events)
-land in the stack's own directory; 30 synthetic pointer motions sent to
-Weston's X window came out of wl_pointer_events as 150 records (ABS X/Y, REL
-X/Y, SYN) to an EventHub-style reader (tests/android/input_fifo.c,
-tests/android/xsend_motion.py; MEASURED). Synthetic buttons and keys are
-not sent: Weston's X11 backend asserts on a synthetic button event
-(libweston/backend-x11/x11.c:1349, the send_event bit) and aborts
-(MEASURED). InputFlinger itself was not run then; it runs in the APK work.
+a. XNU binds a process-directed signal to one thread when it is posted: a
+   thread that does not block it (or waits for it in sigwait); when every
+   thread blocks it, the process's first thread, where it stays. Linux
+   keeps it in the process's shared pending set for the first thread that
+   unblocks it. Under lxrun the first thread is the host main thread, which
+   blocks every signal for good (runtime/main.c). A SIGCHLD that came while
+   the guest blocked it, or while the runtime was in one of its
+   all-signals-blocked sections (the thread table lock every rt_sigprocmask
+   takes), was never delivered. tests/elf/sig_stranded.c (freestanding,
+   raw syscalls: SIGCHLD of a child that exits while blocked, the same with
+   rt_sigsuspend as the wait, a kill() from a child while SIGUSR1 is
+   blocked), run here:
+     main's lxrun (7492467):   == sig_stranded: 0 ok, 3 mal
+       MAL chld: ... not delivered within 2 s of the unblock
+       MAL suspend: rt_sigsuspend woke only for the 2 s watchdog
+       MAL kill: ... not delivered within 2 s of the unblock
+     this branch's lxrun:      == sig_stranded: 3 ok, 0 mal
+   Fix (1519c69): runtime/signal.c lxrt_signal_rescue_stranded. The main
+   thread looks at its pending set on every turn of its loop (window.m: at
+   most 20 ms apart; main.c's LXRT_NO_PUMP loop: 10 ms), and takes each
+   signal with the runtime's handler by unblocking it for a moment;
+   host_handler on a non-guest thread hands it to a guest thread with
+   pthread_kill: the first whose Linux mask (runtime/thread.c now notes it
+   on rt_sigprocmask, rt_sigsuspend and a handler's return) lets it
+   through, else the first guest thread, where it stays pending until
+   unblocked. Signals at SIG_DFL are left alone.
+b. FEX updates its emulated mask before the host mask
+   (SignalDelegator::GuestSigProcMask), and a guest handler runs with a
+   host mask narrower than the guest's; a signal that lands in between is
+   taken from the host and only recorded in PendingSignals, re-raised by
+   CheckForPendingSignals when the guest unmasks it with rt_sigprocmask.
+   GuestSigSuspend never looked there before the host sigsuspend (the
+   previous session's instrumented FEX: "SIGCHLD -> pending 10000", then
+   "sigsuspend set=80000000 pend=10000" and no wake). Fix:
+   patches/fex-lxrt-sigsuspend-pending.patch raises each pending signal the
+   suspend mask lets through again (tgkill to itself, blocked on the host)
+   so the host sigsuspend delivers it and returns; the host handler clears
+   the PendingSignals bit as it delivers (VERIFIED IN SOURCE,
+   SignalDelegator.cpp), so it is not delivered twice.
+   GuestSigTimedWait does the same for the signals of its set.
 
-4. Binder for 32-bit guests, and the 32-bit audio HAL (eb02249, c52265b)
-------------------------------------------------------------------------
-An i386 bionic process passes its own addresses (below 4 GiB) in binder's
-structures and in the ioctl argument; the runtime now bases them
-(runtime/gbase.c, runtime/binder.c) and hands the hub the receive buffer's
-guest address. MEASURED then: tests/android/binder_service.c built for i386
-registers with the image's servicemanager, answers an x86-64 `service call`
-(i32 41 -> 42) and reads a descriptor passed to it; the image's i386 audio
-HAL registers IDevicesFactory and IEffectsFactory 4.0 and audioserver starts
-AudioFlinger, with android-boot.py --linkerconfig (opt-in: init's
-update_linker_config rewrites the root's /linkerconfig with the property
-service up; the legacy file has no VNDK namespace for
-android.hardware.audio@4.0.so).
+The measurement. The command above, in a loop, each run through
+scripts/run-android-x86.sh in a process group of its own with a 15 s
+deadline (TERM to the group, KILL 2 s later: tests/android/run.sh's dlrun;
+a hang shows as ~17 s and no output). Each configuration in its own APFS
+clone of the x86_64 root, so each had its own FEXServer; loops of a batch
+ran at the same time, with the other sessions' guests running:
 
-Not done there: the session's record ends with the WIP commit; nothing of
-it was re-measured end to end in the display profile (whose default leaves
-32-bit out: stage28-android-apk.txt).
+  batch  lxrun             FEX in the root            runs  ok   hung  ok-run median / p90 / max
+  1      main (7492467)    main's (6d4aaa58..., no    240   237  3     454 / 536 / 844 ms
+                           lxrt-sigsuspend-pending)                    (runs 228, 236, 237)
+  1      this branch       this branch's (731ec126...) 240  240  0     454 / 535 / 833 ms
+  2      this branch       this branch's               480  480  0     472 / 562 / 947 ms
+  2      this branch       main's                      240  239  1     486 / 559 / 1071 ms (run 194)
+  2      main              this branch's               240  234  6     480 / 560 / 1146 ms
+                                                                       (runs 129, 150, 153, 206, 215, 230)
+
+  Both fixes: 0 hangs in 720 runs. The previous session, 300 runs each:
+  main 12, runtime fix only 4, FEX fix only 3, both 0. Together: both
+  fixes 0 in 1,020 runs; main 15 in 540.
+  (Batch 1's loop recorded grep's status instead of the guest's for the
+  three hung runs of main -- "rc 1", 17.0 s, no output; the script was
+  corrected for batch 2, where a hang is status 142.)
+  tests/android/run.sh runs the command 40 times (ANDROID_SIG_RUNS): 40 of
+  40 in each run below.
+
+Not fixed, stated (VERIFIED IN SOURCE, not measured): a stranded signal
+that no guest thread accepts goes to the first guest thread and stays
+pending there. A program whose OTHER thread later waits for it in
+sigwait/sigtimedwait (a dedicated signal thread, as ART's signal catcher)
+would not get it, and the runtime's rt_sigtimedwait (fex_support.c) does
+not note its thread as accepting the waited set. XNU itself targets a
+thread that is in sigwait when the signal is posted, so this needs the
+signal to arrive while that thread is busy. Linux would hand it to
+whichever thread wants it first.
+
+Also found (VERIFIED IN SOURCE, MEASURED): FEXServer started with
+--foreground never exits when idle, whatever --persistent says
+(Source/Tools/FEXServer/ProcessPipe.cpp: `if (Foreground || NumClients >
+0) Timeout.reset();`). Three servers of this session's loops were still
+there after 7-10 idle minutes and were stopped by PID.
+scripts/run-android-x86.sh and scripts/run-fex.sh both start it with
+--foreground (it keeps the server from daemonizing away from its PID
+file); run-android-x86.sh's comment said it exits by itself and now says
+it does not. Each one left counts toward scripts/safeguard.sh's 80 lxrun
+processes. Two more left by this session's own runs and stopped by PID at
+the end: the x86_64 root's server that tests/android/run.sh's display
+section starts through run-android-x86.sh (the x86_64 section stops the
+one it started; the display section does not), 30 minutes after run 6,
+and the one of the --linkerconfig boot (android-boot.py stops what carries
+its state directory; the server does not).
+
+Part 2: the FEX build (MEASURED)
+--------------------------------
+STEAMARM_BUILD=~/SteamARM-build-stage28 scripts/build-fex-host.sh all, the
+work directory made from APFS clones of ~/SteamARM-build's RPM cache,
+sysroot and FEX clone (the build directories fresh). FEX 08f451d3b; the
+script checked out the pinned commit with `checkout -f` and `clean -fdx`
+and applied all 14 patches in order, the new ones last:
+  ... fex-lxrt-seccomp-cap-sys-admin.patch, fex-lxrt-sigsuspend-pending.patch,
+  fex-lxrt-i386-bionic.patch  -> "47 changed/new files", no rejects
+Fresh configure and build: Release 35 s, RelWithDebInfo 70 s (LTO, -j10).
+  FEX          3926944 bytes  sha256 f48f3c21b095fca31ecc2c0c95265330f97fd512145e7773b981b1450ca78a78
+  FEX-emu      3927024 bytes  sha256 731ec126b4cecd53df1aabcc41f8424b78f906ec10ad5f0b6aaba9bd295d0a39
+  FEX-dbg     37000480 bytes  sha256 525c6d3327c4decd3ed300fd19149ef46556b2be7925ebc043f63be037762e9a
+  FEXServer     355280 bytes  sha256 d3fe5cd07e9cf82513e18546d3f1e6d26244df01443b4eec9dbe864cf4b0fa7c
+  FEXGetConfig  290664 bytes  sha256 681daef184e2adb52fb75e921370e3ced434dee4e7dc09f3c095dd5f3ec4ab29
+FEX-emu is byte-identical to the FEX the previous session had put in its
+own clone of the x86_64 root (/Volumes/SteamARMAndroid/x86b3, written at
+01:13, before its WIP commit was saved): the WIP patch is what that binary
+was built from, and the build reproduces it. FEXServer and FEXGetConfig are
+identical to the installed ones (the patches do not touch them); the
+binaries carry "lxrt-sigsuspend-pending" and "lxrt-i386-bionic".
+
+The WIP (bf864de) changed one hunk of the i386 patch: MemAllocator32Bit
+takes a free mmap hint (item 4 of the patch), and a MAP_SHARED mapping only
+when the 16 KiB host pages it touches are free as a whole -- with a
+neighbour in one of them the runtime places a private copy (a 4 KiB view
+in a composite 16 KiB page, runtime/shmirror.c's header; VERIFIED IN
+SOURCE), which is not shared any more. Finished here: the patch header now
+describes that rule (text only; the rebuild after it: below, "Final
+checks"). No test isolates the shared-hint rule; it is covered by the
+matrix: i386 ART (boot image, JIT, dex2oat32), Proton's 32-bit Wine
+(tick_32 reads KUSER_SHARED_DATA's clock: GetTickCount 999 ms across
+Sleep(1000)) and the i386 probes.
+
+Part 3: the Steam/Proton route with this FEX (MEASURED)
+--------------------------------------------------------
+Every FEX guest runs the same FEX binary, so the new FEX was run against
+the Steam/Proton tests. How the scripts pick FEX (VERIFIED IN SOURCE):
+tests/elf/run_i386.sh, tests/win/run.sh and tests/elf/run_vk_device.sh all
+go through scripts/run-fex.sh, which execs `lxrun $FEXDIR/$FEXBIN`
+(default /tmp/lxrt-root/usr/bin/FEX-gb); FEX re-executes itself for each
+x86 exec through /proc/self/exe, which the runtime resolves to the image
+it loaded (runtime/process.c). So FEXDIR=~/SteamARM-build-stage28/fexdir
+(FEX-gb = out/FEX, FEXServer, FEXGetConfig) runs every process of a test
+on the new FEX without touching /tmp/lxrt-root or the Steam root.
+run_vk_device.sh reads STEAMARM_BUILD for the thunk sysroots, so only
+FEXDIR was set. The shared FEXServer (one per user) was started by the
+first of these runs from that directory; it is byte-identical to the
+installed one.
+
+tests/elf/run_i386.sh (probes already built in /tmp/lxrt-root/tmp):
+  new FEX, no X server yet     17 passed, 1 failed (i386_x11: XOpenDisplay failed)
+  installed FEX, same          17 passed, 1 failed (the same)
+  new FEX, X server on :2      18 passed, 0 failed (xfail i386_smc_subpage; nap, time: no verdict)
+  installed FEX, same          18 passed, 0 failed
+tests/win/run.sh (Proton Experimental, DXVK / VKD3D-Proton, MoltenVK):
+                     new FEX (4:32)                      installed FEX (3:34)
+  tick               QPC 1001, GetTickCount 991          QPC 1001, GetTickCount 996
+  tick_32            QPC 1001, GetTickCount 999          QPC 1002, GetTickCount 994
+  tone, tone_32      440 Hz stream reached PulseAudio    the same
+  regwin             ok                                  ok
+  d3d11              150.9 fps                           158.7 fps
+  d3d12              158.5                               157.6
+  d3d9               156.7                               158.9
+  d3d9_32            159.5                               160.5
+  d3d11_32           158.1                               160.2
+  d3d12_32           161.3                               161.2
+  == 11 passed, 0 failed                                 == 11 passed, 0 failed
+  d3d11 at 150.9 was the first D3D probe of the first run; alternating
+  reruns of d3d11, d3d9_32, d3d11_32 (new, installed, new, installed):
+  d3d11     158.3  159.6  158.5  159.3
+  d3d9_32   160.5  160.0  158.4  160.4
+  d3d11_32  160.7  161.2  160.4  160.5
+  So within ~1 fps, both sides of the ~160 fps of stage 24.
+tests/elf/run_vk_device.sh: new FEX 2 passed (x86_64 and i386: readback
+  0xcafef00d 0x0badc0de 0x0badc0de); installed FEX 2 passed.
+
+Not installed. The matrix passed, but the shared roots' FEX was left as it
+was: scripts/install-fex-host.sh (the project's installer, with backups)
+refuses while any lxrun guest runs, and the other two sessions had guests
+running -- FEXServers that never exit among them -- for the whole session;
+the x18 session was measuring Proton probes on the installed FEX. To
+install when nothing runs:
+  STEAMARM_BUILD=~/SteamARM-build-stage28 scripts/install-fex-host.sh
+  (FEX-gb, FEXServer, FEXGetConfig in /tmp/lxrt-root/usr/bin and
+  /tmp/lxrt-steamroot/usr/bin; FEX-emu as /tmp/lxrt-steamroot/usr/lib/
+  lxrt-emu/FEX)
+  ANDROID_X86_ROOT=<root> scripts/mkandroidroot.sh --arch x86_64 --emu
+  with STEAMARM_BUILD set the same way, for an x86_64 Android root.
+Installed state, unchanged: /tmp/lxrt-root/usr/bin/FEX-gb and
+/tmp/lxrt-steamroot/usr/bin/FEX-gb eed649d9..., the Steam root's
+lxrt-emu/FEX 2c0b1566..., the shared x86_64 Android root's 6d4aaa58....
+
+Part 4: i386 Android (MEASURED; commits cc9c9cf, eb02249, c52265b)
+------------------------------------------------------------------
+What each 32-bit program died of, and the fix (the previous session's
+measurements, reviewed here against the code):
+  FEX (patches/fex-lxrt-i386-bionic.patch):
+  - the fallback vsyscall page (no VDSO thunk for bionic) tracked as
+    read-write: "NoExec instruction in entry block" on bionic's first
+    AT_SYSINFO call -> AddVirtualPage(PROT_READ|PROT_EXEC);
+  - x32 futex: the guest-base thunk based REQUEUE's integer val2 ->
+    H2G for the non-timeout commands (H2G is range-checked, so 0 and
+    small counts pass unchanged; VERIFIED IN SOURCE, GuestBase.h);
+  - x32 rt_sigtimedwait: NULL siginfo asserted, errors copied out;
+  - MemAllocator32Bit ignored free hints (ART's boot image);
+  - x32 set/getsockopt used the guest's optval without the base (G2H of
+    NULL is NULL).
+  Runtime: msync of a 32-bit guest's address based (dispatch.c);
+  SO_DOMAIN / SO_PROTOCOL; SO_RCVTIMEO_NEW / SO_SNDTIMEO_NEW;
+  MSG_TRUNC / MSG_CTRUNC no longer passed to Darwin's recvmsg (XNU echoes
+  them into msg_flags); an empty SCM_RIGHTS dropped as Linux never
+  delivers one (socket.c); binder for 32-bit guests: the ioctl argument
+  and every address read or written through (gbase.c, binder.c), the hub
+  told the guest's view of the receive buffer.
+Run here (tests/android/run.sh on the r28x clone with the new FEX):
+  i386 bionic under FEX: AT_SYSINFO, CMP_REQUEUE, sigwait, SO_RCVTIMEO,
+    SO_DOMAIN, SCM_RIGHTS, mmap hint, msync (8 ok)
+  dalvikvm32 (i386) Hello: java.vm.name=Dalvik java.vm.version=2.1.0 os.arch=i686
+  dex2oat32 (i386) compiled hello.dex to a 29196-byte i386 odex, and
+    dalvikvm32 runs it
+  an i386 native service (32-bit bionic under FEX) registered and answered
+    an x86-64 client: i32 41 -> 42, and read the descriptor it was passed
+  android-boot: zygote_secondary (i386 app_process32) listening,
+    system_server connected to it (run 6, Part 6)
+The 32-bit audio HAL: scripts/android-boot.py --root r28L (another clone
+with the new FEX) --seconds 90 --linkerconfig, at 05:36:
+  update_linker_config: linkerconfig exited 0, /linkerconfig/ld.config.txt
+    80484 bytes
+  started vendor.audio-hal (pid 11676, class_start hal):
+    /vendor/bin/hw/android.hardware.audio.service   (i386)
+  Registered android.hardware.audio@4.0::IDevicesFactory/default
+  Registered android.hardware.audio.effect@4.0::IEffectsFactory/default
+  audioserver ... AudioFlinger: Using default 3000 mSec as standby time.
+  zygote64 preloaded 12,100 classes in 1297 ms; zygote_secondary listening,
+  system_server connected to it; "Entered the Android system server!" 8 s
+  after the boot started (stage 27: 30 s, 20 of them waiting for the i386
+  zygote); 22 bootstrap services; then the SurfaceFlinger wall (expected).
+
+Two limits found here (MEASURED), both from 32-bit bionic keeping thread
+ids in 16 bits (pthread_mutex_t is 4 bytes on 32-bit):
+a. 32-bit bionic refuses to start when the main thread's tid is above
+   65535 (the message is in the image's lib/bionic/libc.so, not in
+   lib64's). Under lxrun that tid is the Mac's pid, which runs up to
+   99999. In suite run 6 (05:28, the Mac's pid counter near 84000-95000)
+   dalvikvm32 and dex2oat32 printed "Limited by the size of
+   pthread_mutex_t, 32 bit bionic libc only accepts pid <= 65535, but
+   current pid is 84368" (94454 for dex2oat32) and then hung until the
+   test's deadline instead of exiting; the i386 probe hung the same way
+   (the check kept no line of its output). At 05:36, after the counter wrapped
+   (pids near 11000), the audio HAL and zygote_secondary started.
+   tests/android/run.sh now names such runs expected failures.
+b. Every other thread's tid is 200000 + pid * 10000 + n
+   (runtime/thread.c next_tid, chosen so a tid never equals a Darwin pid).
+   tests/android/i386_rmutex.c (new; the image's 32-bit bionic, a second
+   thread takes a recursive and an error-checking mutex):
+     main tid 21107
+     thread tid 211270001: recursive lock 0, relock (trylock) 16, unlock 1 -1;
+       errorcheck lock 0, unlock 1
+     == i386_rmutex: MAL
+   EBUSY on its own recursive mutex, EPERM unlocking its own mutex; a first
+   version that printed from the thread never returned (stdio's recursive
+   lock). zygote_secondary, dalvikvm32 and dex2oat32 got through their runs
+   regardless, but any 32-bit Android code that uses a recursive mutex off
+   the main thread will hang. An expected failure in tests/android/run.sh.
+   The fix is tids (and a main-thread pid) below 65536 for 32-bit bionic
+   guests that stay unique across processes: a system-wide id allocator in
+   the runtime. Not done. i386 glibc has no such limit (the Steam client).
+
+Part 5: a /dev/input per stack (MEASURED; commit 29c324b)
+---------------------------------------------------------
+runtime/evdev.c mapped every guest's /dev/input to /tmp/lxrt-input, where
+steamarm-inputd publishes the controllers; Waydroid's composer makes its
+input FIFOs (wl_pointer_events, wl_keyboard_events, ...) in /dev/input
+for InputFlinger's EventHub, so they landed next to the controllers and
+two Android roots would have shared them. LXRT_INPUT_DIR=<absolute host
+directory> gives a guest (and what it runs: the variable is in the
+environment the runtime passes on) its own /dev/input; unset, it is
+/tmp/lxrt-input, so the Steam controller path is unchanged.
+run-android-display.sh and android-boot.py give their stack <state>/input.
+Review: the runtime does not carry LXRT_INPUT_DIR into a guest's execve
+when the guest drops it from the environment, as with LXRT_BINDER_DIR and
+LXRT_PROPERTY_DIR (VERIFIED IN SOURCE, process.c); Android's services get
+it from android-boot.py's environment.
+  tests/android/run.sh: "LXRT_INPUT_DIR: a composer-style FIFO writer and
+  an EventHub-style reader (x86-64, FEX) meet in their /dev/input; another
+  stack's does not have it (50 EV_SYN, 50 EV_KEY, 50 EV_REL (sum 1275),
+  0 EV_ABS)".
+  tests/elf/run.sh: the check "LXRT_INPUT_DIR default" failed the first
+  time: it probed the first entry of /tmp/lxrt-input (meta/), which
+  tests/elf/fake_inputd.py also makes in the private directory, so it was
+  seen with and without the variable. The check now makes a marker file in
+  the private directory (seen only with the variable) and probes only a
+  name that is in /tmp/lxrt-input and not in the private directory: ok.
+  Through the real composer (with the X server, run.sh's display
+  section): Part 6.
+
+Part 6: tests
+-------------
+tests/elf/run.sh: 82 passed, 1 failed (LXRT_INPUT_DIR default, the test's
+  probe, Part 5); after the fix 83 passed, 0 failed, 32 s. SIG_STRANDED
+  and LXRT_INPUT_DIR among them.
+make test-launcher-core: rc 0 -- application core: all checks passed;
+  app entry: all checks passed; python unittest 80 tests OK; 39/0; 32/0;
+  10/0; guest_env 26/0; mkarmroot 25/0; run_steam_arm64 10/0;
+  fex_proton_tool 35/0.
+tests/android/run.sh (ANDROID_ROOT_DIR=r28a, ANDROID_X86_ROOT=r28x with
+  the new FEX, WESTON_ROOT the Weston root's clone):
+  Each run in a process group of its own under a guard that stopped it,
+  and every process on this session's clones, when the Mac's lxrun count
+  passed a limit: scripts/safeguard.sh kills EVERY guest on the Mac above
+  80, and the other sessions ran 25-75 lxrun processes in bursts about
+  every 6 minutes. The boot section alone adds ~30.
+  run 1 (02:10, limit 74): stopped at the boot: 49 ok, 1 xfail, 0 FAIL --
+    the arm64 section, the x86_64 section up to x86_initsock (i386 probe
+    8 ok, dalvikvm32, dex2oat32, LXRT_INPUT_DIR FIFO, the i386 binder
+    service among them)
+  run 2 (02:12, ANDROID_SKIP_BOOT=1, limit 76): stopped in the display
+    section before SurfaceFlinger: 66 ok, 1 xfail, 0 FAIL (Weston headless,
+    aarch64 and x86-64 wl_shm clients, the x86-64 client's pixels in
+    Weston's X window)
+  runs 3, 4, 5 (limits 72-78): stopped by other sessions' bursts; 49, 30,
+    49 ok, 0 FAIL each
+  run 6 (05:28, after 150 s of quiet, limit 78; peak 44): complete, 486 s:
+    == 68 passed, 3 failed (2 expected failures)
+    the 3 failures: the i386 probe, dalvikvm32, dex2oat32 -- the pid
+    limit (Part 4 a; the Mac's pids were 84368-94454 then); the rest
+    passed, among them: x86_64 sh $(toybox ...) 40 of 40; android-boot:
+    zygote64 preloaded 12,100 classes in 1256 ms; system_server with 11
+    bootstrap services; zygote_secondary (i386) listening, system_server
+    connected to it; the SurfaceFlinger wall (xfail); display: SurfaceFlinger
+    presents the boot animation in Weston's window, 59 page flips/s; input:
+    30 pointer motions into Weston's window came out of hwcomposer.waydroid's
+    FIFO in this stack's own /dev/input: 145 records (29 EV_SYN, 58 EV_REL,
+    58 EV_ABS).
+  run 7 (06:02, after 150 s of quiet, limit 78; peak 33; the new
+    i386_rmutex check and the pid-limit expected failures in): complete,
+    185 s:
+    == 71 passed, 0 failed (3 expected failures)
+    the expected failures: arm64 dalvikvm64 (ART's heap, as before),
+    i386_rmutex ("thread tid 624350001: recursive lock 0, relock (trylock)
+    16, unlock 1 -1; errorcheck lock 0, unlock 1"), the SurfaceFlinger wall.
+    Passed among the rest: x86_64 sh $(toybox ...) 40 of 40 (17 s); i386
+    bionic 8 ok; dalvikvm32 Hello; dex2oat32's 29,196-byte odex run by
+    dalvikvm32; the i386 binder service; android-boot: zygote64 (12,100
+    classes in 1121 ms), system_server, zygote_secondary listening and
+    connected; display: SurfaceFlinger's boot animation at 58 page flips/s,
+    the composer's FIFO: 145 records for 30 motions.
+  x86_64 sh $(toybox ...) in the suite: 40 of 40 in each of runs 1, 2, 3,
+  5, 6 and 7 (run 4 was stopped before it): 240 more runs, 0 hangs (both
+  fixes: 960 runs in all).
+
+scripts/safeguard.sh fired once while this session ran: "05:02:47 KILL: 82
+lxrun processes > 80" (every guest on the Mac). This session's run 4 had
+been stopped by its guard at 05:02:32 (81 counted, its own share a few
+processes then: it was in the x86_64 ART checks) and its processes killed
+by 05:02:35; the 82 at 05:02:47 were the other sessions' (UNKNOWN whether
+anything of run 4 was still exiting then).
+
+Changes in this session
+-----------------------
+- tests/elf/run.sh: the LXRT_INPUT_DIR check's probe (Part 5).
+- scripts/run-android-x86.sh: FEXServer does not exit when idle (Part 1).
+- patches/fex-lxrt-i386-bionic.patch: the header describes the WIP's
+  shared-mapping rule (no code change). Rebuilt after it through the same
+  script (re-patched from a clean tree, 27 s + 26 s): every output
+  byte-identical to Part 2's (FEX f48f3c21..., FEX-emu 731ec126...).
+- tests/android/i386_rmutex.c and its check in tests/android/run.sh; the
+  i386 checks name the pid-above-65535 case (Part 4).
+- docs/ANDROID_RUNTIME_ARCHITECTURE.md: "Reliability and input", and the
+  paragraph, "Left out", "Order of work" and "Tests and records" updated.
+- this record; benchmarks/README.md's row.
+
+Review of the merged commits, in short
+--------------------------------------
+- 1519c69 (the hang): correct by the measurements above. Gap left: Part 1,
+  "Not fixed". The main thread takes a stranded signal only if it has the
+  runtime's handler; SIG_DFL ones stay, as intended.
+- cc9c9cf (i386): the futex H2G and the setsockopt G2H are safe for 0 and
+  for addresses already based (range-checked helpers). The 16-bit tid
+  limit (Part 4) was not seen by it.
+- 29c324b (input): as described; the elf check's probe fixed (Part 5).
+- eb02249 (binder for 32-bit guests): basing is by the < 4 GiB rule of
+  gbase.c, also right for 64-bit guests' low-window addresses.
+- c52265b: the audio HAL starts only with --linkerconfig on an
+  i386-capable FEX; measured above.
+- bf864de (WIP): finished, Part 2.
+
+Remaining
+---------
+- 32-bit bionic's 16-bit tids (Part 4): small, unique tids and a
+  main-thread pid for 32-bit bionic guests.
+- A stranded signal for a thread that later sigwaits (Part 1).
+- FEXServer --foreground never exits when idle (Part 1): either stop it
+  from the scripts that start it or teach FEX's idle timeout to apply.
+- The new FEX is not installed in the shared roots (Part 3, the command).
+- InputFlinger has not read the composer's FIFOs: system_server stops at
+  the display.

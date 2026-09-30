@@ -23,7 +23,11 @@ it is glibc and brings FEX's VDSO thunk. MEASURED, one after the other
    truth, so a free hint is taken. i386 ART's boot image is reserved at
    its link address: "Failed to mmap at expected address, mapped at
    0xee785000 instead of 0x70d32000", then an imageless start (6 s for a
-   hello world; 1.6 s with the image).
+   hello world; 1.6 s with the image). A MAP_SHARED mapping takes its hint
+   only when the 16 KiB host pages it touches are free as a whole: with a
+   neighbour in one of them SteamARM's runtime has to place a private copy
+   (a 4 KiB view inside a composite 16 KiB page), which is no longer shared;
+   the allocator's own search keeps such a mapping shared.
 5. x32 setsockopt/getsockopt dereferenced the guest's optval without the
    base (SO_RCVTIMEO_OLD/SO_SNDTIMEO_OLD, SO_ATTACH_FILTER): the zygote sets
    SO_RCVTIMEO on every connection and FEX faulted on 0xffff5ab0.

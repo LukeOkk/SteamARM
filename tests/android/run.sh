@@ -425,6 +425,12 @@ fi
 # (benchmarks/stage28-android-reliability.txt). A root whose FEX predates the
 # patch (no "lxrt-i386-bionic" in it) makes these expected failures.
 local i386_fex=0 i386_why="the root's FEX predates patches/fex-lxrt-i386-bionic.patch (scripts/build-fex-host.sh; scripts/mkandroidroot.sh --arch x86_64 --emu)"
+# 32-bit bionic refuses to start when its main thread's tid is above 65535,
+# and under lxrun that tid is the Mac's pid, which goes up to 99999: those
+# runs are expected failures, named as such (tests/android/i386_rmutex.c,
+# benchmarks/stage28-android-reliability.txt).
+local i386_pid_why="the Mac gave the process a pid above 65535: 32-bit bionic keeps tids in 16 bits and refuses to start (lxrun's main-thread tid is the Mac's pid)"
+pid_cap() { grep -q 'only accepts pid <= 65535' <<<"$1"; }
 grep -aq lxrt-i386-bionic "$X86_ROOT/usr/lib/lxrt-emu/FEX" && i386_fex=1
 local BLIBC32="$X86_ROOT/apex/com.android.runtime/lib/bionic/libc.so"
 if [ -f "$BLIBC32" ] && /opt/homebrew/opt/llvm/bin/clang --target=i686-linux-android30 -O2 -fPIE -pie -nostdlib \
@@ -436,8 +442,28 @@ if [ -f "$BLIBC32" ] && /opt/homebrew/opt/llvm/bin/clang --target=i686-linux-and
         ok "i386 bionic under FEX: AT_SYSINFO, CMP_REQUEUE, sigwait, SO_RCVTIMEO, SO_DOMAIN, SCM_RIGHTS, mmap hint, msync (8 ok)"
     elif [ "$i386_fex" = 0 ]; then
         xfail "i386 bionic under FEX (rc=$rc $(grep '^== ' <<<"$out"))" "$i386_why"
+    elif pid_cap "$out"; then xfail "i386 bionic under FEX (rc=$rc)" "$i386_pid_why: $(grep -o 'current pid is [0-9]*' <<<"$out" | head -1)"
     else bad "i386 bionic under FEX" "rc=$rc $(grep -E 'MAL|^== |NoExec' <<<"$out" | tr '\n' ' ')"; fi
     rm -f "$X86_ROOT/data/local/tmp/i386_bionic"
+    # A second thread's own recursive / error-checking mutex (32-bit bionic
+    # keeps the owner's tid in 16 bits; lxrun's thread tids are 200000 +
+    # pid * 10000 + n): expected to fail until the runtime gives 32-bit
+    # bionic guests small tids (tests/android/i386_rmutex.c).
+    if /opt/homebrew/opt/llvm/bin/clang --target=i686-linux-android30 -O2 -fPIE -pie -nostdlib \
+           -fno-stack-protector -fuse-ld=lld --ld-path=/opt/homebrew/opt/lld/bin/ld.lld \
+           -Wl,--dynamic-linker=/system/bin/linker -Wl,-z,max-page-size=4096 \
+           -o "$X86_ROOT/data/local/tmp/i386_rmutex" tests/android/i386_rmutex.c "$BLIBC32" 2>/dev/null; then
+        out=$(x 30 /data/local/tmp/i386_rmutex); rc=$?
+        if [ "$rc" -eq 0 ] && grep -q '== i386_rmutex: ok' <<<"$out"; then
+            ok "i386 bionic: a second thread relocks and unlocks its own recursive and error-checking mutexes"
+        elif [ "$i386_fex" = 0 ]; then xfail "i386_rmutex (rc=$rc)" "$i386_why"
+        elif pid_cap "$out"; then xfail "i386_rmutex (rc=$rc)" "$i386_pid_why"
+        elif grep -q '== i386_rmutex: MAL' <<<"$out"; then
+            xfail "i386 bionic: a second thread's own recursive mutex ($(grep '^thread tid' <<<"$out"))" \
+                  "32-bit bionic keeps the owner's tid in 16 bits and lxrun's thread tids are above 200000: relock EBUSY, unlock EPERM, stdio from such a thread hangs"
+        else bad "i386_rmutex" "rc=$rc $(tail -2 <<<"$out" | tr '\n' ' ')"; fi
+        rm -f "$X86_ROOT/data/local/tmp/i386_rmutex"
+    fi
 else
     echo "  skip  i386 bionic probe (no llvm clang/lld or no 32-bit libc.so)"
 fi
@@ -446,6 +472,7 @@ if [ "$HAVE_DEX" = 1 ]; then
     if [ "$rc" -eq 0 ] && grep -q "Hello from Java on ART, no VM" <<<"$out" && grep -q "os.arch=i686" <<<"$out"; then
         ok "dalvikvm32 (i386) Hello: $(grep -o 'java.vm.name=[^ ]* .*os.arch=[^ ]*' <<<"$out")"
     elif [ "$i386_fex" = 0 ]; then xfail "dalvikvm32 (i386) Hello (rc=$rc)" "$i386_why"
+    elif pid_cap "$out"; then xfail "dalvikvm32 (i386) Hello (rc=$rc)" "$i386_pid_why: $(grep -o 'current pid is [0-9]*' <<<"$out" | head -1)"
     else bad "dalvikvm32 (i386) Hello" "rc=$rc $(head -c 300 <<<"$out")"; fi
     rm -rf "$X86_ROOT/data/local/tmp/oat/x86"
     mkdir -p "$X86_ROOT/data/local/tmp/oat/x86"
@@ -458,6 +485,7 @@ if [ "$HAVE_DEX" = 1 ]; then
             ok "dex2oat32 (i386) compiled hello.dex to a $(wc -c <"$odex" | tr -d ' ')-byte i386 odex, and dalvikvm32 runs it"
         else bad "dalvikvm32 with the dex2oat32 odex" "rc=$rc $(head -c 300 <<<"$out")"; fi
     elif [ "$i386_fex" = 0 ]; then xfail "dex2oat32 (i386) hello.dex (rc=$rc)" "$i386_why"
+    elif pid_cap "$out"; then xfail "dex2oat32 (i386) hello.dex (rc=$rc)" "$i386_pid_why: $(grep -o 'current pid is [0-9]*' <<<"$out" | head -1)"
     else bad "dex2oat32 (i386) hello.dex" "rc=$rc odex $(wc -c <"$odex" 2>/dev/null) bytes $(tail -c 300 <<<"$out")"; fi
     rm -rf "$X86_ROOT/data/local/tmp/oat/x86"
 fi

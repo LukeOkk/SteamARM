@@ -864,9 +864,17 @@ if [ -d "$SYSROOT" ] && [ -x "$GUEST_ROOT/tmp/evdev_test" ]; then
     out=$(LXRT_ROOT="$GUEST_ROOT" LXRT_INPUT_DIR="$idir" ./build/lxrun /tmp/evdev_test 2>&1)
     sleep 0.3
     kill $fake 2>/dev/null; wait $fake 2>/dev/null
-    # Something that is in /tmp/lxrt-input now and not in the private
-    # directory (fake_inputd.py writes a "meta" there too, as steamarm-inputd
-    # does in the shared one) -- read only; nothing is made there.
+    # Which directory /dev/input is: a marker made in the private directory
+    # is seen only with the variable; and something that is in
+    # /tmp/lxrt-input and not in the private directory (read only; nothing
+    # is made there), when there is such a thing, only without it.
+    # fake_inputd.py makes meta/ in both, so a name the two share proves
+    # nothing (MEASURED: /tmp/lxrt-input held only meta/, and a check that
+    # probed it failed).
+    marker="steamarm-input-marker-$$"
+    : > "$idir/$marker"
+    m_shared=$(LXRT_ROOT="$GUEST_ROOT" ./build/lxrun /usr/bin/bash -c "test -e '/dev/input/$marker' && echo yes" 2>/dev/null)
+    m_private=$(LXRT_ROOT="$GUEST_ROOT" LXRT_INPUT_DIR="$idir" ./build/lxrun /usr/bin/bash -c "test -e '/dev/input/$marker' && echo yes" 2>/dev/null)
     probe=$(comm -23 <(ls /tmp/lxrt-input 2>/dev/null | sort) <(ls "$idir" 2>/dev/null | sort) | head -1)
     shared="" private=""
     if [ -n "$probe" ]; then
@@ -875,10 +883,12 @@ if [ -d "$SYSROOT" ] && [ -x "$GUEST_ROOT/tmp/evdev_test" ]; then
     fi
     if ! grep -q "== evdev: ok" <<<"$out" || ! grep -q "rumble strong=32768 weak=16384 ms=250" "$idir.log"; then
         bad "LXRT_INPUT_DIR evdev" "$(grep FAIL <<<"$out" | head -6)"
+    elif [ "$m_private" != yes ] || [ -n "$m_shared" ]; then
+        bad "LXRT_INPUT_DIR marker" "a file of the private directory seen as /dev/input/$marker: with the variable '$m_private', without it '$m_shared'"
     elif [ -n "$probe" ] && { [ "$shared" != yes ] || [ -n "$private" ]; }; then
         bad "LXRT_INPUT_DIR default" "/tmp/lxrt-input/$probe seen as /dev/input/$probe: without the variable '$shared', with it '$private'"
     else
-        ok "LXRT_INPUT_DIR: evdev against a daemon in a private /dev/input; without it /dev/input is /tmp/lxrt-input${probe:+ (its $probe seen only there)}"
+        ok "LXRT_INPUT_DIR: evdev against a daemon in a private /dev/input, a file there seen only with the variable${probe:+; $probe of /tmp/lxrt-input only without it}"
     fi
     rm -rf "$idir" "$idir.log"
 fi

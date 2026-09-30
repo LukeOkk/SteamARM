@@ -17,8 +17,13 @@
 # shared one (scripts/run-fex.sh) serves the Ubuntu x86 rootfs. This root has
 # a server of its own, on its own socket name (FEX_SERVERSOCKETPATH) and with
 # its own lock (HOME=/data/local/tmp), so neither can see or replace the
-# other. It is started here if it is not running, detached (scripts/session.py)
-# and exits by itself a while after its last client (--persistent).
+# other. It is started here if it is not running, detached (scripts/session.py).
+# It does NOT exit by itself when idle: FEXServer ignores --persistent's
+# timeout when it runs with --foreground (FEX's ProcessPipe.cpp waits with no
+# timeout when Foreground is set; MEASURED, three servers idle for 7-10 min,
+# benchmarks/stage28-android-reliability.txt), and --foreground is what keeps
+# it from daemonizing away from the PID file. Stop it with --server-stop; each
+# one left counts toward scripts/safeguard.sh's 80 lxrun processes.
 #
 # Environment:
 #   ANDROID_X86_ROOT   the root         (/Volumes/SteamARMAndroid/root-x86_64)
@@ -29,7 +34,7 @@
 #                      heap and boot image -- have somewhere to go
 #                      (patches/fex-lxrt-guest-base.patch); 0: PIE-only rules
 #   FEX_SMCCHECKS      mtrack (default, FEX's page tracking), full, none
-#   ANDROID_X86_SERVER_IDLE  seconds the server stays after its last client (60)
+#   ANDROID_X86_SERVER_IDLE  FEXServer's --persistent (60; no effect with --foreground, above)
 set -u
 cd "$(dirname "$0")/.." || exit 1
 . scripts/roots.sh
