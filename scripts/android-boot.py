@@ -189,6 +189,11 @@ PROFILES["display"] = {
         "netd", "vold",            # stand-ins (below)
         "mediametrics",            # media.metrics: audioserver waits 5 s for it per call and its
                                    # TimeCheck aborts it (MEASURED)
+        "mediaextractor",          # media.extractor and media.swcodec, which SoundPool and
+        "media.swcodec",           # MediaCodec need ("extractor service not running", MEASURED);
+                                   # both x86-64; mediaextractor's watchdog needs timer_create
+                                   # (runtime/posixtimer.c). MediaCodecList still waits for the
+                                   # OMX store and media.player, both i386 (16-bit pids)
     },
     # audioserver loads Waydroid's audio HAL in-process (vintf_passthrough,
     # below), 64-bit, and the HAL opens ALSA's "pulse" device; the image's
@@ -196,7 +201,10 @@ PROFILES["display"] = {
     # directory, where the plugin is 32-bit ("is 32-bit" x4400, no sound,
     # MEASURED). ALSA_PLUGIN_DIR is alsa-lib's own override.
     "env_x86": dict(PROFILES["headless"]["env_x86"],
-                    audioserver={"ALSA_PLUGIN_DIR": "/vendor/lib64/hw"}),
+                    audioserver={"ALSA_PLUGIN_DIR": "/vendor/lib64/hw"},
+                    # Both install a seccomp filter (minijail), as the zygote does.
+                    mediaextractor={"FEX_NEEDSSECCOMP": "1"},
+                    **{"media.swcodec": {"FEX_NEEDSSECCOMP": "1"}}),
     "left_out": {k: v for k, v in PROFILES["headless"]["left_out"].items()
                  if k not in ("vendor.hwcomposer-2-1", "bootanim", "netd", "vold")},
     # Services replaced by a stand-in (scripts/android/java/.../BinderStandIn.java):

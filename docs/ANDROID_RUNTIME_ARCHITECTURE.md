@@ -1133,11 +1133,15 @@ system_server stops at the display in these boots.
 - VPN apps, tethering, per-app firewall rules, data usage accounting: the
   netd stand-in accepts and does nothing.
 - The ISO key swap follows the keyboard type macOS reports.
-- Compressed sound (system sounds, SoundPool, MediaCodec) needs
-  `media.extractor`, and mediaextractor aborts under lxrun: its watchdog's
-  `timer_create` is not implemented ("Watchdog: Failed to create timer:
-  Function not implemented", MEASURED). MediaPlayer needs mediaserver,
-  which is i386 and meets 32-bit bionic's 16-bit pid limit.
+- Compressed sound (system sounds, SoundPool, MediaCodec, MediaPlayer) does
+  not play yet. mediaextractor and media.swcodec (x86-64) now run: the first
+  aborted on its watchdog's `timer_create` until the runtime implemented
+  POSIX timers, and a MediaExtractor reads an `.ogg`'s track (audio/vorbis,
+  MEASURED). But MediaCodecList first asks mediaserver's `media.player`
+  and the vendor's OMX store, and both services are i386, stopped by 32-bit
+  bionic's 16-bit pid limit: it waits for IOmxStore once a second forever
+  (MEASURED). With the OMX store left out of the manifest it went on and
+  crashed (SIGSEGV at 0) instead, so that was not kept.
 
 ## APKs and the Google Play Store
 

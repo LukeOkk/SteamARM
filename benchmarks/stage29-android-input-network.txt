@@ -70,3 +70,21 @@ System sounds: "SoundPool::Sound: doLoad: unable to load sound"
 ("MediaExtractorFactory: extractor service not running"). With mediaextractor
 started: it aborts after 11 s, "Watchdog: Failed to create timer: Function
 not implemented" (timer_create), restarted every 5 s.
+
+== A real split APK install (XAPK)
+base.apk: Simple Solitaire 71 from F-Droid with its signature removed,
+zipaligned and signed with a test key (apksigner, SDK build-tools 36.0.0);
+config.xhdpi.apk: a manifest-only split (package de.tobiasbielefeld.solitaire,
+split="config.xhdpi", versionCode 71, hasCode=false) linked with aapt2
+against android-30 and signed with the same key; manifest.json (XAPK v2).
+apk-inspect.py: format xapk, base.apk + config.xhdpi.apk (density 320),
+chosen both. android-pm.py install --force: meta.json splits
+['split_config.xhdpi.apk'].
+android-session.py launch (after pm uninstall of the F-Droid build):
+  pm install de.tobiasbielefeld.solitaire (2 APKs ...)
+  pm install: Success (2.6 s)
+  am start -W ...GameSelector: ok; focused window ...GameSelector
+pm path:
+  package:/data/app/.../base.apk
+  package:/data/app/.../split_config.xhdpi.apk
+(the F-Droid build was put back afterwards)
