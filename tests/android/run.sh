@@ -371,7 +371,216 @@ if [ "$HAVE_DEX" = 1 ]; then
 else
     echo "  skip  x86_64 ART checks (no $R8_JAR or no javac)"
 fi
+run_x86_64_services
 [ "$had_server" = 1 ] || ANDROID_X86_ROOT="$X86_ROOT" scripts/run-android-x86.sh --server-stop
+}
+
+# x86-64 Android's services under FEX (benchmarks/stage27-android-framework.txt):
+# the property service, binder with the image's service managers and an
+# x86-64 native service, init-style sockets, and the boot of the framework
+# (scripts/android-boot.py). Every x86 guest reaches the runtime's binder
+# driver and property service through FEX's syscall passthrough. Private
+# property and binder directories; daemons stopped by their own PIDs.
+run_x86_64_services() {
+local xp xb XENV out rc
+xp=$(mktemp -d /tmp/lxrt-props-android-x86.XXXXXX)
+xb=$(mktemp -d /tmp/lxrt-binder-android-x86.XXXXXX)
+XENV="LXRT_PROPERTY_DIR=$xp LXRT_PROPERTY_IDLE=5 LXRT_PROPERTY_PERSIST=$xp/persistent_properties LXRT_BINDER_DIR=$xb LXRT_BINDER_HUB_IDLE=3"
+xg() { ANDROID_X86_GENV="$XENV" x "$@"; }
+# A daemon for `xgbg DEADLINE cmd... &`: the background subshell execs into
+# perl, the script, env and lxrun, so $! is the daemon's own PID to stop.
+xgbg() {
+    local dl=$1; shift
+    exec env ANDROID_X86_ROOT="$X86_ROOT" LXRUN="$LXRUN" ANDROID_X86_GENV="$XENV" \
+        /usr/bin/perl -e 'alarm shift; exec @ARGV' "$dl" scripts/run-android-x86.sh "$@"
+}
+mkdir -p "$X86_ROOT/data/local/tmp"
+
+# Properties: bionic x86-64 reads the areas and talks to property_service.
+local sdk
+sdk=$(sed -n 's/^ro.build.version.sdk=//p' "$X86_ROOT/system/build.prop")
+out=$(xg 60 /system/bin/getprop ro.build.version.sdk); rc=$?
+[ "$rc" -eq 0 ] && [ -n "$sdk" ] && [ "$out" = "$sdk" ] && ok "x86_64 getprop ro.build.version.sdk: $out (the property service, through FEX)" \
+    || bad "x86_64 getprop" "rc=$rc '$out' want '$sdk'"
+xg 60 /system/bin/setprop steamarm.x86.prop "hello from x86"; rc=$?
+out=$(xg 60 /system/bin/getprop steamarm.x86.prop)
+[ "$rc" -eq 0 ] && [ "$out" = "hello from x86" ] && ok "x86_64 setprop in one guest, getprop in another: [$out]" \
+    || bad "x86_64 setprop/getprop" "rc=$rc '$out'"
+local BLIBC64="$X86_ROOT/apex/com.android.runtime/lib64/bionic/libc.so"
+if [ -f "$BLIBC64" ] && /opt/homebrew/opt/llvm/bin/clang --target=x86_64-linux-android30 -O2 -fPIE -pie -nostdlib \
+       -fno-stack-protector -fuse-ld=lld --ld-path=/opt/homebrew/opt/lld/bin/ld.lld \
+       -Wl,--dynamic-linker=/system/bin/linker64 -Wl,-z,max-page-size=4096 \
+       -o "$X86_ROOT/data/local/tmp/props_wait" tests/android/props_wait.c "$BLIBC64" 2>/dev/null; then
+    local wlog wpid
+    wlog=$(mktemp -t props-wait-x86)
+    (xgbg 60 /data/local/tmp/props_wait wait steamarm.x86.wait go 40 >"$wlog" 2>&1) &
+    wpid=$!
+    for _ in $(seq 1 150); do grep -q '^waiting' "$wlog" && break; sleep 0.1; done
+    xg 30 /system/bin/setprop steamarm.x86.wait notyet >/dev/null
+    xg 30 /system/bin/setprop steamarm.x86.wait go >/dev/null
+    wait "$wpid"; rc=$?
+    if [ "$rc" -eq 0 ] && grep -q '^woke: steamarm.x86.wait=go' "$wlog"; then
+        ok "x86_64 __system_property_wait (FUTEX_WAIT under FEX, woken by the service): $(grep '^woke' "$wlog")"
+    else bad "x86_64 __system_property_wait" "rc=$rc $(grep -v '^\[lxrt' "$wlog" | tr '\n' ' ' | head -c 200)"; fi
+    rm -f "$wlog" "$X86_ROOT/data/local/tmp/props_wait"
+else
+    echo "  skip  x86_64 __system_property_wait (no llvm clang/lld or no x86_64 libc.so)"
+fi
+
+# Binder: the image's servicemanager, service, dumpsys; an x86-64 native
+# service linked against the image's bionic (tests/android/bionic_min.h)
+# that receives a file descriptor.
+local smpid ready=""
+(xgbg 120 /system/bin/servicemanager >/dev/null 2>&1) &
+smpid=$!
+for _ in $(seq 1 60); do
+    xg 20 /system/bin/service check manager | grep -q found && { ready=1; break; }
+    sleep 0.2
+done
+out=$(xg 30 /system/bin/service list); rc=$?
+if [ -n "$ready" ] && grep -q '^Found 1 services' <<<"$out" && grep -q 'manager: \[android.os.IServiceManager\]' <<<"$out"; then
+    ok "x86_64 servicemanager on /dev/binder; service list: $(grep -c ': \[' <<<"$out") service"
+else bad "x86_64 servicemanager + service list" "ready=${ready:-no} rc=$rc $(head -3 <<<"$out" | tr '\n' ' ')"; fi
+STAGE="${STEAMARM_BUILD:-$HOME/SteamARM-build}/rootstage-f43"
+if [ -n "$ready" ] && [ -f "$STAGE/usr/include/linux/android/binder.h" ] && [ -f "$BLIBC64" ] &&
+   /opt/homebrew/opt/llvm/bin/clang --target=x86_64-linux-android30 -DBIONIC_MIN -O2 -fPIE -pie -nostdlib \
+       -fno-stack-protector -Itests/android -idirafter "$STAGE/usr/include" -fuse-ld=lld \
+       --ld-path=/opt/homebrew/opt/lld/bin/ld.lld -Wl,--dynamic-linker=/system/bin/linker64 \
+       -Wl,-z,max-page-size=4096 -o "$X86_ROOT/data/local/tmp/binder_service" tests/android/binder_service.c \
+       "$BLIBC64" 2>/dev/null; then
+    local svclog svcpid want gone=""
+    svclog=$(mktemp -t binder-service-x86)
+    (xgbg 90 /data/local/tmp/binder_service >"$svclog" 2>&1) &
+    svcpid=$!
+    for _ in $(seq 1 100); do grep -q registered "$svclog" && break; sleep 0.1; done
+    out=$(xg 30 /system/bin/service list)
+    grep -q '^Found 2 services' <<<"$out" && grep -q 'steamarm.test: \[steamarm.test.IEcho\]' <<<"$out" &&
+        ok "an x86-64 native service (bionic) registered; service list: steamarm.test: [steamarm.test.IEcho]" ||
+        bad "x86_64 native service registration" "$(tr '\n' ' ' <<<"$out") / $(grep -v '^\[lxrt' "$svclog" | head -2)"
+    out=$(xg 30 /system/bin/service call steamarm.test 1 i32 41)
+    grep -q 'Result: Parcel(00000000 0000002a' <<<"$out" && ok "x86_64 service call steamarm.test 1 i32 41 -> 42" \
+        || bad "x86_64 service call i32" "$out"
+    want=$(python3 -c "import sys; d=open(sys.argv[1],'rb').read(); print('%08x %08x' % (len(d), sum(d)))" "$X86_ROOT/system/etc/hosts")
+    out=$(xg 30 /system/bin/service call steamarm.test 2 fd /system/etc/hosts)
+    grep -q "Result: Parcel(00000000 $want" <<<"$out" &&
+        ok "x86_64 service call ... fd: the x86-64 service read the descriptor it was passed ($want)" ||
+        bad "x86_64 service call fd" "want $want: $out"
+    out=$(xg 30 /system/bin/dumpsys -l)
+    grep -q '^  steamarm.test' <<<"$out" && ok "x86_64 dumpsys -l lists manager and steamarm.test" || bad "x86_64 dumpsys -l" "$(tr '\n' ' ' <<<"$out")"
+    xg 30 /system/bin/service call steamarm.test 3 >/dev/null
+    wait "$svcpid" 2>/dev/null
+    for _ in $(seq 1 30); do
+        out=$(xg 30 /system/bin/service list)
+        grep -q '^Found 1 services' <<<"$out" && { gone=1; break; }
+        sleep 0.2
+    done
+    [ -n "$gone" ] && ok "x86_64: the service exited; servicemanager's death notification removed it" \
+        || bad "x86_64 death notification" "$(tr '\n' ' ' <<<"$out")"
+    rm -f "$svclog" "$X86_ROOT/data/local/tmp/binder_service"
+else
+    echo "  skip  x86_64 native binder service (no $STAGE headers, no x86_64 libc.so, or servicemanager not ready)"
+fi
+kill "$smpid" 2>/dev/null; wait "$smpid" 2>/dev/null
+
+# vndservicemanager, the vendor context.
+local vpid
+(xgbg 60 /vendor/bin/vndservicemanager /dev/vndbinder >/dev/null 2>&1) &
+vpid=$!
+out=""
+for _ in $(seq 1 60); do
+    out=$(xg 20 /vendor/bin/vndservice list)
+    grep -q '^Found 1 services' <<<"$out" && break
+    sleep 0.2
+done
+grep -q 'manager: \[android.os.IServiceManager\]' <<<"$out" && ok "x86_64 vndservicemanager on /dev/vndbinder; vndservice list: manager" \
+    || bad "x86_64 vndservicemanager" "$(head -3 <<<"$out" | tr '\n' ' ')"
+kill "$vpid" 2>/dev/null; wait "$vpid" 2>/dev/null
+
+# hwservicemanager, lshal, and an x86-64 HIDL HAL of the image.
+local hpid apid hready=""
+(xgbg 90 /system/bin/hwservicemanager >/dev/null 2>&1) &
+hpid=$!
+for _ in $(seq 1 60); do
+    [ "$(xg 20 /system/bin/getprop hwservicemanager.ready)" = true ] && { hready=1; break; }
+    sleep 0.2
+done
+[ -n "$hready" ] && ok "x86_64 hwservicemanager set hwservicemanager.ready=true" || bad "x86_64 hwservicemanager.ready" "not set"
+out=$(xg 40 /system/bin/lshal list)
+grep -qE "android\.hidl\.manager@1\.0::IServiceManager/default +N/A +$hpid" <<<"$out" &&
+    ok "x86_64 lshal list: $(grep -cE "::I[A-Za-z]+/default +N/A +$hpid" <<<"$out") interfaces served by hwservicemanager (pid $hpid)" ||
+    bad "x86_64 lshal list" "$(head -4 <<<"$out" | tr '\n' ' ')"
+(xgbg 60 /system/bin/hw/android.hidl.allocator@1.0-service >/dev/null 2>&1) &
+apid=$!
+for _ in $(seq 1 30); do
+    out=$(xg 40 /system/bin/lshal list)
+    grep -qE "android\.hidl\.allocator@1\.0::IAllocator/ashmem +N/A +$apid" <<<"$out" && break
+    sleep 0.3
+done
+grep -qE "android\.hidl\.allocator@1\.0::IAllocator/ashmem +N/A +$apid" <<<"$out" &&
+    ok "an x86-64 HIDL HAL registered: android.hidl.allocator@1.0::IAllocator/ashmem (pid $apid)" ||
+    bad "x86_64 HIDL HAL registration" "$(grep -i allocator <<<"$out" | head -2)"
+kill "$apid" "$hpid" 2>/dev/null; wait "$apid" "$hpid" 2>/dev/null
+
+# An init-style socket (bound on the host, inherited as a descriptor, the
+# way scripts/android-boot.py hands ANDROID_SOCKET_<name> to a service), as
+# libcutils and the zygote check it; /proc/self/fd without the runtime's and
+# FEX's descriptors; /proc/self/attr/current (tests/android/x86_initsock.c).
+if clang --target=x86_64-linux-gnu -O1 -ffreestanding -fno-stack-protector -nostdlib -static-pie -fPIE \
+         -fuse-ld=lld -o "$X86_ROOT/data/local/tmp/x86_initsock" tests/android/x86_initsock.c 2>/dev/null; then
+    out=$(python3 - "$X86_ROOT" "$LXRUN" <<'EOF'
+import os, socket, subprocess, sys
+root, lxrun = sys.argv[1], sys.argv[2]
+g = "/dev/socket/steamarm_initsock"
+try:
+    os.unlink(root + g)
+except FileNotFoundError:
+    pass
+s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+s.bind(root + g)                      # as Python binds: no NUL in the length
+fd = s.detach()
+os.set_inheritable(fd, True)
+env = dict(os.environ, ANDROID_X86_ROOT=root, LXRUN=lxrun)
+r = subprocess.run(["/usr/bin/perl", "-e", "alarm shift; exec @ARGV", "60", "scripts/run-android-x86.sh",
+                    "/data/local/tmp/x86_initsock", str(fd), g], pass_fds=[fd], env=env,
+                   stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+os.unlink(root + g)
+print("\n".join(l for l in r.stdout.decode().splitlines() if not l.startswith("[lxrt]")))
+print("rc=%d" % r.returncode)
+EOF
+)
+    if grep -q '== x86_initsock: 4 ok, 0 mal' <<<"$out"; then
+        ok "x86_initsock: an init socket's name (guest path, Linux's length), listen, /proc/self/fd without runtime/FEX descriptors, attr/current"
+    else bad "x86_initsock" "$(grep -E 'MAL|stranger|==|rc=' <<<"$out" | tr '\n' ' ')"; fi
+    rm -f "$X86_ROOT/data/local/tmp/x86_initsock"
+else
+    echo "  skip  x86_initsock (no clang for x86_64-linux-gnu)"
+fi
+for _ in $(seq 1 80); do [ -e "$xp/service.pid" ] || break; sleep 0.1; done
+rm -rf "$xp" "$xb"
+
+# The framework, headless (scripts/android-boot.py): init's boot actions, the
+# service managers, the HALs of the profile, zygote64 and system_server under
+# FEX with Android ids. It gets as far as SurfaceFlinger: the image's only
+# composer is Waydroid's Wayland client and there is no display here.
+if [ -n "${ANDROID_SKIP_BOOT:-}" ]; then
+    echo "  skip  android-boot (ANDROID_SKIP_BOOT)"
+    return 0
+fi
+local bst
+bst=$(mktemp -d /tmp/lxrt-boot-test.XXXXXX)
+python3 scripts/android-boot.py --root "$X86_ROOT" --lxrun "$LXRUN" --state "$bst" --seconds 75 \
+    --persist "$bst/persistent_properties" >/dev/null 2>&1; rc=$?
+local lc="$bst/logcat.txt" il="$bst/init.log"
+if grep -q 'started zygote' "$il" && grep -aq 'Zygote: Accepting command socket connections' "$lc"; then
+    ok "android-boot: init actions, service managers, HALs; zygote64 preloaded and listening ($(grep -ao 'preloaded [0-9]* classes in [0-9]*ms' "$lc" | head -1))"
+else bad "android-boot: zygote" "$(tail -3 "$il" | tr '\n' ' ')"; fi
+if grep -aq 'SystemServer: Entered the Android system server!' "$lc"; then
+    ok "android-boot: system_server forked (Android ids, seccomp under FEX) and running: $(grep -a 'SystemServerTiming: Start' "$lc" | grep -vc took) bootstrap services started"
+else bad "android-boot: system_server" "$(grep -aE 'FatalError|Fatal signal' "$lc" | head -2 | tr '\n' ' ')"; fi
+if grep -aq "Waiting for service 'SurfaceFlinger'" "$lc"; then
+    xfail "android-boot: system_server past LightsService" "it waits for SurfaceFlinger, which waits for a composer (Waydroid's is a Wayland client; no display here)"
+else bad "android-boot: the SurfaceFlinger wall moved" "$(grep -a 'SystemServerTiming' "$lc" | tail -2 | tr '\n' ' ')"; fi
+rm -rf "$bst"
 }
 
 run_arm64

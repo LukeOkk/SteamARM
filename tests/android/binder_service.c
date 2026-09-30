@@ -19,6 +19,15 @@
 // plus INTERFACE_TRANSACTION and PING_TRANSACTION, as BBinder would.
 //
 //   binder_service [name]      prints "registered <name>" once added
+//
+// Two builds (tests/android/run.sh): aarch64 with glibc, and, with
+// -DBIONIC_MIN, x86_64 against the x86_64 image's own bionic libc.so (the
+// declarations in bionic_min.h), run under FEX -- an x86-64 binder service
+// that receives a file descriptor.
+#ifdef BIONIC_MIN
+#include "bionic_min.h"
+#include <linux/android/binder.h>
+#else
 #define _GNU_SOURCE
 #include <errno.h>
 #include <fcntl.h>
@@ -31,6 +40,7 @@
 #include <sys/ioctl.h>
 #include <sys/mman.h>
 #include <unistd.h>
+#endif
 
 #define B_PACK(a, b, c, d) (((a) << 24) | ((b) << 16) | ((c) << 8) | (d))
 #define FIRST_CALL_TRANSACTION 1

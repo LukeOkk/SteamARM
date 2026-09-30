@@ -7,7 +7,8 @@
 //   props_wait get <name>                        the value, via
 //                                                __system_property_read_callback
 //
-// Built by tests/android/run.sh:
+// Built by tests/android/run.sh (and for x86_64 with
+// --target=x86_64-linux-android30 against the x86_64 image's libc.so):
 //   clang --target=aarch64-linux-android30 -nostdlib -fPIE -pie
 //         -fuse-ld=lld -Wl,--dynamic-linker=/system/bin/linker64
 //         props_wait.c <root>/system/lib64/libc.so
@@ -141,4 +142,8 @@ __attribute__((used)) static void _start_main(void *raw_args)
     structors_array_t array = { 0, 0, fini_array };
     __libc_init(raw_args, 0, main, &array);
 }
+#if defined(__x86_64__)   // the x86_64 root, under FEX (tests/android/run.sh, x86_64 section)
+__asm__(".globl _start\n_start:\n  mov %rsp, %rdi\n  call _start_main\n  hlt\n");
+#else
 __asm__(".globl _start\n_start:\n  mov x0, sp\n  b _start_main\n");
+#endif
