@@ -1481,6 +1481,33 @@ static void load_boot_defaults(void)
     load_properties_from_file("/factory/factory.prop", "ro.*", &props);
     if (guest_readable("/debug_ramdisk/adb_debug.prop"))
         load_properties_from_file("/debug_ramdisk/adb_debug.prop", NULL, &props);
+    // LXRT_PROPERTY_HOST: the host's own .prop file (a host path), loaded
+    // last among the image's files and with their rules -- what Waydroid's
+    // container manager does with the waydroid.prop it writes for each boot.
+    // scripts/android-boot.py puts there what this host can do that the
+    // image cannot know, e.g. that it runs no 32-bit code:
+    // ro.product.cpu.abilist32 empty (the framework otherwise waited for, and
+    // tried to start processes in, a 32-bit zygote: benchmarks/stage28-
+    // android-apk.txt).
+    const char *hostprop = getenv("LXRT_PROPERTY_HOST");
+    if (hostprop && *hostprop) {
+        int fd = open(hostprop, O_RDONLY | O_CLOEXEC);
+        struct stat hs;
+        if (fd >= 0 && fstat(fd, &hs) == 0 && S_ISREG(hs.st_mode) && hs.st_uid == getuid() &&
+            hs.st_size < (1 << 20)) {
+            char *d = xmalloc((size_t)hs.st_size + 2);
+            ssize_t got = read(fd, d, (size_t)hs.st_size);
+            if (got < 0) got = 0;
+            d[got] = '\n';
+            d[got + 1] = '\0';
+            load_properties(d, NULL, hostprop, &props);
+            free(d);
+            plog("host properties from %s", hostprop);
+        } else {
+            plog("LXRT_PROPERTY_HOST=%s: not a regular file of this user; ignored", hostprop);
+        }
+        if (fd >= 0) close(fd);
+    }
     // std::map order.
     qsort(props.a, (size_t)props.n, sizeof *props.a, cmp_kv);
     int set = 0;

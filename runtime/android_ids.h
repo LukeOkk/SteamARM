@@ -50,14 +50,46 @@ bool lxrt_aids_syscall(long nr, uint64_t a0, uint64_t a1, uint64_t a2, uint64_t 
 
 uint32_t lxrt_aids_euid(void);   // host geteuid() when off
 uint32_t lxrt_aids_egid(void);
+// The Uid:/Gid:/Groups: lines of /proc/<pid>/status: real, effective, saved,
+// filesystem ids, and the supplementary groups (space-separated). The host's
+// ids when off. Android's Process.getUidForPid reads Uid: and
+// ActivityManagerService.isProcessAliveLocked compares it with the process
+// record's uid: with the Mac's 501 there, every provider looked like it was
+// in a dying process (benchmarks/stage28-android-apk.txt).
+void lxrt_aids_status_ids(uint32_t u[4], uint32_t g[4], char *groups, size_t groups_len);
 // Linux's capable(): is `cap` in the effective set? (false when off)
 bool lxrt_aids_capable(int cap);
 
-// chown in Android mode: 1 = do the real call (nothing to fake: the ids
-// asked for are the host's own or -1), 0 = report success without changing
-// the file (allowed by Linux's rules for these ids), negative = the Linux
-// error. Only meaningful when lxrt_aids_on().
-int lxrt_aids_chown(uint32_t uid, uint32_t gid);
+// Virtual file ownership (stage 28). Every file is the Mac user's, but
+// Android checks owners it has set: installd's fs_prepare_dir_strict refuses
+// an app's existing data directory whose stat does not show the app's uid
+// ("Expected path /data/data/<pkg> with owner 1000:1000 but found 501:20",
+// benchmarks/stage28-android-apk.txt), so every boot after the first lost
+// every app's data. A chown that lxrt_aids_chown allows records the owner in
+// a Darwin extended attribute of the host file (LXRT_OWNER_XATTR, a name no
+// guest can reach: guest xattr calls are ENOTSUP), and stat, fstat, fstatat
+// and statx report it to guests with Android ids. A file never chowned shows
+// the Mac's ids, as before; a chown back to the Mac's own ids removes the
+// record. Without Android ids nothing is read or written.
+#define LXRT_OWNER_XATTR "org.steamarm.lxrt.owner"
+
+// chown in Android mode (only meaningful when lxrt_aids_on()): Linux's rules
+// for these ids against the file's virtual owner (CAP_CHOWN, or the owner
+// keeping its uid and giving the file to one of its groups: fs/attr.c
+// chown_ok/chgrp_ok), then uid/gid (0xffffffff: keep that half) recorded
+// for a host path (nofollow: the link itself) or, with host NULL, an open
+// host descriptor. The file itself stays the Mac user's. Returns 0 or the
+// Linux error.
+long lxrt_aids_chown_file(const char *host, int fd, bool nofollow, uint32_t uid, uint32_t gid);
+
+// Replace st_uid/st_gid with the recorded owner, if any (Android ids only).
+struct stat;
+void lxrt_aids_fix_stat(const char *host, int fd, bool nofollow, struct stat *st);
+
+// The same two for a translated host path relative to a Darwin directory
+// descriptor (AT_FDCWD: the working directory), as the *at calls give them.
+long lxrt_aids_chown_at(int ddirfd, const char *host, bool nofollow, uint32_t uid, uint32_t gid);
+void lxrt_aids_fix_stat_at(int ddirfd, const char *host, bool nofollow, struct stat *st);
 
 // The string to put in the environment of the next image at execve, with
 // Linux's execve capability rules applied ("LXRT_ANDROID_IDS=..."), or NULL

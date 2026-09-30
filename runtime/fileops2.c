@@ -27,6 +27,7 @@
 bool lxrt_trace_on(void);
 #include "fileops2.h"
 #include "props.h"
+#include "android_ids.h"
 
 #include <errno.h>
 #include <fcntl.h>
@@ -972,6 +973,16 @@ long lxrt_statx(int ldirfd, const char *tpath, int lflags, unsigned mask,
     // Android's property areas look root-owned, as bionic requires.
     lxrt_props_fix_stat(tpath[0] ? tpath : NULL,
                         tpath[0] ? -1 : lxrt_dirfd_to_darwin(ldirfd), &d);
+    // Guests with Android ids: the owner a chown recorded (android_ids.h).
+    if (tpath[0]) {
+        lxrt_aids_fix_stat_at(lxrt_dirfd_to_darwin(ldirfd), tpath, (lflags & 0x100) != 0, &d);
+    } else if (ldirfd == L_AT_FDCWD) {
+        lxrt_aids_fix_stat(".", -1, false, &d);
+    } else {
+        int dfd = lxrt_dirfd_to_darwin(ldirfd);
+        const char *pf = lxrt_pathfd_path(dfd);
+        lxrt_aids_fix_stat(pf, pf ? -1 : dfd, false, &d);
+    }
 
     // AT_STATX_FORCE_SYNC (0x2000) and AT_STATX_DONT_SYNC (0x4000) ask a
     // network filesystem how hard to work for a fresh answer. Darwin's stat has

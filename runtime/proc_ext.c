@@ -49,6 +49,7 @@
 
 #include "lxrt.h"
 #include "proc_ext.h"
+#include "android_ids.h"
 
 #include <errno.h>
 #include <fcntl.h>
@@ -1007,6 +1008,28 @@ static size_t gen_self_stat(char *b, size_t cap)
     return sb_done(&s);
 }
 
+// /proc/self/status, regenerated on each lookup so its ids are the current
+// ones: with Android ids (android_ids.h) those are the virtual ids, which
+// change as a zygote child becomes an app. procfs.c's copy, written at start,
+// can only hold the ids of that moment.
+static size_t gen_self_status(char *b, size_t cap)
+{
+    struct sb s = { b, cap, 0, false };
+    uint32_t u[4], g[4];
+    char groups[1024];
+    lxrt_aids_status_ids(u, g, groups, sizeof groups);
+    const char *nm = getprogname();
+    char comm[16];
+    snprintf(comm, sizeof comm, "%s", nm ? nm : "lxrt");
+    sbf(&s,
+        "Name:\t%s\nUmask:\t0022\nState:\tR (running)\nTgid:\t%d\nNgid:\t0\nPid:\t%d\nPPid:\t%d\n"
+        "TracerPid:\t0\nUid:\t%u\t%u\t%u\t%u\nGid:\t%u\t%u\t%u\t%u\nFDSize:\t256\nGroups:\t%s\n"
+        "Threads:\t%u\n",
+        comm, (int)getpid(), (int)getpid(), (int)getppid(),
+        u[0], u[1], u[2], u[3], g[0], g[1], g[2], g[3], groups, thread_count());
+    return sb_done(&s);
+}
+
 static size_t gen_self_statm(char *b, size_t cap)
 {
     struct sb s = { b, cap, 0, false };
@@ -1340,6 +1363,7 @@ static const struct ext_file g_files[] = {
 
     { SC_SELF, "stat",      "stat",      gen_self_stat  },
     { SC_SELF, "statm",     "statm",     gen_self_statm },
+    { SC_SELF, "status",    "status",    gen_self_status },
     { SC_SELF, "mountinfo", "mountinfo", gen_mountinfo  },
     { SC_SELF, "auxv",      "auxv",      gen_auxv       },
     // /proc/self/mounts is a real file on Linux -- verified on the project's

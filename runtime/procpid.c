@@ -26,6 +26,7 @@
 // Files are generated into <our procfs dir>/.p/<pid>/ on each lookup.
 
 #include "lxrt.h"
+#include "android_ids.h"
 
 #include <arpa/inet.h>
 #include <dirent.h>
@@ -381,12 +382,20 @@ static void gen_pid_dir(int pid, const char *pd)
     snprintf(p, sizeof p, "%s/stat", pd);
     write_whole(p, line, (size_t)n);
 
+    // A guest with Android ids shows its virtual ones (android_ids.h): the
+    // framework matches a pid to an app by the Uid: line here
+    // (Process.getUidForPid, ActivityManagerService.isProcessAliveLocked).
+    uint32_t ru = bi.pbi_uid, eu = bi.pbi_uid, su = bi.pbi_svuid, rg = bi.pbi_gid, eg = bi.pbi_gid, sg = bi.pbi_svgid;
+    struct lxrt_aids_peer peer;
+    if (lxrt_aids_lookup(pid, &peer)) {
+        ru = peer.ruid; eu = su = peer.euid;
+        rg = peer.rgid; eg = sg = peer.egid;
+    }
     n = snprintf(line, sizeof line,
                  "Name:\t%s\nUmask:\t0022\nState:\t%c (%s)\nTgid:\t%d\nNgid:\t0\nPid:\t%d\nPPid:\t%d\n"
                  "TracerPid:\t0\nUid:\t%u\t%u\t%u\t%u\nGid:\t%u\t%u\t%u\t%u\nThreads:\t%d\n",
                  comm, state, state == 'T' ? "stopped" : "sleeping", pid, pid, (int)bi.pbi_ppid,
-                 bi.pbi_uid, bi.pbi_uid, bi.pbi_svuid, bi.pbi_uid,
-                 bi.pbi_gid, bi.pbi_gid, bi.pbi_svgid, bi.pbi_gid,
+                 ru, eu, su, eu, rg, eg, sg, eg,
                  ti.pti_threadnum > 0 ? ti.pti_threadnum : 1);
     snprintf(p, sizeof p, "%s/status", pd);
     write_whole(p, line, (size_t)n);

@@ -360,6 +360,16 @@ long lxrt_futex(uint32_t *uaddr, int op, uint32_t val, uint64_t timeout_or_val2,
         uint32_t us = 0;
         const struct linux_timespec64 *ts =
             (const struct linux_timespec64 *)(uintptr_t)timeout_or_val2;
+        // A deadline past what 64-bit nanoseconds can hold is forever, as on
+        // Linux (futex_ops.c's GUEST_SEC_MAX). Multiplying it overflowed and
+        // came back negative, so the wait returned ETIMEDOUT at once: bionic's
+        // Condition::waitRelative(INT64_MAX) asks for {LONG_MAX, ...}, and
+        // audioserver's TimeCheck thread, waiting like that on an empty list,
+        // woke immediately and aborted the process ("TimeCheck timeout for
+        // <unspecified>", MEASURED at stage 28).
+        if (ts && ts->tv_sec >= 0 && ts->tv_sec >= INT64_MAX / 1000000000LL &&
+            ts->tv_nsec >= 0 && ts->tv_nsec < 1000000000LL)
+            ts = NULL;
         if (ts) {
             int64_t ns;
             if (base == FUTEX_WAIT_BITSET) {
