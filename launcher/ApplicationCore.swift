@@ -931,12 +931,12 @@ enum HeroicARM64 {
     /// lxrun does not provide (as for Steam's webhelper). --disable-gpu: its
     /// GPU process cannot initialise GL here (ANGLE over indirect GLX) and
     /// exited twice per start before the software fallback (MEASURED).
-    /// --js-flags=--no-opt: V8's TurboFan tier crashed under lxrun (a null
-    /// node input in GraphReducer::ReduceNode, and other graph checks; cause
-    /// UNKNOWN, docs/HEROIC_INTEGRATION.md); Ignition, Sparkplug and Maglev
-    /// stay on.
+    /// No V8 flags: TurboFan crashed under lxrun until stage 28, when the cause
+    /// was found in the runtime (a `br x18` jump table's live x16, runtime/x18.c
+    /// plan_br; benchmarks/stage28-keep-x18.txt); before that the entry ran
+    /// with --js-flags=--no-opt.
     static func command(program: String = program) -> [String] {
-        [program, "--no-sandbox", "--disable-gpu", "--js-flags=--no-opt"]
+        [program, "--no-sandbox", "--disable-gpu"]
     }
     /// LXRT_X18_ALL_TEXT: Electron's images use x18 in functions without an
     /// .eh_frame FDE (Chromium is built without unwind tables), so every image
