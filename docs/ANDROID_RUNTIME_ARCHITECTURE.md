@@ -84,7 +84,7 @@ property areas and 38.7 ms without: properties cost nothing at start-up.
 
 ```sh
 scripts/mkandroidroot.sh          # download, sha256-check, extract (once)
-make lxrt                         # or: rm -f build/lxrun && make lxrt LXRT_KEEP_X18=1
+make lxrt                         # SDK 12.3 build since stage 28; LXRT_KEEP_X18=0: current SDK
 LXRT_ROOT=/Volumes/SteamARMAndroid/root LXRT_GUEST_PAGE=4096 \
     build/lxrun /system/bin/toybox uname -a
 tests/android/run.sh              # the battery: 29 passed, 1 expected failure
@@ -96,8 +96,8 @@ python3 tests/android/logd.py /Volumes/SteamARMAndroid/root   # "logcat", see be
   linker maps at its compiled-in 4 KiB `PAGE_SIZE` anyway. Almost the whole
   image is 4 KiB-aligned (2,163 of 2,241 aarch64 ELF files), served by
   `runtime/subpage.c`.
-- Both lxrun builds work: the default (current SDK) and `LXRT_KEEP_X18=1`
-  (12.3 SDK, the kernel keeps x18). The x18 rewriter handles bionic's
+- Both lxrun builds work: `LXRT_KEEP_X18=0` (current SDK) and `LXRT_KEEP_X18=1`
+  (12.3 SDK, the kernel keeps x18; the default since stage 28). The x18 rewriter handles bionic's
   shadow call stack either way (28 sites outside the VNDK v28 prebuilts,
   all rewritten). JIT code that allocates x18 would need the second build
   (`docs/X18_VIRTUALIZATION.md`); ART's JIT reserves x18 (HYPOTHESIS, not

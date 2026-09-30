@@ -74,7 +74,8 @@ class Session:
         # HeroicARM64.command), plus the DevTools port this script drives.
         cmd = [os.path.join(REPO, "scripts/run-native.sh"), args.program, "--no-sandbox"]
         cmd += [] if args.gpu else ["--disable-gpu"]
-        cmd += ["--js-flags=" + args.js_flags, "--remote-debugging-port=%d" % args.cdp_port] + args.extra
+        cmd += ["--js-flags=" + args.js_flags] if args.js_flags else []
+        cmd += ["--remote-debugging-port=%d" % args.cdp_port] + args.extra
         self.t0 = time.time()
         self.logf = open(logpath, "w")
         self.p = subprocess.Popen(cmd, cwd=REPO, env=env, stdout=self.logf,
@@ -330,8 +331,10 @@ def main():
     ap.add_argument("--home", default="/tmp/heroichome")
     ap.add_argument("--display", default=":2")
     ap.add_argument("--cdp-port", type=int, default=9333)
-    # The launcher entry's V8 flags (launcher/ApplicationCore.swift, HeroicARM64).
-    ap.add_argument("--js-flags", default="--no-opt")
+    # V8 flags; the launcher entry has none since stage 28 (TurboFan works:
+    # benchmarks/stage28-keep-x18.txt). --js-flags=--no-opt, the stage-24
+    # workaround, stays available as a control.
+    ap.add_argument("--js-flags", default="")
     # sigterm: SIGTERM to Heroic's main process; quit: Heroic's own sidebar Quit.
     ap.add_argument("--close", choices=("sigterm", "quit"), default="sigterm")
     ap.add_argument("--extra", action="append", default=[], help="another Heroic argument (repeatable)")

@@ -120,6 +120,7 @@ void lxrt_rewrite_totals(struct lxrt_rewrite_report *out);
 // spans and fills them in, so a pool placed inside such a span gets mapped over
 // -- a failure mode that otherwise looks like random corruption.
 bool lxrt_pool_contains(uint64_t addr);
+bool lxrt_pool_maybe(uint64_t addr);
 bool lxrt_pool_overlaps(uint64_t start, uint64_t end);
 void lxrt_pool_offer_elf_gap(uint64_t start, uint64_t end);
 

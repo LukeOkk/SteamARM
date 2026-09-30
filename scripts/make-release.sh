@@ -18,6 +18,12 @@ APP=$OUT/SteamARM.app
 rm -rf "$OUT"
 mkdir -p "$OUT"
 
+# The package carries the source, and the user's Mac builds lxrun from it
+# (scripts/setup.sh: make all). Its Makefile must link lxrun as SDK 12.3 by
+# default, so the kernel keeps x18 for JIT code (benchmarks/stage28-keep-x18.txt).
+grep -q '^LXRT_KEEP_X18 ?= 1$' Makefile ||
+    { echo "make-release: the Makefile no longer defaults to LXRT_KEEP_X18=1; refusing" >&2; exit 1; }
+
 make launcher >/dev/null
 cp -R build/SteamARM.app "$APP"
 # No checkout path in a distributed app: the launcher falls back to the

@@ -38,19 +38,32 @@ LXRT_SRCS := runtime/procpid.c runtime/main.c runtime/android_ids.c runtime/bind
              runtime/futex_ops.c runtime/inotify.c runtime/ioctl_tty.c runtime/mounts.c runtime/memlog.c runtime/mremap.c runtime/timerfd_signalfd.c runtime/proc_ext.c runtime/privmap.c runtime/shmirror.c runtime/sysv_ipc.c runtime/process.c runtime/procfs.c runtime/signal.c runtime/socket.c runtime/stack.c runtime/storemu.c runtime/subpage.c runtime/sysfs.c runtime/sysreg.c runtime/window.m runtime/remote_layer.m runtime/thread.c runtime/tls.c runtime/trampoline.S runtime/vdso_map.c runtime/vdso_blob.S
 LXRT_CFLAGS := -arch arm64 -fmodules -Wall -Wextra -Wno-unused-parameter -O2 -Iruntime
 LXRT_LDFLAGS := -framework Cocoa -framework Metal -framework QuartzCore
-# LXRT_KEEP_X18=1 (opt-in): link lxrun as built against the macOS 12.3 SDK.
-# xnu keeps x18 across exceptions for such a binary (MEASURED on the M4 under
-# macOS 27 by tests/x18_preserve/run.sh), so guest code the runtime never
-# rewrote keeps its x18 too: Linux HotSpot's C1/C2 and llvmpipe's LLVM JIT
-# allocate it, and computed wrong results or crashed without it
-# (benchmarks/stage24-minecraft-prism.txt). Not the default until the x86
-# Steam, Proton and Vulkan presentation paths are measured with it.
-# `make clean` or deleting build/lxrun first: make does not see the switch.
+# LXRT_KEEP_X18 (default 1 since stage 28; LXRT_KEEP_X18=0 opts out): link
+# lxrun as built against the macOS 12.3 SDK. xnu keeps x18 across exceptions
+# for such a binary -- in the process it exec'd, not in a forked child
+# (MEASURED on the M4 under macOS 27 and on the macos-15 CI runner:
+# tests/x18_preserve/run.sh). The x18 rewriter (runtime/x18.c) stays on
+# either way; what the kernel's x18 adds is code the runtime never rewrote,
+# a JIT's: Linux HotSpot's C1/C2 and llvmpipe's LLVM JIT allocate x18 and
+# computed wrong results or crashed without it
+# (benchmarks/stage24-minecraft-prism.txt, benchmarks/stage28-keep-x18.txt:
+# the whole test matrix passes with both builds). The flag only changes the
+# SDK version the binary records (-platform_version needs no 12.3 SDK
+# installed); if the link fails anyway, the rule links against the current
+# SDK and says so. build/.lxrun-flavor remembers the choice (rewritten only
+# when it changes): switching rebuilds lxrun.
+LXRT_KEEP_X18 ?= 1
 ifeq ($(LXRT_KEEP_X18),1)
 # SteamARM needs macOS 14 anyway: calls newer than 12.0 (mkfifoat) are there.
-LXRT_CFLAGS += -mmacosx-version-min=12.0 -Wno-unguarded-availability-new
-LXRT_LDFLAGS += -Wl,-platform_version,macos,12.0,12.3
+LXRT_KEEP_X18_CFLAGS := -mmacosx-version-min=12.0 -Wno-unguarded-availability-new
+LXRT_KEEP_X18_LDFLAGS := -Wl,-platform_version,macos,12.0,12.3
 endif
+LXRT_FLAVOR := build/.lxrun-flavor
+$(LXRT_FLAVOR): FORCE
+	@mkdir -p build
+	@echo "LXRT_KEEP_X18=$(LXRT_KEEP_X18)" | cmp -s - $@ || echo "LXRT_KEEP_X18=$(LXRT_KEEP_X18)" > $@
+.PHONY: FORCE
+FORCE:
 
 # The vDSO (M6): a Linux aarch64 shared object, embedded by vdso_blob.S.
 VDSO_CC := /opt/homebrew/opt/llvm/bin/clang
@@ -60,9 +73,20 @@ runtime/vdso/vdso.so: runtime/vdso/vdso.c runtime/vdso/vdso.lds
 	    -Wl,-T,runtime/vdso/vdso.lds -Wl,--hash-style=both -Wl,-soname,linux-vdso.so.1 \
 	    -Wl,--build-id=none -o $@ runtime/vdso/vdso.c
 
-build/lxrun: $(LXRT_SRCS) runtime/lxrt.h runtime/android_ids.h runtime/binder.h runtime/props.h runtime/x18.h runtime/storemu.h runtime/offmap.h resources/lxrt.entitlements runtime/vdso/vdso.so
+build/lxrun: $(LXRT_SRCS) runtime/lxrt.h runtime/android_ids.h runtime/binder.h runtime/props.h runtime/x18.h runtime/storemu.h runtime/offmap.h resources/lxrt.entitlements runtime/vdso/vdso.so $(LXRT_FLAVOR)
 	@mkdir -p build
+ifeq ($(LXRT_KEEP_X18),1)
+	$(CC) $(LXRT_CFLAGS) $(LXRT_KEEP_X18_CFLAGS) $(LXRT_LDFLAGS) $(LXRT_KEEP_X18_LDFLAGS) $(LXRT_SRCS) -o $@.new || { \
+	    echo "lxrun: linking as SDK 12.3 (LXRT_KEEP_X18=1) failed; linking against the current SDK" \
+	         "instead. The kernel will zero x18 for JIT code (docs/X18_VIRTUALIZATION.md)." >&2; \
+	    $(CC) $(LXRT_CFLAGS) $(LXRT_LDFLAGS) $(LXRT_SRCS) -o $@.new; }
+else
 	$(CC) $(LXRT_CFLAGS) $(LXRT_LDFLAGS) $(LXRT_SRCS) -o $@.new
+endif
+	@sdk=$$(otool -l $@.new | awk '/LC_BUILD_VERSION/{f=1} f && $$1 == "sdk" {print $$2; exit}'); \
+	    if [ -n "$$sdk" ] && [ "$${sdk%%.*}" -lt 13 ]; then \
+	        echo "lxrun: LC_BUILD_VERSION sdk $$sdk: the kernel keeps x18 for JIT code"; \
+	    else echo "lxrun: LC_BUILD_VERSION sdk $$sdk: the kernel zeroes x18 for JIT code"; fi
 	@# MAP_JIT needs the allow-jit entitlement, and a guest JIT needs MAP_JIT:
 	@# Apple Silicon refuses plain read-write-execute to every process.
 	@codesign -f -s - --entitlements resources/lxrt.entitlements $@.new

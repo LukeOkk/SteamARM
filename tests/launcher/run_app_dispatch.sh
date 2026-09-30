@@ -19,7 +19,7 @@ cat > "$W/launcher/apps.json" <<'JSON'
  {"id":"ovr","name":"ovr","command":["/opt/apps/o/run"],"root":"/tmp/lxrt-steamroot","fexRootfs":"/","env":{},"kind":"custom","overrides":{"display":"vnc","vsync":"on","bogus":"x"}},
  {"id":"kk","name":"kk","command":["/opt/apps/k/run"],"root":"/tmp/lxrt-steamroot","fexRootfs":"/","env":{},"kind":"custom","overrides":{"graphicsBackend":"vulkanKosmicKrisp","synchronization":"esync"}},
  {"id":"hs","name":"Heroic Steam","command":["/opt/apps/h/run"],"root":"/tmp/lxrt-steamroot","fexRootfs":"/","env":{},"kind":"custom"},
- {"id":"heroic","name":"Heroic Games Launcher","command":["/opt/apps/heroic/Heroic-2.22.3-linux-arm64/heroic","--no-sandbox","--disable-gpu","--js-flags=--no-opt"],"root":"/tmp/lxrt-armroot","fexRootfs":null,"env":{"HOME_IN_GUEST":"/tmp/heroichome","LXRT_X18_ALL_TEXT":"/opt/apps/heroic/"},"kind":"heroic","architecture":"aarch64","readiness":"experimental"},
+ {"id":"heroic","name":"Heroic Games Launcher","command":["/opt/apps/heroic/Heroic-2.22.3-linux-arm64/heroic","--no-sandbox","--disable-gpu"],"root":"/tmp/lxrt-armroot","fexRootfs":null,"env":{"HOME_IN_GUEST":"/tmp/heroichome","LXRT_X18_ALL_TEXT":"/opt/apps/heroic/"},"kind":"heroic","architecture":"aarch64","readiness":"experimental"},
  {"id":"steam","name":"Fake","command":["/bin/fake"],"kind":"custom"},
  {"id":"android-org.example.game","name":"Juego","command":[],"root":"/s/android/packages/org.example.game","kind":"android","architecture":"aarch64","android":{"package":"org.example.game"}},
  {"id":"android-cmd","name":"Juego2","command":["/system/bin/app_process64"],"kind":"android","architecture":"aarch64"}]
@@ -59,7 +59,7 @@ expect steam-arm64-frame 'LXRT_ROOT=/tmp/lxrt-arm64root DISPLAY=:2'
 expect steam-arm64-frame 'LXRT_GUEST_PAGE=4096'
 # Heroic ARM64 as launcher/Installers.swift writes it (HeroicARM64): native,
 # the Fedora ARM64 root, its own home, x18 over all of the app's text.
-expect heroic 'command:  scripts/run-native.sh /opt/apps/heroic/Heroic-2.22.3-linux-arm64/heroic --no-sandbox --disable-gpu --js-flags=--no-opt' 'FEX_'
+expect heroic 'command:  scripts/run-native.sh /opt/apps/heroic/Heroic-2.22.3-linux-arm64/heroic --no-sandbox --disable-gpu' 'FEX_'
 expect heroic 'LXRT_ROOT=/tmp/lxrt-armroot DISPLAY=:2'
 expect heroic 'HOME_IN_GUEST=/tmp/heroichome'
 expect heroic 'LXRT_X18_ALL_TEXT=/opt/apps/heroic/'
