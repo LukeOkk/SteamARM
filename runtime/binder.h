@@ -298,6 +298,15 @@ int  lxrt_binder_context_of(const char *guest_path);  // -1: not a binder device
 long lxrt_binder_open(int context, int lflags);
 bool lxrt_binder_is(int fd);
 long lxrt_binder_ioctl(int fd, unsigned long req, uint64_t arg);
+// A binder ioctl ('b') on a descriptor that is not a binder file, in a
+// process that has one open: noted in <binder dir>/client.log (the guest
+// sees Darwin's answer, EBADF or ENOTTY, as "Bad file descriptor").
+void lxrt_binder_note_stray_ioctl(int fd, unsigned long req);
+// Is `fd` one of the runtime's own channels to the hub (a binder file's
+// process channel or a thread's)? Those numbers do not exist for the guest:
+// its close() of one is EBADF, as on Linux, instead of cutting the channel
+// (the guest's next binder call would fail with EBADF in some other thread).
+bool lxrt_binder_owns(int fd);
 long lxrt_binder_mmap(uint64_t addr, uint64_t len, int prot, int lflags, int fd, uint64_t off);
 bool lxrt_binder_munmap(uint64_t addr, uint64_t len, long *ret);
 void lxrt_binder_close(int fd);

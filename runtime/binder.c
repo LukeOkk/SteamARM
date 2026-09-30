@@ -27,6 +27,7 @@
 // and the dispatcher restarts under SA_RESTART with the consumed counts
 // advanced, as Linux's restart does.
 #include <errno.h>
+#include <stdarg.h>
 #include <fcntl.h>
 #include <limits.h>
 #include <mach/mach.h>
@@ -80,6 +81,7 @@ struct bfile {
 struct tchan {
     struct bfile *f;
     int fd;
+    int hub_end;        // our copy of the hub's end, until the hub has answered (tchan_get)
     bool polled;
     bool busy;
     uint64_t seq;
@@ -95,8 +97,10 @@ LXRT_FORK_SAFE(binder_g_lock, g_lock)
 static _Thread_local struct tchan t_chans[MAX_TCHAN];
 static _Thread_local int t_nchans;
 
-// Every thread channel of this process, so a fork child can close the
-// parent's (their threads do not exist in the child).
+// Every channel of this process to the hub -- each binder file's process
+// channel and each thread's -- so a fork child can close the parent's (their
+// threads do not exist in the child) and a guest close() cannot cut one
+// (lxrt_binder_owns).
 static int g_chan_fds[1024];
 static int g_nchan_fds;
 
@@ -166,7 +170,7 @@ static void file_put(struct bfile *f)
     bool last = --f->refs == 0;
     pthread_mutex_unlock(&g_lock);
     if (!last) return;
-    if (f->chan >= 0) close(f->chan);
+    if (f->chan >= 0) { chan_unregister(f->chan); close(f->chan); }
     pthread_mutex_destroy(&f->lock);
     pthread_mutex_destroy(&f->map_lock);
     free(f);
@@ -230,6 +234,37 @@ static int hide_fd(int fd)
     }
     fcntl(fd, F_SETFD, FD_CLOEXEC);
     return fd;
+}
+
+static const char *binder_dir(void);
+
+// Why a binder call failed in a way the guest cannot explain ("Bad file
+// descriptor" from BinderProxy.transactNative with a driver that is there):
+// one line per event in <binder dir>/client.log. Guests' stderr is often
+// /dev/null (the zygote's children), so it goes to a file of the hub's
+// directory. Costs nothing on the success paths.
+static void binder_diag(const char *fmt, ...)
+{
+    const char *dir = binder_dir();
+    if (!dir) return;
+    char path[300], line[400];
+    snprintf(path, sizeof path, "%s/client.log", dir);
+    struct timespec ts;
+    clock_gettime(CLOCK_REALTIME, &ts);
+    va_list ap;
+    va_start(ap, fmt);
+    int n = snprintf(line, sizeof line, "[%ld.%03ld pid %d tid %ld] ", (long)ts.tv_sec, ts.tv_nsec / 1000000,
+                     getpid(), (long)lxrt_gettid());
+    if (n > 0 && n < (int)sizeof line) vsnprintf(line + n, sizeof line - (size_t)n, fmt, ap);
+    va_end(ap);
+    size_t l = strnlen(line, sizeof line - 2);
+    line[l++] = '\n';
+    int fd = open(path, O_WRONLY | O_APPEND | O_CREAT | O_CLOEXEC, 0600);
+    if (fd >= 0) {
+        ssize_t w = write(fd, line, l);
+        (void)w;
+        close(fd);
+    }
 }
 
 // The hub's directory. In /tmp by default, so it must be this user's own
@@ -355,9 +390,14 @@ static int send_msg(int fd, const struct bh_hdr *h, const void *pl, size_t plen,
 // Receive one message. *interrupted is set when a signal cut the wait short
 // (the caller decides what that means); fds get FD_CLOEXEC, as binder
 // installs them.
+static _Thread_local const char *t_recv_fail;
+static _Thread_local int t_recv_errno;
+
 static int recv_msg(int fd, struct bh_hdr *h, uint8_t **pl, int *fds, int *nfds,
                     bool *interrupted)
 {
+    t_recv_fail = "";
+    t_recv_errno = 0;
     *pl = NULL;
     *nfds = 0;
     union { struct cmsghdr c; char b[CMSG_SPACE(sizeof(int) * BH_MAX_FDS)]; } cm;
@@ -372,7 +412,13 @@ static int recv_msg(int fd, struct bh_hdr *h, uint8_t **pl, int *fds, int *nfds,
             if (got == 0 && interrupted) return -EINTR;
             continue;
         }
-        if (n <= 0) goto fail;
+        if (n <= 0) {
+            t_recv_errno = n < 0 ? errno : 0;
+            t_recv_fail = n < 0 ? "header recvmsg failed" : got ? "end of file in the header" : "end of file";
+            goto fail;
+        }
+        if (m.msg_flags & (MSG_CTRUNC | MSG_TRUNC))
+            binder_diag("channel %d: message flags 0x%x (truncated control data: descriptors lost)", fd, m.msg_flags);
         for (struct cmsghdr *c = CMSG_FIRSTHDR(&m); c; c = CMSG_NXTHDR(&m, c)) {
             if (c->cmsg_level != SOL_SOCKET || c->cmsg_type != SCM_RIGHTS) continue;
             int k = (int)((c->cmsg_len - CMSG_LEN(0)) / sizeof(int));
@@ -386,15 +432,19 @@ static int recv_msg(int fd, struct bh_hdr *h, uint8_t **pl, int *fds, int *nfds,
         }
         got += (size_t)n;
     }
-    if (h->len > BH_MAX_MSG) goto fail;
+    if (h->len > BH_MAX_MSG) { t_recv_fail = "message too large"; goto fail; }
     if (h->len) {
         *pl = malloc(h->len);
-        if (!*pl) goto fail;
+        if (!*pl) { t_recv_fail = "out of memory"; goto fail; }
         size_t g2 = 0;
         while (g2 < h->len) {
             ssize_t n = recv(fd, *pl + g2, h->len - g2, 0);
             if (n < 0 && errno == EINTR) continue;
-            if (n <= 0) goto fail;
+            if (n <= 0) {
+                t_recv_errno = n < 0 ? errno : 0;
+                t_recv_fail = n < 0 ? "payload recv failed" : "end of file in the payload";
+                goto fail;
+            }
             g2 += (size_t)n;
         }
     }
@@ -462,9 +512,12 @@ long lxrt_binder_open(int context, int lflags)
         struct bh_hdr ah;
         uint8_t *pl = NULL;
         int fds[1], nfds = 0;
-        if (send_msg(s, &h, &hello, sizeof hello, NULL, 0) != 0 ||
-            recv_msg(s, &ah, &pl, fds, &nfds, NULL) != 0 || ah.type != BH_HELLO_ACK ||
+        int hs = send_msg(s, &h, &hello, sizeof hello, NULL, 0);
+        int hr = hs ? 0 : recv_msg(s, &ah, &pl, fds, &nfds, NULL);
+        if (hs != 0 || hr != 0 || ah.type != BH_HELLO_ACK ||
             ah.len < sizeof(struct bh_hello_ack)) {
+            binder_diag("open, attempt %d: hello %s (errno %d)", attempt + 1,
+                        hs ? "not sent" : hr ? "not answered" : "answered wrongly", errno);
             free(pl);
             close(s);
             s = -1;
@@ -480,8 +533,10 @@ long lxrt_binder_open(int context, int lflags)
         struct timeval zero = { 0, 0 };
         setsockopt(s, SOL_SOCKET, SO_RCVTIMEO, &zero, sizeof zero);
     }
-    if (s < 0)
+    if (s < 0) {
+        binder_diag("open: no hub in %s after 4 attempts", dir);
         return LERR(ENOENT);        // no driver: what an absent /dev/binder says
+    }
     if (s >= B_FDS) {
         close(s);
         return LERR(EMFILE);
@@ -491,6 +546,7 @@ long lxrt_binder_open(int context, int lflags)
     int d = dup(s);
     if (d < 0) { free(f); close(s); return LERR(errno); }
     f->chan = hide_fd(d);
+    chan_register(f->chan);
     f->context = context;
     f->naliases = 1;
     f->refs = 1;
@@ -512,6 +568,7 @@ static void tchan_drop(struct tchan *tc)
 {
     chan_unregister(tc->fd);
     close(tc->fd);
+    if (tc->hub_end >= 0) { chan_unregister(tc->hub_end); close(tc->hub_end); }
     struct bfile *f = tc->f;
     *tc = t_chans[--t_nchans];
     memset(&t_chans[t_nchans], 0, sizeof t_chans[0]);
@@ -533,7 +590,17 @@ static struct tchan *tchan_get(struct bfile *f, long *err)
     int sv[2];
     if (socketpair(AF_UNIX, SOCK_STREAM, 0, sv) != 0) { *err = LERR(errno); return NULL; }
     int mine = hide_fd(sv[0]);
-    int hubs = sv[1];
+    // The hub's end goes to the hub by SCM_RIGHTS, and this process keeps a
+    // copy of it until the hub has answered on the channel. Closed at once,
+    // the end in flight had no reference but the message, and XNU's unix
+    // socket garbage collection (unp_gc, which any close of a descriptor-
+    // carrying socket anywhere on the Mac runs) could flush it: the hub then
+    // received a channel already at end of file, dropped the thread, and the
+    // guest's call failed with EBADF ("Bad file descriptor" from
+    // BinderProxy.transactNative; system_server itself died of it several
+    // times a boot, MEASURED at stage 28 with the hub's "thread channel
+    // arrived closed at the other end").
+    int hubs = hide_fd(sv[1]);
     int sz = 1 << 20;
     setsockopt(mine, SOL_SOCKET, SO_SNDBUF, &sz, sizeof sz);
     setsockopt(mine, SOL_SOCKET, SO_RCVBUF, &sz, sizeof sz);
@@ -542,18 +609,20 @@ static struct tchan *tchan_get(struct bfile *f, long *err)
     pthread_mutex_lock(&f->lock);
     int r = send_msg(f->chan, &h, &bt, sizeof bt, &hubs, 1);
     pthread_mutex_unlock(&f->lock);
-    close(hubs);
     if (r != 0) {
+        binder_diag("new thread channel: send on the file's channel %d failed: %s", f->chan, strerror(-r));
+        close(hubs);
         close(mine);
         *err = LERR(EBADF);
         return NULL;
     }
     chan_register(mine);
+    chan_register(hubs);
     pthread_mutex_lock(&g_lock);
     f->refs++;
     pthread_mutex_unlock(&g_lock);
     struct tchan *tc = &t_chans[t_nchans++];
-    *tc = (struct tchan){ .f = f, .fd = mine };
+    *tc = (struct tchan){ .f = f, .fd = mine, .hub_end = hubs };
     return tc;
 }
 
@@ -590,8 +659,11 @@ static long roundtrip(struct tchan *tc, uint32_t type, const void *pl, size_t pl
     struct bfile *f = tc->f;
     uint64_t seq = ++tc->seq;
     struct bh_hdr h = { .type = type, .nfds = (uint32_t)nfds, .len = plen, .seq = seq };
-    if (send_msg(tc->fd, &h, pl, plen, fds, nfds) != 0)
+    int sr = send_msg(tc->fd, &h, pl, plen, fds, nfds);
+    if (sr != 0) {
+        binder_diag("request type %u on thread channel %d: send failed: %s", type, tc->fd, strerror(-sr));
         return LERR(EBADF);
+    }
     bool cancelled = false;
     while (1) {
         struct bh_hdr rh;
@@ -605,8 +677,11 @@ static long roundtrip(struct tchan *tc, uint32_t type, const void *pl, size_t pl
             }
             continue;
         }
-        if (r != 0)
+        if (r != 0) {
+            binder_diag("request type %u on thread channel %d: no answer: %s%s%s", type, tc->fd, t_recv_fail,
+                        t_recv_errno ? ", " : "", t_recv_errno ? strerror(t_recv_errno) : "");
             return LERR(EBADF);             // the hub is gone: no driver any more
+        }
         if (rh.type != BH_RESULT || rh.seq != seq || rh.len < sizeof(struct bh_result)) {
             free(out->pl);
             for (int i = 0; i < out->nfds; i++) close(out->fds[i]);
@@ -614,6 +689,11 @@ static long roundtrip(struct tchan *tc, uint32_t type, const void *pl, size_t pl
             out->nfds = 0;
             if (rh.seq != seq) continue;    // a stale answer: keep waiting
             return LERR(EIO);
+        }
+        if (tc->hub_end >= 0) {         // the hub has its end: ours can go
+            chan_unregister(tc->hub_end);
+            close(tc->hub_end);
+            tc->hub_end = -1;
         }
         memcpy(&out->r, out->pl, sizeof out->r);
         uint64_t need = sizeof out->r + out->r.read_len + 8ull * out->r.nfixups + 4ull * out->r.ncloses;
@@ -642,6 +722,13 @@ static void result_done(struct result *res)
         for (uint32_t i = 0; i < res->r.ncloses; i++) {
             int32_t fd;
             memcpy(&fd, res->closes + i, 4);
+            if (fd >= 0 && fd < B_FDS && g_files[fd])
+                binder_diag("FDA buffer freed: descriptor %d to close is a binder descriptor now", fd);
+            struct stat cst;
+            if (fd >= 0 && fstat(fd, &cst) == 0 && S_ISSOCK(cst.st_mode))
+                binder_diag("FDA buffer freed: descriptor %d to close is a socket", fd);
+            else if (fd >= 0 && fcntl(fd, F_GETFD) < 0)
+                binder_diag("FDA buffer freed: descriptor %d to close is not open", fd);
             if (fd >= 0) lxrt_guest_close_fd(fd);
         }
     free(res->pl);
@@ -875,7 +962,10 @@ static long write_read(struct tchan *tc, uint64_t ubwr, int guest_fd)
 long lxrt_binder_ioctl(int fd, unsigned long lreq, uint64_t arg)
 {
     struct bfile *f = file_get(fd);
-    if (!f) return LERR(EBADF);
+    if (!f) {
+        binder_diag("ioctl 0x%lx on descriptor %d, which is not a binder file (any more)", lreq, fd);
+        return LERR(EBADF);
+    }
     long ret;
     if (f->forked || f->closed) { ret = LERR(EINVAL); goto out; }
     uint32_t req = (uint32_t)lreq;
@@ -922,6 +1012,28 @@ long lxrt_binder_ioctl(int fd, unsigned long lreq, uint64_t arg)
 out:
     file_put(f);
     return ret;
+}
+
+bool lxrt_binder_owns(int fd)
+{
+    // The channels sit at 64 and above (hide_fd); every close() comes here.
+    if (fd < 64 || atomic_load(&g_nopened) == 0) return false;
+    bool mine = false;
+    pthread_mutex_lock(&g_lock);
+    for (int i = 0; i < g_nchan_fds && !mine; i++) mine = g_chan_fds[i] == fd;
+    pthread_mutex_unlock(&g_lock);
+    if (mine) binder_diag("close of descriptor %d refused: it is the runtime's channel to the binder hub", fd);
+    return mine;
+}
+
+void lxrt_binder_note_stray_ioctl(int fd, unsigned long req)
+{
+    if (atomic_load(&g_nopened) == 0 || ((req >> 8) & 0xff) != 'b') return;
+    char path[PATH_MAX] = "";
+    int fl = fcntl(fd, F_GETFD);
+    if (fl >= 0) fcntl(fd, F_GETPATH, path);
+    binder_diag("binder ioctl 0x%lx on descriptor %d, which is not a binder file: %s%s", req, fd,
+                fl < 0 ? "closed" : "open", path[0] ? path : "");
 }
 
 void lxrt_binder_polled(int fd)
@@ -1090,6 +1202,7 @@ void lxrt_binder_close(int fd)
     if (last) f->closed = true;
     pthread_mutex_unlock(&g_lock);
     if (!f) return;
+    binder_diag("binder descriptor %d closed%s", fd, last ? " (its last alias)" : "");
     if (last && !f->map_base)
         file_release_proc(f);
     file_put(f);
@@ -1106,7 +1219,7 @@ static void file_release_proc(struct bfile *f)
         if (t_chans[i].f == f && !t_chans[i].busy) tchan_drop(&t_chans[i]);
         else i++;
     pthread_mutex_lock(&f->lock);
-    if (f->chan >= 0) { shutdown(f->chan, SHUT_RDWR); close(f->chan); f->chan = -1; }
+    if (f->chan >= 0) { chan_unregister(f->chan); shutdown(f->chan, SHUT_RDWR); close(f->chan); f->chan = -1; }
     pthread_mutex_unlock(&f->lock);
 }
 
@@ -1152,7 +1265,7 @@ static void binder_after_fork_child(void)
         f->forked = true;
         pthread_mutex_init(&f->lock, NULL);
         pthread_mutex_init(&f->map_lock, NULL);
-        if (f->chan >= 0) { close(f->chan); f->chan = -1; }
+        f->chan = -1;                   // closed above with the other channels
         f->map_base = 0;
         f->alias = NULL;
     }

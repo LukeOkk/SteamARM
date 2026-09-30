@@ -562,6 +562,8 @@ uint64_t lxrt_guest_clock_ns(long clk)
 // close(2) as the guest sees it.
 static long guest_close(int fd)
 {
+    if (lxrt_binder_owns(fd))
+        return LERR(EBADF);
 
     // Every module that keeps side state keyed by descriptor gets a chance
     // to drop it. Each is a cheap no-op for a descriptor it does not own.
