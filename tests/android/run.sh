@@ -577,6 +577,36 @@ if [ -n "$ready" ] && [ -f "$STAGE/usr/include/linux/android/binder.h" ] && [ -f
 else
     echo "  skip  x86_64 native binder service (no $STAGE headers, no x86_64 libc.so, or servicemanager not ready)"
 fi
+# The same service built for i386 (32-bit bionic under FEX's 32-bit mode): its
+# binder structures carry 32-bit addresses the runtime gives the guest base
+# (runtime/binder.c, gp(); gbase.c for the ioctl argument), and the hub hands
+# it guest addresses of its receive buffer.
+local BLIBC32B="$X86_ROOT/apex/com.android.runtime/lib/bionic/libc.so" i386_ok=0
+grep -aq lxrt-i386-bionic "$X86_ROOT/usr/lib/lxrt-emu/FEX" && i386_ok=1
+if [ -n "$ready" ] && [ -f "$STAGE/usr/include/linux/android/binder.h" ] && [ -f "$BLIBC32B" ] &&
+   /opt/homebrew/opt/llvm/bin/clang --target=i686-linux-android30 -DBIONIC_MIN -O2 -fPIE -pie -nostdlib \
+       -fno-stack-protector -Itests/android -idirafter "$STAGE/usr/include" -fuse-ld=lld \
+       --ld-path=/opt/homebrew/opt/lld/bin/ld.lld -Wl,--dynamic-linker=/system/bin/linker \
+       -Wl,-z,max-page-size=4096 -o "$X86_ROOT/data/local/tmp/binder_service32" tests/android/binder_service.c \
+       "$BLIBC32B" 2>/dev/null; then
+    local svclog32 svcpid32 got32=""
+    svclog32=$(mktemp -t binder-service-i386)
+    (xgbg 90 /data/local/tmp/binder_service32 >"$svclog32" 2>&1) &
+    svcpid32=$!
+    for _ in $(seq 1 100); do grep -q registered "$svclog32" && break; sleep 0.1; done
+    out=$(xg 30 /system/bin/service call steamarm.test 1 i32 41)
+    grep -q 'Result: Parcel(00000000 0000002a' <<<"$out" && got32=1
+    want=$(python3 -c "import sys; d=open(sys.argv[1],'rb').read(); print('%08x %08x' % (len(d), sum(d)))" "$X86_ROOT/system/etc/hosts")
+    local out2
+    out2=$(xg 30 /system/bin/service call steamarm.test 2 fd /system/etc/hosts)
+    xg 30 /system/bin/service call steamarm.test 3 >/dev/null
+    wait "$svcpid32" 2>/dev/null
+    if [ -n "$got32" ] && grep -q "Result: Parcel(00000000 $want" <<<"$out2"; then
+        ok "an i386 native service (32-bit bionic under FEX) registered and answered an x86-64 client: i32 41 -> 42, and read the descriptor it was passed ($want)"
+    elif [ "$i386_ok" = 0 ]; then xfail "i386 native binder service" "the root's FEX predates patches/fex-lxrt-i386-bionic.patch"
+    else bad "i386 native binder service" "i32: $(tr '\n' ' ' <<<"$out") fd: $(tr '\n' ' ' <<<"$out2") / $(grep -v '^\[lxrt' "$svclog32" | head -2 | tr '\n' ' ')"; fi
+    rm -f "$svclog32" "$X86_ROOT/data/local/tmp/binder_service32"
+fi
 kill "$smpid" 2>/dev/null; wait "$smpid" 2>/dev/null
 
 # vndservicemanager, the vendor context.

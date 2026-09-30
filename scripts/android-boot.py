@@ -46,6 +46,12 @@ service's stdout and stderr).
                           [--profile NAME] [--also SVC] [--all] [--no-zygote]
                           [--prop NAME=VALUE] [--svc-env SVC:VAR=VALUE]
                           [--trace SVC] [--persist FILE] [--bootargs ARGS]
+                          [--linkerconfig]
+
+--linkerconfig runs init's update_linker_config (the image's linkerconfig,
+with the property service up): it rewrites the root's /linkerconfig, which
+every guest of the root reads, so it is not the default. The 32-bit audio
+HAL needs it (--also vendor.audio-hal --linkerconfig).
 
 Stops, at the end, every process it started and every process those left in
 the root's state (found by the state directory in their environment), and
@@ -808,6 +814,22 @@ class Boot:
                 for name in self.rc.order:
                     if a[0] in self.rc.services[name].classes:
                         self.stop(name, c + " " + a[0])
+            elif c == "update_linker_config" and self.a.linkerconfig:
+                # init's builtin (early-init, after the bootstrap APEXes): the
+                # image's linkerconfig, now with the property service up, so
+                # it writes the full layout (VNDK, statsd's APEX) instead of
+                # the "legacy" one written before properties existed. The
+                # 32-bit audio HAL needs it: "library android.hardware.audio@
+                # 4.0.so not found ... in namespace (default)" with the legacy
+                # file (MEASURED, benchmarks/stage28-android-reliability.txt).
+                # It rewrites the root's /linkerconfig, which every guest of
+                # the root reads: opt-in (--linkerconfig).
+                rc, _ = self.guest(["/system/bin/linkerconfig", "--target", "/linkerconfig"], timeout=120)
+                try:
+                    size = os.path.getsize(self.hpath("/linkerconfig/ld.config.txt"))
+                except OSError:
+                    size = -1
+                log("update_linker_config: linkerconfig exited %d, /linkerconfig/ld.config.txt %d bytes" % (rc, size))
             elif c == "exec_start":
                 svc = self.rc.services.get(a[0])
                 if svc and (a[0] in self.profile["start"] or a[0] in (self.a.also or []) or self.a.all):
@@ -988,6 +1010,8 @@ def main():
     ap.add_argument("--all", action="store_true", help="start every service the actions ask for")
     ap.add_argument("--also", action="append", help="start this service too (outside the profile)")
     ap.add_argument("--no-zygote", action="store_true")
+    ap.add_argument("--linkerconfig", action="store_true",
+                    help="run init's update_linker_config: rewrite the root's /linkerconfig with properties up")
     ap.add_argument("--zygote-stdio", action="store_true", help="the zygote's stdio to its log too (it then refuses to fork)")
     ap.add_argument("--bootargs", default=os.environ.get("LXRT_PROPERTY_BOOTARGS", ""))
     ap.add_argument("--persist", default=None, help="persistent property file (default: the root's /data/property)")
