@@ -614,11 +614,91 @@ bool lxrt_absorb_runtime_fault(int dsig, siginfo_t *dinfo, void *uap)
     return false;
 }
 
+// ------------------------------------------------ signals no thread took
+//
+// XNU binds a process-directed signal (kill() of the process, a child's
+// SIGCHLD) to ONE thread when it is posted: the first thread that does not
+// block it or waits for it in sigwait -- and when every thread blocks it, the
+// process's first thread, where it then stays (MEASURED on macOS 27,
+// benchmarks/stage28-android-reliability.txt: main blocks everything, a
+// second thread blocks SIGCHLD, a child exits, the second thread unblocks or
+// sigsuspends -- nothing; sigpending() on main shows it). Linux keeps such a
+// signal in the process's shared pending set and delivers it to the first
+// thread that unblocks it. Here the first thread is the host main thread,
+// which blocks every signal for good (main.c), so a SIGCHLD that arrived while
+// the guest had it blocked -- or during one of the runtime's own all-signals-
+// blocked sections (thread.c threads_lock, taken on every rt_sigprocmask) --
+// was lost: a shell that blocks SIGCHLD around fork and waits in sigsuspend
+// slept forever, 12 of 300 runs of x86-64 Android's `sh -c 'x=$(toybox ...)'`
+// under FEX (stage 27's intermittent hang; tests/elf/sig_stranded.c).
+//
+// So the main thread looks at its own pending set on every turn of its loop
+// (window.m, at most 20 ms apart), and takes each signal it finds there that
+// has the runtime's handler by unblocking it for a moment: host_handler then
+// runs on the main thread, sees it is not a guest thread, and hands the
+// signal to a guest thread with pthread_kill -- one whose noted mask accepts
+// it, else the first guest thread, where it stays pending until unblocked, as
+// Linux would keep it. A signal at SIG_DFL (terminate, stop) is left where it
+// is: taking it on the main thread would act on it even though the guest
+// blocks it. The same hand-over serves any other non-guest thread that ends
+// up with one (a thread Darwin's frameworks started with an open mask).
+static bool is_sync_dsig(int d)
+{
+    return d == SIGSEGV || d == SIGBUS || d == SIGILL || d == SIGFPE || d == SIGTRAP || d == SIGSYS;
+}
+static _Atomic uint32_t g_forwarded;
+static void forward_stray(int dsig)
+{
+    int lsig = dsig == LXRT_RT_CARRIER ? 0 : lxrt_signo_to_linux(dsig);
+    pthread_t t;
+    bool have = lsig ? lxrt_thread_signal_target(lsig, &t) : lxrt_main_guest_thread(&t);
+    atomic_fetch_add(&g_forwarded, 1);
+    if (have && !pthread_equal(t, pthread_self()))
+        pthread_kill(t, dsig);
+    if (lxrt_trace_on()) {
+        char b[160];
+        int n = snprintf(b, sizeof b, "[lxrt] pid %d: darwin signal %d reached a non-guest thread; %s\n",
+                         (int)getpid(), dsig, have ? "handed to a guest thread" : "no guest thread to take it");
+        write(2, b, (size_t)(n > 0 && n < (int)sizeof b ? n : 0));
+    }
+}
+static void host_handler(int dsig, siginfo_t *dinfo, void *uap);
+void lxrt_signal_rescue_stranded(void)
+{
+    sigset_t pend;
+    if (sigpending(&pend) != 0)
+        return;
+    sigset_t take;
+    sigemptyset(&take);
+    bool any = false;
+    for (int d = 1; d < NSIG; d++) {
+        if (!sigismember(&pend, d) || d == SIGKILL || d == SIGSTOP || is_sync_dsig(d))
+            continue;
+        struct sigaction cur;
+        if (sigaction(d, NULL, &cur) != 0 || !(cur.sa_flags & SA_SIGINFO) ||
+            cur.sa_sigaction != host_handler)
+            continue;
+        sigaddset(&take, d);
+        any = true;
+    }
+    if (!any)
+        return;
+    // Unblocked, each is delivered right here, before the call returns.
+    pthread_sigmask(SIG_UNBLOCK, &take, NULL);
+    pthread_sigmask(SIG_BLOCK, &take, NULL);
+}
+
 static void host_handler(int dsig, siginfo_t *dinfo, void *uap)
 {
     // The JIT execute-mode stub's brk (jit.c) is the runtime's own.
     if (dsig == SIGTRAP && lxrt_jit_stub_trap(uap))
         return;
+    // Not a guest thread (the host main thread, see above): hand an
+    // asynchronous signal on. Guest handlers never run on these threads.
+    if (!is_sync_dsig(dsig) && !lxrt_thread_is_guest()) {
+        forward_stray(dsig);
+        return;
+    }
     sigstats_note(dsig);
     if (uap) {
         unsigned k = g_lastsig_n++ % 4;
@@ -1159,6 +1239,7 @@ static void host_handler(int dsig, siginfo_t *dinfo, void *uap)
         duc->uc_sigmask = dm;           // Darwin's sigreturn installs this
         g_rt_blocked = after & RT_BITS;
         g_sync_blocked = after & SYNC_BITS;
+        lxrt_thread_note_mask(after);
         rt_kick_if_pending();
     }
     if (lxrt_trace_on()) {
@@ -1442,8 +1523,15 @@ long lxrt_rt_sigprocmask(int how, const uint64_t *uset, uint64_t *uoldset,
         g_sync_blocked = dhow == SIG_BLOCK ? (sync_old | y)
                        : dhow == SIG_UNBLOCK ? (sync_old & ~y) : y;
     }
+    uint64_t old_l = darwin_mask_to_linux(&old) | rt_old | sync_old;
+    if (uset) {
+        // What other threads aim stray signals by (lxrt_thread_signal_target).
+        uint64_t n = how == LINUX_SIG_BLOCK ? (old_l | *uset)
+                   : how == LINUX_SIG_UNBLOCK ? (old_l & ~*uset) : *uset;
+        lxrt_thread_note_mask(n & ~((1ull << (9 - 1)) | (1ull << (19 - 1))));   // never KILL, STOP
+    }
     if (uoldset)
-        *uoldset = darwin_mask_to_linux(&old) | rt_old | sync_old;
+        *uoldset = old_l;
     if (uset)
         rt_kick_if_pending();
     return 0;

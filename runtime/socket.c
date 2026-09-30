@@ -816,6 +816,16 @@ static long cmsg_to_darwin(const void *lbuf, size_t llen, void *dst, size_t dcap
             in_off += LALIGN((uint32_t)lc->cmsg_len);
             continue;
         }
+        // SCM_RIGHTS without a descriptor: Linux attaches nothing
+        // (net/core/scm.c scm_fp_copy, num <= 0), Darwin delivers an empty
+        // SCM_RIGHTS the receiver has to cope with. Android's LocalSocket
+        // sends one whenever its outbound descriptor array is empty, and
+        // libbase's ReceiveFileDescriptorVector aborts on it ("cmsg_len(16)
+        // not long enough to hold any data": the zygote, MEASURED at stage 28).
+        if (lc->cmsg_level == L_SOL_SOCKET && lc->cmsg_type == L_SCM_RIGHTS && payload < sizeof(int)) {
+            in_off += LALIGN((uint32_t)lc->cmsg_len);
+            continue;
+        }
         size_t need = CMSG_SPACE(payload);
         if (out_off + need > dcap)
             return -1;
@@ -843,6 +853,10 @@ static long cmsg_to_linux(const void *dbuf, size_t dlen, void *lout, size_t lcap
         if (dc->cmsg_len < sizeof(*dc) || in_off + dc->cmsg_len > dlen)
             break;
         size_t payload = (size_t)dc->cmsg_len - sizeof(*dc);
+        if (dc->cmsg_level == SOL_SOCKET && dc->cmsg_type == SCM_RIGHTS && payload < sizeof(int)) {
+            in_off += (size_t)((dc->cmsg_len + 3u) & ~3u);     // an empty SCM_RIGHTS: Linux never has one
+            continue;
+        }
         size_t need = LALIGN((uint32_t)(sizeof(struct linux_cmsghdr) + payload));
         if (out_off + need > lcap)
             return -1;
@@ -864,14 +878,22 @@ static long cmsg_to_linux(const void *dbuf, size_t dlen, void *lout, size_t lcap
 
 
 // MSG_* flags: another silent number space. Linux -> Darwin:
-//   CTRUNC 0x8 -> 0x20, TRUNC 0x20 -> 0x10, DONTWAIT 0x40 -> 0x80,
-//   EOR 0x80 -> 0x8, WAITALL 0x100 -> 0x40, NOSIGNAL 0x4000 -> 0x80000;
-//   OOB/PEEK/DONTROUTE (1/2/4) agree; CMSG_CLOEXEC has no meaning here.
+//   DONTWAIT 0x40 -> 0x80, EOR 0x80 -> 0x8, WAITALL 0x100 -> 0x40,
+//   NOSIGNAL 0x4000 -> 0x80000; OOB/PEEK/DONTROUTE (1/2/4) agree;
+//   CMSG_CLOEXEC has no meaning here.
+// TRUNC (0x20) and CTRUNC (0x8) are NOT passed on: as recvmsg input Linux
+// ignores CTRUNC and reads TRUNC only on datagram and packet sockets (return
+// the datagram's real length), while XNU copies both into msg_flags on
+// return whether or not anything was truncated (MEASURED, macOS 27: one byte
+// into a 4-byte buffer, input MSG_TRUNC -> msg_flags MSG_TRUNC, on stream
+// and datagram sockets alike). libbase's ReceiveFileDescriptorVector passes
+// both and then refuses a message that reports either: i386 Android's
+// zygote ("message was truncated when receiving file descriptors") and
+// system_server talking to it. The real-length reading of input TRUNC on a
+// datagram socket is not emulated.
 int lxrt_msgflags_to_darwin(int lf)
 {
     int d = lf & 0x7;
-    if (lf & 0x8)     d |= 0x20;
-    if (lf & 0x20)    d |= 0x10;
     if (lf & 0x40)    d |= 0x80;
     if (lf & 0x80)    d |= 0x8;
     if (lf & 0x100)   d |= 0x40;
@@ -985,7 +1007,7 @@ long lxrt_recvmsg(int fd, void *lmsg, int flags)
     long w = seqpkt_before_recv(fd, flags);
     if (w < 0)
         return w;
-    ssize_t r = recvmsg(fd, &dm, lxrt_msgflags_to_darwin(flags));
+    ssize_t r = recvmsg(fd, &dm, lxrt_msgflags_to_darwin(flags));   // drops TRUNC/CTRUNC
     if (r < 0 && errno == ECONNRESET && lxrt_is_seqpacket(fd)) {
         lm->msg_controllen = 0;
         lm->msg_flags = 0;
@@ -1052,6 +1074,11 @@ static const struct opt_map k_so[] = {
     { 10, SO_OOBINLINE },  { 13, SO_LINGER },     { 15, SO_REUSEPORT },
     { 18, SO_RCVLOWAT },   { 19, SO_SNDLOWAT },   { 20, SO_RCVTIMEO },
     { 21, SO_SNDTIMEO },   { 30, SO_ACCEPTCONN },
+    // SO_RCVTIMEO_NEW / SO_SNDTIMEO_NEW (y2038 names): on a 64-bit ABI the
+    // same 16-byte timeval as 20/21. FEX turns an i386 guest's _OLD
+    // timeouts into these (i386 Android's zygote: ENOPROTOOPT on every
+    // connection before this).
+    { 66, SO_RCVTIMEO },   { 67, SO_SNDTIMEO },
 };
 
 // Returns false when the option has no Darwin equivalent -- SO_PASSCRED and
@@ -1205,6 +1232,35 @@ long lxrt_getsockopt(int fd, int llevel, int lopt, void *val, unsigned *len)
         if (*len < sizeof uc) return LERR(EINVAL);
         memcpy(val, &uc, sizeof uc);
         *len = sizeof uc;
+        return 0;
+    }
+    if (llevel == L_SOL_SOCKET_OPT && (lopt == 38 || lopt == 39)) {
+        // SO_PROTOCOL (38) and SO_DOMAIN (39): read-only, Linux 2.6.32+.
+        // Darwin has neither; the answer follows from the socket's address
+        // family and type. Android's BlockGuardOs asks SO_DOMAIN of every
+        // accepted socket (isInetSocket), and the zygote died on the
+        // ENOPROTOOPT with system_server's first connection ("accept failed:
+        // ENOPROTOOPT", MEASURED at stage 28).
+        if (!val || !len) return LERR(EFAULT);
+        if (*len < 4) return LERR(EINVAL);
+        int32_t v;
+        if (is_netlink(fd)) {
+            v = lopt == 39 ? L_AF_NETLINK : 0;
+        } else {
+            struct sockaddr_storage ss;
+            socklen_t sl = sizeof ss;
+            int type = 0;
+            socklen_t tl = sizeof type;
+            if (getsockname(fd, (struct sockaddr *)&ss, &sl) != 0 ||
+                getsockopt(fd, SOL_SOCKET, SO_TYPE, &type, &tl) != 0)
+                return LERR(errno);
+            int fam = ss.ss_family == AF_INET6 ? 10 : ss.ss_family;   // Darwin AF_INET6 is 30
+            if (lopt == 39) v = fam;
+            else if (fam == AF_UNIX) v = 0;
+            else v = type == SOCK_STREAM ? 6 : type == SOCK_DGRAM ? 17 : 0;   // IPPROTO_TCP/UDP
+        }
+        *(int32_t *)val = v;
+        *len = 4;
         return 0;
     }
     int dlevel, dopt;

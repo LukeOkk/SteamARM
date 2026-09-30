@@ -46,6 +46,13 @@ service's stdout and stderr).
                           [--profile NAME] [--also SVC] [--all] [--no-zygote]
                           [--prop NAME=VALUE] [--svc-env SVC:VAR=VALUE]
                           [--trace SVC] [--persist FILE] [--bootargs ARGS]
+                          [--linkerconfig] [--wayland XDG[:SOCKET]] [--abi32]
+                          [--exit-with PID]
+
+--linkerconfig runs init's update_linker_config (the image's linkerconfig,
+with the property service up): it rewrites the root's /linkerconfig, which
+every guest of the root reads, so it is not the default. The 32-bit audio
+HAL needs it (--also vendor.audio-hal --linkerconfig).
 
 Stops, at the end, every process it started and every process those left in
 the root's state (found by the state directory in their environment), and
@@ -139,27 +146,83 @@ PROFILES = {
         # seccomp policy and abort if they cannot ("Could not set seccomp
         # filter of size 238: Invalid argument", MEASURED). Inherited by
         # system_server and every app the zygote forks.
-        "env_x86": {"zygote": {"FEX_NEEDSSECCOMP": "1"}},
+        "env_x86": {"zygote": {"FEX_NEEDSSECCOMP": "1"}, "zygote_secondary": {"FEX_NEEDSSECCOMP": "1"}},
         # Asked for by the .rc files but left out, and why (the boot logs
         # each one it skips).
         "left_out": {
             "ueventd": "no uevents and no device nodes to make (ro.cold_boot_done=true)",
             "logd": "tests/android/logd.py stands in for its write socket",
-            "lmkd": "no memory cgroups or PSI; ActivityManager keeps working without it",
+            "lmkd": "no memory cgroups or PSI; its socket has a stand-in (Boot.start_lmkd_socket)",
             "vold": "no block devices, no FUSE: /data is a directory of the root",
             "apexd": "flattened APEXes (ro.apex.updatable unset), already under /apex",
             "netd": "exits at once: NETLINK_KOBJECT_UEVENT, route netlink, iptables, BPF; its "
                     "'onrestart restart zygote' then kills the zygote every 5 s",
-            "vendor.audio-hal": "i386 (32-bit) binary: FEX stops it at once ('NoExec instruction in "
-                                "entry block'); audioserver waits for it",
+            # Started instead with --linkerconfig when the root's FEX carries
+            # patches/fex-lxrt-i386-bionic.patch (Boot.__init__).
+            "vendor.audio-hal": "i386 (32-bit): needs a FEX with patches/fex-lxrt-i386-bionic.patch and "
+                                "--linkerconfig (the legacy /linkerconfig has no VNDK namespace for "
+                                "android.hardware.audio@4.0.so); audioserver waits for it",
             "vendor.audio-hal-2-0": "declares the same interface; no such binary in this image",
             "vendor.hwcomposer-2-1": "Waydroid's composer is a Wayland client: no display here",
-            "zygote_secondary": "app_process32 (i386): 32-bit apps only",
+            # Started instead when the root's FEX carries
+            # patches/fex-lxrt-i386-bionic.patch (Boot.__init__); otherwise the
+            # host .prop declares no 32-bit ABI (HOST_ABI_PROPS), or
+            # system_server waits 20 s for it (hasSecondZygote, "x86_64,x86").
+            "zygote_secondary": "app_process32 (i386): the root's FEX predates patches/fex-lxrt-i386-bionic.patch",
             "bootanim": "graphics",
             "statsd": "cannot link: the root's /linkerconfig (written by the image's linkerconfig "
                       "before properties existed) has no namespace for the statsd APEX",
         },
     },
+}
+
+# The same with a screen (stage 28, benchmarks/stage28-android-apk.txt):
+# Waydroid's composer HAL connects to a Wayland compositor (scripts/run-
+# weston.sh; --wayland names its socket), SurfaceFlinger presents through it,
+# and init's bootanim runs until system_server says the boot is complete.
+PROFILES["display"] = {
+    "start": PROFILES["headless"]["start"] | {
+        "vendor.hwcomposer-2-1",   # composer@2.1 + hwcomposer.waydroid (a Wayland client)
+        "task-hal-1-0",            # vendor.waydroid.task@1.0: the composer waits for it
+        "bootanim",                # started by SurfaceFlinger (ctl.start), stopped by system_server
+        "netd", "vold",            # stand-ins (below)
+        "mediametrics",            # media.metrics: audioserver waits 5 s for it per call and its
+                                   # TimeCheck aborts it (MEASURED)
+    },
+    "env_x86": dict(PROFILES["headless"]["env_x86"]),
+    "left_out": {k: v for k, v in PROFILES["headless"]["left_out"].items()
+                 if k not in ("vendor.hwcomposer-2-1", "bootanim", "netd", "vold")},
+    # Services replaced by a stand-in (scripts/android/java/.../BinderStandIn.java):
+    # the same name, user and capabilities, the image's own AIDL interfaces,
+    # every call answered with success and empty values. netd cannot run
+    # (no netlink route/uevent sockets, iptables, BPF, tc on a Mac), and
+    # system_server waits for its "netd" and "dnsresolver" services forever
+    # ("NetdService: WARNING: returning null INetd instance.", MEASURED).
+    # So the framework boots with no network at all.
+    # Of the daemon's .rc sockets only those named with socket= are made:
+    # NsdService waits in system_server's start-up until it has connected to
+    # netd's "mdns" (MEASURED). fwmarkd and dnsproxyd stay absent, so every
+    # app's libnetd_client finds no fwmark server and carries on, and a DNS
+    # lookup fails at once instead of waiting for an answer.
+    # vold likewise (no block devices, FUSE, dm or fscrypt here): without its
+    # "vold" service StorageManagerService's calls met a null IVold and
+    # finishBooting's checkpoint commit rebooted the framework ("Rebooting,
+    # reason: Checkpoint commit failed", MEASURED); its booleans are questions
+    # (isCheckpointing, needsCheckpoint, ...), answered no. "storaged" goes
+    # with it (StorageManagerService asks for both).
+    "stand_ins": {
+        "netd": ["netd=android.net.INetd", "dnsresolver=android.net.IDnsResolver", "socket=mdns"],
+        "vold": ["vold=android.os.IVold:false", "storaged=android.os.IStoraged"],
+    },
+    # HIDL HALs whose service binary cannot run here, served in-process
+    # instead: hwservicemanager is shown a copy of the vendor manifest with
+    # these HALs' transport "passthrough" (a bind of that one file, for that
+    # one process), so a client loads the HAL's x86-64 implementation from
+    # /vendor/lib64/hw itself, as libhidl does for passthrough HALs. The
+    # audio HAL's service is i386 and FEX's 32-bit mode stops it; audioserver
+    # then waited for IDevicesFactory forever and never published
+    # media.audio_flinger, which AudioService waits for (MEASURED).
+    "vintf_passthrough": ["android.hardware.audio", "android.hardware.audio.effect"],
 }
 
 
@@ -185,10 +248,55 @@ HOST_PROPS = [
     ("ro.hardware.egl", "swiftshader"),
     ("ro.hardware.gralloc", "default"),
     # installd runs dex2oat32 unless this is set (dexopt.cpp
-    # select_execution_binary); i386 programs do not run under FEX here yet
-    # (dex2oat32 died of SIGSEGV in FEX's 32-bit mode, MEASURED), x86-64
-    # dex2oat64 does (benchmarks/stage25-art-x86-fex.txt).
+    # select_execution_binary). dex2oat32 died of SIGSEGV in FEX's 32-bit
+    # mode until patches/fex-lxrt-i386-bionic.patch (stage 28); x86-64
+    # dex2oat64 is kept: it needs no i386 fix and ran first
+    # (benchmarks/stage25-art-x86-fex.txt).
     ("dalvik.vm.dex2oat64.enabled", "true"),
+    # Waydroid's sensors HAL serves stub sensors only with this (Lepton's
+    # properties.sh sets it, docs/LEPTON_REUSE_ANALYSIS.md 0.3); without it
+    # the HAL exits at once and system_server's StartSensorService waits for
+    # ISensors until the Watchdog kills it (MEASURED, stage 28).
+    ("waydroid.stub_sensors_hal", "1"),
+    # Android 11's app data isolation: the zygote mounts a tmpfs over
+    # /data/user, /data/data and /data/misc/profiles/cur in each app's mount
+    # namespace and binds back only that app's directories. The runtime
+    # emulates bind mounts (per process) but not tmpfs, so every app died in
+    # the zygote ("Failed to mount tmpfs to /data/misc/profiles/cur:
+    # Operation not permitted", SystemUI first, MEASURED). The framework's
+    # switch for it (ProcessList, persist.zygote.app_data_isolation, default
+    # true) turns it off; every guest is the same Mac user anyway, so the
+    # isolation had nothing under it here.
+    ("persist.zygote.app_data_isolation", "false"),
+]
+
+# The display profile adds these. The boot animation is SwiftShader drawing
+# 57 frames a second on the CPU (bootanimation 35% and SurfaceFlinger 40% of a
+# core, stage 27) while every framework process starts under FEX; the network
+# stack's TetheringService then missed ActivityManager's 20 s service timeout
+# and its loss took system_server down ("Lost network stack", MEASURED).
+# debug.sf.nobootanimation is SurfaceFlinger's own switch: it does not start
+# bootanim, and the screen stays black until the first window.
+DISPLAY_PROPS = [("debug.sf.nobootanimation", "1")]
+
+
+# What this host can run, which the image cannot know: the property service
+# loads these, with HOST_PROPS and --prop, from a .prop file of this script's
+# (LXRT_PROPERTY_HOST, loaded last among the image's .prop files, as Waydroid's
+# container manager writes waydroid.prop for each boot).
+HOST_ABI_PROPS = [
+    # Without a FEX that runs i386 bionic (patches/fex-lxrt-i386-bionic.patch;
+    # before it: "NoExec instruction in entry block", stage 27), or in the
+    # display profile without --abi32 (Boot.abi32), no 32-bit code runs, so
+    # the device declares none.
+    # With the image's "x86_64,x86" the primary zygote waited 20 s for a
+    # secondary one, finishBooting died telling the absent 32-bit zygote the
+    # boot was complete ("Failed to inform zygote of boot_completed"), and the
+    # WebView loader's 32-bit process failed to start, whereupon
+    # ActivityManager force-stopped package "android" and the settings
+    # provider every app needs went missing (MEASURED, stage 28).
+    ("ro.product.cpu.abilist", "x86_64"),
+    ("ro.product.cpu.abilist32", ""),
 ]
 
 
@@ -202,6 +310,33 @@ def log(msg):
 
 
 LOGF = None
+
+# Virtual file ownership (runtime/android_ids.h): the owner guests with
+# Android ids see for a file is this extended attribute of the Mac's file;
+# init's mkdir/chown here record it the same way a guest's chown does.
+OWNER_XATTR = b"org.steamarm.lxrt.owner"
+_libc = None
+
+
+def set_owner(host_path, uid, gid=None):
+    global _libc
+    import ctypes
+    if _libc is None:
+        _libc = ctypes.CDLL(None, use_errno=True)
+        _libc.setxattr.argtypes = [ctypes.c_char_p, ctypes.c_char_p, ctypes.c_void_p, ctypes.c_size_t,
+                                   ctypes.c_uint32, ctypes.c_int]
+        _libc.getxattr.argtypes = list(_libc.setxattr.argtypes)
+        _libc.getxattr.restype = _libc.setxattr.restype = ctypes.c_ssize_t
+    p = host_path.encode()
+    if uid is None or gid is None:
+        buf = ctypes.create_string_buffer(32)
+        n = _libc.getxattr(p, OWNER_XATTR, buf, 31, 0, 1)
+        cur = buf.raw[:n].decode().split(":") if n > 0 else [str(os.getuid()), str(os.getgid())]
+        uid = int(cur[0]) if uid is None else uid
+        gid = int(cur[1]) if gid is None else gid
+    v = ("%d:%d" % (uid, gid)).encode()
+    if _libc.setxattr(p, OWNER_XATTR, v, len(v), 0, 1) != 0:        # XATTR_NOFOLLOW
+        log("set_owner %s %d:%d: errno %d" % (host_path, uid, gid, ctypes.get_errno()))
 
 
 def own_group():
@@ -398,6 +533,7 @@ class Boot:
         self.state = a.state
         self.propdir = os.path.join(self.state, "props")
         self.binderdir = os.path.join(self.state, "binder")
+        self.inputdir = os.path.join(self.state, "input")
         self.lxrun = os.path.realpath(a.lxrun)
         self.profile = PROFILES[a.profile]
         self.props = Props(self)
@@ -408,7 +544,29 @@ class Boot:
         self.queue = []
         self.class_started = set()
         self.x86 = self.detect_x86()
+        # i386 programs run under a FEX with patches/fex-lxrt-i386-bionic.patch
+        # (it carries this string): then the secondary zygote is started too
+        # (benchmarks/stage28-android-reliability.txt).
+        # With --linkerconfig the 32-bit audio HAL links as well (binder for
+        # 32-bit guests, runtime/binder.c), and audioserver stops waiting.
+        # The display profile leaves 32-bit out unless asked (--abi32): the
+        # device then declares no 32-bit ABI (HOST_ABI_PROPS) and one zygote
+        # fewer shares the CPU with the boot.
+        self.abi32 = bool(self.x86 and (a.profile == "headless" or a.abi32) and self.fex_has(b"lxrt-i386-bionic"))
+        if self.abi32:
+            extra = {"zygote_secondary"} | ({"vendor.audio-hal"} if a.linkerconfig else set())
+            prof = dict(self.profile)
+            prof["start"] = set(prof["start"]) | extra
+            prof["left_out"] = {k: v for k, v in prof["left_out"].items() if k not in extra}
+            self.profile = prof
         self.t0 = time.time()
+
+    def fex_has(self, marker):
+        try:
+            with open(self.root + "/usr/lib/lxrt-emu/FEX", "rb") as f:
+                return marker in f.read()
+        except OSError:
+            return False
 
     def detect_x86(self):
         with open(self.root + "/system/bin/toybox", "rb") as f:
@@ -422,6 +580,10 @@ class Boot:
             "OBJC_DISABLE_INITIALIZE_FORK_SAFETY": "YES",
             "LXRT_PROPERTY_DIR": self.propdir, "LXRT_BINDER_DIR": self.binderdir,
             "LXRT_BINDER_HUB_IDLE": "30",
+            # This boot's /dev/input (runtime/evdev.c): the display composer's
+            # input FIFOs and InputFlinger's EventHub meet there, not in the
+            # shared /tmp/lxrt-input of steamarm-inputd's controllers.
+            "LXRT_INPUT_DIR": self.inputdir,
         }
         if self.x86:
             # The same as scripts/run-android-x86.sh (its FEXServer is used).
@@ -442,9 +604,15 @@ class Boot:
         return hashlib.sha1(self.root.encode()).hexdigest()[:12]
 
     def spawn(self, argv, env, out, pass_fds=(), what=""):
+        # cwd: the root, which is the guest's "/" (init's cwd). A relative
+        # path resolves against the host's working directory; with the Mac's
+        # "/" there, PackageManagerServiceUtils.makeDirRecursive (which walks
+        # "data", "data/app", ... relative) found none of them, tried to make
+        # "/data" and every `pm install` failed with "Failed rename"
+        # (MEASURED at stage 28). getcwd still answers "/".
         p = subprocess.Popen([self.lxrun] + argv, env=env, stdin=subprocess.DEVNULL,
                              stdout=out, stderr=subprocess.STDOUT, pass_fds=pass_fds,
-                             preexec_fn=own_group, cwd="/")
+                             preexec_fn=own_group, cwd=self.root)
         self.children.append((p, what))
         return p
 
@@ -452,7 +620,7 @@ class Boot:
         env = dict(self.base_env(), **self.env)
         env.update(env_extra or {})
         r = subprocess.run([self.lxrun] + argv, env=env, stdin=subprocess.DEVNULL,
-                           stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, timeout=timeout)
+                           stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, timeout=timeout, cwd=self.root)
         return r.returncode, r.stdout.decode(errors="replace")
 
     # -- start-up
@@ -477,7 +645,15 @@ class Boot:
         self.ctl.bind(cp)
         self.ctl.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 4 << 20)
         self.ctl.setblocking(False)
-        env = dict(self.base_env(), LXRT_PROPERTY_IDLE="0", LXRT_PROPERTY_INIT=cp)
+        hostprop = os.path.join(self.state, "host.prop")
+        extra = [tuple(x.split("=", 1)) for x in (self.a.prop or []) if "=" in x]
+        with open(hostprop, "w") as f:
+            f.write("# scripts/android-boot.py: this host's properties (LXRT_PROPERTY_HOST)\n")
+            abi = [] if self.abi32 else HOST_ABI_PROPS
+            for k, v in abi + HOST_PROPS + (DISPLAY_PROPS if self.a.profile == "display" else []) + extra:
+                f.write("%s=%s\n" % (k, v))
+        env = dict(self.base_env(), LXRT_PROPERTY_IDLE="0", LXRT_PROPERTY_INIT=cp,
+                   LXRT_PROPERTY_HOST=hostprop)
         if self.a.bootargs:
             env["LXRT_PROPERTY_BOOTARGS"] = self.a.bootargs
         if self.a.persist:
@@ -516,6 +692,48 @@ class Boot:
         self.props.set("init.svc.logd", "running")
         log("logd stand-in on /dev/socket/logdw -> %s" % os.path.join(self.state, "logcat.txt"))
 
+    def start_lmkd_socket(self):
+        """lmkd's socket, with nothing behind it but a reader. lmkd itself
+        cannot work here (no memory cgroups, no PSI), and without its socket
+        every oom_adj change in ActivityManager waited 3 s for a connection
+        (ProcessList.writeLmkd: waitForConnection(3 * LMKD_RECONNECT_DELAY_MS))
+        with the ActivityManager lock held: 56 "SLOW OOM ADJ: 3000ms" in one
+        boot, then ANRs of SystemUI and the network stack, whose loss took
+        system_server down ("Lost network stack", MEASURED at stage 28). The
+        guest's SEQPACKET socket is a datagram socket here (runtime/socket.c),
+        so this is one too; every command is read and dropped: no process is
+        ever killed for memory, as with no lmkd. The only commands that want
+        an answer (LMK_GETKILLCNT) come from dumps (dumpsys activity lmk,
+        ActivityManagerService.reportLmkKillAtOrBelow; VERIFIED IN SOURCE, the
+        image's services.jar) and would wait for one."""
+        import threading
+        path = self.root + "/dev/socket/lmkd"
+        try:
+            os.unlink(path)
+        except FileNotFoundError:
+            pass
+        s = socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM)
+        try:
+            s.bind(path)
+        except OSError as e:
+            log("lmkd socket: %s" % e)
+            s.close()
+            return
+        os.chmod(path, 0o660)
+        self.lmkd_msgs = 0
+
+        def reader():
+            while True:
+                try:
+                    if not s.recv(4096):
+                        continue
+                except OSError:
+                    return
+                self.lmkd_msgs += 1
+
+        threading.Thread(target=reader, name="lmkd", daemon=True).start()
+        log("lmkd stand-in on /dev/socket/lmkd (commands read and dropped)")
+
     # -- identities
     def uid_of(self, name):
         if name == "host":            # Waydroid's init: waydroid.host.uid, default 1000
@@ -549,10 +767,12 @@ class Boot:
         return "%d:%d:%s" % (uid, gid, sup)
 
     # -- services
-    def make_sockets(self, svc):
+    def make_sockets(self, svc, only=None):
         fds, env = [], {}
         for spec in svc.sockets:
             name, typ = spec[0], spec[1]
+            if only is not None and name not in only:
+                continue
             perm = int(spec[2], 8) if len(spec) > 2 else 0o660
             base = typ.split("+")[0]
             st = {"stream": socket.SOCK_STREAM, "dgram": socket.SOCK_DGRAM,
@@ -594,13 +814,31 @@ class Boot:
         if name == "zygote" and self.a.no_zygote:
             log("start zygote (%s): --no-zygote" % why)
             return False
-        fds, senv = self.make_sockets(svc)
+        stand_in = self.profile.get("stand_ins", {}).get(name)
+        argv = svc.argv
+        if stand_in:
+            dex = self.standin_dex()
+            if not dex:
+                log("start %s (%s): its stand-in could not be built" % (name, why))
+                return False
+            argv = ["/system/bin/app_process64", "/system/bin", "org.steamarm.android.BinderStandIn"] + stand_in
+            keep = [x.split("=", 1)[1] for x in stand_in if x.startswith("socket=")]
+            fds, senv = self.make_sockets(svc, only=keep)
+            senv["CLASSPATH"] = dex + ":/system/framework/services.jar"
+        else:
+            fds, senv = self.make_sockets(svc)
         env = dict(self.base_env(), **self.env)
         env.update(svc.env)
         env.update(senv)
         env["LXRT_ANDROID_IDS"] = self.ids_for(svc)
         if self.x86:
             env.update(self.profile.get("env_x86", {}).get(name, {}))
+        if name == "hwservicemanager" and self.profile.get("vintf_passthrough"):
+            m = self.passthrough_manifest(self.profile["vintf_passthrough"])
+            if m:
+                # One bind in the runtime's table (runtime/mounts.c): this
+                # process reads the copy at the image's path.
+                env["LXRT_MOUNTS"] = "/vendor/etc/vintf/manifest.xml\x1e%s\x1e1\x1f" % m
         for spec in self.a.svc_env or []:
             who, _, kv = spec.partition(":")
             if who in (name, "all") and "=" in kv:
@@ -620,7 +858,7 @@ class Boot:
             # .../svc/zygote.log", MEASURED). Other services keep the log.
             out.close()
             out = subprocess.DEVNULL
-        svc.proc = self.spawn(svc.argv, env, out, pass_fds=fds, what="service " + name)
+        svc.proc = self.spawn(argv, env, out, pass_fds=fds, what="service " + name)
         for fd in fds:
             os.close(fd)
         svc.state = "running"
@@ -629,9 +867,69 @@ class Boot:
         self.props.set("init.svc." + name, "running")
         if svc.starts == 1:
             self.props.set("ro.boottime." + name, str(int(time.monotonic() * 1e9)))
-        log("started %s (pid %d, %s): %s [%s]" % (name, svc.proc.pid, why, " ".join(svc.argv),
-                                                  env["LXRT_ANDROID_IDS"]))
+        log("started %s (pid %d, %s): %s%s [%s]" % (name, svc.proc.pid, why, " ".join(argv),
+                                                    " (stand-in)" if stand_in else "", env["LXRT_ANDROID_IDS"]))
         return True
+
+    def passthrough_manifest(self, hals):
+        """A copy of the image's vendor VINTF manifest in the state directory
+        with the named HIDL HALs' transport made passthrough. Its host path,
+        or None."""
+        src = self.root + "/vendor/etc/vintf/manifest.xml"
+        try:
+            text = open(src).read()
+        except OSError as e:
+            log("vintf: %s" % e)
+            return None
+        done = []
+
+        def fix(m):
+            block = m.group(0)
+            nm = re.search(r"<name>\s*([^<\s]+)\s*</name>", block)
+            if nm and nm.group(1) in hals and "<transport>hwbinder</transport>" in block:
+                done.append(nm.group(1))
+                return block.replace("<transport>hwbinder</transport>",
+                                     '<transport arch="32+64">passthrough</transport>')
+            return block
+        text = re.sub(r'<hal format="hidl">.*?</hal>', fix, text, flags=re.S)
+        out = os.path.join(self.state, "vintf-manifest.xml")
+        with open(out, "w") as f:
+            f.write(text)
+        log("vintf: %s passthrough for hwservicemanager (%s)" % (", ".join(done) or "nothing", out))
+        return out
+
+    def standin_dex(self):
+        """The stand-ins' dex (scripts/android/java), built with javac and D8
+        (R8_JAR, as tests/android/run.sh builds its test dex) when missing or
+        older than the source, and copied into the root. Its guest path, or
+        None."""
+        if getattr(self, "_standin", None):
+            return self._standin
+        src = os.path.join(HERE, "android", "java", "org", "steamarm", "android", "BinderStandIn.java")
+        out = os.path.join(REPO, "build", "android", "standin")
+        dex = os.path.join(out, "classes.dex")
+        r8 = os.environ.get("R8_JAR") or os.path.join(
+            os.environ.get("STEAMARM_STATE") or os.path.expanduser("~/SteamARM-roots"), "android/tools/r8-9.4.27.jar")
+        try:
+            if not os.path.exists(dex) or os.path.getmtime(dex) < os.path.getmtime(src):
+                cls = os.path.join(out, "classes")
+                os.makedirs(cls, exist_ok=True)
+                subprocess.run(["javac", "--release", "8", "-nowarn", "-d", cls, "-sourcepath",
+                                os.path.join(HERE, "android", "stubs"), src], check=True, timeout=300)
+                pkg = os.path.join(cls, "org", "steamarm", "android")
+                subprocess.run(["java", "-cp", r8, "com.android.tools.r8.D8", "--min-api", "30", "--release",
+                                "--output", out] + [os.path.join(pkg, f) for f in sorted(os.listdir(pkg))
+                                                    if f.endswith(".class")],
+                               check=True, timeout=300, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            guest = "/data/local/tmp/steamarm-standin.dex"
+            os.makedirs(self.root + "/data/local/tmp", exist_ok=True)
+            with open(dex, "rb") as f, open(self.root + guest, "wb") as g:
+                g.write(f.read())
+        except (OSError, subprocess.SubprocessError) as e:
+            log("stand-in dex: %s (needs javac and %s)" % (e, r8))
+            return None
+        self._standin = guest
+        return guest
 
     def stop(self, name, why, restart=False):
         svc = self.rc.services.get(name)
@@ -643,10 +941,13 @@ class Boot:
             except OSError:
                 pass
             svc.proc.wait()
-        svc.state = "stopped"
+        # init's `restart` (and ctl.restart): stop, then start again at once.
+        # The state has to say so, or reap() never starts it again (a
+        # gralloc exit's "onrestart restart surfaceflinger" left SurfaceFlinger
+        # stopped for the rest of the boot, MEASURED at stage 28).
+        svc.state = "restarting" if restart else "stopped"
         svc.restart_at = time.time() if restart else None
-        if not restart:
-            self.props.set("init.svc." + name, "stopped")
+        self.props.set("init.svc." + name, "restarting" if restart else "stopped")
         log("%s %s (%s)" % ("restarting" if restart else "stopped", name, why))
 
     def reap(self):
@@ -718,6 +1019,50 @@ class Boot:
         # them, MEASURED). /dev, /proc, /sys, /acct, /config are the kernel's.
         return any(g == d or g.startswith(d + "/") for d in ("/data", "/mnt", "/storage"))
 
+    def init_user0(self):
+        """init's init_user0 asks vold (vdc cryptfs init_user0) to prepare
+        user 0's device-encrypted storage, and the framework later asks it
+        for the credential-encrypted half (StorageManagerService.
+        prepareUserStorage). There is no vold here and /data is not
+        encrypted (mount_all above), so both are made now, with the modes and
+        owners of vold's fscrypt_prepare_user_storage and vold_prepare_subdirs
+        (system/vold FsCrypt.cpp, vold_prepare_subdirs.cpp, Android 11).
+        Without them installd could create no app's data and SettingsProvider
+        could not open its database: system_server died in
+        installSystemProviders (MEASURED, stage 28)."""
+        u = 0
+        dirs = [
+            # DE
+            ("/data/system/users/%d" % u, 0o700, "system", "system"),
+            ("/data/misc/profiles/cur/%d" % u, 0o771, "system", "system"),
+            ("/data/system_de/%d" % u, 0o770, "system", "system"),
+            ("/data/misc_de/%d" % u, 0o1771, "system", "misc"),
+            ("/data/vendor_de/%d" % u, 0o771, "root", "root"),
+            ("/data/user_de/%d" % u, 0o771, "system", "system"),
+            # CE (for user 0 on the default volume the CE app directory is /data/data)
+            ("/data/system_ce/%d" % u, 0o770, "system", "system"),
+            ("/data/misc_ce/%d" % u, 0o1771, "system", "misc"),
+            ("/data/vendor_ce/%d" % u, 0o771, "root", "root"),
+            ("/data/media/%d" % u, 0o770, "media_rw", "media_rw"),
+        ]
+        for base in ("/data/misc_de/%d" % u, "/data/misc_ce/%d" % u):
+            dirs += [(base + "/" + d, 0o700, "root", "root") for d in ("vold", "storaged", "rollback", "apexrollback")]
+            dirs.append((base + "/apexdata", 0o711, "root", "root"))
+            for apex in sorted(os.listdir(self.root + "/apex")) if os.path.isdir(self.root + "/apex") else []:
+                if "@" not in apex:
+                    dirs.append((base + "/apexdata/" + apex, 0o771, "root", "system"))
+        dirs += [("/data/vendor_de/%d/fpdata" % u, 0o700, "system", "system"),
+                 ("/data/vendor_de/%d/facedata" % u, 0o700, "system", "system"),
+                 ("/data/system_ce/%d/backup" % u, 0o700, "system", "system"),
+                 ("/data/system_ce/%d/backup_stage" % u, 0o700, "system", "system"),
+                 ("/data/vendor_ce/%d/facedata" % u, 0o700, "system", "system")]
+        for path, mode, user, group in dirs:
+            hp = self.hpath(path)
+            os.makedirs(hp, exist_ok=True)
+            os.chmod(hp, mode)
+            set_owner(hp, AID[user], AID[group])
+        log("init_user0: user 0's storage prepared as vold would (%d directories)" % len(dirs))
+
     def skip(self, cmd, why):
         k = cmd[0]
         self.skipped.setdefault(k, []).append(" ".join(cmd) + (" (%s)" % why if why else ""))
@@ -733,9 +1078,53 @@ class Boot:
             elif c == "mkdir":
                 if not self.data_path(a[0]):
                     return self.skip(cmd, "not /data, /mnt or /storage")
-                mode = int(a[1], 8) if len(a) > 1 and a[1].isdigit() else 0o755
-                os.makedirs(self.hpath(a[0]), exist_ok=True)
-                os.chmod(self.hpath(a[0]), mode)
+                opts = [t for t in a[1:] if "=" not in t]     # mode, owner, group (encryption=... ignored)
+                mode = int(opts[0], 8) if opts and opts[0].isdigit() else 0o755
+                hp = self.hpath(a[0])
+                if os.path.islink(hp):
+                    # /data/user/0 is a symlink here (the bind below); init's
+                    # mkdir would not follow it and change /data/data's mode.
+                    return
+                existed = os.path.isdir(hp)
+                os.makedirs(hp, exist_ok=True)
+                # init: a new directory is 0755 root:root unless the line says
+                # otherwise; an existing one changes only what the line names.
+                # Guests with Android ids see the owner (virtual ownership).
+                if opts or not existed:
+                    os.chmod(hp, mode)
+                if len(opts) > 1:
+                    uid = self.uid_of(opts[1])
+                    set_owner(hp, uid, self.uid_of(opts[2]) if len(opts) > 2 else uid)
+                elif not existed:
+                    set_owner(hp, 0, 0)
+            elif c in ("chown", "chmod"):
+                p = a[-1]
+                if not self.data_path(p) or not os.path.lexists(self.hpath(p)):
+                    return self.skip(cmd, "not /data, /mnt or /storage, or not there")
+                if c == "chmod":
+                    os.chmod(self.hpath(p), int(a[0], 8))
+                else:
+                    uid = self.uid_of(a[0])
+                    gid = self.uid_of(a[1]) if len(a) > 2 else None
+                    set_owner(self.hpath(p), uid, gid)
+            elif c == "mount" and len(a) >= 4 and a[3] == "bind" and self.data_path(a[1]) and self.data_path(a[2]):
+                # init.rc binds /data/data on /data/user/0. A bind is only per
+                # process here (the runtime's bind table), so the boot does
+                # what Android did before 11: /data/user/0 -> /data/data, a
+                # symlink the runtime resolves inside the root. installd uses
+                # /data/data for user 0 and the framework /data/user/0.
+                src, dst = self.hpath(a[1]), self.hpath(a[2])
+                if os.path.islink(dst):
+                    return
+                if os.path.isdir(dst) and not os.listdir(dst):
+                    os.rmdir(dst)
+                if not os.path.lexists(dst):
+                    os.symlink(a[1], dst)
+                    log("%s: bind %s on %s made a symlink" % (where, a[1], a[2]))
+                else:
+                    return self.skip(cmd, "target not empty")
+            elif c == "init_user0":
+                self.init_user0()
             elif c == "write":
                 if not self.data_path(a[0]):
                     return self.skip(cmd, "not /data, /mnt or /storage")
@@ -782,6 +1171,22 @@ class Boot:
                 for name in self.rc.order:
                     if a[0] in self.rc.services[name].classes:
                         self.stop(name, c + " " + a[0])
+            elif c == "update_linker_config" and self.a.linkerconfig:
+                # init's builtin (early-init, after the bootstrap APEXes): the
+                # image's linkerconfig, now with the property service up, so
+                # it writes the full layout (VNDK, statsd's APEX) instead of
+                # the "legacy" one written before properties existed. The
+                # 32-bit audio HAL needs it: "library android.hardware.audio@
+                # 4.0.so not found ... in namespace (default)" with the legacy
+                # file (MEASURED, benchmarks/stage28-android-reliability.txt).
+                # It rewrites the root's /linkerconfig, which every guest of
+                # the root reads: opt-in (--linkerconfig).
+                rc, _ = self.guest(["/system/bin/linkerconfig", "--target", "/linkerconfig"], timeout=120)
+                try:
+                    size = os.path.getsize(self.hpath("/linkerconfig/ld.config.txt"))
+                except OSError:
+                    size = -1
+                log("update_linker_config: linkerconfig exited %d, /linkerconfig/ld.config.txt %d bytes" % (rc, size))
             elif c == "exec_start":
                 svc = self.rc.services.get(a[0])
                 if svc and (a[0] in self.profile["start"] or a[0] in (self.a.also or []) or self.a.all):
@@ -841,6 +1246,7 @@ class Boot:
         os.chmod(self.state, 0o700)
         os.makedirs(self.binderdir, mode=0o700, exist_ok=True)
         os.chmod(self.binderdir, 0o700)
+        os.makedirs(self.inputdir, mode=0o700, exist_ok=True)
         global LOGF
         LOGF = open(os.path.join(self.state, "init.log"), "a")
         log("== android-boot: root %s (%s), state %s, lxrun %s" %
@@ -853,6 +1259,7 @@ class Boot:
             self.start_fexserver()
             self.start_propsvc()
             self.start_logd()
+            self.start_lmkd_socket()
             self.rc = Rc(self.root, self.props)
             self.rc.parse_file("/system/etc/init/hw/init.rc")
             for d in ("/system/etc/init", "/system_ext/etc/init", "/product/etc/init",
@@ -909,10 +1316,19 @@ class Boot:
             if end and time.time() >= end:
                 log("--seconds %d reached" % self.a.seconds)
                 return
+            if self.a.exit_with and time.time() >= getattr(self, "_next_parent_check", 0):
+                self._next_parent_check = time.time() + 1
+                try:
+                    os.kill(self.a.exit_with, 0)
+                except ProcessLookupError:
+                    log("--exit-with %d: that process is gone" % self.a.exit_with)
+                    return
+                except PermissionError:
+                    pass
             time.sleep(0.1)
 
     def shutdown(self):
-        log("stopping")
+        log("stopping (lmkd stand-in read %d commands)" % getattr(self, "lmkd_msgs", 0))
         for name, svc in getattr(self, "rc", Rc(self.root, {})).services.items():
             if svc.proc and svc.proc.poll() is None:
                 try:
@@ -957,18 +1373,48 @@ def main():
     ap.add_argument("--seconds", type=int, default=300)
     ap.add_argument("--until-prop", default=None, help="NAME=VALUE: stop once the property has the value")
     ap.add_argument("--keep-running", action="store_true")
+    ap.add_argument("--exit-with", type=int, default=0, metavar="PID",
+                    help="stop the boot when this process is gone (scripts/android-session.py run)")
     ap.add_argument("--profile", default="headless", choices=sorted(PROFILES))
     ap.add_argument("--all", action="store_true", help="start every service the actions ask for")
     ap.add_argument("--also", action="append", help="start this service too (outside the profile)")
     ap.add_argument("--no-zygote", action="store_true")
+    ap.add_argument("--linkerconfig", action="store_true",
+                    help="run init's update_linker_config: rewrite the root's /linkerconfig with properties up")
+    ap.add_argument("--abi32", action="store_true",
+                    help="the display profile with the image's 32-bit ABI and zygote_secondary (needs a FEX with "
+                         "patches/fex-lxrt-i386-bionic.patch; the headless profile does this whenever it can)")
     ap.add_argument("--zygote-stdio", action="store_true", help="the zygote's stdio to its log too (it then refuses to fork)")
     ap.add_argument("--bootargs", default=os.environ.get("LXRT_PROPERTY_BOOTARGS", ""))
     ap.add_argument("--persist", default=None, help="persistent property file (default: the root's /data/property)")
     ap.add_argument("--watch", action="append", help="log changes of this property")
     ap.add_argument("--prop", action="append", help="NAME=VALUE set before the first action")
+    ap.add_argument("--pulse", default=None, metavar="GUEST_DIR",
+                    help="the directory of a PulseAudio socket 'native' in the root for the audio HAL "
+                         "(scripts/audio.sh with LXRT_ROOT=<root>: /tmp/pulse)")
+    ap.add_argument("--wayland", default=None, metavar="XDG[:SOCKET]",
+                    help="the Wayland compositor for hwcomposer.waydroid: its XDG_RUNTIME_DIR (a guest "
+                         "path under /dev/shm, scripts/run-weston.sh) and socket (wayland-0); sets "
+                         "Waydroid's host properties and selects the display profile")
     ap.add_argument("--trace", action="append", help="LXRT_TRACE for this service (<state>/svc/NAME.trace)")
     ap.add_argument("--svc-env", action="append", help="SERVICE:VAR=VALUE (SERVICE 'all' for every one)")
     a = ap.parse_args()
+    if a.wayland:
+        # What Waydroid's container manager writes into waydroid.prop for the
+        # composer (hwcomposer.cpp: XDG_RUNTIME_DIR/WAYLAND_DISPLAY from these,
+        # one window with the whole screen, the window made at open).
+        xdg, _, sock = a.wayland.partition(":")
+        a.prop = (a.prop or []) + ["waydroid.xdg_runtime_dir=" + xdg,
+                                   "waydroid.wayland_display=" + (sock or "wayland-0"),
+                                   "waydroid.active_apps=Waydroid", "waydroid.background_start=false"]
+        if a.profile == "headless":
+            a.profile = "display"
+    if a.pulse:
+        # Waydroid's audio HAL points libpulse at waydroid.pulse_runtime_path
+        # (audio.primary.waydroid: PULSE_RUNTIME_PATH, default /run/user/1000/
+        # pulse); scripts/audio.sh gives each root a socket on SteamARM's
+        # PulseAudio at <root>/tmp/pulse/native.
+        a.prop = (a.prop or []) + ["waydroid.pulse_runtime_path=" + a.pulse]
     if not a.state:
         import hashlib
         a.state = "/tmp/lxrt-android-%d-%s" % (os.getuid(),

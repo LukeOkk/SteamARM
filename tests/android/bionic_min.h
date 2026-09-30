@@ -65,5 +65,10 @@ __attribute__((used)) static void _start_main(void *raw_args)
 __asm__(".globl _start\n_start:\n  mov %rsp, %rdi\n  call _start_main\n  hlt\n");
 #elif defined(__aarch64__)
 __asm__(".globl _start\n_start:\n  mov x0, sp\n  b _start_main\n");
+#elif defined(__i386__)
+// i386 (the x86_64 image's 32-bit bionic, /system/bin/linker): raw_args on
+// the stack, which is kept 16-byte aligned at the call.
+__asm__(".globl _start\n_start:\n  mov %esp, %eax\n  and $-16, %esp\n  sub $12, %esp\n"
+        "  push %eax\n  call _start_main\n  hlt\n");
 #endif
 #endif

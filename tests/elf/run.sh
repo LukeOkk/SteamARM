@@ -852,6 +852,36 @@ if [ -d "$SYSROOT" ] && [ -d "$GUEST_ROOT/tmp" ] && ! pgrep -qx steamarm-inputd;
         bad "build evdev_test" "$err"
     fi
 fi
+# The same with LXRT_INPUT_DIR: a /dev/input of the guest's own (Android's
+# composer FIFOs, per root), not /tmp/lxrt-input, so it runs even while
+# steamarm-inputd does; without the variable /dev/input stays /tmp/lxrt-input
+# (the controllers' directory).
+if [ -d "$SYSROOT" ] && [ -x "$GUEST_ROOT/tmp/evdev_test" ]; then
+    idir=$(mktemp -d /tmp/lxrt-inp.XXXXXX)
+    LXRT_INPUT_DIR="$idir" python3 tests/elf/fake_inputd.py 20 --once > "$idir.log" 2>&1 &
+    fake=$!
+    for _ in $(seq 1 50); do [ -S "$idir/event0" ] && break; sleep 0.1; done
+    out=$(LXRT_ROOT="$GUEST_ROOT" LXRT_INPUT_DIR="$idir" ./build/lxrun /tmp/evdev_test 2>&1)
+    sleep 0.3
+    kill $fake 2>/dev/null; wait $fake 2>/dev/null
+    # Something that is in /tmp/lxrt-input now and not in the private
+    # directory (fake_inputd.py writes a "meta" there too, as steamarm-inputd
+    # does in the shared one) -- read only; nothing is made there.
+    probe=$(comm -23 <(ls /tmp/lxrt-input 2>/dev/null | sort) <(ls "$idir" 2>/dev/null | sort) | head -1)
+    shared="" private=""
+    if [ -n "$probe" ]; then
+        shared=$(LXRT_ROOT="$GUEST_ROOT" ./build/lxrun /usr/bin/bash -c "test -e '/dev/input/$probe' && echo yes" 2>/dev/null)
+        private=$(LXRT_ROOT="$GUEST_ROOT" LXRT_INPUT_DIR="$idir" ./build/lxrun /usr/bin/bash -c "test -e '/dev/input/$probe' && echo yes" 2>/dev/null)
+    fi
+    if ! grep -q "== evdev: ok" <<<"$out" || ! grep -q "rumble strong=32768 weak=16384 ms=250" "$idir.log"; then
+        bad "LXRT_INPUT_DIR evdev" "$(grep FAIL <<<"$out" | head -6)"
+    elif [ -n "$probe" ] && { [ "$shared" != yes ] || [ -n "$private" ]; }; then
+        bad "LXRT_INPUT_DIR default" "/tmp/lxrt-input/$probe seen as /dev/input/$probe: without the variable '$shared', with it '$private'"
+    else
+        ok "LXRT_INPUT_DIR: evdev against a daemon in a private /dev/input; without it /dev/input is /tmp/lxrt-input${probe:+ (its $probe seen only there)}"
+    fi
+    rm -rf "$idir" "$idir.log"
+fi
 
 
 # ARM64_INITIAL_STACK_BOUNDS: entry stack alignment, auxv right after envp,
@@ -1251,6 +1281,24 @@ else
     echo "  skip  ANDROID_IDS (no $STAGE)"
 fi
 
+# ANDROID_BOOT_RT: what booting Android's framework to an app needed from the
+# runtime (benchmarks/stage28-android-apk.txt): a futex deadline past 64-bit
+# nanoseconds, the alarm timerfd clocks (CAP_WAKE_ALARM), SO_DOMAIN and
+# SO_PROTOCOL, an empty SCM_RIGHTS and MSG_TRUNC on input, "user." xattrs,
+# process_vm_readv/writev on itself. Without and with Android ids.
+if [ -f "$STAGE/usr/lib64/libc.a" ] && [ -n "$GCCDIR" ]; then
+    if err=$(glibc_cc -static-pie -O2 -pthread -o build/android_boot_rt tests/elf/android_boot_rt.c); then
+        out=$(deadline 60 ./build/lxrun "$PWD/build/android_boot_rt" 2>&1); rc=$?
+        out2=$(LXRT_ANDROID_IDS=root deadline 60 ./build/lxrun "$PWD/build/android_boot_rt" ids 2>&1); rc2=$?
+        if [ "$rc" -eq 0 ] && [ "$rc2" -eq 0 ] && grep -q '^== android boot rt: ok' <<<"$out" &&
+           grep -q '^== android boot rt: ok' <<<"$out2"; then
+            ok "ANDROID_BOOT_RT: $(grep -c '^  ok ' <<<"$out2") checks with Android ids, $(grep -c '^  ok ' <<<"$out") without (futex forever, alarm timerfds, SO_DOMAIN, empty SCM_RIGHTS, user. xattrs, process_vm_readv)"
+        else bad "ANDROID_BOOT_RT" "rc=$rc/$rc2 $(grep -hE 'MAL|SIG|lxrun:' <<<"$out$out2" | head -6)"; fi
+    else bad "build android_boot_rt" "$err"; fi
+else
+    echo "  skip  ANDROID_BOOT_RT (no $STAGE)"
+fi
+
 # BINDER_IPC: Android binder between lxrun processes, raw ioctls against the
 # Linux UAPI header (runtime/binder.c, runtime/binder_hub.c; benchmarks/
 # stage25-binder.txt). A private hub directory, and a hub that leaves 2 s
@@ -1285,6 +1333,21 @@ if err=$(/opt/homebrew/opt/llvm/bin/clang --target=aarch64-linux-gnu -O2 -ffrees
         ok "SIMD_SYSCALL: v0-v31 over 2000 syscall rounds, FPSR, all 16 NZCV values survive a syscall ($(grep -o 'getpid: .*' <<<"$out"))"
     else bad "SIMD_SYSCALL" "rc=$rc $(grep -E 'MAL|round|==' <<<"$out" | tr '\n' ' ')"; fi
 else bad "build simd_syscall" "$err"; fi
+
+# SIG_STRANDED: a process-directed signal that arrives while every thread
+# blocks it stays pending for the process and is delivered once a thread
+# unblocks it (runtime/signal.c, lxrt_signal_rescue_stranded). XNU binds it to
+# the process's first thread -- the host main thread, which blocks everything
+# -- and it stayed there: the intermittent `sh -c $(toybox ...)` hang under FEX
+# (benchmarks/stage28-android-reliability.txt). Freestanding.
+if err=$(/opt/homebrew/opt/llvm/bin/clang --target=aarch64-linux-gnu -O2 -ffreestanding -fno-stack-protector \
+             -fno-builtin -nostdlib -static-pie -fPIE -fuse-ld=lld --ld-path=$CROSS_LD \
+             -o build/sig_stranded tests/elf/sig_stranded.c 2>&1); then
+    out=$(deadline 60 ./build/lxrun build/sig_stranded 2>&1); rc=$?
+    if [ "$rc" -eq 0 ] && grep -q '== sig_stranded: 3 ok, 0 mal' <<<"$out"; then
+        ok "SIG_STRANDED: SIGCHLD and a kill() that came while blocked are delivered on unblock and wake rt_sigsuspend"
+    else bad "SIG_STRANDED" "rc=$rc $(grep -E 'MAL|==' <<<"$out" | tr '\n' ' ')"; fi
+else bad "build sig_stranded" "$err"; fi
 
 # SHM_MREMAP: growing a MAP_SHARED file mapping maps more of the file
 # (runtime/mremap.c, remap_shared_file): a Wayland compositor's wl_shm pool

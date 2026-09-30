@@ -38,6 +38,26 @@ static void check(int cond, const char *what)
 }
 
 static long sc(long n, long a, long b, long c) { long r = syscall(n, a, b, c); return r < 0 ? -errno : r; }
+// The value of a "Key:\t..." line of a /proc status file.
+static int status_line(const char *path, const char *key, char *out, size_t n)
+{
+    FILE *f = fopen(path, "r");
+    if (!f) return 0;
+    char line[512];
+    int found = 0;
+    while (fgets(line, sizeof line, f)) {
+        if (!strncmp(line, key, strlen(key))) {
+            char *v = line + strlen(key);
+            while (*v == '\t' || *v == ' ') v++;
+            v[strcspn(v, "\n")] = 0;
+            snprintf(out, n, "%s", v);
+            found = 1;
+            break;
+        }
+    }
+    fclose(f);
+    return found;
+}
 static void caps(uint64_t *eff, uint64_t *prm, uint64_t *inh)
 {
     struct __user_cap_header_struct h = { _LINUX_CAPABILITY_VERSION_3, 0 };
@@ -126,12 +146,41 @@ int main(int argc, char **argv)
     check(fd >= 0 && read(fd, buf, sizeof buf - 1) == 4 && !strcmp(buf, "bind"), "the bind shows the source's file");
     if (fd >= 0) close(fd);
 
-    // chown with CAP_CHOWN: reported done, the file stays the Mac user's.
+    // chown with CAP_CHOWN: done, and the owner is what stat reports from
+    // then on (virtual file ownership: an xattr on the Mac's file, which
+    // stays the Mac user's). installd's fs_prepare_dir_strict needs this for
+    // an app's existing data directory (benchmarks/stage28-android-apk.txt).
+    char o[512], ol[512];
+    snprintf(o, sizeof o, "%s/owned", tmp);
+    snprintf(ol, sizeof ol, "%s/owned-link", tmp);
+    fd = open(o, O_CREAT | O_WRONLY | O_TRUNC, 0444);            // read-only: Darwin's xattr wants write access
+    if (fd >= 0) close(fd);
+    symlink("owned", ol);
     struct stat st0, st1;
-    stat(f, &st0);
-    check(chown(f, 1234, 5678) == 0, "chown to another uid with CAP_CHOWN: 0");
-    stat(f, &st1);
-    check(st1.st_uid == st0.st_uid, "... and the file's real owner is unchanged");
+    stat(o, &st0);
+    check(chown(o, 1234, 5678) == 0, "chown to another uid with CAP_CHOWN: 0");
+    stat(o, &st1);
+    check(st1.st_uid == 1234 && st1.st_gid == 5678, "... stat reports the new owner, 1234:5678");
+    check((st1.st_mode & 07777) == 0444, "... of a read-only file, whose mode is unchanged");
+    fd = open(o, O_RDONLY);
+    check(fd >= 0 && fstat(fd, &st1) == 0 && st1.st_uid == 1234, "... fstat too");
+    check(fd >= 0 && fchown(fd, (uid_t)-1, 42) == 0 && fstat(fd, &st1) == 0 && st1.st_uid == 1234 && st1.st_gid == 42,
+          "fchown(-1, 42): only the group changes (1234:42)");
+    if (fd >= 0) close(fd);
+    check(lstat(ol, &st1) == 0 && st1.st_uid == st0.st_uid, "the symlink to it keeps its own owner (lstat)");
+    check(stat(ol, &st1) == 0 && st1.st_uid == 1234, "... and stat through it shows the file's");
+    check(lchown(ol, 2000, 2000) == 0 && lstat(ol, &st1) == 0 && st1.st_uid == 2000 && stat(o, &st0) == 0 && st0.st_uid == 1234,
+          "lchown records the link's owner, not the file's");
+    int dfd = open(tmp, O_RDONLY | O_DIRECTORY);
+    check(dfd >= 0 && fstatat(dfd, "owned", &st1, 0) == 0 && st1.st_uid == 1234 && st1.st_gid == 42,
+          "fstatat relative to a directory descriptor");
+    check(dfd >= 0 && fchownat(dfd, "owned", 1000, 1000, 0) == 0 && stat(o, &st1) == 0 && st1.st_uid == 1000,
+          "fchownat relative to a directory descriptor");
+    if (dfd >= 0) close(dfd);
+    struct statx sx;
+    check(statx(AT_FDCWD, o, 0, STATX_UID | STATX_GID, &sx) == 0 && sx.stx_uid == 1000 && sx.stx_gid == 1000,
+          "statx reports it");
+    check(chown(o, 1234, 5678) == 0, "back to 1234:5678 for the unprivileged checks below");
 
     // SO_PEERCRED: a peer that became uid 2000 is seen as 2000.
     int sp[2];
@@ -153,6 +202,10 @@ int main(int argc, char **argv)
     getsockopt(sp[0], SOL_SOCKET, SO_PEERCRED, &uc, &ul);
     printf("       (SO_PEERCRED: pid %d uid %u gid %u; child %d)\n", uc.pid, uc.uid, uc.gid, kid);
     check(uc.pid == kid && uc.uid == 2000 && uc.gid == 2000, "SO_PEERCRED of a peer that dropped to 2000: uid 2000, gid 2000");
+    char sp_path[64], uidline[128];
+    snprintf(sp_path, sizeof sp_path, "/proc/%d/status", (int)kid);
+    check(status_line(sp_path, "Uid:", uidline, sizeof uidline) && !strcmp(uidline, "2000\t2000\t2000\t2000"),
+          "/proc/<peer>/status Uid: its virtual ids (2000), as Process.getUidForPid reads them");
     write(sp[0], &c, 1);
     int ws = 0;
     waitpid(kid, &ws, 0);
@@ -203,6 +256,13 @@ int main(int argc, char **argv)
     check(sc(SYS_setresuid, 1000, 1000, 1000) == 0, "setresuid(1000)");
     getresuid(&r, &ef, &s);
     check(r == 1000 && ef == 1000 && s == 1000, "getresuid: 1000 1000 1000");
+    {
+        char l1[128], l2[128], self_by_pid[64];
+        snprintf(self_by_pid, sizeof self_by_pid, "/proc/%d/status", (int)getpid());
+        check(status_line("/proc/self/status", "Uid:", l1, sizeof l1) && !strcmp(l1, "1000\t1000\t1000\t1000") &&
+              status_line(self_by_pid, "Uid:", l2, sizeof l2) && !strcmp(l2, l1),
+              "/proc/self/status and /proc/<own pid>/status Uid: 1000 (the current virtual ids)");
+    }
     caps(&e, &p, &i);
     check(e == 0 && p == ALL, "keepcaps: permitted kept, effective cleared (euid left 0)");
     check(sc(SYS_setresuid, 0, 0, 0) == -EPERM, "no CAP_SETUID effective: setresuid(0) EPERM");
@@ -216,6 +276,9 @@ int main(int argc, char **argv)
           "ambient SYS_NICE refused (not inheritable)");
     check(chown(f, 1000, 1000) == 0, "chown to its own uid and gid without CAP_CHOWN: 0");
     check(chown(f, 0, 0) == -1 && errno == EPERM, "chown to root without CAP_CHOWN: EPERM");
+    check(chown(o, 1000, 1000) == -1 && errno == EPERM,
+          "chown of a file owned by 1234 without CAP_CHOWN: EPERM (not its owner)");
+    check(chown(o, (uid_t)-1, 1001) == -1 && errno == EPERM, "... nor its group");
     check(sc(SYS_unshare, CLONE_NEWNS, 0, 0) == -EPERM, "unshare(CLONE_NEWNS) without CAP_SYS_ADMIN: EPERM");
     check(prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) == 0 && prctl(PR_GET_NO_NEW_PRIVS, 0, 0, 0, 0) == 1,
           "PR_SET_NO_NEW_PRIVS / PR_GET_NO_NEW_PRIVS");
@@ -231,6 +294,8 @@ int main(int argc, char **argv)
     check(WIFEXITED(ws) && WEXITSTATUS(ws) == 0, "execve'd image: ids, groups, caps, no_new_privs and the bind (above)");
 
     unlink(f);
+    unlink(o);
+    unlink(ol);
     rmdir(a);
     rmdir(b);
     rmdir(tmp);

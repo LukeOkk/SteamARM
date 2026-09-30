@@ -20,6 +20,7 @@
 #include <sys/mman.h>
 #include <sys/proc_info.h>
 #include <sys/stat.h>
+#include <sys/xattr.h>
 #include <unistd.h>
 
 #define LERR(e) (-(long)lxrt_errno_to_linux(e))
@@ -258,6 +259,23 @@ bool lxrt_aids_on(void)
 
 uint32_t lxrt_aids_euid(void) { return lxrt_aids_on() ? g.e : (uint32_t)geteuid(); }
 uint32_t lxrt_aids_egid(void) { return lxrt_aids_on() ? g.eg : (uint32_t)getegid(); }
+
+void lxrt_aids_status_ids(uint32_t u[4], uint32_t gg[4], char *groups, size_t gn)
+{
+    if (groups && gn) groups[0] = '\0';
+    if (!lxrt_aids_on()) {
+        u[0] = u[1] = u[2] = u[3] = (uint32_t)getuid();
+        gg[0] = gg[1] = gg[2] = gg[3] = (uint32_t)getgid();
+        return;
+    }
+    pthread_mutex_lock(&g_mu);
+    u[0] = g.r; u[1] = g.e; u[2] = g.s; u[3] = g.fs;
+    gg[0] = g.rg; gg[1] = g.eg; gg[2] = g.sg; gg[3] = g.fsg;
+    size_t o = 0;
+    for (int i = 0; groups && i < g.ngroups && o + 12 < gn; i++)
+        o += (size_t)snprintf(groups + o, gn - o, "%u ", g.groups[i]);
+    pthread_mutex_unlock(&g_mu);
+}
 
 // ---- guest memory ----
 static bool mem_ok(uint64_t addr, size_t n, bool need_write)
@@ -614,22 +632,121 @@ bool lxrt_aids_syscall(long nr, uint64_t a0, uint64_t a1, uint64_t a2, uint64_t 
     return handled;
 }
 
-int lxrt_aids_chown(uint32_t uid, uint32_t gid)
+// ---- virtual file ownership (android_ids.h) ----
+static bool owner_read(const char *host, int fd, bool nofollow, uint32_t *uid, uint32_t *gid)
+{
+    char buf[32];
+    ssize_t n = host ? getxattr(host, LXRT_OWNER_XATTR, buf, sizeof buf - 1, 0, nofollow ? XATTR_NOFOLLOW : 0)
+                     : fgetxattr(fd, LXRT_OWNER_XATTR, buf, sizeof buf - 1, 0, 0);
+    if (n <= 0) return false;
+    buf[n] = 0;
+    unsigned u, gg;
+    if (sscanf(buf, "%u:%u", &u, &gg) != 2) return false;
+    *uid = u;
+    *gid = gg;
+    return true;
+}
+
+void lxrt_aids_fix_stat(const char *host, int fd, bool nofollow, struct stat *st)
+{
+    if (!lxrt_aids_on() || (!host && fd < 0)) return;
+    uint32_t u, gg;
+    if (owner_read(host, fd, nofollow, &u, &gg)) {
+        st->st_uid = u;
+        st->st_gid = gg;
+    }
+}
+
+// A path the xattr calls can take: relative paths joined to the directory
+// descriptor's own path (Darwin has no getxattrat).
+static const char *at_path(int ddirfd, const char *host, char *buf, size_t n)
+{
+    if (!host || host[0] == '/' || ddirfd == AT_FDCWD) return host;
+    const char *pf = lxrt_pathfd_path(ddirfd);
+    char dir[PATH_MAX];
+    if (pf) snprintf(dir, sizeof dir, "%s", pf);
+    else if (fcntl(ddirfd, F_GETPATH, dir) != 0) return NULL;
+    if (snprintf(buf, n, "%s/%s", dir, host) >= (int)n) return NULL;
+    return buf;
+}
+
+void lxrt_aids_fix_stat_at(int ddirfd, const char *host, bool nofollow, struct stat *st)
+{
+    if (!lxrt_aids_on()) return;
+    char buf[PATH_MAX];
+    const char *p = at_path(ddirfd, host, buf, sizeof buf);
+    if (p) lxrt_aids_fix_stat(p, -1, nofollow, st);
+}
+
+static int owner_write(const char *host, int fd, bool nofollow, const char *val)
+{
+    int xo = host && nofollow ? XATTR_NOFOLLOW : 0;
+    if (!val)
+        return host ? removexattr(host, LXRT_OWNER_XATTR, xo) : fremovexattr(fd, LXRT_OWNER_XATTR, 0);
+    return host ? setxattr(host, LXRT_OWNER_XATTR, val, strlen(val), 0, xo)
+                : fsetxattr(fd, LXRT_OWNER_XATTR, val, strlen(val), 0, 0);
+}
+
+long lxrt_aids_chown_file(const char *host, int fd, bool nofollow, uint32_t uid, uint32_t gid)
 {
     const uint32_t N = 0xffffffffu;
-    if (!cap_has(g.eff, CAP_CHOWN)) {
-        // Without CAP_CHOWN Linux lets the owner (every file here is this
-        // process's) give the file to itself and to one of its groups.
-        if (uid != N && uid != g.fs) return (int)LERR(EPERM);
-        if (gid != N && gid != g.fsg) {
-            bool in = false;
-            for (int i = 0; i < g.ngroups && !in; i++) in = g.groups[i] == gid;
-            if (!in) return (int)LERR(EPERM);
+    struct stat st;
+    if ((host ? (nofollow ? lstat(host, &st) : stat(host, &st)) : fstat(fd, &st)) != 0)
+        return LERR(errno);
+    uint32_t cu = (uint32_t)st.st_uid, cg = (uint32_t)st.st_gid;
+    bool recorded = owner_read(host, fd, nofollow, &cu, &cg);
+    pthread_mutex_lock(&g_mu);
+    bool capchown = cap_has(g.eff, CAP_CHOWN);
+    uint32_t fs = g.fs, fsg = g.fsg;
+    bool member = gid == N || gid == fsg;
+    for (int i = 0; i < g.ngroups && !member; i++) member = g.groups[i] == gid;
+    pthread_mutex_unlock(&g_mu);
+    if (!recorded) {
+        // A file nobody chowned is the Mac user's, i.e. every guest's: as
+        // before, the caller counts as its owner.
+        cu = fs;
+        cg = fsg;
+    }
+    if (!capchown) {
+        if (uid != N && (uid != cu || fs != cu)) return LERR(EPERM);
+        if (gid != N && gid != cg && (fs != cu || !member)) return LERR(EPERM);
+    }
+    uint32_t nu = uid == N ? cu : uid, ng = gid == N ? cg : gid;
+    char val[32];
+    const char *v = NULL;                      // back to the Mac's own ids: no record
+    if (nu != (uint32_t)getuid() || ng != (uint32_t)getgid()) {
+        snprintf(val, sizeof val, "%u:%u", nu, ng);
+        v = val;
+    }
+    if (!v && !recorded) return 0;
+    int r = owner_write(host, fd, nofollow, v);
+    if (r != 0 && (errno == EACCES || errno == EPERM) && !S_ISLNK(st.st_mode)) {
+        // Darwin wants write permission for an xattr; Linux's chown with
+        // CAP_CHOWN does not. Lend the owner write permission for the call.
+        int m = st.st_mode & 07777;
+        if ((host ? chmod(host, (mode_t)(m | S_IWUSR)) : fchmod(fd, (mode_t)(m | S_IWUSR))) == 0) {
+            r = owner_write(host, fd, nofollow, v);
+            int e = errno;
+            if (host) chmod(host, (mode_t)m); else fchmod(fd, (mode_t)m);
+            errno = e;
         }
     }
-    if ((uid == N || uid == (uint32_t)getuid()) && (gid == N || gid == (uint32_t)getgid()))
-        return 1;                              // the host's own ids: a real call
+    if (r != 0) {
+        if (!v && errno == ENOATTR) return 0;
+        // A filesystem without extended attributes: the old answer, success
+        // with nothing recorded.
+        if (errno == ENOTSUP) return 0;
+        return LERR(errno);
+    }
     return 0;
+}
+
+long lxrt_aids_chown_at(int ddirfd, const char *host, bool nofollow, uint32_t uid, uint32_t gid)
+{
+    char buf[PATH_MAX];
+    const char *p = at_path(ddirfd, host, buf, sizeof buf);
+    if (!p) return host ? LERR(ENAMETOOLONG) : LERR(EFAULT);
+    return lxrt_aids_chown_file(p, -1, nofollow, uid, gid);
 }
 
 const char *lxrt_aids_exec_env(void)

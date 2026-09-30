@@ -1,0 +1,7 @@
+// Compile-time stand-in (see android/os/IBinder.java).
+package android.util;
+
+public final class Log {
+    public static int i(String tag, String msg) { throw new RuntimeException("stub"); }
+    public static int w(String tag, String msg) { throw new RuntimeException("stub"); }
+}

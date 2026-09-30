@@ -1,0 +1,655 @@
+#!/usr/bin/env python3
+"""One Android session on the Mac, with no VM (AGENTS.md): Weston (a macOS
+window through SteamARM's X server, or headless), the x86_64 Android root
+booted by scripts/android-boot.py until sys.boot_completed=1, and an app from
+the launcher's library installed with `pm install` and started with
+`am start`. docs/ANDROID_RUNTIME_ARCHITECTURE.md ("Session"),
+docs/APK_SUPPORT.md, benchmarks/stage28-android-apk.txt.
+
+  scripts/android-session.py start [--headless] [--size WxH] [--timeout S] [--fex FILE]
+  scripts/android-session.py stop
+  scripts/android-session.py status
+  scripts/android-session.py install <package> [--apk FILE] [--force]
+  scripts/android-session.py launch <package> [--apk FILE] [start's options]
+  scripts/android-session.py run <package> [start's options]
+  scripts/android-session.py shell <guest program> [args...]
+  scripts/android-session.py xwd <out.xwd>
+
+start     Weston, then the boot; returns once sys.boot_completed=1 (or fails,
+          and stops what it started). One session at a time: a second start
+          finds the first ($STATE/android/session.json) and does nothing.
+          The first boot of a session root disables the image's apps a window
+          on the Mac does not need (TRIM_PACKAGES: camera, gallery, music,
+          clock, contacts, backup ...; `shell /system/bin/pm enable <pkg>`
+          brings one back), which keeps the session near 55-60 lxrun
+          processes (scripts/safeguard.sh stops every guest past its limit).
+stop      the boot (every Android process with it), then Weston.
+install   <package>'s APK from $STATE/android/packages/<package>/base.apk
+          (scripts/android-pm.py put it there), or --apk, with the image's own
+          `pm install`, unless that version is already installed.
+launch    start if needed, install if needed, then `am start` of the launcher
+          activity (meta.json's launcherActivity, else the package manager's
+          answer), and wait until its window has the focus.
+run       launch, then stay until the session ends: SIGTERM/SIGINT/SIGHUP
+          (the launcher's Detener), Weston gone (its window closed) or the
+          boot gone. Then stop. scripts/run-app.sh runs Android cards so.
+shell     a guest program in the session (root, Android ids): pm, am, cmd,
+          dumpsys, input, getprop ...
+xwd       a dump of Weston's X window (the macOS window's contents), by the
+          Weston root's xwd; tests/android/xwd_colors.py reads it.
+
+The root: $ANDROID_SESSION_ROOT (/Volumes/SteamARMAndroid/session), an APFS
+clone of $ANDROID_X86_ROOT (/Volumes/SteamARMAndroid/root-x86_64) made the
+first time (seconds, no space), so the session's /data -- installed apps and
+their data -- is its own and the root the tests use is not written. --fex
+puts a FEX-emu (scripts/build-fex-host.sh) into it when it is made. The
+volume is attached from $STATE/android.sparsebundle when it is not.
+Host state (sockets, so it must be short): $ANDROID_SESSION_DIR
+(/tmp/lxrt-android-session-<uid>): binder, properties, /dev/input, init.log,
+logcat.txt. Log: $STATE/logs/android-<date>.log (this program and the boot).
+Weston: WESTON_XDG=$ANDROID_SESSION_XDG (/dev/shm/steamarm-android), kiosk
+shell (Android's one window fills Weston's output), 1024x768 by default.
+
+Stops only what it started: the boot it recorded (checked to be
+android-boot.py on this session's directory) and the Weston on its own socket.
+"""
+import argparse
+import datetime
+import fcntl
+import json
+import os
+import re
+import shutil
+import signal
+import subprocess
+import sys
+import time
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+REPO = os.path.dirname(HERE)
+STATE = os.environ.get("STEAMARM_STATE") or os.path.expanduser("~/SteamARM-roots")
+ADIR = os.path.join(STATE, "android")
+SESSION_FILE = os.path.join(ADIR, "session.json")
+LOCK_FILE = os.path.join(ADIR, "session.lock")
+LOGS = os.path.join(STATE, "logs")
+VOLUME = "/Volumes/SteamARMAndroid"
+BUNDLE = os.path.join(STATE, "android.sparsebundle")
+BASE_ROOT = os.environ.get("ANDROID_X86_ROOT") or VOLUME + "/root-x86_64"
+ROOT = os.environ.get("ANDROID_SESSION_ROOT") or VOLUME + "/session"
+RUN_DIR = os.environ.get("ANDROID_SESSION_DIR") or "/tmp/lxrt-android-session-%d" % os.getuid()
+XDG = os.environ.get("ANDROID_SESSION_XDG") or "/dev/shm/steamarm-android"
+SOCKET = "wayland-0"
+LXRUN = os.path.realpath(os.environ.get("LXRUN") or os.path.join(REPO, "build/lxrun"))
+DISPLAY = os.environ.get("ANDROID_SESSION_DISPLAY") or ":2"
+# FEX's server socket, <root>/data/local/tmp/steamarm-android-<12 hex>.FEXServer.Socket,
+# must fit Darwin's 104-byte sun_path (scripts/run-android-display.sh).
+FEX_SOCKET_TAIL = len("/data/local/tmp/steamarm-android-000000000000.FEXServer.Socket")
+
+LOGF = None
+
+# The image's apps the session disables once (pm disable-user, kept in the
+# session root's /data; `pm enable` brings one back), Lepton-style: what a
+# phone has and a window on the Mac does not need, each started at boot as a
+# process of its own under FEX. Android is one lxrun process per service and
+# per app; the Mac's safeguard (scripts/safeguard.sh) stops every guest past
+# its process limit, and these took the first boot of a session over it
+# during its first pm install (MEASURED, benchmarks/stage28-android-apk.txt).
+# Not here: SystemUI, the launcher, the keyboard, the providers, telephony
+# (com.android.phone is persistent), permission controller, settings.
+TRIM_PACKAGES = [
+    "com.android.camera2",            # no camera (it ANRs on BOOT_COMPLETED waiting for one)
+    "com.android.gallery3d",
+    "org.lineageos.eleven",           # music player
+    "com.android.deskclock",
+    "com.android.contacts",
+    "com.stevesoltys.seedvault",      # backup
+    "com.android.localtransport",     # backup transport
+    "com.android.printspooler",
+    "com.android.smspush",
+    "com.android.dynsystem",          # dynamic system updates
+    "org.protonaosp.deviceconfig",
+    "com.android.calendar", "org.lineageos.etar",
+    "org.lineageos.recorder", "org.lineageos.jelly",
+]
+TRIM_MARK = "/data/local/tmp/.steamarm-session-trimmed"
+
+
+def log(msg):
+    line = "%s android-session: %s" % (time.strftime("%H:%M:%S"), msg)
+    print(line, flush=True)
+    if LOGF:
+        LOGF.write(line + "\n")
+        LOGF.flush()
+
+
+def die(msg, code=1):
+    log(msg)
+    sys.exit(code)
+
+
+def read_session():
+    try:
+        with open(SESSION_FILE) as f:
+            s = json.load(f)
+        return s if isinstance(s, dict) else None
+    except (OSError, ValueError):
+        return None
+
+
+def write_session(s):
+    os.makedirs(ADIR, exist_ok=True)
+    tmp = SESSION_FILE + ".tmp"
+    with open(tmp, "w") as f:
+        json.dump(s, f, indent=1)
+    os.replace(tmp, SESSION_FILE)
+
+
+def open_log(path):
+    global LOGF
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    LOGF = open(path, "a")
+
+
+class Lock:
+    """start and stop take this: two of them never interleave."""
+
+    def __enter__(self):
+        os.makedirs(ADIR, exist_ok=True)
+        self.f = open(LOCK_FILE, "w")
+        fcntl.flock(self.f, fcntl.LOCK_EX)
+        return self
+
+    def __exit__(self, *exc):
+        fcntl.flock(self.f, fcntl.LOCK_UN)
+        self.f.close()
+
+
+def command_of(pid):
+    try:
+        return subprocess.run(["ps", "-o", "command=", "-p", str(pid)], stdout=subprocess.PIPE,
+                              stderr=subprocess.DEVNULL, timeout=10).stdout.decode(errors="replace").strip()
+    except (OSError, subprocess.SubprocessError):
+        return ""
+
+
+def boot_alive(s):
+    """The recorded boot, if it still runs and is this session's."""
+    pid = (s or {}).get("bootPid")
+    if not isinstance(pid, int) or pid <= 1:
+        return False
+    try:
+        os.kill(pid, 0)
+    except OSError:
+        return False
+    c = command_of(pid)
+    return "android-boot.py" in c and s.get("dir", "") in c
+
+
+def weston_env():
+    return dict(os.environ, WESTON_XDG=XDG, WESTON_SOCKET=SOCKET, LXRUN=LXRUN, DISPLAY=DISPLAY)
+
+
+def weston_pid():
+    r = subprocess.run([os.path.join(HERE, "run-weston.sh"), "status"], env=weston_env(),
+                       stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, cwd=REPO)
+    m = re.search(r"pid (\d+)", r.stdout.decode(errors="replace"))
+    return int(m.group(1)) if r.returncode == 0 and m else None
+
+
+# ------------------------------------------------------------------ the root
+def ensure_volume():
+    if os.path.isdir(BASE_ROOT) or not BASE_ROOT.startswith(VOLUME + "/"):
+        return
+    if not os.path.isdir(BUNDLE):
+        die("no Android root at %s and no %s (scripts/mkandroidroot.sh --arch x86_64)" % (BASE_ROOT, BUNDLE))
+    log("attaching %s at %s" % (BUNDLE, VOLUME))
+    subprocess.run(["hdiutil", "attach", "-nobrowse", "-mountpoint", VOLUME, BUNDLE],
+                   stdout=subprocess.DEVNULL, stderr=subprocess.STDOUT, check=False)
+    if not os.path.isdir(BASE_ROOT):
+        die("no Android root at %s after attaching the volume" % BASE_ROOT)
+
+
+def ensure_root(fex=None):
+    if len(ROOT) + FEX_SOCKET_TAIL > 103:
+        die("the session root's path is too long for FEX's server socket (%d bytes; at most %d): %s"
+            % (len(ROOT), 103 - FEX_SOCKET_TAIL, ROOT))
+    if os.path.isfile(ROOT + "/system/bin/toybox"):
+        return
+    if not os.path.isfile(BASE_ROOT + "/usr/lib/lxrt-emu/FEX"):
+        die("%s is not an x86_64 Android root with FEX (scripts/mkandroidroot.sh --arch x86_64)" % BASE_ROOT)
+    tmp = "%s.new-%d" % (ROOT, os.getpid())
+    t0 = time.time()
+    # cp -c: APFS clones, file by file (the root's sockets are not copied,
+    # which is right: they belong to whoever bound them). Its status is not
+    # 0 because of those, so the result is checked instead.
+    subprocess.run(["cp", "-c", "-R", BASE_ROOT, tmp], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    if not os.path.isfile(tmp + "/system/bin/toybox"):
+        shutil.rmtree(tmp, ignore_errors=True)
+        die("could not clone %s to %s (cp -c needs both on the same APFS volume)" % (BASE_ROOT, tmp))
+    for stale in ("/data/local/tmp/.fexserver.pid",):
+        try:
+            os.unlink(tmp + stale)
+        except OSError:
+            pass
+    if fex:
+        shutil.copyfile(fex, tmp + "/usr/lib/lxrt-emu/FEX")
+        os.chmod(tmp + "/usr/lib/lxrt-emu/FEX", 0o755)
+    with open(tmp + "/.steamarm-session", "w") as f:
+        f.write("# scripts/android-session.py: an APFS clone of %s, %s%s\n"
+                % (BASE_ROOT, datetime.datetime.now().isoformat(timespec="seconds"),
+                   (", FEX from " + fex) if fex else ""))
+    os.rename(tmp, ROOT)
+    log("session root %s: a clone of %s (%.1f s)" % (ROOT, BASE_ROOT, time.time() - t0))
+
+
+# ------------------------------------------------------------------ guests
+def guest(s, argv, timeout=120, ids="root"):
+    """A guest program in the session. (returncode, stdout)."""
+    genv = "LXRT_BINDER_DIR=%s/binder LXRT_PROPERTY_DIR=%s/props LXRT_INPUT_DIR=%s/input LXRT_ANDROID_IDS=%s" % (
+        s["dir"], s["dir"], s["dir"], ids)
+    env = dict(os.environ, ANDROID_X86_ROOT=s["root"], LXRUN=LXRUN, ANDROID_X86_GENV=genv,
+               STEAMARM_NO_SAFEGUARD="1")
+    try:
+        r = subprocess.run([os.path.join(HERE, "run-android-x86.sh")] + argv, env=env, cwd=REPO,
+                           stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                           timeout=timeout)
+        return r.returncode, r.stdout.decode(errors="replace")
+    except subprocess.TimeoutExpired as e:
+        return 124, (e.stdout or b"").decode(errors="replace")
+
+
+# ------------------------------------------------------------------ commands
+def start(a, exit_with=0):
+    with Lock():
+        s = read_session()
+        if s and boot_alive(s):
+            if s.get("bootCompleted"):
+                log("already running (boot pid %d, root %s, log %s)" % (s["bootPid"], s["root"], s.get("log")))
+                if not LOGF and s.get("log"):
+                    open_log(s["log"])
+                return s
+            log("a boot is under way (pid %d); waiting for it" % s["bootPid"])
+            if not LOGF and s.get("log"):
+                open_log(s["log"])
+            return wait_boot(s, a.timeout)
+        if s:
+            leftover(s)
+        stamp = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
+        logpath = os.path.join(LOGS, "android-%s.log" % stamp)
+        open_log(logpath)
+        log("== session: root %s, host state %s, %s" % (ROOT, RUN_DIR, "headless" if a.headless else "Weston on " + DISPLAY))
+        if not os.access(LXRUN, os.X_OK):
+            die("no %s (make lxrt)" % LXRUN)
+        ensure_volume()
+        ensure_root(a.fex)
+        # A fresh host state: the binder hub, the property service and the
+        # boot's own files are this session's alone.
+        if os.path.isdir(RUN_DIR):
+            if os.stat(RUN_DIR).st_uid != os.getuid():
+                die("%s is not this user's" % RUN_DIR)
+            shutil.rmtree(RUN_DIR, ignore_errors=True)
+        os.makedirs(RUN_DIR, mode=0o700)
+        t0 = time.time()
+        # The display: SteamARM's X server on :2 (its windows are macOS
+        # windows), then Weston on it -- or headless.
+        wenv = weston_env()
+        if not a.headless:
+            r = subprocess.run([os.path.join(HERE, "run-x11-native.sh"), "start", DISPLAY], cwd=REPO,
+                               stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+            if r.returncode != 0:
+                die("the X server on %s did not start: %s" % (DISPLAY, r.stdout.decode(errors="replace").strip()))
+        wargs = ["start", "--kiosk", "--size", a.size] + (["--headless"] if a.headless else [])
+        had_weston = weston_pid() is not None
+        r = subprocess.run([os.path.join(HERE, "run-weston.sh")] + wargs, env=wenv, cwd=REPO,
+                           stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+        log(r.stdout.decode(errors="replace").strip())
+        wpid = weston_pid()
+        if r.returncode != 0 or not wpid:
+            die("Weston did not start")
+        # The boot, in a session of its own so that it outlives this command
+        # (start returns; stop or run's end stop it).
+        cmd = [sys.executable, os.path.join(HERE, "android-boot.py"), "--root", ROOT, "--state", RUN_DIR,
+               "--lxrun", LXRUN, "--wayland", "%s:%s" % (XDG, SOCKET), "--seconds", "0",
+               "--until-prop", "sys.boot_completed=1", "--keep-running"]
+        if exit_with:
+            cmd += ["--exit-with", str(exit_with)]
+        p = subprocess.Popen(cmd, stdin=subprocess.DEVNULL, stdout=LOGF, stderr=subprocess.STDOUT,
+                             start_new_session=True, cwd=REPO, env=dict(os.environ, LXRUN=LXRUN))
+        s = {"bootPid": p.pid, "root": ROOT, "dir": RUN_DIR, "xdg": XDG, "socket": SOCKET,
+             "display": "headless" if a.headless else DISPLAY, "size": a.size, "log": logpath,
+             "westonPid": wpid, "westonWasRunning": had_weston, "started": time.time()}
+        write_session(s)
+        log("boot started (pid %d); Weston pid %d; waiting for sys.boot_completed=1" % (p.pid, wpid))
+    return wait_boot(s, a.timeout, t0)
+
+
+def wait_boot(s, timeout, t0=None):
+    t0 = t0 or s.get("started") or time.time()
+    initlog = os.path.join(s["dir"], "init.log")
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        try:
+            with open(initlog, errors="replace") as f:
+                text = f.read()
+        except OSError:
+            text = ""
+        m = re.search(r"sys\.boot_completed=1 after ([\d.]+) s", text)
+        if m:
+            s["bootCompleted"] = time.time()
+            s["bootSeconds"] = round(time.time() - t0, 1)
+            write_session(s)
+            log("sys.boot_completed=1: %.1f s after the session started (the boot's own count: %s s)"
+                % (time.time() - t0, m.group(1)))
+            trim(s)
+            return s
+        if "boot failed:" in text or not boot_alive(s):
+            tail = "\n".join(text.splitlines()[-5:])
+            stop_session(s, "the boot ended before sys.boot_completed=1")
+            die("the boot ended before sys.boot_completed=1:\n" + tail)
+        time.sleep(1)
+    stop_session(s, "no sys.boot_completed=1 after %d s" % timeout)
+    die("no sys.boot_completed=1 after %d s (%s)" % (timeout, s.get("log")))
+
+
+def trim(s):
+    """TRIM_PACKAGES disabled, once per session root."""
+    if os.path.exists(s["root"] + TRIM_MARK):
+        return
+    t0 = time.time()
+    script = "; ".join("/system/bin/pm disable-user --user 0 %s >/dev/null 2>&1" % p for p in TRIM_PACKAGES)
+    rc, out = guest(s, ["/system/bin/sh", "-c", script + "; /system/bin/cmd package list packages -d"], timeout=600)
+    disabled = [l.split(":", 1)[1] for l in out.split() if l.startswith("package:")]
+    done = [p for p in TRIM_PACKAGES if p in disabled]
+    with open(s["root"] + TRIM_MARK, "w") as f:
+        f.write("# scripts/android-session.py TRIM_PACKAGES, disabled with pm disable-user\n%s\n" % "\n".join(done))
+    log("disabled %d of the image's apps the session does not need (%.1f s): %s"
+        % (len(done), time.time() - t0, ", ".join(done)))
+
+
+def lxrun_count():
+    try:
+        out = subprocess.run(["ps", "-Ao", "comm="], stdout=subprocess.PIPE, timeout=10).stdout.decode(errors="replace")
+    except (OSError, subprocess.SubprocessError):
+        return -1
+    return sum(1 for l in out.splitlines() if l.strip().endswith("/lxrun") or l.strip() == "lxrun")
+
+
+def leftover(s):
+    """A session.json whose boot is gone: stop what it may have left."""
+    log("the recorded session (boot pid %s) is gone; clearing it" % s.get("bootPid"))
+    stop_weston(s)
+    try:
+        os.unlink(SESSION_FILE)
+    except OSError:
+        pass
+
+
+def stop_weston(s):
+    r = subprocess.run([os.path.join(HERE, "run-weston.sh"), "stop"], env=weston_env(), cwd=REPO,
+                       stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+    log(r.stdout.decode(errors="replace").strip())
+
+
+def stop_session(s, why):
+    log("stopping: %s" % why)
+    pid = s.get("bootPid")
+    if boot_alive(s):
+        os.kill(pid, signal.SIGTERM)        # android-boot.py stops every process it started
+        for _ in range(300):
+            if not boot_alive(s):
+                break
+            time.sleep(0.1)
+        if boot_alive(s):
+            log("the boot did not stop in 30 s: SIGKILL to its process group")
+            try:
+                os.killpg(pid, signal.SIGKILL)
+            except OSError:
+                pass
+    stop_weston(s)
+    try:
+        if (read_session() or {}).get("bootPid") == pid:
+            os.unlink(SESSION_FILE)
+    except OSError:
+        pass
+    log("stopped")
+
+
+def cmd_stop(a):
+    with Lock():
+        s = read_session()
+        if not s:
+            log("no session")
+            return 0
+        if s.get("log"):
+            open_log(s["log"])
+        stop_session(s, "asked")
+    return 0
+
+
+def cmd_status(a):
+    s = read_session()
+    alive = bool(s and boot_alive(s))
+    out = dict(s or {}, running=alive, westonRunning=bool(weston_pid()))
+    if alive:
+        rc, o = guest(s, ["/system/bin/getprop", "sys.boot_completed"], timeout=60)
+        out["sys.boot_completed"] = o.strip()
+    print(json.dumps(out, indent=1))
+    return 0 if alive else 3
+
+
+def package_meta(pkg):
+    try:
+        with open(os.path.join(ADIR, "packages", pkg, "meta.json")) as f:
+            m = json.load(f)
+        return m if isinstance(m, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def meta_field(m, key):
+    """A field of android-pm.py's meta.json, which keeps apk-inspect's report."""
+    if key in m:
+        return m[key]
+    for sub in ("apk", "report", "inspect"):
+        if isinstance(m.get(sub), dict) and key in m[sub]:
+            return m[sub][key]
+    return None
+
+
+PKG_RE = re.compile(r"[A-Za-z][A-Za-z0-9_]*(\.[A-Za-z][A-Za-z0-9_]*)+")
+
+
+def installed_version(s, pkg):
+    rc, out = guest(s, ["/system/bin/cmd", "package", "list", "packages", "--show-versioncode", pkg], timeout=120)
+    for line in out.splitlines():
+        m = re.match(r"package:(\S+) versionCode:(\d+)", line.strip())
+        if m and m.group(1) == pkg:
+            return int(m.group(2))
+    return None
+
+
+def install(s, pkg, apk=None, force=False):
+    if not PKG_RE.fullmatch(pkg):
+        die("not a package name: %r" % pkg, 2)
+    apk = apk or os.path.join(ADIR, "packages", pkg, "base.apk")
+    if not os.path.isfile(apk):
+        die("no APK for %s at %s (scripts/android-pm.py install)" % (pkg, apk), 5)
+    want = meta_field(package_meta(pkg), "versionCode")
+    have = installed_version(s, pkg)
+    if have is not None and not force and (want is None or have == want):
+        log("%s is installed (versionCode %s)" % (pkg, have))
+        return True
+    staged = "/data/local/tmp/steamarm-install-%s.apk" % pkg
+    shutil.copyfile(apk, s["root"] + staged)
+    t0 = time.time()
+    log("pm install %s (%s, %.1f MB; installed now: %s)" % (pkg, apk, os.path.getsize(apk) / 1e6, have))
+    rc, out = guest(s, ["/system/bin/pm", "install", "-r", staged], timeout=900)
+    try:
+        os.unlink(s["root"] + staged)
+    except OSError:
+        pass
+    out = out.strip()
+    log("pm install: %s (%.1f s)" % (out.splitlines()[-1] if out else "rc %d" % rc, time.time() - t0))
+    return out.endswith("Success")
+
+
+def launcher_activity(s, pkg):
+    act = meta_field(package_meta(pkg), "launcherActivity")
+    if isinstance(act, str) and act:
+        return act
+    rc, out = guest(s, ["/system/bin/cmd", "package", "resolve-activity", "--brief", "-c",
+                        "android.intent.category.LAUNCHER", pkg], timeout=120)
+    lines = [l.strip() for l in out.splitlines() if "/" in l]
+    if lines:
+        comp = lines[-1]
+        p, _, c = comp.partition("/")
+        return p + c if c.startswith(".") else c
+    return None
+
+
+def focused(s):
+    rc, out = guest(s, ["/system/bin/dumpsys", "window"], timeout=120)
+    m = re.search(r"mCurrentFocus=Window\{[^}]*\s(\S+)\}", out)
+    return m.group(1) if m else ""
+
+
+def launch(s, pkg, apk=None, force=False):
+    if not install(s, pkg, apk, force):
+        die("%s was not installed" % pkg, 4)
+    act = launcher_activity(s, pkg)
+    if not act:
+        die("%s has no launcher activity" % pkg, 4)
+    t0 = time.time()
+    rc, out = guest(s, ["/system/bin/am", "start", "-W", "-n", "%s/%s" % (pkg, act)], timeout=300)
+    status = re.search(r"Status: (\S+)", out)
+    total = re.search(r"TotalTime: (\d+)", out)
+    log("am start -W -n %s/%s: %s%s (%.1f s)" % (pkg, act, status.group(1) if status else "no status",
+                                                ", TotalTime %s ms" % total.group(1) if total else "",
+                                                time.time() - t0))
+    for _ in range(60):
+        f = focused(s)
+        if f.startswith(pkg + "/"):
+            log("focused window: %s (%.1f s after am start; %d lxrun processes on the Mac)"
+                % (f, time.time() - t0, lxrun_count()))
+            s["app"] = pkg
+            write_session(s)
+            return True
+        time.sleep(2)
+    log("its window never had the focus (last focus: %s)" % (focused(s) or "none"))
+    return False
+
+
+def cmd_install(a):
+    s = read_session()
+    if not s or not boot_alive(s) or not s.get("bootCompleted"):
+        die("no session (scripts/android-session.py start)", 3)
+    if s.get("log"):
+        open_log(s["log"])
+    return 0 if install(s, a.package, a.apk, a.force) else 4
+
+
+def cmd_launch(a):
+    s = start(a)
+    return 0 if launch(s, a.package, a.apk, a.force) else 1
+
+
+def cmd_run(a):
+    stop_now = []
+
+    def on_signal(sig, frame):
+        stop_now.append(sig)
+    for sig in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):
+        signal.signal(sig, on_signal)
+    s = start(a, exit_with=os.getpid())
+    ok = launch(s, a.package, a.apk, a.force)
+    if not ok:
+        stop_session(s, "the app did not start")
+        return 1
+    log("running; the session ends with Detener (SIGTERM), when Weston's window is closed, or with the boot")
+    while not stop_now:
+        if not boot_alive(s):
+            log("the boot is gone")
+            stop_session(s, "the boot ended")
+            return 1
+        if s.get("westonPid"):
+            try:
+                os.kill(s["westonPid"], 0)
+            except OSError:
+                stop_session(s, "Weston is gone (its window was closed)")
+                return 0
+        time.sleep(1)
+    with Lock():
+        stop_session(s, "signal %d" % stop_now[0])
+    return 0
+
+
+def cmd_shell(a):
+    s = read_session()
+    if not s or not boot_alive(s):
+        die("no session (scripts/android-session.py start)", 3)
+    rc, out = guest(s, a.argv, timeout=a.timeout)
+    sys.stdout.write(out)
+    return rc
+
+
+def cmd_xwd(a):
+    s = read_session()
+    if not s or s.get("display") in (None, "headless"):
+        die("no session with a window (start without --headless)", 3)
+    r = subprocess.run(["/opt/homebrew/bin/xwininfo", "-root", "-tree"], env=dict(os.environ, DISPLAY=DISPLAY),
+                       stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+    m = re.search(r"(0x[0-9a-f]+) \"Weston Compositor[^\"]*\"", r.stdout.decode(errors="replace"))
+    if not m:
+        die("no Weston window on %s" % DISPLAY)
+    out = os.path.abspath(a.out)
+    wroot = os.environ.get("WESTON_ROOT") or os.path.join(STATE, "westonroot")
+    guest_out = "/tmp/android-session-%d.xwd" % os.getpid()
+    env = dict(os.environ, WESTON_XDG=XDG, WESTON_SOCKET=SOCKET, LXRUN=LXRUN, DISPLAY=DISPLAY)
+    r = subprocess.run([os.path.join(HERE, "run-weston.sh"), "client", "/usr/bin/xwd", "-silent", "-id", m.group(1),
+                        "-out", guest_out], env=env, cwd=REPO, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+    host = wroot + guest_out
+    if r.returncode != 0 or not os.path.isfile(host):
+        die("xwd failed: %s" % r.stderr.decode(errors="replace")[-300:])
+    shutil.move(host, out)
+    print("%s: window %s" % (out, m.group(1)))
+    return 0
+
+
+def main():
+    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    sub = ap.add_subparsers(dest="cmd", required=True)
+
+    def start_opts(p):
+        p.add_argument("--headless", action="store_true", help="Weston with no window (tests)")
+        p.add_argument("--size", default=os.environ.get("ANDROID_SESSION_SIZE", "1024x768"),
+                       help="Weston's output, which is Android's screen (WxH)")
+        p.add_argument("--timeout", type=int, default=900, help="seconds to wait for sys.boot_completed=1")
+        p.add_argument("--fex", default=None, help="a FEX-emu to put in the session root when it is made")
+    p = sub.add_parser("start")
+    start_opts(p)
+    sub.add_parser("stop")
+    sub.add_parser("status")
+    for name in ("install", "launch", "run"):
+        p = sub.add_parser(name)
+        p.add_argument("package")
+        p.add_argument("--apk", default=None, help="this APK instead of the library's copy")
+        p.add_argument("--force", action="store_true", help="install even if that version is installed")
+        if name != "install":
+            start_opts(p)
+    p = sub.add_parser("shell")
+    p.add_argument("--timeout", type=int, default=300)
+    p.add_argument("argv", nargs=argparse.REMAINDER)
+    p = sub.add_parser("xwd")
+    p.add_argument("out")
+    a = ap.parse_args()
+    if getattr(a, "size", None) and not re.fullmatch(r"\d{3,4}x\d{3,4}", a.size):
+        die("--size WxH", 2)
+    if a.cmd == "start":
+        start(a)
+        return 0
+    return {"stop": cmd_stop, "status": cmd_status, "install": cmd_install, "launch": cmd_launch,
+            "run": cmd_run, "shell": cmd_shell, "xwd": cmd_xwd}[a.cmd](a)
+
+
+if __name__ == "__main__":
+    sys.exit(main())

@@ -1,0 +1,90 @@
+Stage 28 (Android reliability) -- the sh $(toybox) hang, i386 Android under FEX, a /dev/input per Android stack, binder for 32-bit guests (2026-09-30)
+===============================================================================================================================================
+
+ZERO-VM. Every process is an ordinary macOS process: lxrun, or lxrun running
+SteamARM's FEX. Host: Mac mini M4, macOS 27.0. No account, no Google
+software, no Steam client.
+
+How this record was made. The session that did this work (branch
+worktree-wf_f2c065ea-b4f-2, commits 1519c69, cc9c9cf, 29c324b, eb02249,
+c52265b, and bf864de marked WIP) was interrupted before it wrote its record.
+Its measurements are in those commit messages; they are gathered here as
+they were written there, labelled as that session labelled them. The branch
+was merged at b35745f together with the APK work of the same stage
+(benchmarks/stage28-android-apk.txt), and what is re-measured after the
+merge is in that record's final checks. Labels: MEASURED, VERIFIED IN SOURCE,
+HYPOTHESIS, UNKNOWN.
+
+1. The intermittent hang of x86-64 Android's mksh under FEX (1519c69)
+---------------------------------------------------------------------
+Stage 27 saw `sh -c '$(toybox ...)'` hang about 1 run in 40 (12 of 300
+here). Two causes, each MEASURED:
+- XNU binds a process-directed signal to one thread when it is posted and,
+  if every thread blocks it, leaves it on the process's first thread: under
+  lxrun the host main thread, which blocks everything. A SIGCHLD that came
+  while the guest blocked it (or during the runtime's own all-signals-blocked
+  sections) was never delivered. The main thread now looks at its pending
+  set on every turn of its loop and hands such signals to a guest thread
+  (runtime/signal.c, runtime/thread.c). tests/elf/sig_stranded.c: 0 ok 3 mal
+  before, 3 ok after.
+- FEX kept a SIGCHLD that arrived in its mask-update window in
+  PendingSignals, and GuestSigSuspend never looked there before sleeping:
+  patches/fex-lxrt-sigsuspend-pending.patch re-raises such signals for the
+  host sigsuspend (and rt_sigtimedwait).
+300 runs each: HEAD 12 hangs, runtime fix only 4, FEX fix only 3, both 0.
+tests/android/run.sh runs the command 40 times.
+
+2. i386 Android under FEX: zygote_secondary, dex2oat32, dalvikvm32 (cc9c9cf)
+------------------------------------------------------------------------------
+The image's 32-bit programs died in FEX's 32-bit mode. Fixed one after the
+other in patches/fex-lxrt-i386-bionic.patch: the fallback vsyscall page was
+not tracked as executable ("NoExec instruction in entry block" on bionic's
+first AT_SYSINFO call); x32 futex REQUEUE's integer val2 was rebased
+(EINVAL, "futex requeue failed"); x32 rt_sigtimedwait with a NULL siginfo
+asserted; the 32-bit allocator ignored free mmap hints (ART's boot image:
+imageless start, 6 s -> 1.6 s for a hello world); x32 set/getsockopt
+dereferenced the guest's optval without the base. In the runtime: msync of
+a 32-bit guest address gets the base; getsockopt SO_DOMAIN/SO_PROTOCOL;
+SO_RCVTIMEO_NEW/SO_SNDTIMEO_NEW; MSG_TRUNC/MSG_CTRUNC are not passed to
+Darwin's recvmsg, which echoes them into msg_flags (libbase's
+ReceiveFileDescriptorVector refused every message); an SCM_RIGHTS with no
+descriptor is dropped, as Linux never delivers one. MEASURED then: dex2oat32
+compiles a dex whose odex dalvikvm32 runs, zygote_secondary listens and
+serves system_server, which enters in ~7 s instead of ~30 s.
+tests/android/i386_bionic.c: 8 checks, one per fix. The last WIP commit
+(bf864de) made a shared mapping take its hint only when the 16 KiB host
+pages it touches are free as a whole; the FEX built from these patches after
+the merge (FEX-emu sha256 731ec126..., 43 s of ninja, Release) is
+byte-identical to the one that session had installed in its own clone
+(MEASURED, stage28-android-apk.txt).
+
+3. A /dev/input per Android stack (29c324b)
+-------------------------------------------
+LXRT_INPUT_DIR=<host dir> gives a guest (and what it runs) its own
+/dev/input; unset, it is /tmp/lxrt-input as before (runtime/evdev.c).
+hwcomposer.waydroid's input FIFOs (wl_pointer_events, wl_keyboard_events)
+land in the stack's own directory; 30 synthetic pointer motions sent to
+Weston's X window came out of wl_pointer_events as 150 records (ABS X/Y, REL
+X/Y, SYN) to an EventHub-style reader (tests/android/input_fifo.c,
+tests/android/xsend_motion.py; MEASURED). Synthetic buttons and keys are
+not sent: Weston's X11 backend asserts on a synthetic button event
+(libweston/backend-x11/x11.c:1349, the send_event bit) and aborts
+(MEASURED). InputFlinger itself was not run then; it runs in the APK work.
+
+4. Binder for 32-bit guests, and the 32-bit audio HAL (eb02249, c52265b)
+------------------------------------------------------------------------
+An i386 bionic process passes its own addresses (below 4 GiB) in binder's
+structures and in the ioctl argument; the runtime now bases them
+(runtime/gbase.c, runtime/binder.c) and hands the hub the receive buffer's
+guest address. MEASURED then: tests/android/binder_service.c built for i386
+registers with the image's servicemanager, answers an x86-64 `service call`
+(i32 41 -> 42) and reads a descriptor passed to it; the image's i386 audio
+HAL registers IDevicesFactory and IEffectsFactory 4.0 and audioserver starts
+AudioFlinger, with android-boot.py --linkerconfig (opt-in: init's
+update_linker_config rewrites the root's /linkerconfig with the property
+service up; the legacy file has no VNDK namespace for
+android.hardware.audio@4.0.so).
+
+Not done there: the session's record ends with the WIP commit; nothing of
+it was re-measured end to end in the display profile (whose default leaves
+32-bit out: stage28-android-apk.txt).

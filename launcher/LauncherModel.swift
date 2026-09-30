@@ -269,7 +269,8 @@ final class LauncherModel: ObservableObject {
     /// tried. Only programs outside the x86 Steam root are checked here (that
     /// one is the setup banner's business): their root and program must exist.
     func unavailableReason(_ app: AppEntry) -> String? {
-        // No Android runtime exists yet: every Android card stays closed, with why.
+        // Android cards open in the Android session (scripts/android-session.py)
+        // when it can run their code; otherwise they stay closed, with why.
         if app.isAndroid { return AndroidApps.unavailableReason(app.android) }
         guard !app.isWindows, !Paths.isX86Root(app.root) else { return nil }
         let host = Paths.hostRoot(forGuestRoot: app.root)
@@ -448,7 +449,10 @@ final class LauncherModel: ObservableObject {
 
     /// What `app` asks for: its own choices over the settings.
     func requestedDisplay(_ app: AppEntry) -> DisplayMode {
-        DisplayMode(rawValue: app.overrides?["display"] ?? "") ?? settings.display
+        // The Android session's screen is a Weston window on the native X
+        // server whatever the setting (scripts/run-app.sh does the same).
+        if app.isAndroid { return .native }
+        return DisplayMode(rawValue: app.overrides?["display"] ?? "") ?? settings.display
     }
 
     /// The settings of this launch that cannot work, with what runs instead.
@@ -491,7 +495,10 @@ final class LauncherModel: ObservableObject {
         }
         if app.isExperimental && !confirmExperimental(app) { return }
         // Settings that cannot work: the fallback policy decides.
-        let issues = launchIssues(app)
+        // An Android card runs in the Android session (Weston on the native X
+        // server, SwiftShader inside Android): the Linux apps' display,
+        // synchronization and graphics settings do not reach it.
+        let issues = app.isAndroid ? [] : launchIssues(app)
         switch settings.fallback.decision(for: issues) {
         case .proceed: break
         case .refuse:

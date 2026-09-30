@@ -33,10 +33,15 @@ follows the layout of the [Ryujinx](https://ryujinx.app) emulator's.
   version, SDK levels, native code, permissions, signing schemes) and
   installs it into `~/SteamARM-roots/android/` (`scripts/android-pm.py`). An
   update keeps the app's data and is refused when the new APK is signed by
-  another certificate or is an older version. The card cannot be opened
-  yet: SteamARM has no Android runtime, and the card says so. arm64-v8a
-  code is preferred; an app with only 32-bit ARM code cannot run on Apple
-  Silicon, and one with only x86 code would need FEX (not supported).
+  another certificate or is an older version. **Abrir** starts SteamARM's
+  Android session (Android 11 x86-64 under FEX, no VM,
+  `scripts/android-session.py`): a Weston window on the native X server is
+  Android's screen, the app is installed there with Android's own
+  `pm install` and started; the first start takes a minute or two, later
+  ones about half a minute. **Detener** ends the session. It runs apps with no native code and apps with x86-64 code; the
+  card is disabled, and says why, for arm64-v8a-only code (Android's arm64
+  runtime does not start on macOS), 32-bit ARM or x86 code and apps that
+  need a newer Android than 11. No sound or network inside Android yet.
   XAPK, APKS, APKM and AAB bundles are refused for now. Right-click an
   Android card for **Información…**, **Abrir carpeta de datos** and
   **Desinstalar…** (with or without its data). Details:
