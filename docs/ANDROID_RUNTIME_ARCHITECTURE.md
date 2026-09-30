@@ -1165,7 +1165,16 @@ directories in either mode (`toybox ps` shows nothing): not changed here.
   and the vendor's OMX store, and both services are i386, stopped by 32-bit
   bionic's 16-bit pid limit: it waits for IOmxStore once a second forever
   (MEASURED). With the OMX store left out of the manifest it went on and
-  crashed (SIGSEGV at 0) instead, so that was not kept.
+  crashed (SIGSEGV at 0) instead, so that was not kept. Since the 16-bit
+  ids, mediaserver (i386) runs and registers `media.player`, but
+  MediaCodecList inside it waits for the OMX store the same way. The OMX
+  store (i386) needs the image's generated linker configuration: with
+  `--linkerconfig` rewriting the root's `/linkerconfig` audioserver exited
+  at once in a loop and the boot never completed, but the 32-bit linker
+  of this userdebug build honours `LD_CONFIG_FILE`, so `linkerconfig
+  --target <dir>` and that variable for the OMX store alone let it link;
+  it then goes silent once its minijail seccomp filter is installed under
+  FEX's seccomp emulation (MEASURED; the next step).
 
 ## APKs and the Google Play Store
 
