@@ -11,6 +11,16 @@
 //
 // SDL (winebus in Proton, native games) finds these the way it does inside
 // any container: scanning /dev/input and watching it with inotify.
+//
+// LXRT_INPUT_DIR=<absolute host directory> gives a guest (and what it runs,
+// which inherits the environment) a /dev/input of its own instead. Android's
+// display composer (Waydroid's hwcomposer.waydroid) makes its input FIFOs
+// there, /dev/input/wl_{pointer,keyboard,touch,tablet}_events, for
+// InputFlinger's EventHub to read; in the shared directory they sat next to
+// steamarm-inputd's controller sockets, and two Android roots would have met
+// in one FIFO (benchmarks/stage28-android-reliability.txt). Unset, the
+// directory is /tmp/lxrt-input as before: the Steam controller path does not
+// change.
 #include <errno.h>
 #include <fcntl.h>
 #include <limits.h>
@@ -32,7 +42,25 @@
 
 #define LERR(e) (-lxrt_errno_to_linux(e))
 
-#define EVDEV_DIR "/tmp/lxrt-input"
+#define EVDEV_DIR_DEFAULT "/tmp/lxrt-input"
+
+static const char *evdev_dir(void)
+{
+    static char dir[PATH_MAX];
+    static _Atomic int ready;
+    if (!atomic_load_explicit(&ready, memory_order_acquire)) {
+        const char *e = getenv("LXRT_INPUT_DIR");
+        char tmp[PATH_MAX];
+        snprintf(tmp, sizeof tmp, "%s",
+                 e && e[0] == '/' && strlen(e) < sizeof tmp - 32 ? e : EVDEV_DIR_DEFAULT);
+        size_t l = strlen(tmp);
+        while (l > 1 && tmp[l - 1] == '/')
+            tmp[--l] = 0;
+        memcpy(dir, tmp, l + 1);            // every thread that races here writes the same bytes
+        atomic_store_explicit(&ready, 1, memory_order_release);
+    }
+    return dir;
+}
 #define EV_FDS 65536
 #define KEY_BYTES 96            // KEY_MAX 0x2ff
 #define ABS_N 64                // ABS_MAX 0x3f
@@ -77,15 +105,16 @@ const char *lxrt_evdev_translate(const char *path, char *buf, size_t n)
 {
     if (strncmp(path, "/dev/input", 10) != 0 || (path[10] != '\0' && path[10] != '/'))
         return NULL;
-    int k = snprintf(buf, n, "%s%s", EVDEV_DIR, path + 10);
+    int k = snprintf(buf, n, "%s%s", evdev_dir(), path + 10);
     return k > 0 && (size_t)k < n ? buf : NULL;
 }
 
 // "…/lxrt-input/eventN" -> N, else -1.
 static int node_number(const char *host)
 {
-    size_t l = strlen(EVDEV_DIR);
-    if (strncmp(host, EVDEV_DIR "/event", l + 6) != 0)
+    const char *d = evdev_dir();
+    size_t l = strlen(d);
+    if (strncmp(host, d, l) != 0 || strncmp(host + l, "/event", 6) != 0)
         return -1;
     const char *p = host + l + 6;
     if (!*p)
@@ -102,7 +131,7 @@ static int node_number(const char *host)
 static int load_meta(struct evdev *e)
 {
     char path[PATH_MAX];
-    snprintf(path, sizeof path, EVDEV_DIR "/meta/event%d", e->num);
+    snprintf(path, sizeof path, "%s/meta/event%d", evdev_dir(), e->num);
     FILE *f = fopen(path, "r");
     if (!f)
         return -1;

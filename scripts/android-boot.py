@@ -404,6 +404,7 @@ class Boot:
         self.state = a.state
         self.propdir = os.path.join(self.state, "props")
         self.binderdir = os.path.join(self.state, "binder")
+        self.inputdir = os.path.join(self.state, "input")
         self.lxrun = os.path.realpath(a.lxrun)
         self.profile = PROFILES[a.profile]
         self.props = Props(self)
@@ -443,6 +444,10 @@ class Boot:
             "OBJC_DISABLE_INITIALIZE_FORK_SAFETY": "YES",
             "LXRT_PROPERTY_DIR": self.propdir, "LXRT_BINDER_DIR": self.binderdir,
             "LXRT_BINDER_HUB_IDLE": "30",
+            # This boot's /dev/input (runtime/evdev.c): the display composer's
+            # input FIFOs and InputFlinger's EventHub meet there, not in the
+            # shared /tmp/lxrt-input of steamarm-inputd's controllers.
+            "LXRT_INPUT_DIR": self.inputdir,
         }
         if self.x86:
             # The same as scripts/run-android-x86.sh (its FEXServer is used).
@@ -862,6 +867,7 @@ class Boot:
         os.chmod(self.state, 0o700)
         os.makedirs(self.binderdir, mode=0o700, exist_ok=True)
         os.chmod(self.binderdir, 0o700)
+        os.makedirs(self.inputdir, mode=0o700, exist_ok=True)
         global LOGF
         LOGF = open(os.path.join(self.state, "init.log"), "a")
         log("== android-boot: root %s (%s), state %s, lxrun %s" %

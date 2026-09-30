@@ -5,7 +5,8 @@ and taken its snapshot, presses A, moves the left stick and releases A.
 Rumble records are printed as "rumble strong=S weak=W ms=M"."""
 import os, socket, struct, sys, time, select
 
-D = "/tmp/lxrt-input"
+# LXRT_INPUT_DIR: a private /dev/input (runtime/evdev.c), as the guest gets it.
+D = os.environ.get("LXRT_INPUT_DIR", "/tmp/lxrt-input")
 os.makedirs(D + "/meta", exist_ok=True)
 for f in ("event0", "meta/event0"):
     try: os.unlink(os.path.join(D, f))

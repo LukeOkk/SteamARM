@@ -32,7 +32,10 @@
 #                         <root>/data/local/tmp must fit Darwin's 104-byte
 #                         sun_path (a 44-byte root path failed, MEASURED)
 #   ANDROID_DISPLAY_DIR   host state: private binder hub and property service
-#                         directories, PIDs, logcat (/tmp/lxrt-android-display-<uid>)
+#                         directories, PIDs, logcat (/tmp/lxrt-android-display-<uid>),
+#                         and <dir>/input: the guests' /dev/input (LXRT_INPUT_DIR,
+#                         runtime/evdev.c), where the composer makes its input
+#                         FIFOs, not in the shared /tmp/lxrt-input
 #   ANDROID_DISPLAY_LOGD  1: run tests/android/logd.py on <root>/dev/socket/logdw
 #                         (only if nobody else is bound there)
 #   ANDROID_DISPLAY_BOOTANIM  0: no bootanimation
@@ -45,7 +48,7 @@ XDG="${WESTON_XDG:-/dev/shm/steamarm-wayland}"
 SOCKET="${WESTON_SOCKET:-wayland-0}"
 HOSTSOCK="/tmp/lxrt-shm-$(id -u)${XDG#/dev/shm}/$SOCKET"
 export ANDROID_X86_ROOT="$ROOT"
-BASE_GENV="LXRT_BINDER_DIR=$DIR/binder LXRT_BINDER_HUB_IDLE=10 LXRT_PROPERTY_DIR=$DIR/props LXRT_PROPERTY_PERSIST=$DIR/props/persistent_properties LXRT_PROPERTY_IDLE=60"
+BASE_GENV="LXRT_BINDER_DIR=$DIR/binder LXRT_BINDER_HUB_IDLE=10 LXRT_PROPERTY_DIR=$DIR/props LXRT_PROPERTY_PERSIST=$DIR/props/persistent_properties LXRT_PROPERTY_IDLE=60 LXRT_INPUT_DIR=$DIR/input"
 now() { python3 -c 'import time; print("%.2f" % time.time())'; }
 
 # guest [ENV=V...] -- <program> [args]: one guest, in the foreground.
@@ -81,7 +84,7 @@ start)
     if [ -d "$DIR/pids" ] && [ -n "$(ls "$DIR/pids" 2>/dev/null)" ]; then
         for f in "$DIR"/pids/*; do alive "$(basename "$f")" && { echo "run-android-display: already running ($0 stop first)" >&2; exit 1; }; done
     fi
-    mkdir -p "$DIR/binder" "$DIR/props" "$DIR/pids" && chmod 700 "$DIR" "$DIR/binder" "$DIR/props"
+    mkdir -p "$DIR/binder" "$DIR/props" "$DIR/pids" "$DIR/input" && chmod 700 "$DIR" "$DIR/binder" "$DIR/props"
     rm -f "$DIR"/pids/*
     t0=$(now)
     if [ "${ANDROID_DISPLAY_LOGD:-0}" = 1 ]; then
@@ -143,16 +146,12 @@ stop)
         rm -f "$DIR/pids/$n"
     done
     # hwcomposer.waydroid makes its input FIFOs (/dev/input/wl_*_events) as
-    # it finds a pointer and a keyboard. The runtime maps /dev/input to one
-    # host directory (/tmp/lxrt-input, runtime/evdev.c) for every guest, so
-    # they land there; remove them once no composer runs any more.
-    sleep 0.5
-    if ! ps -Ao command= | grep -q "[l]xrun /vendor/bin/hw/android.hardware.graphics.composer"; then
-        for f in /tmp/lxrt-input/wl_keyboard_events /tmp/lxrt-input/wl_pointer_events \
-                 /tmp/lxrt-input/wl_touch_events /tmp/lxrt-input/wl_tablet_events; do
-            [ -p "$f" ] && rm -f "$f"
-        done
-    fi
+    # it finds a pointer and a keyboard: in $DIR/input, this stack's own
+    # /dev/input (LXRT_INPUT_DIR). Remove them with the stack.
+    for f in "$DIR"/input/wl_keyboard_events "$DIR"/input/wl_pointer_events \
+             "$DIR"/input/wl_touch_events "$DIR"/input/wl_tablet_events; do
+        [ -p "$f" ] && rm -f "$f"
+    done
     echo "run-android-display: stopped (the binder hub, property service and FEXServer leave by themselves when idle)" ;;
 status)
     [ -n "$(ls "$DIR/pids" 2>/dev/null)" ] || { echo "run-android-display: not started"; exit 3; }

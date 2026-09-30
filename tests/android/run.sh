@@ -445,6 +445,29 @@ if [ "$HAVE_DEX" = 1 ]; then
     else bad "dex2oat32 (i386) hello.dex" "rc=$rc odex $(wc -c <"$odex" 2>/dev/null) bytes $(tail -c 300 <<<"$out")"; fi
     rm -rf "$X86_ROOT/data/local/tmp/oat/x86"
 fi
+# 5. A /dev/input per stack (LXRT_INPUT_DIR, runtime/evdev.c): the composer's
+# FIFO protocol between two x86-64 guests (tests/android/input_fifo.c), and a
+# guest with another LXRT_INPUT_DIR that does not see the FIFO.
+local BLIBC64I="$X86_ROOT/apex/com.android.runtime/lib64/bionic/libc.so"
+if [ -f "$BLIBC64I" ] && /opt/homebrew/opt/llvm/bin/clang --target=x86_64-linux-android30 -O2 -fPIE -pie -nostdlib \
+       -fno-stack-protector -fuse-ld=lld --ld-path=/opt/homebrew/opt/lld/bin/ld.lld \
+       -Wl,--dynamic-linker=/system/bin/linker64 -Wl,-z,max-page-size=4096 \
+       -o "$X86_ROOT/data/local/tmp/input_fifo" tests/android/input_fifo.c "$BLIBC64I" 2>/dev/null; then
+    local ia ib ilog ipid wout other same
+    ia=$(mktemp -d /tmp/lxrt-inA.XXXXXX); ib=$(mktemp -d /tmp/lxrt-inB.XXXXXX); ilog=$(mktemp -t input-fifo)
+    (ANDROID_X86_ROOT="$X86_ROOT" LXRUN="$LXRUN" ANDROID_X86_GENV="LXRT_INPUT_DIR=$ia" \
+        dlrun 60 scripts/run-android-x86.sh /data/local/tmp/input_fifo read wl_pointer_events 50 >"$ilog" 2>&1) &
+    ipid=$!
+    wout=$(ANDROID_X86_ROOT="$X86_ROOT" LXRUN="$LXRUN" ANDROID_X86_GENV="LXRT_INPUT_DIR=$ia" \
+        dlrun 60 scripts/run-android-x86.sh /data/local/tmp/input_fifo write wl_pointer_events 50 2>&1 | grep -v '^\[lxrt')
+    wait "$ipid"; rc=$?
+    other=$(ANDROID_X86_ROOT="$X86_ROOT" LXRUN="$LXRUN" ANDROID_X86_GENV="LXRT_INPUT_DIR=$ib" \
+        dlrun 30 scripts/run-android-x86.sh /data/local/tmp/input_fifo stat wl_pointer_events 2>/dev/null | grep -v '^\[lxrt')
+    if [ "$rc" -eq 0 ] && grep -q '^reader: 150 records' "$ilog" && [ -p "$ia/wl_pointer_events" ] && [ "$other" = absent ]; then
+        ok "LXRT_INPUT_DIR: a composer-style FIFO writer and an EventHub-style reader (x86-64, FEX) meet in their /dev/input; another stack's does not have it ($(sed -n 's/^reader: 150 records: //p' "$ilog"))"
+    else bad "LXRT_INPUT_DIR FIFO" "rc=$rc other='$other' $(grep -v '^\[lxrt' "$ilog" | tail -2 | tr '\n' ' ') $wout"; fi
+    rm -rf "$ia" "$ib" "$ilog" "$X86_ROOT/data/local/tmp/input_fifo"
+fi
 run_x86_64_services
 [ "$had_server" = 1 ] || ANDROID_X86_ROOT="$X86_ROOT" scripts/run-android-x86.sh --server-stop
 }
@@ -783,6 +806,33 @@ else
             if [ "$teal" = 1 ] && [ -n "$f0" ] && [ -n "$f1" ] && [ "$t1" -gt "$t0" ]; then
                 ok "Android SurfaceFlinger (x86_64, FEX) presents the LineageOS boot animation in Weston's window: $(( (16#$f1 - 16#$f0) / (t1 - t0) )) page flips/s (SwiftShader GLES, gralloc default, wl_shm)"
             else bad "SurfaceFlinger boot animation" "teal=$teal flips '$f0' '$f1' $(tail -3 <<<"$out" | tr '\n' ' ')"; fi
+            # 4. Input: hwcomposer.waydroid's FIFOs are in this stack's own
+            # /dev/input (LXRT_INPUT_DIR=$ddir/input), and what it writes
+            # there when the pointer moves over its window is read the way
+            # Waydroid's EventHub reads it (tests/android/input_fifo.c; no
+            # system_server here to run InputFlinger itself).
+            local ifi="$X86_ROOT/data/local/tmp/input_fifo" ilog
+            if [ -p "$ddir/input/wl_pointer_events" ] && [ -f /opt/homebrew/lib/libX11.dylib ] &&
+               "$llvm" --target=x86_64-linux-android30 -O2 -fPIE -pie -nostdlib -fno-stack-protector -fuse-ld=lld \
+                   --ld-path=/opt/homebrew/opt/lld/bin/ld.lld -Wl,--dynamic-linker=/system/bin/linker64 \
+                   -Wl,-z,max-page-size=4096 -o "$ifi" tests/android/input_fifo.c \
+                   "$X86_ROOT/apex/com.android.runtime/lib64/bionic/libc.so" 2>/dev/null; then
+                ilog=$(mktemp -t input-fifo)
+                (ANDROID_X86_ROOT="$X86_ROOT" LXRUN="$LXRUN" ANDROID_X86_GENV="LXRT_INPUT_DIR=$ddir/input" \
+                    dlrun 45 scripts/run-android-x86.sh /data/local/tmp/input_fifo read wl_pointer_events 1000 >"$ilog" 2>&1) &
+                local ipid=$!
+                for n in $(seq 1 100); do grep -q '^reader: open' "$ilog" && break; sleep 0.1; done
+                python3 tests/android/xsend_motion.py :2 "$id" 30 >/dev/null 2>&1
+                wait "$ipid"
+                local recs
+                recs=$(sed -n 's/^reader: \([0-9]*\) records.*/\1/p' "$ilog")
+                if [ "${recs:-0}" -ge 60 ] && grep -q ' EV_ABS' "$ilog" && ! grep -q ' 0 EV_ABS' "$ilog"; then
+                    ok "input: 30 pointer motions into Weston's window came out of hwcomposer.waydroid's FIFO in this stack's own /dev/input: $(sed -n 's/^reader: //p' "$ilog" | tail -1)"
+                else bad "input through the composer's FIFO" "$(grep -v '^\[lxrt' "$ilog" | tail -3 | tr '\n' ' ')"; fi
+                rm -f "$ilog" "$ifi"
+            else
+                echo "  skip  input through the composer's FIFO (no FIFO in $ddir/input, no libX11 or no clang)"
+            fi
             ANDROID_X86_ROOT="$X86_ROOT" ANDROID_DISPLAY_DIR="$ddir" scripts/run-android-display.sh stop >/dev/null
             sleep 2
             rm -f "$shot"

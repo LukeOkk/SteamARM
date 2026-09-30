@@ -851,6 +851,34 @@ if [ -d "$SYSROOT" ] && [ -d "$GUEST_ROOT/tmp" ] && ! pgrep -qx steamarm-inputd;
         bad "build evdev_test" "$err"
     fi
 fi
+# The same with LXRT_INPUT_DIR: a /dev/input of the guest's own (Android's
+# composer FIFOs, per root), not /tmp/lxrt-input, so it runs even while
+# steamarm-inputd does; without the variable /dev/input stays /tmp/lxrt-input
+# (the controllers' directory).
+if [ -d "$SYSROOT" ] && [ -x "$GUEST_ROOT/tmp/evdev_test" ]; then
+    idir=$(mktemp -d /tmp/lxrt-inp.XXXXXX)
+    LXRT_INPUT_DIR="$idir" python3 tests/elf/fake_inputd.py 20 --once > "$idir.log" 2>&1 &
+    fake=$!
+    for _ in $(seq 1 50); do [ -S "$idir/event0" ] && break; sleep 0.1; done
+    out=$(LXRT_ROOT="$GUEST_ROOT" LXRT_INPUT_DIR="$idir" ./build/lxrun /tmp/evdev_test 2>&1)
+    sleep 0.3
+    kill $fake 2>/dev/null; wait $fake 2>/dev/null
+    # Something that is in /tmp/lxrt-input now (read only; nothing is made there).
+    probe=$(ls /tmp/lxrt-input 2>/dev/null | head -1)
+    shared="" private=""
+    if [ -n "$probe" ]; then
+        shared=$(LXRT_ROOT="$GUEST_ROOT" ./build/lxrun /usr/bin/bash -c "test -e '/dev/input/$probe' && echo yes" 2>/dev/null)
+        private=$(LXRT_ROOT="$GUEST_ROOT" LXRT_INPUT_DIR="$idir" ./build/lxrun /usr/bin/bash -c "test -e '/dev/input/$probe' && echo yes" 2>/dev/null)
+    fi
+    if ! grep -q "== evdev: ok" <<<"$out" || ! grep -q "rumble strong=32768 weak=16384 ms=250" "$idir.log"; then
+        bad "LXRT_INPUT_DIR evdev" "$(grep FAIL <<<"$out" | head -6)"
+    elif [ -n "$probe" ] && { [ "$shared" != yes ] || [ -n "$private" ]; }; then
+        bad "LXRT_INPUT_DIR default" "/tmp/lxrt-input/$probe seen as /dev/input/$probe: without the variable '$shared', with it '$private'"
+    else
+        ok "LXRT_INPUT_DIR: evdev against a daemon in a private /dev/input; without it /dev/input is /tmp/lxrt-input${probe:+ (its $probe seen only there)}"
+    fi
+    rm -rf "$idir" "$idir.log"
+fi
 
 
 # ARM64_INITIAL_STACK_BOUNDS: entry stack alignment, auxv right after envp,
