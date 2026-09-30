@@ -796,6 +796,52 @@ if [ -f "$STAGE/usr/lib64/libc.a" ] && [ -n "$GCCDIR" ]; then
     fi
 fi
 
+# 19i. Linux abstract socket names ('/', '%', 100 bytes, NUL-padded): bind,
+# connect, and getsockname gives the abstract address back (Android's zygote
+# checks a child zygote's socket by it). rt_tgsigqueueinfo to this thread or
+# process: the handler gets the queued siginfo (FEX's seccomp emulation
+# raises SIGSYS so).
+if [ -f "$STAGE/usr/lib64/libc.a" ] && [ -n "$GCCDIR" ]; then
+    for t in abstract_names sigqueueinfo; do
+        if err=$(glibc_cc -static-pie -O2 -o build/$t tests/elf/$t.c 2>&1); then
+            out=$(deadline 30 ./build/lxrun "$PWD/build/$t" 2>&1); rc=$?
+            if [ "$rc" -eq 0 ] && grep -q '^PASS' <<<"$out"; then
+                ok "$t: $(grep -c '^  OK  ' <<<"$out") of $(grep -cE '^  (OK |MAL)' <<<"$out")"
+            else
+                bad "$t" "rc=$rc $(grep MAL <<<"$out" | head -3 | tr '\n' ' ')"
+            fi
+        else
+            bad "build $t" "$err"
+        fi
+    done
+fi
+
+# 19j. memfd seals bind a process that received the descriptor (SCM_RIGHTS
+# to a child that exec'd): F_GET_SEALS, no writable shared mapping. And a
+# syscall's write into a read-only 4 KiB guest page is EFAULT although the
+# host page stays writable. Both were checks Chromium's WebView renderer
+# makes before it runs.
+if [ -f "$STAGE/usr/lib64/libc.a" ] && [ -n "$GCCDIR" ]; then
+    for t in memfd_seal_xproc readonly_efault; do
+        if err=$(glibc_cc -static-pie -O2 -o build/$t tests/elf/$t.c 2>&1); then
+            env=""
+            if [ "$t" = readonly_efault ]; then
+                env="LXRT_GUEST_PAGE=4096"
+                out=$(LXRT_GUEST_PAGE=4096 deadline 30 ./build/lxrun "$PWD/build/$t" 2>&1); rc=$?
+            else
+                out=$(deadline 30 ./build/lxrun "$PWD/build/$t" 2>&1); rc=$?
+            fi
+            if [ "$rc" -eq 0 ] && grep -q '^PASS' <<<"$out"; then
+                ok "$t: $(grep -c '^  OK  ' <<<"$out") of $(grep -cE '^  (OK |MAL)' <<<"$out")${env:+ ($env)}"
+            else
+                bad "$t" "rc=$rc $(grep MAL <<<"$out" | head -3 | tr '\n' ' ')"
+            fi
+        else
+            bad "build $t" "$err"
+        fi
+    done
+fi
+
 # 19c. 32-bit bionic needs process and thread IDs below 65536. Exercise the
 # opt-in namespace with native aarch64 first, leaving the normal run untouched.
 if [ -f "$STAGE/usr/lib64/libc.a" ] && [ -n "$GCCDIR" ]; then

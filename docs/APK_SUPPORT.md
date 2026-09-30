@@ -360,7 +360,8 @@ on the same cases.
    (`benchmarks/stage29-android-input-network.txt`), sound (compressed
    files included) since stage 30, the Mac's keyboard layout and the
    clipboard, text both ways, since stage 31
-   (`benchmarks/stage31-runtime-waits-clipboard.txt`).
+   (`benchmarks/stage31-runtime-waits-clipboard.txt`), WebView since stage 33
+   (`benchmarks/stage33-android-webview.txt`).
 2. **Real-session bundle validation.** Synthetic unit tests MEASURE the
    selection and local package storage of XAPK, APKS, APKM, plain APK bags
    and OBB data. `scripts/android-session.py` stages chosen APKs into one

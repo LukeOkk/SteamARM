@@ -1,0 +1,71 @@
+Stage 33: WebView in Android apps (Chromium's renderer under FEX, sandboxed)
+Mac mini M4, macOS 27; x86_64 LineageOS 18.1 root under FEX (sesstest
+clone); com.android.webview 137.0.7151.72 (the image's own). No Google
+software: the test app is built here from tests/android/webview (Android SDK
+platform 30, aapt2, d8, apksigner, a throwaway debug key).
+
+The probe (org.steamarm.webviewprobe) loads a data: page with a script and
+logs under WebViewProbe: the WebView package, the script's result, "page
+finished", and the non-white pixels of the drawn page.
+
+== One wall after another
+1. The renderer is forked by WebView's own zygote (a child zygote of zygote64):
+   "(webview_zygote) Zygote.cpp:795: Failed to mount tmpfs to
+   /data/misc/profiles/cur: Operation not permitted" -- app data isolation.
+   The runtime now emulates mount(tmpfs) for Android ids: a new empty
+   directory (mode, uid, gid from the options) bound there in the process's
+   mount table; umount2 gives the old view back (tests/elf ANDROID_IDS).
+2. "(zygote) Socket name not whitelisted : /tmp/lxrt-abstract-501/
+   com.android.internal.os.WebViewZygoteInit_...": getsockname of an abstract
+   socket gave the runtime's file. Abstract names are now encoded reversibly
+   ('/' %2F, '%' %25, NUL %00; a hash with a .name file beside it when too
+   long for 104 bytes) and getsockname/accept/recvfrom give the abstract
+   address back (tests/elf/abstract_names.c: 3 of 3; the 0.3.9 runtime 0).
+3. The renderer died at once, SIGILL from __pthread_kill: Chromium's sandbox
+   RAW_SANDBOX_DIE ("sanity checks are failing after receiving SIGSYS").
+   FEX's seccomp emulation raises SIGSYS with rt_tgsigqueueinfo and its own
+   siginfo (SYS_SECCOMP, si_call_addr, si_syscall, si_arch); the runtime
+   delivered tgkill's instead. tests/android/x86_seccomp_trap.c (freestanding
+   x86-64, FEX_NEEDSSECCOMP=1) first got EACCES from seccomp(): no_new_privs
+   was not remembered outside Android ids (PR_GET_NO_NEW_PRIVS answered 0).
+   (Its first version also passed an unrelocated handler address, so FEX
+   installed SIG_DFL for SIGSYS: the probe's own bug, fixed.) Now: the queued
+   siginfo travels with a signal to the calling process (tests/elf/
+   sigqueueinfo.c 3 of 3), PR_SET/GET_NO_NEW_PRIVS remembered, and
+   patches/fex-lxrt-seccomp-trap-skip.patch: a trapped syscall is no longer
+   run after the SIGSYS is queued (Linux skips it; the result is RAX as the
+   handler leaves it -- FEX hands back the rolled-back number, 39 for getpid,
+   not yet the handler's value).
+   x86_seccomp_trap: "si_code 1 si_errno 66 si_syscall 39 si_arch 3221225534
+   call_addr==RIP yes RAX 39 ... the call did not run (returned 39)".
+4. SIGTRAP in libwebviewchromium.so +0x5cec4f4: Chromium's
+   ashmem_get_prot_region (ioctl 0x7706, else a writable MAP_SHARED probe)
+   found a read-only shared memory region writable. memfd seals were kept per
+   process; the renderer received the memfd over binder. Seals now also live
+   on the backing file (xattr org.steamarm.memfd.seals) and bind any process
+   holding the descriptor (tests/elf/memfd_seal_xproc.c: the receiving child
+   of a fresh exec reads 0x16 and gets EPERM for a writable shared mapping;
+   0.3.9: 0xffffffff and a mapping).
+5. SIGTRAP at +0x5cd94fd: base::internal::AssertMemoryIsReadOnly --
+   prlimit64(0, RLIMIT_NPROC, NULL, p) into Chromium's protected section
+   must be EFAULT after mprotect(PROT_READ) of that 4 KiB page; the 16 KiB
+   host page stayed writable and the write went through. prlimit64 and
+   getrlimit now check the guest's 4 KiB protection (tests/elf/
+   readonly_efault.c at LXRT_GUEST_PAGE=4096; 0.3.9: no EFAULT).
+
+== Then
+  WebViewProbe: package com.android.webview 137.0.7151.72
+  WebViewProbe: js sum=500500 ua=Mozilla/5.0 (Linux; Android 11; WayDroid x86_64
+                Device Build/RQ3A.211001.001; wv) ... Chrome/137.0.7151.72 ...
+  WebViewProbe: page finished
+  WebViewProbe: drawn 6366 non-white pixels (504x842, every 8th)
+  android-session: focused window: org.steamarm.webviewprobe/...MainActivity
+                   (8.5 s after am start)
+A launch (session start included) took 37 s.
+
+== Matrix on this runtime
+tests/elf 97/0 (abstract_names, sigqueueinfo, memfd_seal_xproc,
+readonly_efault new; ANDROID_IDS now checks the tmpfs); i386 18/0; win 11/0;
+arm64 4/0; vk_device 2/0; wlmac 4/0; launcher core 35/0; Python 135 OK;
+tests/android 85 passed, 0 failed, 2 expected failures ("seccomp RET_TRAP
+under FEX" and "WebView" new).

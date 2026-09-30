@@ -138,7 +138,21 @@ int main(int argc, char **argv)
     // zygote: UnmountStorageOnInit, then a child's MountEmulatedStorage.
     check(sc(SYS_unshare, CLONE_NEWNS, 0, 0) == 0, "unshare(CLONE_NEWNS) with CAP_SYS_ADMIN");
     check(mount("rootfs", "/", NULL, MS_SLAVE | MS_REC, NULL) == 0, "mount(\"/\", MS_SLAVE|MS_REC): a propagation change");
-    check(mount("tmpfs", b, "tmpfs", 0, NULL) == -1 && errno == EPERM, "a tmpfs mount is not emulated: EPERM");
+    // tmpfs (zygote's app data isolation: MountAppDataTmpFs): an empty,
+    // writable directory over b, with the mode and owner the options name;
+    // b's own contents come back once it is unmounted.
+    char bt[512], bm[512];
+    snprintf(bm, sizeof bm, "%s/mark", b);
+    fd = open(bm, O_CREAT | O_WRONLY, 0644);
+    if (fd >= 0) close(fd);
+    check(mount("tmpfs", b, "tmpfs", MS_NOSUID | MS_NODEV | MS_NOEXEC, "uid=1000,gid=1000,mode=0751") == 0,
+          "mount(tmpfs, \"uid=1000,gid=1000,mode=0751\")");
+    struct stat ts;
+    snprintf(bt, sizeof bt, "%s/new", b);
+    check(stat(b, &ts) == 0 && (ts.st_mode & 07777) == 0751 && ts.st_uid == 1000 && ts.st_gid == 1000 &&
+          access(bm, F_OK) != 0 && mkdir(bt, 0700) == 0, "the tmpfs: empty, mode 0751, owner 1000:1000, writable");
+    check(umount2(b, 0) == 0 && access(bm, F_OK) == 0 && access(bt, F_OK) != 0,
+          "umount2: the directory's own contents again");
     check(mount(a, b, NULL, MS_BIND | MS_REC, NULL) == 0, "mount(MS_BIND) of a directory");
     char bf[512], buf[16] = {0};
     snprintf(bf, sizeof bf, "%s/file", b);

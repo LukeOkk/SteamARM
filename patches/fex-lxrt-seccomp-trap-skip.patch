@@ -1,0 +1,17 @@
+--- a/Source/Tools/LinuxEmulation/LinuxSyscalls/Seccomp/SeccompEmulator.cpp	2026-09-30 20:20:22
++++ b/Source/Tools/LinuxEmulation/LinuxSyscalls/Seccomp/SeccompEmulator.cpp	2026-09-30 20:20:22
+@@ -465,7 +465,13 @@
+     Info.si_arch = Arch;
+ 
+     SignalDelegation->QueueSignal(::getpid(), ::gettid(), SIGSYS, &Info, true);
+-    break;
++    // Linux skips a trapped syscall: the SIGSYS handler sees RAX rolled back
++    // to the syscall number (syscall_rollback) and whatever it leaves in RAX
++    // is the result. Falling through ran the syscall anyway and wrote its
++    // result over the handler's -- Chromium's sandbox (WebView's renderer)
++    // emulates trapped calls that way. RAX as it is now: the number, or the
++    // handler's value when the signal was delivered inside QueueSignal.
++    return {true, Frame->State.gregs[FEXCore::X86State::REG_RAX]};
+   }
+   case SECCOMP_RET_ERRNO: {
+     // errno return is clamped.

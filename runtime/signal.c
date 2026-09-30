@@ -253,6 +253,45 @@ struct rt_sigframe {
     struct linux_ucontext uc;
 };
 
+// rt_tgsigqueueinfo / rt_sigqueueinfo to a thread of this process: the
+// caller's siginfo, kept here until the signal is delivered to that thread
+// and then handed to its handler whole. FEX's seccomp emulation raises
+// SIGSYS this way with si_code SYS_SECCOMP, si_call_addr, si_syscall and
+// si_arch; delivered with tgkill's siginfo instead, Chromium's sandbox (a
+// WebView renderer) found "sanity checks failing after receiving SIGSYS"
+// and killed itself (MEASURED).
+#define QINFO_SLOTS 64
+static struct { _Atomic int state; int tid, lsig; struct linux_siginfo info; } g_qinfo[QINFO_SLOTS];
+static bool qinfo_put(int tid, int lsig, const void *linfo)
+{
+    for (int i = 0; i < QINFO_SLOTS; i++) {
+        int z = 0;
+        if (atomic_compare_exchange_strong(&g_qinfo[i].state, &z, 1)) {
+            g_qinfo[i].tid = tid;
+            g_qinfo[i].lsig = lsig;
+            memcpy(&g_qinfo[i].info, linfo, sizeof g_qinfo[i].info);
+            atomic_store(&g_qinfo[i].state, 2);
+            return true;
+        }
+    }
+    return false;
+}
+static bool qinfo_take(int tid, int lsig, struct linux_siginfo *out)
+{
+    for (int i = 0; i < QINFO_SLOTS; i++) {
+        if (atomic_load(&g_qinfo[i].state) != 2 || (g_qinfo[i].tid != tid && g_qinfo[i].tid != 0) ||
+            g_qinfo[i].lsig != lsig)
+            continue;          // tid 0: process-directed, whichever thread takes it
+        int two = 2;
+        if (!atomic_compare_exchange_strong(&g_qinfo[i].state, &two, 3))
+            continue;
+        memcpy(out, &g_qinfo[i].info, sizeof *out);
+        atomic_store(&g_qinfo[i].state, 0);
+        return true;
+    }
+    return false;
+}
+
 _Static_assert(__builtin_offsetof(struct linux_ucontext, uc_mcontext) == 176,
                "Linux aarch64 puts uc_mcontext at 176; the guest reads it there");
 
@@ -1018,6 +1057,14 @@ static void host_handler(int dsig, siginfo_t *dinfo, void *uap)
     if (lsig == 4 /*ILL*/ || lsig == 5 /*TRAP*/ || lsig == 7 /*BUS*/ ||
         lsig == 8 /*FPE*/ || lsig == 11 /*SEGV*/)
         f->info.si_addr = fault_addr;
+    // A siginfo the sender queued with it (rt_tgsigqueueinfo): that one.
+    {
+        struct linux_siginfo q;
+        if (qinfo_take(lxrt_gettid(), lsig, &q)) {
+            f->info = q;
+            f->info.si_signo = lsig;
+        }
+    }
 
     f->uc.uc_stack.ss_sp = g_altstack.sp;
     f->uc.uc_stack.ss_size = g_altstack.size;
@@ -1831,6 +1878,27 @@ static void xsig_drain(void)
 }
 
 // Thread-directed. This is what glibc's raise() and pthread_kill() use.
+// rt_tgsigqueueinfo(tgid, tid, sig, info) and rt_sigqueueinfo(pid, sig,
+// info): to this process, the siginfo travels with the signal (qinfo_put);
+// to another, it is sent as tgkill/kill would send it.
+long lxrt_sigqueueinfo(int tgid, int tid, int lsig, const void *linfo)
+{
+    if (!linfo)
+        return LERR(EFAULT);
+    bool self = tgid == (lxrt_ids_on() ? lxrt_ids_pid() : getpid()) || tgid == getpid();
+    if (self && lsig > 0 && lsig < 65) {
+        int target = tid > 0 ? tid : 0;
+        bool queued = qinfo_put(target, lsig, linfo);
+        long r = tid > 0 ? lxrt_tgkill(tgid, tid, lsig) : lxrt_kill(tgid, lsig);
+        if (r != 0 && queued) {
+            struct linux_siginfo drop;
+            qinfo_take(target, lsig, &drop);
+        }
+        return r;
+    }
+    return tid > 0 ? lxrt_tgkill(tgid, tid, lsig) : lxrt_kill(tgid, lsig);
+}
+
 long lxrt_tgkill(int tgid, int tid, int lsig)
 {
     if (lxrt_ids_on() && tgid > 0) {

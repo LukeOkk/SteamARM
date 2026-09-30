@@ -17,6 +17,7 @@
 #include "offmap.h"
 
 #include <errno.h>
+#include <dirent.h>
 #include <dlfcn.h>
 #include <mach/mach.h>
 #include <mach/mach_vm.h>
@@ -2011,6 +2012,72 @@ static long do_pselect6(uint64_t nfds_, uint64_t rset, uint64_t wset, uint64_t e
 
 // ---------------------------------------------------------------- sleep
 
+// mount("tmpfs", dir, "tmpfs", flags, "uid=..,gid=..,mode=..") for Android
+// ids: a new empty directory of the runtime's, bound on dir in this
+// process's mount table (mounts.c), as a tmpfs in a private mount namespace
+// is. Android's zygote isolates a process's view of other apps' data and
+// JIT profiles that way before it forks WebView's zygote and isolated
+// services ("Failed to mount tmpfs to /data/misc/profiles/cur: Operation not
+// permitted" killed every WebView renderer, MEASURED). The directories live
+// in /tmp/lxrt-tmpfs-<uid>/<pid>-*; those of processes that are gone are
+// swept at the next such mount.
+static void tmpfs_remove(const char *path)
+{
+    DIR *d = lxrt_opendir_private(path);
+    if (d) {
+        struct dirent *e;
+        while ((e = readdir(d))) {
+            if (!strcmp(e->d_name, ".") || !strcmp(e->d_name, "..")) continue;
+            char sub[PATH_MAX];
+            snprintf(sub, sizeof sub, "%s/%s", path, e->d_name);
+            struct stat st;
+            if (lstat(sub, &st) == 0 && S_ISDIR(st.st_mode)) tmpfs_remove(sub);
+            else unlink(sub);
+        }
+        lxrt_closedir_private(d);
+    }
+    rmdir(path);
+}
+static long tmpfs_mount(const char *dst, const char *data, bool ro)
+{
+    char base[64];
+    snprintf(base, sizeof base, "/tmp/lxrt-tmpfs-%u", (unsigned)getuid());
+    if (mkdir(base, 0700) != 0 && errno != EEXIST) return LERR(errno);
+    static bool swept;
+    if (!swept) {
+        swept = true;
+        DIR *d = lxrt_opendir_private(base);
+        struct dirent *e;
+        while (d && (e = readdir(d))) {
+            char *end;
+            long pid = strtol(e->d_name, &end, 10);
+            if (end == e->d_name || *end != '-' || pid <= 0) continue;
+            if (kill((pid_t)pid, 0) == 0 || errno != ESRCH) continue;
+            char sub[PATH_MAX];
+            snprintf(sub, sizeof sub, "%s/%s", base, e->d_name);
+            tmpfs_remove(sub);
+        }
+        if (d) lxrt_closedir_private(d);
+    }
+    char dir[PATH_MAX];
+    snprintf(dir, sizeof dir, "%s/%d-XXXXXX", base, (int)getpid());
+    if (!mkdtemp(dir)) return LERR(errno);
+    unsigned mode = 01777, uid = 0, gid = 0;
+    for (const char *o = data; o && *o; ) {
+        sscanf(o, "mode=%o", &mode);
+        sscanf(o, "uid=%u", &uid);
+        sscanf(o, "gid=%u", &gid);
+        const char *c = strchr(o, ',');
+        o = c ? c + 1 : NULL;
+    }
+    chmod(dir, (mode_t)(mode & 07777));
+    lxrt_aids_chown_file(dir, -1, false, uid, gid);
+    lxrt_mounts_bind(dst, dir, ro);
+    if (getenv("LXRT_ANDROID_IDS_LOG"))
+        fprintf(stderr, "[lxrt] pid %d: tmpfs %s (%s) on %s\n", (int)getpid(), data ? data : "", dir, dst);
+    return 0;
+}
+
 static long do_nanosleep(uint64_t req, uint64_t rem)
 {
     const struct linux_timespec *r = (const struct linux_timespec *)req;
@@ -2420,6 +2487,18 @@ static long do_prlimit64(long pid, long res, uint64_t newp, uint64_t oldp)
     struct rlimit cur;
     if (getrlimit(dres, &cur) != 0)
         return LERR(errno);
+    // ...and a buffer in a 4 KiB guest page the guest made read-only inside a
+    // host page that stays writable (subpage.c keeps the guest's protection):
+    // EFAULT too. Chromium's WebView renderer (under FEX, 4 KiB pages)
+    // checked its protected section so and died when the write went through
+    // (MEASURED).
+    if (oldp) {
+        for (uint64_t pg = LXRT_ALIGN_DOWN(oldp, 4096); pg < oldp + sizeof(struct rlimit); pg += 4096) {
+            int sp = lxrt_subpage_prot_at(pg);
+            if (sp >= 0 && !(sp & PROT_WRITE))
+                return LERR(EFAULT);
+        }
+    }
     // The old limit is written by Darwin's getrlimit straight into the
     // guest's buffer (Darwin's struct rlimit is two 64-bit words, as Linux's
     // struct rlimit64), so a buffer the guest cannot write gives EFAULT, as
@@ -3295,6 +3374,11 @@ restart:
             char hdst[PATH_MAX];
             snprintf(hdst, sizeof hdst, "%s", translate_follow(dst));
             if (stat(hdst, &ds) != 0) { ret = LERR(errno); break; }
+            if (a2 && !strcmp((const char *)a2, "tmpfs") && !(fl & (0x1000 | 0x20))) {
+                if (!S_ISDIR(ds.st_mode)) { ret = LERR(ENOTDIR); break; }
+                ret = tmpfs_mount(dst, (const char *)a4, (fl & 1) != 0);
+                break;
+            }
             if (fl & 0x20) {                          // MS_REMOUNT
                 if (fl & 0x1000) {
                     char cur[PATH_MAX];
@@ -3626,6 +3710,21 @@ restart:
             // (MEASURED: jumps to 0x814c7309b93f9500-style garbage). Apple
             // silicon's TSO bit is not reachable from user space.
             ret = LERR(EINVAL);
+            break;
+        case 38: // PR_SET_NO_NEW_PRIVS: one way, and remembered
+        case 39: // PR_GET_NO_NEW_PRIVS
+            // FEX's seccomp emulation installs a filter only for a task with
+            // no_new_privs (or CAP_SYS_ADMIN), and asks PR_GET: answered 0
+            // after a successful PR_SET, every sandbox's filter was refused
+            // with EACCES (Android ids keep their own bit, android_ids.c).
+            {
+                static _Atomic int nnp = -1;
+                if (atomic_load(&nnp) < 0)
+                    atomic_store(&nnp, getenv("LXRT_NO_NEW_PRIVS") ? 1 : 0);
+                if (a2 || a3 || a4 || (a0 == 38 && a1 != 1) || (a0 == 39 && a1)) { ret = LERR(EINVAL); break; }
+                if (a0 == 38) { atomic_store(&nnp, 1); setenv("LXRT_NO_NEW_PRIVS", "1", 1); ret = 0; }
+                else ret = atomic_load(&nnp);
+            }
             break;
         default:
             ret = 0;
@@ -4313,9 +4412,11 @@ restart:
         // fatal signal this way after resetting it to SIG_DFL; ENOSYS sent
         // it into async_safe_fatal and every Android abort ended as
         // _exit(127) instead of SIGABRT (stage 25).
+        // The caller's siginfo travels with a signal to this process
+        // (lxrt_sigqueueinfo): FEX's seccomp emulation sends SIGSYS so.
         if (!a2 && nr == 240) { ret = LERR(EFAULT); break; }
-        ret = nr == 240 ? lxrt_tgkill((int)a0, (int)a1, (int)a2)
-                        : lxrt_kill((int)a0, (int)a1);
+        ret = nr == 240 ? lxrt_sigqueueinfo((int)a0, (int)a1, (int)a2, (const void *)a3)
+                        : lxrt_sigqueueinfo((int)a0, 0, (int)a1, (const void *)a2);
         break;
     case LNR_rt_sigaction:
         ret = lxrt_rt_sigaction((int)a0, (const void *)a1, (void *)a2, (size_t)a3);

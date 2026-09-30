@@ -56,6 +56,12 @@ struct linux_sockaddr_in6 { uint16_t sin6_family; uint16_t sin6_port;
                             uint32_t sin6_flowinfo; uint8_t sin6_addr[16];
                             uint32_t sin6_scope_id; };
 
+// The last abstract name too long to materialise as itself (addr_to_darwin),
+// for lxrt_bind to record beside its hash. Per thread: bind translates and
+// binds on the calling thread.
+static _Thread_local char g_abstract_long[108];
+static _Thread_local size_t g_abstract_long_len;
+
 // Where Linux abstract socket names are materialised. Created once, mode 0700.
 static const char *abstract_dir(void)
 {
@@ -122,20 +128,44 @@ static int addr_to_darwin(const void *lsa, unsigned llen, struct sockaddr_storag
             const char *dir = abstract_dir();
             if (!dir)
                 return -1;
-            size_t n = strnlen(lu->sun_path + 1, pathmax - 1);
-            char name[128];
+            // The name is everything after the leading NUL, llen long (Linux
+            // abstract names are not NUL-terminated and may hold NULs and
+            // '/'). Encoded reversibly -- '/' as %2F, '%' as %25, NUL as %00
+            // -- so getsockname can give the guest its abstract address back
+            // (addr_to_linux): Android's zygote checks a child zygote's socket
+            // by that name ("Socket name not whitelisted : /tmp/lxrt-abstract-
+            // 501/com.android.internal.os.WebViewZygoteInit_...", MEASURED).
+            // Trailing NULs are dropped: a program that binds with
+            // sizeof(struct sockaddr_un) pads its name with them.
+            size_t n = pathmax - 1;
+            while (n && lu->sun_path[n] == '\0')
+                n--;
+            char name[330];
             size_t k = 0;
-            for (size_t i = 0; i < n && k + 1 < sizeof name; i++) {
-                char c = lu->sun_path[1 + i];
-                // Abstract names may hold anything, including '/'.
-                name[k++] = (c == '/' || c == '\0') ? '_' : c;
+            for (size_t i = 0; i < n && k + 4 < sizeof name; i++) {
+                unsigned char c = (unsigned char)lu->sun_path[1 + i];
+                if (c == '/' || c == '%' || c == '\0') {
+                    k += (size_t)snprintf(name + k, sizeof name - k, "%%%02X", c);
+                } else {
+                    name[k++] = (char)c;
+                }
             }
             name[k] = '\0';
             struct sockaddr_un *du = (struct sockaddr_un *)out;
             du->sun_family = AF_UNIX;
             int w = snprintf(du->sun_path, sizeof du->sun_path, "%s/%s", dir, name);
-            if (w < 0 || (size_t)w >= sizeof du->sun_path)
-                return -1;
+            if (w < 0 || (size_t)w >= sizeof du->sun_path) {
+                // Too long for Darwin's 104 bytes: a hash names the socket,
+                // and <hash>.name beside it keeps the name for getsockname
+                // (written at bind, abstract_note_long_name).
+                uint64_t h = 1469598103934665603ull;
+                for (size_t i = 0; i < n; i++) { h ^= (unsigned char)lu->sun_path[1 + i]; h *= 1099511628211ull; }
+                w = snprintf(du->sun_path, sizeof du->sun_path, "%s/~%016llx", dir, (unsigned long long)h);
+                if (w < 0 || (size_t)w >= sizeof du->sun_path)
+                    return -1;
+                g_abstract_long_len = n;
+                memcpy(g_abstract_long, lu->sun_path + 1, n);
+            }
             du->sun_len = (uint8_t)sizeof(*du);
             return (int)sizeof(*du);
         }
@@ -211,6 +241,41 @@ static void addr_to_linux(const struct sockaddr *dsa, socklen_t dlen,
         if (lim > sizeof du->sun_path) lim = sizeof du->sun_path;
         size_t n = strnlen(du->sun_path, lim);
         const char *src = du->sun_path;
+        // One of the runtime's materialised abstract names: the guest's
+        // abstract address again (leading NUL, the decoded name, no
+        // terminator; the length says where it ends).
+        const char *adir = abstract_dir();
+        size_t al = adir ? strlen(adir) : 0;
+        if (al && n > al + 1 && !strncmp(src, adir, al) && src[al] == '/' && src[al + 1] == '~') {
+            char side[200], nm[108];
+            snprintf(side, sizeof side, "%.*s.name", (int)n, src);
+            int sf = open(side, O_RDONLY | O_CLOEXEC);
+            ssize_t got = sf >= 0 ? read(sf, nm, sizeof nm - 1) : -1;
+            if (sf >= 0) close(sf);
+            if (got > 0) {
+                lu.sun_path[0] = '\0';
+                memcpy(lu.sun_path + 1, nm, (size_t)got);
+                used = (uint32_t)(2 + 1 + got);
+                memcpy(&out, &lu, sizeof lu);
+                break;
+            }
+        }
+        if (al && n > al + 1 && !strncmp(src, adir, al) && src[al] == '/' && src[al + 1] != '~') {
+            size_t k = 1;
+            for (size_t i = al + 1; i < n && k < sizeof lu.sun_path; ) {
+                unsigned v;
+                if (src[i] == '%' && i + 2 < n && sscanf(src + i + 1, "%2X", &v) == 1) {
+                    lu.sun_path[k++] = (char)v;
+                    i += 3;
+                } else {
+                    lu.sun_path[k++] = src[i++];
+                }
+            }
+            lu.sun_path[0] = '\0';
+            used = (uint32_t)(2 + k);
+            memcpy(&out, &lu, sizeof lu);
+            break;
+        }
         const char *root = getenv("LXRT_ROOT");
         size_t rl = root ? strlen(root) : 0;
         char hostp[sizeof du->sun_path + 1], gview[1024];
@@ -525,7 +590,20 @@ long lxrt_bind(int fd, const void *lsa, unsigned llen)
     // not. Unlink before binding so a restart is not blocked by the last run.
     if (((struct sockaddr *)&ss)->sa_family == AF_UNIX)
         unlink(((struct sockaddr_un *)&ss)->sun_path);
-    return bind(fd, (struct sockaddr *)&ss, (socklen_t)n) != 0 ? LERR(errno) : 0;
+    if (bind(fd, (struct sockaddr *)&ss, (socklen_t)n) != 0)
+        return LERR(errno);
+    const char *bp = ((struct sockaddr_un *)&ss)->sun_path;
+    const char *adir = abstract_dir();
+    size_t al = adir ? strlen(adir) : 0;
+    if (((struct sockaddr *)&ss)->sa_family == AF_UNIX && al && !strncmp(bp, adir, al) &&
+        bp[al] == '/' && bp[al + 1] == '~' && g_abstract_long_len) {
+        char side[200];
+        snprintf(side, sizeof side, "%s.name", bp);
+        int sf = open(side, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0600);
+        if (sf >= 0) { (void)!write(sf, g_abstract_long, g_abstract_long_len); close(sf); }
+    }
+    g_abstract_long_len = 0;
+    return 0;
 }
 
 long lxrt_accept4(int fd, void *lsa, uint32_t *llen, int lflags)

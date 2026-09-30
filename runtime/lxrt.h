@@ -450,6 +450,7 @@ int  lxrt_rt_dequeue_self(void);
 int  lxrt_rt_dequeue_self_mask(uint64_t blocked);
 bool lxrt_rt_pending_unblocked(uint64_t blocked);
 uint64_t lxrt_rt_queued_self(void);
+long lxrt_sigqueueinfo(int tgid, int tid, int lsig, const void *linfo);
 struct iovec;
 bool lxrt_seqpkt_readv(int fd, const struct iovec *iov, int cnt, long *ret);
 long lxrt_rt_sigpending(uint64_t *uset, size_t sigsetsize);

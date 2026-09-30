@@ -608,6 +608,10 @@ bool lxrt_aids_syscall(long nr, uint64_t a0, uint64_t a1, uint64_t a2, uint64_t 
             handled = false;                   // dispatch.c: lxrt_aids_mount
             break;
         }
+        if (a2 && !strcmp((const char *)(uintptr_t)a2, "tmpfs")) {
+            handled = false;                   // dispatch.c: an empty directory bound there
+            break;
+        }
         if ((a3 & prop) && !(a3 & ~(prop | 0x4000 /* MS_REC */ | 0x8000 /* MS_SILENT */)))
             *ret = 0;
         else {

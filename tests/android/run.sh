@@ -738,6 +738,21 @@ EOF
 else
     echo "  skip  x86_initsock (no clang for x86_64-linux-gnu)"
 fi
+# seccomp SECCOMP_RET_TRAP under FEX's emulation, as Chromium's sandbox (a
+# WebView renderer) uses it: SIGSYS with Linux's fields (the runtime carries
+# rt_tgsigqueueinfo's siginfo) and the trapped call not run
+# (patches/fex-lxrt-seccomp-trap-skip.patch; tests/android/x86_seccomp_trap.c).
+if clang --target=x86_64-linux-gnu -O1 -ffreestanding -fno-stack-protector -nostdlib -static-pie -fPIE \
+         -fuse-ld=lld -o "$X86_ROOT/data/local/tmp/x86_seccomp_trap" tests/android/x86_seccomp_trap.c 2>/dev/null; then
+    out=$(ANDROID_X86_ROOT="$X86_ROOT" LXRUN="$LXRUN" ANDROID_X86_GENV="FEX_NEEDSSECCOMP=1" \
+          perl -e 'alarm shift; exec @ARGV' 60 scripts/run-android-x86.sh /data/local/tmp/x86_seccomp_trap 2>&1 | grep -v '^\[lxrt')
+    if grep -q '== x86_seccomp_trap: PASS' <<<"$out"; then
+        ok "seccomp RET_TRAP under FEX: $(grep -o 'SIGSYS with .*' <<<"$out")"
+    else bad "seccomp RET_TRAP under FEX" "$(grep -E 'MAL|si_code|==' <<<"$out" | tr '\n' ' ')"; fi
+    rm -f "$X86_ROOT/data/local/tmp/x86_seccomp_trap"
+else
+    echo "  skip  x86_seccomp_trap (no clang for x86_64-linux-gnu)"
+fi
 for _ in $(seq 1 80); do [ -e "$xp/service.pid" ] || break; sleep 0.1; done
 rm -rf "$xp" "$xb"
 
@@ -1274,6 +1289,27 @@ if [ -z "${ANDROID_SKIP_WLMAC:-}" ] && { [ -x build/steamarm-wlmac ] || tools/wl
             rm -f "$sroot/data/local/tmp/clip.dex"
         else
             echo "  skip  clipboard (no $R8_JAR or no javac)"
+        fi
+        # WebView (Chromium's renderer: a separate, isolated process forked
+        # from WebView's own zygote, under a seccomp sandbox): an app with a
+        # WebView, built here with the Android SDK (tests/android/webview),
+        # runs JavaScript, finishes its page and draws it.
+        local wvapk
+        if wvapk=$(tests/android/webview/build.sh 2>/dev/null); then
+            env "${senv[@]}" ANDROID_SESSION_XDG=$wx ANDROID_SESSION_COMPOSITOR=wlmac WLMAC_PASTEBOARD=$board \
+                perl -e 'alarm shift; exec @ARGV' 600 python3 scripts/android-session.py launch org.steamarm.webviewprobe \
+                --apk "$wvapk" >/dev/null 2>&1
+            local wvlog="" n
+            for n in $(seq 1 30); do
+                wvlog=$(grep -a 'WebViewProbe' "$sdir/logcat.txt" 2>/dev/null)
+                grep -q 'drawn [1-9]' <<<"$wvlog" && break
+                sleep 2
+            done
+            if grep -q 'js sum=500500' <<<"$wvlog" && grep -q 'page finished' <<<"$wvlog" && grep -q 'drawn [1-9]' <<<"$wvlog"; then
+                ok "WebView: its renderer ran JavaScript (sum=500500), finished the page and drew it ($(grep -o 'drawn [0-9]* non-white pixels' <<<"$wvlog" | tail -1))"
+            else bad "WebView" "$(tail -3 <<<"$wvlog" | tr '\n' ' ') $(grep -a 'crash detected' "$sdir/logcat.txt" 2>/dev/null | tail -1)"; fi
+        else
+            echo "  skip  WebView (no Android SDK platform 30 and build-tools)"
         fi
     else bad "one Mac window per app" "rc=$rc windows: $(grep 'window title' "$wlog" 2>/dev/null | tr '\n' ' ') $(tail -2 <<<"$out" | tr '\n' ' ')"; fi
     env "${senv[@]}" ANDROID_SESSION_XDG=$wx python3 scripts/android-session.py stop >/dev/null 2>&1

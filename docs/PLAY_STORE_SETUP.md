@@ -4,9 +4,9 @@ Status (2026-09-30): tooling and procedure only. `scripts/android-gapps.py`
 checks a GApps package that you obtained yourself, builds an overlay tree
 next to the pristine Android root, prints the commands that layer it onto
 an APFS clone of the root, and tells you how to read the GSF ID for
-Google's registration page. The Play Store itself has not run on SteamARM:
-the Android framework does not reach `sys.boot_completed` yet
-(`docs/ANDROID_RUNTIME_ARCHITECTURE.md`, "Boot"). No Google software was
+Google's registration page. The Play Store itself has not run on SteamARM;
+the framework boots, installs and runs apps, with network, input, sound and
+WebView (the table below). No Google software was
 downloaded, installed or run for this page, and no account was signed into.
 Why SteamARM never ships Google's apps, and what Play Store needs on top of
 Android, is in `docs/PLAY_STORE_RESEARCH.md`.
@@ -44,7 +44,7 @@ meets them.
 | 2 | system_server reaches PackageManagerService and `sys.boot_completed=1` | the display profile boots to `sys.boot_completed=1` in 17-27 s warm; `pm install` and `am start` work | MEASURED (`benchmarks/stage28-android-apk.txt`) |
 | 3 | a display and input for the store's UI | apps show in a macOS window through Weston; clicks and keys from that window reach apps (a click opens a game, Escape is BACK, A is KEYCODE_A) | MEASURED (`benchmarks/stage29-android-input-network.txt`) |
 | 4 | networking Android considers online, DNS, TLS, a correct clock | an Ethernet network registered with ConnectivityService (netd stays a stand-in) and VALIDATED by the network stack's own probes; DNS through a dnsproxyd served from the Mac; `curl` https answers 204; the clock and time zone are the Mac's | MEASURED (`benchmarks/stage29-android-input-network.txt`); HYPOTHESIS (that this is all Play needs of the network, `docs/ANDROID_ZERO_VM_FEASIBILITY.md` 3.14) |
-| 5 | WebView (Google's sign-in and many store pages are web content) | the image has `com.android.webview` 137.0.7151.72 with x86 and x86_64 libraries in `/system/product/app/webview`; whether Chromium's multi-process renderer runs under lxrun and FEX is not known | MEASURED (file read, see below); UNKNOWN (runs) |
+| 5 | WebView (Google's sign-in and many store pages are web content) | works: an app's WebView (com.android.webview 137.0.7151.72, the image's own) runs JavaScript, finishes its page and draws it; Chromium's renderer is forked by WebView's zygote and sandboxed with seccomp under FEX (tests/android/run.sh "WebView") | MEASURED (`benchmarks/stage33-android-webview.txt`) |
 | 6 | AccountManagerService and Google's account authenticator | part of system_server and of Play services: nothing to test before row 2 | UNKNOWN |
 | 7 | keystore and a keymaster HAL | keymaster 4.0 and keystore run in the headless profile | MEASURED (stage 27) |
 | 8 | the privileged-permission allow-list matches the package | the image enforces it (`ro.control_privapp_permissions=enforce`); a privileged app asking for a platform privileged permission that no `privapp-permissions` entry allows makes system_server throw at `systemReady` | MEASURED (property, see below); VERIFIED IN SOURCE (`LineageOS/android_frameworks_base` `8d14a16` `PermissionManagerService.java:3616-3668, 4756-4761`; the property is set by `LineageOS/android_vendor_lineage` `9acedc7` `config/common.mk:77-79`) |

@@ -270,10 +270,34 @@ def refresh_emu(fex=None):
     log("session root %s: emulator side (/usr/lib/lxrt-emu) taken again from %s" % (ROOT, BASE_ROOT))
 
 
+def update_base_emu():
+    """The base root's emulator side was put there by
+    scripts/mkandroidroot.sh --emu from scripts/build-fex-host.sh's FEX-emu;
+    a SteamARM update rebuilds that FEX (patches/fex-lxrt-*.patch) but left
+    the root's copy alone. Install the new one when they differ, unless a
+    guest runs on the base root (the tests' own sessions)."""
+    fexemu = os.path.join(os.environ.get("STEAMARM_BUILD") or os.path.expanduser("~/SteamARM-build"), "out", "FEX-emu")
+    base = BASE_ROOT + "/usr/lib/lxrt-emu/FEX"
+    try:
+        if not os.path.isfile(fexemu) or not os.path.isfile(base) or filecmp.cmp(fexemu, base, shallow=False):
+            return
+    except OSError:
+        return
+    r = subprocess.run([os.path.join(HERE, "mkandroidroot.sh"), "--arch", "x86_64", "--emu"], cwd=REPO,
+                       stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+    lines = r.stdout.decode(errors="replace").strip().splitlines()
+    if r.returncode == 0:
+        log("base root: FEX updated from %s" % fexemu)
+    else:
+        log("base root: FEX not updated now (%s)" % (lines[-1] if lines else "mkandroidroot.sh failed"))
+
+
 def ensure_root(fex=None):
     if len(ROOT) + FEX_SOCKET_TAIL > 103:
         die("the session root's path is too long for FEX's server socket (%d bytes; at most %d): %s"
             % (len(ROOT), 103 - FEX_SOCKET_TAIL, ROOT))
+    if not fex:
+        update_base_emu()
     if os.path.isfile(ROOT + "/system/bin/toybox"):
         refresh_emu(fex)
         return

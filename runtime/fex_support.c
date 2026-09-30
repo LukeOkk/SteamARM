@@ -35,6 +35,7 @@
 #include <string.h>
 #include <sys/mman.h>
 #include <sys/stat.h>
+#include <sys/xattr.h>
 #include <unistd.h>
 
 #define LERR(e) (-lxrt_errno_to_linux(e))
@@ -284,6 +285,8 @@ static const char *memfd_dir(void)
     return g_memfd_dir_ok ? g_memfd_dir : NULL;
 }
 
+static void seals_store(int fd, uint32_t seals);
+
 long lxrt_memfd_create(const char *name, unsigned int lflags)
 {
     if (lflags & ~L_MFD_KNOWN)
@@ -362,7 +365,9 @@ long lxrt_memfd_create(const char *name, unsigned int lflags)
     // re-executes the runtime, which reads the file rather than executing it.
     if (lflags & L_MFD_NOEXEC_SEAL)
         g_memobj[obj].seals |= L_F_SEAL_EXEC;
+    uint32_t initial = g_memobj[obj].seals;
     pthread_mutex_unlock(&g_memfd_lock);
+    seals_store(fd, initial);
 
     return fd;
 }
@@ -434,12 +439,38 @@ void lxrt_memfd_close(int fd)
 }
 
 // Returns the seal word, or 0 for an fd that is not ours.
+// The seals also live on the file, as an extended attribute, so that a
+// process that received the descriptor (SCM_RIGHTS, binder, fork) is bound by
+// them too: Chromium seals a read-only shared memory region
+// (F_SEAL_FUTURE_WRITE) in the browser and its renderer checks the region
+// cannot be mapped writable -- it could, the renderer's CHECK failed and every
+// WebView renderer died (MEASURED). Only unlinked regular files are asked
+// (the memfd's backing file), so an ordinary file costs one fstat.
+#define SEALS_XATTR "org.steamarm.memfd.seals"
+static void seals_store(int fd, uint32_t seals)
+{
+    (void)fsetxattr(fd, SEALS_XATTR, &seals, sizeof seals, 0, 0);
+}
+static bool seals_load(int fd, uint32_t *out)
+{
+    struct stat st;
+    if (fd < 0 || fstat(fd, &st) != 0 || !S_ISREG(st.st_mode) || st.st_nlink != 0)
+        return false;
+    uint32_t v = 0;
+    if (fgetxattr(fd, SEALS_XATTR, &v, sizeof v, 0, 0) != (ssize_t)sizeof v)
+        return false;
+    *out = v;
+    return true;
+}
+
 static uint32_t seals_of(int fd)
 {
     pthread_mutex_lock(&g_memfd_lock);
     struct memfd_ent *e = find_ent(fd);
     uint32_t s = e ? g_memobj[e->obj].seals : 0u;
     pthread_mutex_unlock(&g_memfd_lock);
+    if (!e)
+        seals_load(fd, &s);                 // another process's memfd
     return s;
 }
 
@@ -453,6 +484,17 @@ long lxrt_memfd_fcntl(int fd, int lcmd, unsigned long arg, bool *handled)
 
     pthread_mutex_lock(&g_memfd_lock);
     struct memfd_ent *e = find_ent(fd);
+    uint32_t xs;
+    if (!e && seals_load(fd, &xs)) {
+        // A memfd this process received: into the table, with its seals.
+        int obj = -1;
+        for (int i = 0; i < MEMFD_MAX; i++)
+            if (g_memobj[i].refs == 0) { obj = i; break; }
+        if (obj >= 0 && add_ent(fd, obj)) {
+            g_memobj[obj].seals = xs;
+            e = find_ent(fd);
+        }
+    }
     if (!e) {
         pthread_mutex_unlock(&g_memfd_lock);
         // Linux returns EINVAL for a file whose filesystem does not support
@@ -491,7 +533,9 @@ long lxrt_memfd_fcntl(int fd, int lcmd, unsigned long arg, bool *handled)
     // a mapping that can still write. Refusing every F_SEAL_WRITE would break
     // the common correct ordering, so the narrower gap is the one accepted.
     o->seals |= want;
+    uint32_t now = o->seals;
     pthread_mutex_unlock(&g_memfd_lock);
+    seals_store(fd, now);
     return 0;
 }
 
