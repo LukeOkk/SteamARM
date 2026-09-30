@@ -50,7 +50,7 @@ diff --git a/Source/Tools/FEXInterpreter/ELFCodeLoader.h b/Source/Tools/FEXInter
 diff --git a/Source/Tools/LinuxEmulation/LinuxSyscalls/LinuxAllocator.cpp b/Source/Tools/LinuxEmulation/LinuxSyscalls/LinuxAllocator.cpp
 --- a/Source/Tools/LinuxEmulation/LinuxSyscalls/LinuxAllocator.cpp
 +++ b/Source/Tools/LinuxEmulation/LinuxSyscalls/LinuxAllocator.cpp
-@@ -170,6 +170,29 @@
+@@ -170,6 +170,36 @@
    // Check reserved range
    if (Fixed && PageAddr < 16) {
      return reinterpret_cast<void*>(-EINVAL);
@@ -63,14 +63,21 @@ diff --git a/Source/Tools/LinuxEmulation/LinuxSyscalls/LinuxAllocator.cpp b/Sour
 +  // and gives up on the image otherwise ("Failed to mmap at expected address,
 +  // mapped at 0xee785000 instead of 0x70d32000", then an imageless start,
 +  // 6 s for a hello world). A file mapping that must start on a host page
-+  // (below) keeps the search when the hint is not on one.
++  // (below) keeps the search when the hint is not on one; a shared mapping
++  // takes its hint only when the 16 KiB host pages it touches are free as a
++  // whole, since a neighbour in one of them makes the runtime place a private
++  // copy, which is not shared.
 +  if (!Fixed && Addr && GuestBase && PageAddr >= 16 && Addr + length <= (1ULL << 32) &&
 +      !(fd != -1 && (offset & 0x3fff) == 0 && (G2H(Addr) & 0x3fff) != 0)) {
-+    bool Free = true;
-+    for (size_t i = 0; i < PagesLength; ++i) {
-+      if (MappedPages.test(PageAddr + i)) {
++    uint64_t First = PageAddr, Last = PageAddr + PagesLength;
++    if (flags & MAP_SHARED) {
++      First &= ~3ULL;
++      Last = FEXCore::AlignUp(Last, 4);
++    }
++    bool Free = Last <= (1ULL << 20);
++    for (uint64_t i = First; Free && i < Last; ++i) {
++      if (MappedPages.test(i)) {
 +        Free = false;
-+        break;
 +      }
 +    }
 +    if (Free) {
