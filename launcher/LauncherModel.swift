@@ -265,13 +265,34 @@ final class LauncherModel: ObservableObject {
         return Library.visible(items, stats: stats, query: query, filter: filter).compactMap { byID[$0] }
     }
 
+    /// What the Android session (scripts/android-session.py) needs that "Instalar"
+    /// does not set up: the x86_64 Android root (on its sparsebundle, which the
+    /// session attaches itself) and the Weston root. nil when both are there.
+    func androidSessionMissing() -> String? {
+        let fm = FileManager.default
+        let volumeRoot = "/Volumes/SteamARMAndroid/root-x86_64/system/bin/toybox"
+        let bundle = Paths.state.appendingPathComponent("android.sparsebundle").path
+        if !fm.fileExists(atPath: volumeRoot) && !fm.fileExists(atPath: bundle) {
+            return "falta la raíz Android x86_64: se crea con scripts/mkandroidroot.sh --arch x86_64 "
+                + "(descarga la imagen de Waydroid) y luego scripts/mkandroidroot.sh --arch x86_64 --emu "
+                + "(docs/ANDROID_RUNTIME_ARCHITECTURE.md)"
+        }
+        if !fm.fileExists(atPath: Paths.state.appendingPathComponent("westonroot/usr").path) {
+            return "falta Weston, que muestra la pantalla de Android: se crea con scripts/mkwestonroot.sh"
+        }
+        return nil
+    }
+
     /// Why `app` cannot start on this Mac, in Spanish; nil when it can be
     /// tried. Only programs outside the x86 Steam root are checked here (that
     /// one is the setup banner's business): their root and program must exist.
     func unavailableReason(_ app: AppEntry) -> String? {
         // Android cards open in the Android session (scripts/android-session.py)
         // when it can run their code; otherwise they stay closed, with why.
-        if app.isAndroid { return AndroidApps.unavailableReason(app.android) }
+        if app.isAndroid {
+            if let why = AndroidApps.unavailableReason(app.android) { return why }
+            return androidSessionMissing()
+        }
         guard !app.isWindows, !Paths.isX86Root(app.root) else { return nil }
         let host = Paths.hostRoot(forGuestRoot: app.root)
         let shown = (host.path as NSString).abbreviatingWithTildeInPath
