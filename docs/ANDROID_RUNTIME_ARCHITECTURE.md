@@ -578,7 +578,7 @@ and capabilities its .rc file names; the zygote does the same for
 system_server and every app, and treats each failure as fatal. A Mac
 process cannot become another user, so the runtime keeps per-process
 virtual credentials for Android guests, switched on by `LXRT_ANDROID_IDS`
-(`ruid[,euid,suid]:rgid[,egid,sgid]:groups:eff,prm,inh,bnd,amb[:kn]`, or
+(`ruid[,euid,suid]:rgid[,egid,sgid]:groups:eff,prm,inh,bnd,amb[:knb<hex>]`, or
 `root`), which the boot script sets per service. Lepton gets the same with
 a seccomp profile that answers success and a bionic fake-uid patch
 (`docs/LEPTON_REUSE_ANALYSIS.md` 3.3).
@@ -590,7 +590,7 @@ a seccomp profile that answers success and a bionic fake-uid patch
 | execve, fork | the next image gets them, recomputed as for a file without capabilities (root: bounding and inheritable; others: the ambient set); the bind table goes along |
 | chown, fchown, fchownat | a change Linux would allow reports success; the file stays the Mac user's |
 | unshare, mount, umount2, setns | namespaces and propagation changes succeed for CAP_SYS_ADMIN (one view); `MS_BIND` is an entry in the per-process bind table (`runtime/mounts.c`); other mounts EPERM |
-| SO_PEERCRED, SCM_CREDENTIALS, binder sender euid | another process's virtual ids, from `/tmp/lxrt-shm-<uid>/android-ids` (pid, checked against its start time) |
+| SO_PEERCRED, SCM_CREDENTIALS, capget of a pid, binder sender euid | another process's virtual ids (effective for SO_PEERCRED, real for SCM_CREDENTIALS) and capabilities, from `/tmp/lxrt-shm-<uid>/android-ids.v2` (pid, checked against its start time) |
 
 Without the variable nothing changes. What the kernel would enforce is not
 enforced: files are all the Mac user's (stat shows 501) and any process can
