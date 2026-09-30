@@ -15,6 +15,10 @@
 //              when getxattr of user.serial failed); other namespaces ENOTSUP
 //   pvm        process_vm_readv/writev on itself (ART's SafeCopy: without it
 //              no NullPointerException from compiled code was caught)
+//   boottime   an ABSTIME CLOCK_BOOTTIME timerfd measured against BOOTTIME
+//              (AlarmManager's elapsed alarms fired seconds early against
+//              MONOTONIC: "Too many (100000) false wakeups")
+//   sendfile   sendfile and splice (FileUtils.copy: pm install's staging copy)
 //
 //   android_boot_rt          without Android ids: the alarm clocks are EPERM
 //   android_boot_rt ids      with LXRT_ANDROID_IDS=root: the alarm clocks work
@@ -32,6 +36,7 @@
 #include <string.h>
 #include <sys/socket.h>
 #include <sys/syscall.h>
+#include <sys/sendfile.h>
 #include <sys/timerfd.h>
 #include <sys/uio.h>
 #include <sys/un.h>
@@ -135,6 +140,32 @@ int main(int argc, char **argv)
     }
     check(timerfd_settime(timerfd_create(CLOCK_MONOTONIC, 0), 4, &(struct itimerspec){ 0 }, NULL) == -1 &&
           errno == EINVAL, "timerfd_settime with an unknown flag: EINVAL");
+    // An absolute BOOTTIME deadline is measured against BOOTTIME, which here
+    // counts the Mac's sleep and so runs ahead of MONOTONIC (AlarmManager's
+    // elapsed-realtime alarms came due as much later as the Mac had slept).
+    {
+        struct timespec bt, mt;
+        clock_gettime(CLOCK_BOOTTIME, &bt);
+        clock_gettime(CLOCK_MONOTONIC, &mt);
+        double ahead = (bt.tv_sec - mt.tv_sec) + (bt.tv_nsec - mt.tv_nsec) / 1e9;
+        int tb = timerfd_create(CLOCK_BOOTTIME, TFD_NONBLOCK);
+        struct itimerspec at = { { 0, 0 }, bt };
+        at.it_value.tv_nsec += 80 * 1000 * 1000;
+        if (at.it_value.tv_nsec >= 1000000000) { at.it_value.tv_sec++; at.it_value.tv_nsec -= 1000000000; }
+        double b0 = now_s();
+        int sr = tb >= 0 ? timerfd_settime(tb, TFD_TIMER_ABSTIME, &at, NULL) : -1;
+        uint64_t n = 0;
+        ssize_t rr = -1;
+        while (now_s() - b0 < 3 && (rr = read(tb, &n, 8)) != 8) {
+            struct timespec d = { 0, 5 * 1000 * 1000 };
+            nanosleep(&d, NULL);
+        }
+        double took = now_s() - b0;
+        snprintf(msg, sizeof msg, "timerfd CLOCK_BOOTTIME, ABSTIME now+80 ms: fired after %.0f ms (BOOTTIME ahead of MONOTONIC by %.1f s)",
+                 took * 1000, ahead);
+        check(sr == 0 && rr == 8 && n == 1 && took >= 0.07 && took < 1.5, msg);
+        if (tb >= 0) close(tb);
+    }
     if (fr >= 0) close(fr);
     if (fb >= 0) close(fb);
 
@@ -201,6 +232,39 @@ int main(int argc, char **argv)
         if (dfd >= 0) close(dfd);
         check(removexattr(dir, "user.serial") == 0 && listxattr(dir, NULL, 0) == 0, "removexattr");
         rmdir(dir);
+    }
+
+    // sendfile and splice (Android's FileUtils.copy: pm install's staging copy).
+    {
+        char a[] = "/tmp/lxrt-sendfile-a-XXXXXX", b[] = "/tmp/lxrt-sendfile-b-XXXXXX";
+        int fa = mkstemp(a), fb = mkstemp(b);
+        static char big[300000];
+        for (size_t i = 0; i < sizeof big; i++) big[i] = (char)(i * 7 + 3);
+        int wr = fa >= 0 && write(fa, big, sizeof big) == (ssize_t)sizeof big;
+        off_t off = 1000;
+        ssize_t n = wr ? sendfile(fb, fa, &off, sizeof big - 1000) : -1;
+        static char back[300000];
+        ssize_t got = pread(fb, back, sizeof back, 0);
+        off_t cur = lseek(fa, 0, SEEK_CUR);
+        snprintf(msg, sizeof msg, "sendfile file -> file with an offset: %zd bytes, offset now %lld, input's own offset %lld",
+                 n, (long long)off, (long long)cur);
+        check(n == (ssize_t)sizeof big - 1000 && got == n && !memcmp(back, big + 1000, (size_t)n) &&
+              off == (off_t)sizeof big && cur == (off_t)sizeof big, msg);
+        lseek(fa, 0, SEEK_SET);
+        ssize_t n2 = sendfile(fb, fa, NULL, 5000);
+        check(n2 == 5000 && lseek(fa, 0, SEEK_CUR) == 5000, "sendfile without an offset advances the input");
+        int p[2];
+        pipe(p);
+        loff_t so = 10;
+        ssize_t s1 = splice(fa, &so, p[1], NULL, 4096, 0);
+        char pb[4096];
+        ssize_t s2 = read(p[0], pb, sizeof pb);
+        check(s1 == 4096 && s2 == 4096 && so == 4106 && !memcmp(pb, big + 10, 4096), "splice file -> pipe with an offset");
+        errno = 0;
+        check(splice(fa, NULL, fb, NULL, 10, 0) == -1 && errno == EINVAL, "splice with no pipe: EINVAL");
+        close(p[0]); close(p[1]);
+        if (fa >= 0) { close(fa); unlink(a); }
+        if (fb >= 0) { close(fb); unlink(b); }
     }
 
     // process_vm_readv on itself (ART's SafeCopy of the faulting instruction).

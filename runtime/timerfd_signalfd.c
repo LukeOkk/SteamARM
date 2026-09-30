@@ -102,9 +102,14 @@ static int create(int kind, int flags, clockid_t clock)
 // absolute deadline the guest computed from ITS clock is only meaningful
 // against that clock. Darwin's CLOCK_MONOTONIC is a different base (measured
 // 3.8 s apart here) and ABSTIME never fired.
+// `clock` is the guest's own clock id (0 REALTIME, 1 MONOTONIC, 7 BOOTTIME,
+// 8/9 their _ALARM forms): BOOTTIME is not MONOTONIC here, it counts the
+// Mac's sleep (lxrt_guest_clock_ns), and AlarmManagerService arms its
+// elapsed-realtime timers with BOOTTIME deadlines -- measured against
+// MONOTONIC they came due as much later as the Mac had slept since boot.
 static ticks now(clockid_t clock)
 {
-    return (ticks)lxrt_guest_clock_ns(clock == CLOCK_REALTIME ? 0 : 1);
+    return (ticks)lxrt_guest_clock_ns((long)clock);
 }
 static ticks to_ticks(struct ltime t) { return (ticks)t.sec * NS + t.nsec; }
 static struct ltime to_time(ticks t)
@@ -144,7 +149,7 @@ long lxrt_timerfd_create(int clockid, int flags)
     if ((clockid == 8 || clockid == 9) && !lxrt_aids_capable(35))
         return LERR(EPERM);
     pthread_mutex_lock(&lock);
-    int fd = create(1, flags, clockid == 0 || clockid == 8 ? CLOCK_REALTIME : CLOCK_MONOTONIC);
+    int fd = create(1, flags, (clockid_t)clockid);
     pthread_mutex_unlock(&lock); return fd;
 }
 long lxrt_timerfd_settime(int fd, int flags, const void *in, void *out)
@@ -279,7 +284,7 @@ long lxrt_signalfd4(int fd, const uint64_t *mask, size_t size, int flags)
     m &= ~((UINT64_C(1) << 8) | (UINT64_C(1) << 18));
     pthread_mutex_lock(&lock);
     bool fresh = fd == -1;
-    if (fresh) fd = create(2, flags, CLOCK_MONOTONIC);
+    if (fresh) fd = create(2, flags, (clockid_t)1);
     if (fd < 0 && fresh) { pthread_mutex_unlock(&lock); return fd; }
     struct state *s = lookup(fd, 2);
     if (!s) { pthread_mutex_unlock(&lock); return badfd(fd); }

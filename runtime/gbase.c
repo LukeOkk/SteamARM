@@ -67,6 +67,7 @@ static const struct { unsigned short nr; unsigned char mask; } k_ptr_args[] = {
     {72, A1 | A2 | A3 | A4 | A5},                                // pselect6
     {73, A0 | A2 | A3},                                          // ppoll
     {74, A1},                                                    // signalfd4
+    {76, A1 | A3},                                               // splice (off_in, off_out)
     {78, A1 | A2}, {79, A1 | A2}, {80, A1},                      // readlinkat, newfstatat, fstat
     {86, A2 | A3}, {87, A1}, {88, A1 | A2},                      // timerfd_settime/gettime, utimensat
     {90, A1}, {91, A1},                                          // capget, capset

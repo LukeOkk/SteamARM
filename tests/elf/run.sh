@@ -1248,6 +1248,24 @@ else
     echo "  skip  ANDROID_IDS (no $STAGE)"
 fi
 
+# ANDROID_BOOT_RT: what booting Android's framework to an app needed from the
+# runtime (benchmarks/stage28-android-apk.txt): a futex deadline past 64-bit
+# nanoseconds, the alarm timerfd clocks (CAP_WAKE_ALARM), SO_DOMAIN and
+# SO_PROTOCOL, an empty SCM_RIGHTS and MSG_TRUNC on input, "user." xattrs,
+# process_vm_readv/writev on itself. Without and with Android ids.
+if [ -f "$STAGE/usr/lib64/libc.a" ] && [ -n "$GCCDIR" ]; then
+    if err=$(glibc_cc -static-pie -O2 -pthread -o build/android_boot_rt tests/elf/android_boot_rt.c); then
+        out=$(deadline 60 ./build/lxrun "$PWD/build/android_boot_rt" 2>&1); rc=$?
+        out2=$(LXRT_ANDROID_IDS=root deadline 60 ./build/lxrun "$PWD/build/android_boot_rt" ids 2>&1); rc2=$?
+        if [ "$rc" -eq 0 ] && [ "$rc2" -eq 0 ] && grep -q '^== android boot rt: ok' <<<"$out" &&
+           grep -q '^== android boot rt: ok' <<<"$out2"; then
+            ok "ANDROID_BOOT_RT: $(grep -c '^  ok ' <<<"$out2") checks with Android ids, $(grep -c '^  ok ' <<<"$out") without (futex forever, alarm timerfds, SO_DOMAIN, empty SCM_RIGHTS, user. xattrs, process_vm_readv)"
+        else bad "ANDROID_BOOT_RT" "rc=$rc/$rc2 $(grep -hE 'MAL|SIG|lxrun:' <<<"$out$out2" | head -6)"; fi
+    else bad "build android_boot_rt" "$err"; fi
+else
+    echo "  skip  ANDROID_BOOT_RT (no $STAGE)"
+fi
+
 # BINDER_IPC: Android binder between lxrun processes, raw ioctls against the
 # Linux UAPI header (runtime/binder.c, runtime/binder_hub.c; benchmarks/
 # stage25-binder.txt). A private hub directory, and a hub that leaves 2 s

@@ -562,6 +562,7 @@ uint64_t lxrt_guest_clock_ns(long clk)
 // close(2) as the guest sees it.
 static long guest_close(int fd)
 {
+
     // Every module that keeps side state keyed by descriptor gets a chance
     // to drop it. Each is a cheap no-op for a descriptor it does not own.
     // On Linux, close() removes the descriptor from every epoll set it is
@@ -2257,6 +2258,77 @@ static long do_process_vm(bool write, uint64_t pid, uint64_t liov, uint64_t liov
     return (long)total;
 }
 
+// sendfile (71) and splice (76): the kernel copies between two descriptors.
+// Darwin's sendfile only sends a file to a socket and it has no splice, so
+// both are a read/write loop here, with the offsets as Linux keeps them: a
+// given offset is read (or written) with pread/pwrite and advanced, the
+// descriptor's own offset left alone. Android's FileUtils.copy picks
+// sendfile for file to file and splice when a pipe is involved; `pm install`
+// failed with "sendfile failed: ENOSYS" (PackageInstallerSession writing the
+// APK into its staging file, MEASURED at stage 28). Neither blocks longer
+// than a read or write would; bytes read but not written (a non-blocking
+// output that filled) are given back with lseek where the input can seek.
+static long copy_fds(int in, int64_t *off_in, int out, int64_t *off_out, uint64_t count)
+{
+    if (off_in && *off_in < 0) return LERR(EINVAL);
+    if (off_out && *off_out < 0) return LERR(EINVAL);
+    size_t cap = count < (1u << 20) ? (size_t)count : (1u << 20);
+    if (!cap) return 0;
+    char *buf = malloc(cap);
+    if (!buf) return LERR(ENOMEM);
+    uint64_t done = 0;
+    long err = 0;
+    while (done < count) {
+        size_t want = count - done < cap ? (size_t)(count - done) : cap;
+        ssize_t n = off_in ? pread(in, buf, want, (off_t)*off_in) : read(in, buf, want);
+        if (n < 0) { err = LERR(errno); break; }
+        if (n == 0) break;
+        long seal = lxrt_memfd_check_write(out, off_out ? *off_out : -1, (uint64_t)n);
+        if (seal < 0) { err = seal; break; }
+        ssize_t w = 0;
+        while (w < n) {
+            ssize_t k = off_out ? pwrite(out, buf + w, (size_t)(n - w), (off_t)(*off_out + w))
+                                : write(out, buf + w, (size_t)(n - w));
+            if (k < 0) { if (errno == EINTR) continue; err = LERR(errno); break; }
+            w += k;
+        }
+        if (off_in) *off_in += w;
+        else if (w < n) lseek(in, -(off_t)(n - w), SEEK_CUR);
+        if (off_out) *off_out += w;
+        done += (uint64_t)w;
+        if (w < n || (size_t)n < want) break;
+    }
+    free(buf);
+    return done ? (long)done : err;
+}
+
+static long do_sendfile(int out, int in, uint64_t offp, uint64_t count)
+{
+    int64_t off = 0;
+    if (offp) memcpy(&off, (const void *)(uintptr_t)offp, sizeof off);
+    long r = copy_fds(in, offp ? &off : NULL, out, NULL, count);
+    if (offp && r >= 0) memcpy((void *)(uintptr_t)offp, &off, sizeof off);
+    return r;
+}
+
+static long do_splice(int in, uint64_t offinp, int out, uint64_t offoutp, uint64_t len, unsigned flags)
+{
+    struct stat si, so;
+    if (fstat(in, &si) != 0 || fstat(out, &so) != 0) return LERR(EBADF);
+    if (!S_ISFIFO(si.st_mode) && !S_ISFIFO(so.st_mode)) return LERR(EINVAL);   // one end must be a pipe
+    if ((offinp && S_ISFIFO(si.st_mode)) || (offoutp && S_ISFIFO(so.st_mode))) return LERR(ESPIPE);
+    (void)flags;                                // SPLICE_F_MOVE / MORE / NONBLOCK / GIFT: hints here
+    int64_t oi = 0, oo = 0;
+    if (offinp) memcpy(&oi, (const void *)(uintptr_t)offinp, sizeof oi);
+    if (offoutp) memcpy(&oo, (const void *)(uintptr_t)offoutp, sizeof oo);
+    long r = copy_fds(in, offinp ? &oi : NULL, out, offoutp ? &oo : NULL, len);
+    if (r >= 0) {
+        if (offinp) memcpy((void *)(uintptr_t)offinp, &oi, sizeof oi);
+        if (offoutp) memcpy((void *)(uintptr_t)offoutp, &oo, sizeof oo);
+    }
+    return r;
+}
+
 static long do_nanosleep(uint64_t req, uint64_t rem);
 static long do_nanosleep_abs(long clk, uint64_t req);
 
@@ -3639,6 +3711,12 @@ restart:
     case LNR_listxattr: case LNR_llistxattr: case LNR_flistxattr:
     case LNR_removexattr: case LNR_lremovexattr: case LNR_fremovexattr:
         ret = do_xattr(nr, a0, a1, a2, a3, a4);
+        break;
+    case 71:                // sendfile
+        ret = do_sendfile((int)a0, (int)a1, a2, a3);
+        break;
+    case 76:                // splice
+        ret = do_splice((int)a0, a1, (int)a2, a3, a4, (unsigned)a5);
         break;
     case 270: case 271:     // process_vm_readv, process_vm_writev
         ret = do_process_vm(nr == 271, a0, a1, a2, a3, a4, a5);
