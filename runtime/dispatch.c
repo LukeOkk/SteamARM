@@ -897,6 +897,8 @@ static long do_munmap(uint64_t addr, uint64_t len)
     lxrt_privmap_forget(addr, len);
     if (hstart < hend && munmap((void *)hstart, (size_t)(hend - hstart)) != 0)
         return LERR(errno);
+    if (hstart < hend)
+        lxrt_mremap_forget_shared(hstart, hend - hstart);
     // A partly covered page at either end that belongs to a 4 KiB-offset file
     // mapping (offmap.c) holds nothing else: it goes with its last guest byte.
     uint64_t dead[2];
@@ -1049,6 +1051,7 @@ static long do_mmap(uint64_t addr, uint64_t len, long prot, long lflags,
         lxrt_privmap_forget(addr, len);
         lxrt_shmirror_forget(addr, len);
         lxrt_wx_forget(addr, len);     // a new mapping is not the old RWX range
+        lxrt_mremap_forget_shared(addr, len);
     }
     // Something placed into the host pages of a 4 KiB-offset file mapping
     // makes them no longer that mapping's alone (offmap.c).
@@ -1189,6 +1192,8 @@ static long do_mmap(uint64_t addr, uint64_t len, long prot, long lflags,
                             flags | MAP_FIXED, (int)fd, (off_t)off);
             if (fp == MAP_FAILED)
                 return LERR(errno);
+            if ((flags & MAP_SHARED) && !(prot & PROT_EXEC))
+                lxrt_mremap_note_shared((uint64_t)(uintptr_t)fp, len, (int)fd, (uint64_t)off, (int)prot);
             return (long)(uintptr_t)fp;
         }
         return (long)at;
@@ -1372,6 +1377,9 @@ static long do_mmap(uint64_t addr, uint64_t len, long prot, long lflags,
         return LERR(errno);
     if (shmirror_candidate)
         lxrt_shmirror_note((uint64_t)(uintptr_t)p, len);
+    // A shared file mapping can be grown later (mremap.c): remember the file.
+    if ((flags & MAP_SHARED) && fd >= 0 && !exec_map)
+        lxrt_mremap_note_shared((uint64_t)(uintptr_t)p, len, (int)fd, (uint64_t)off, use_prot);
 
     if (exec_map) {
         // Clamp the scan to what the file can actually supply.

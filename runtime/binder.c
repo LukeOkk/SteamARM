@@ -414,7 +414,24 @@ long lxrt_binder_open(int context, int lflags)
             if (s < 0) continue;
         }
         // Hello. A hub that was just exiting closes on us: try again.
-        struct bh_hello hello = { .version = BH_VERSION, .pid = getpid(), .euid = geteuid(),
+        // The uid binder peers see (getCallingUid) is the Mac user's unless
+        // LXRT_BINDER_UID names an Android one: what init's `user` line gives
+        // a service (surfaceflinger runs as system, 1000; bootanimation as
+        // graphics, 1003). Every guest is the same Mac user, and the hub
+        // trusts its peers' word already, so this grants nothing a guest could
+        // not claim anyway; it lets Android's own uid checks pass the way they
+        // do on a device (SurfaceFlinger admits AID_GRAPHICS and AID_SYSTEM
+        // without asking system_server's permission service, which is not
+        // running: benchmarks/stage27-android-display.txt).
+        uint32_t euid = geteuid();
+        const char *ue = getenv("LXRT_BINDER_UID");
+        if (ue && *ue) {
+            char *end = NULL;
+            unsigned long v = strtoul(ue, &end, 10);
+            if (end && !*end && v < 0x80000000ul)
+                euid = (uint32_t)v;
+        }
+        struct bh_hello hello = { .version = BH_VERSION, .pid = getpid(), .euid = euid,
                                   .context = (uint32_t)context };
         const char *sc = getenv("LXRT_BINDER_SECCTX");
         snprintf(hello.secctx, sizeof hello.secctx, "%s", sc && *sc ? sc : "u:r:unlabeled:s0");

@@ -1,8 +1,9 @@
 # Android userspace on lxrun, with no VM
 
-Status 2026-09-29, stage 26 (`benchmarks/stage25-android-userspace.txt`,
+Status 2026-09-29, stage 27 (`benchmarks/stage25-android-userspace.txt`,
 `benchmarks/stage25-binder.txt`, `benchmarks/stage25-art-x86-fex.txt`,
-`benchmarks/stage26-android-properties.txt`).
+`benchmarks/stage26-android-properties.txt`,
+`benchmarks/stage27-android-display.txt`).
 The owner's goal is Android on the Mac: install APKs and, later, the Google
 Play Store, with **zero VM** (`AGENTS.md`). This page says what of Android
 runs today, how to run it, what stops Java on arm64, how Java runs on the
@@ -38,6 +39,12 @@ and runs Java, interpreted and JIT-compiled, with the Mac JVM's results
 and apps with x86-64 native code possible now; apps whose native code is
 arm64-v8a only still need the native arm64 path, because the x86 image has
 no arm64 native bridge.
+
+Android also has a screen now: in the x86_64 root, Android's own
+SurfaceFlinger renders the LineageOS boot animation with SwiftShader and
+presents it through Waydroid's hwcomposer to Weston running under lxrun,
+whose X11 window on SteamARM's X server is a macOS window, at 57 frames/s
+(MEASURED, section "Display").
 
 ## What runs today (MEASURED)
 
@@ -291,7 +298,8 @@ The trade-off, honestly:
   properties, init and zygote be built against a working ART meanwhile.
 
 Not done here: zygote, system_server, binder, properties, init, graphics,
-input, audio. `dalvikvm64` and `dex2oat64` only.
+input, audio. `dalvikvm64` and `dex2oat64` only. (Since then: binder,
+properties and the display stack run in this root too, section "Display".)
 
 ## Binder (stage 25, `benchmarks/stage25-binder.txt`)
 
@@ -415,7 +423,9 @@ Deviations, stated rather than hidden:
   3.6).
 - The sender's euid is the Mac's uid (501) for every process: Android has
   no per-app uids here yet. Lepton sends a uid in the transaction flags
-  for the same reason (3.6).
+  for the same reason (3.6). A process started with `LXRT_BINDER_UID=<n>`
+  presents uid n instead, as init's `user` line would give it (stage 27:
+  SurfaceFlinger as 1000, bootanimation as 1003; section "Display").
 - Poll readiness is kept for the thread that registered the descriptor
   (`epoll_ctl`, `ppoll`); Linux evaluates it for the thread that waits.
   In libbinder's pattern the two are the same thread (`setupPolling`, then
@@ -545,11 +555,11 @@ LXRT_PROPERTY_SERVICE=0 ...                            # no properties (stage 25
   now the first wall for native Android services.
 - **Shared memory across processes.** Parcels carry ashmem or memfd
   descriptors; binder passes them (FD objects), but lxrun's memfd seals
-  hold only inside one process (`docs/LEPTON_REUSE_ANALYSIS.md` 7). HALs
-  hand such buffers to their clients (the ashmem allocator above
-  registers, but nothing has allocated through it yet). libcutils picks
-  ashmem or memfd from `ro.vndk.version`, which is now set (30); which path
-  it takes here is HYPOTHESIS until measured.
+  hold only inside one process (`docs/LEPTON_REUSE_ANALYSIS.md` 7). Stage
+  27: the graphics allocator's buffers reach SurfaceFlinger and the
+  composer through hwbinder and are mapped by all three, with
+  `sys.use_memfd=true` (there is no `/dev/ashmem`, so the frames that
+  arrive can only have come through memfd; not traced per call).
 - **logd.** `tests/android/logd.py` stands in for its write socket; the
   real logd needs its sockets and `/proc/kmsg` (optional).
 - **Linker namespaces.** `linkerconfig` is ET_EXEC and cannot run under
@@ -560,6 +570,164 @@ LXRT_PROPERTY_SERVICE=0 ...                            # no properties (stage 25
   writes the main file before it stops on the missing properties (MEASURED;
   `libandroid_runtime.so` needs it to find `libstatssocket.so`).
 - **Graphics, input, audio**: `docs/LEPTON_REUSE_ANALYSIS.md` 4.
+
+## Display (stage 27, `benchmarks/stage27-android-display.txt`)
+
+### What works (MEASURED)
+
+Android's own SurfaceFlinger presents its boot animation in a macOS window,
+with no VM. The chain, every piece an ordinary macOS process:
+
+```
+bootanimation (x86-64, FEX)       draws the LineageOS animation with GLES
+  | BufferQueue over binder        (SwiftShader: GLES 3.0 on the CPU)
+SurfaceFlinger (x86-64, FEX)      composites the layers, GLES again
+  | HWC2 over hwbinder, gralloc    (composer@2.1 + HWC2On1Adapter)
+  | buffers (memfd) passed as fds
+hwcomposer.waydroid (x86-64, FEX) copies the frame into a memfd wl_shm
+  | Wayland over a Unix socket,    buffer (R and B swapped), commits it
+  | the memfd passed by SCM_RIGHTS
+Weston 14 (aarch64, native lxrun)  composites with pixman, X11 backend
+  | X11 + MIT-SHM
+XQuartz :2 (SteamARM-X11.app)     a rootless X server: a macOS window
+```
+
+| step | result (MEASURED) |
+|---|---|
+| Weston under lxrun (Fedora 43's 14.0.2, `scripts/mkwestonroot.sh`), X11 backend on :2, pixman renderer, desktop shell | an 800x600 X window "Weston Compositor - screen0" on :2: a macOS window with Weston's panel and background; `wayland-info` lists 20 globals (16 headless with the kiosk shell) |
+| `weston-simple-shm` | its rings in the window (`xwd` of the window, not a screen capture), 56.2 frame callbacks/s; Weston 1.8% of a core, XQuartz 20% more than idle |
+| `tests/android/wl_shm_client.c`, aarch64 | 57.4 frames/s, 300 frames |
+| the same client built for x86-64, run under FEX from the x86_64 Android root | 57.5 frames/s into the aarch64 Weston; `xwd` of the window: 37,440 + 37,440 + 38,400 + 38,411 pixels of its four colours, exactly the client's 480x320 buffer less the moving band. An FEX guest and a native guest share buffers through a memfd passed over the socket |
+| `servicemanager`, `service list` of the x86_64 image, under FEX | "Found 1 services": binder reaches x86-64 guests through FEX |
+| hwservicemanager, allocator@2.0, vendor.waydroid.task@1.0, configstore@1.1 (x86_64, FEX) | registered; `lshal` lists them |
+| composer@2.1 with hwcomposer.waydroid | connects to Weston through `waydroid.xdg_runtime_dir`/`waydroid.wayland_display`, creates its "Waydroid" window, registers IComposer and Waydroid's display, window and clipboard HALs; its EGL worker initialises SwiftShader |
+| SurfaceFlinger (x86_64, FEX) | RenderEngine on "Google SwiftShader, OpenGL ES 3.0 SwiftShader 4.1.0.7", display 0 800x568 (Weston's maximised window), 48 shaders in 128 ms, registers "SurfaceFlinger" |
+| bootanimation (x86_64, FEX) | "Enter boot animation"; the LineageOS animation (teal arc and circle) in the macOS window, frames changing between screenshots; SurfaceFlinger 57 page flips/s, hwcomposer 56.8 buffer commits/s |
+| start-up | composer ready 0.5 s after launch, SurfaceFlinger 0.9 s after that, the boot animation layer 2.4 s after that; `scripts/run-android-display.sh start` (binder, properties, the HALs, SurfaceFlinger) 4.9 s |
+| cost, boot animation running | SurfaceFlinger 40-48% of one core, bootanimation 35-38%, composer 4-5%, Weston 4-5%, XQuartz 23-30%, the HALs and managers ~0% |
+
+### What it needed
+
+| change | why | where |
+|---|---|---|
+| mremap of a MAP_SHARED file mapping maps more of the file | every libwayland-server compositor grows a client's wl_shm pool with `mremap(MREMAP_MAYMOVE)`; lxrun refused, and Weston quit at once: "wl_shm_pool#3: error 2: failed mremap" for its own desktop shell | `runtime/mremap.c` (a Mach fileport of each shared file mapping, `remap_shared_file`), `runtime/dispatch.c`; `tests/elf/shm_mremap.c` |
+| the syscall trampoline keeps v0-v31, FPSR and NZCV | Linux preserves them across `svc`; the dispatcher (Darwin C) clobbers them. A raw client kept its msghdr template in q2 across syscalls and sent `iovlen` 0 (EMSGSIZE) after a few calls; a counted `subs; svc; b.ne` loop exits early. Any inline-syscall code (glibc's INTERNAL_SYSCALL) is exposed. 18.8 -> 23.5 ns per getpid | `runtime/trampoline.S`; `tests/elf/simd_syscall.c` |
+| `LXRT_BINDER_UID` | every guest is the Mac user (501); SurfaceFlinger admits only AID_GRAPHICS/AID_SYSTEM without system_server's permission service, and bootanimation waited forever ("Waiting to check permission android.permission.ACCESS_SURFACE_FLINGER from uid=501"). The uid binder peers see, as init's `user` line gives it (surfaceflinger 1000, bootanimation 1003); grants nothing a guest of the same Mac user could not already claim | `runtime/binder.c`; `tests/android/run.sh` |
+| the socket in `/dev/shm` | the runtime maps `/dev/shm` to one host directory per user for every root, so one `XDG_RUNTIME_DIR` works from the Fedora root, the Android root and FEX | `scripts/run-weston.sh` |
+| Waydroid's host properties | what Waydroid's container manager writes into `/vendor/waydroid.prop` (here a dummy): `ro.hardware.gralloc=default`, `ro.hardware.egl=swiftshader`, `waydroid.xdg_runtime_dir`, `waydroid.wayland_display`, `waydroid.active_apps=Waydroid`, plus `sys.use_memfd=true` (there is no `/dev/ashmem`); set with the image's `setprop` | `scripts/run-android-display.sh` |
+
+### How hwcomposer.waydroid connects (VERIFIED IN SOURCE)
+
+Waydroid's `android_hardware_waydroid` `3b2f29d` (branch lineage-18.1, the
+last hwcomposer commit before the image's 2025-06-28 build) and Lepton's pin
+`896f652` (`gitlab.steamos.cloud/frame-public/android_hardware_waydroid`)
+connect the same way:
+
+- `hwc_open` sets `XDG_RUNTIME_DIR` from `waydroid.xdg_runtime_dir`
+  (default `/run/user/1000`) and `WAYLAND_DISPLAY` from
+  `waydroid.wayland_display` (default `wayland-0`), then
+  `wl_display_connect(NULL)` (`hwcomposer/hwcomposer.cpp:1260-1268`,
+  `wayland-hwc.cpp:1953`; Lepton's `hwcomposer.cpp:755-759`). Lepton points
+  them at gamescope's socket (`docs/LEPTON_REUSE_ANALYSIS.md` 4.2).
+- Globals it binds (`wayland-hwc.cpp:1817-1899`): wl_compositor (<= 5),
+  wl_subcompositor, xdg_wm_base (v1), wl_shell, wl_seat, wl_shm, wl_output,
+  wp_presentation, wp_viewporter; android_wlegl (gralloc "android") or
+  zwp_linux_dmabuf_v1 v3 (gbm, minigbm); optional zwp_tablet_manager_v2,
+  pointer constraints, relative pointer, idle inhibit, fractional scale,
+  wl_data_device_manager, gtk_shell1 (Lepton adds mir_shell_v1). Nothing
+  Waydroid-specific on the Wayland side: its own protocol file
+  (`wayland-android.xml`, android_wlegl) is only for gralloc "android".
+  Weston offers every one it needs (not dmabuf with the pixman renderer,
+  which gralloc "default" does not use).
+- Gralloc "default": the composer locks each layer's buffer for CPU reads
+  and copies it, swapping red and blue, into a `wl_shm` buffer in a memfd
+  of its own (`hwcomposer.cpp:154-183, 187-262`,
+  `wayland-hwc.cpp:260-293`). One copy per frame in the composer.
+- `create_display` ends with `IWaydroidTask::getService()`
+  (`wayland-hwc.cpp:1971`): the task HAL is declared in the vendor VINTF
+  manifest, so libhidl waits for it; the image's
+  `/system/bin/hw/vendor.waydroid.task@1.0-service` provides it.
+- `waydroid.active_apps=Waydroid` shows the whole Android screen in one
+  window (`hwcomposer.cpp:494-540`); per-app windows are its multi-window
+  mode (`persist.waydroid.multi_windows`), not tried.
+- There is no sw_sync device here, so `sw_sync_timeline_create()`
+  (`hwcomposer.cpp:1246`) can only fail and every retire fence is -1
+  (HYPOTHESIS from the source, not traced); SurfaceFlinger runs without a
+  sync framework anyway (`ro.surface_flinger.running_without_sync_framework=true`
+  in the image) and presented regardless (MEASURED).
+- Input: it `mkfifo`s `/dev/input/wl_{pointer,keyboard,touch,tablet}_events`
+  and writes `input_event` records for Android's EventHub
+  (`wayland-hwc.cpp:1292-1323, 694, 1809`). The runtime maps `/dev/input`
+  to one host directory for every guest (`runtime/evdev.c`), so the FIFOs
+  land in `/tmp/lxrt-input`; with no InputFlinger reading them the
+  composer logs "Failed to open pipe to InputFlinger" (ENXIO) when the
+  pointer enters the window. Input is the next step, not done here.
+
+Log lines that look like failures and are not (MEASURED, explained):
+"FMQ: grantorIdx must be less than 3" is libfmq mapping the optional
+event-flag word of a queue that has none (LineageOS `android_system_libfmq`
+`19c77ec`, `include/fmq/MessageQueue.h:622, 1204-1207`); libprocessgroup's
+cgroup warnings (no cgroups here); "Unable to set property ctl.start to
+bootanim" (no init: the property service refuses `ctl.*`).
+
+### The GL path
+
+- Today (MEASURED): SwiftShader, in the image as
+  `/vendor/lib64/egl/lib*_swiftshader.so`, renders GLES on the CPU for both
+  SurfaceFlinger and apps; under FEX that is x86-64 SwiftShader JIT output
+  translated again. It costs about 40% of a core for SurfaceFlinger and 35%
+  for the boot animation at 800x568 and 57 frames/s.
+- Also in the image, untested: Mesa's `libEGL_mesa.so` (needs a DRM device
+  and gbm: there is none) and Mesa's lavapipe `vulkan.lvp.so` (Vulkan on the
+  CPU, `ro.hardware.vulkan=lvp`, HYPOTHESIS: usable with gralloc "default").
+  The Waydroid image has no ANGLE; Lepton's API 30 image adds it
+  (`docs/LEPTON_REUSE_ANALYSIS.md` 0.2).
+- Later, the GPU (HYPOTHESIS): a bionic build of SteamARM's Vulkan shim as
+  Android's Vulkan HAL (`vulkan.steamarm.so`, MoltenVK or KosmicKrisp
+  underneath, with `VK_ANDROID_native_buffer`), then GLES on top through
+  ANGLE's Vulkan back end or Zink, as Lepton does over Turnip
+  (`docs/ANDROID_ZERO_VM_FEASIBILITY.md` 3.11). The copies change too: a
+  GPU gralloc would hand the compositor dmabuf-like buffers, which lxrun
+  does not have; IOSurface or a remote CAMetalLayer per window
+  (`runtime/remote_layer.m`) would replace wl_shm and the X11 hop.
+
+### Costs of this path, and what could replace parts of it
+
+Per frame, with gralloc "default": SurfaceFlinger composites on the CPU into
+a gralloc buffer; the composer copies it into its wl_shm buffer (the
+composer process uses 0.7 ms of CPU per 800x568 frame, 4% of a core at 57
+frames/s); Weston composites it
+with pixman into its X11 image; the X server copies that into the macOS
+window. Four CPU passes over the frame between the app and the screen, and
+three processes in the chain besides Android's. It is the correct first
+step because every piece is unmodified (Android's HALs, Weston, XQuartz).
+An `hwcomposer.steamarm` that is itself an X11 client (MIT-SHM) or presents
+into a CAMetalLayer would remove Weston and one or two copies
+(`docs/ANDROID_ZERO_VM_FEASIBILITY.md` 3.10); Waydroid's composer is
+Apache-2.0 and its HWC1 structure is the reference.
+
+### How to run it
+
+```sh
+scripts/mkwestonroot.sh                      # the Weston root (once, reproducible from scripts/mkwestonroot.lock)
+scripts/run-x11-native.sh start              # SteamARM's X server on :2 (if not running)
+scripts/run-weston.sh start                  # Weston on :2; --headless, --kiosk, --size WxH
+scripts/run-weston.sh client /usr/bin/weston-simple-shm
+scripts/run-android-display.sh start         # the x86_64 root's display stack and bootanimation
+scripts/run-android-display.sh stop
+scripts/run-weston.sh stop
+```
+
+- One display stack per Android root at a time: the binder hub and the
+  property service are private (`ANDROID_DISPLAY_DIR`), but
+  `<root>/dev/socket/logdw` (`ANDROID_DISPLAY_LOGD=1`) is the root's.
+- The root's path must be short: FEX's server socket
+  `<root>/data/local/tmp/steamarm-android-<hash>.FEXServer.Socket` has to
+  fit Darwin's 104-byte `sun_path`; a 44-byte root path failed with
+  "Failed to create FEXServer socket: error 22" (MEASURED).
+- `weston-terminal` does not start: it needs a pseudo-terminal
+  (`/dev/ptmx`), which the runtime does not pass through (VERIFIED IN
+  SOURCE, `runtime/dispatch.c` `translate_one`).
 
 ## APKs and the Google Play Store
 
@@ -593,9 +761,11 @@ LXRT_PROPERTY_SERVICE=0 ...                            # no properties (stage 25
    the property triggers of the `.rc` files, on top of this property
    service (also what linkerconfig's `VENDOR_VNDK_VERSION` abort asks for);
    then shared memory between a HAL and its clients.
-4. Then zygote, system_server, `pm install` and a window (Lepton's graphics
-   analysis, 4): first in the x86_64 root for Java and x86-64 apps, then
-   with the rebuilt ART for arm64-v8a APKs.
+4. Then zygote, system_server, `pm install` and a window: the window's
+   path exists (stage 27, "Display": SurfaceFlinger through Waydroid's
+   hwcomposer into Weston, a macOS window); input (the composer's FIFOs to
+   InputFlinger) and a GPU path are next. First in the x86_64 root for
+   Java and x86-64 apps, then with the rebuilt ART for arm64-v8a APKs.
 
 ## Tests and records
 
@@ -617,6 +787,15 @@ LXRT_PROPERTY_SERVICE=0 ...                            # no properties (stage 25
 - `tests/elf/run.sh` ANDROID_BIONIC_RT and "kept TLS reads"
   (`tests/elf/android_bionic_rt.c`): the runtime changes, with no Android
   root needed.
+- `tests/android/run.sh`, display section: Weston (headless) with an
+  aarch64 and an x86-64 (FEX) wl_shm client; with an X server on :2, the
+  x86-64 client's pixels read back from Weston's X window with `xwd`
+  (`tests/android/xwd_colors.py`), then SurfaceFlinger's boot animation in
+  it and its page-flip rate (`ANDROID_DISPLAY_SF=0` skips that part).
+  `LXRT_BINDER_UID` in the binder section.
+- `tests/elf/run.sh` SIMD_SYSCALL (`tests/elf/simd_syscall.c`) and
+  SHM_MREMAP (`tests/elf/shm_mremap.c`): the two runtime fixes of stage 27.
 - `benchmarks/stage25-android-userspace.txt`, `benchmarks/stage25-binder.txt`,
-  `benchmarks/stage25-art-x86-fex.txt` and
-  `benchmarks/stage26-android-properties.txt`: every run, before and after.
+  `benchmarks/stage25-art-x86-fex.txt`,
+  `benchmarks/stage26-android-properties.txt` and
+  `benchmarks/stage27-android-display.txt`: every run, before and after.

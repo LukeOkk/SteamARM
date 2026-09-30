@@ -1,0 +1,470 @@
+Stage 27 (Android display) -- Wayland on the Mac through lxrun, and Android's SurfaceFlinger in a macOS window (2026-09-29)
+=======================================================================================================================
+
+ZERO-VM. Every process below is an ordinary macOS process: lxrun running a
+Linux aarch64 program, or lxrun running FEX running an x86-64 program. No
+VM was started or proposed. Host: Mac mini M4, macOS 27.0. Base commit
+bc27c17. The X server on :2 (scripts/run-x11-native.sh, SteamARM-X11.app)
+was already running and was not restarted or stopped. Another session ran
+its own Android stack in /Volumes/SteamARMAndroid/root-x86_64 at the same
+time (its own binder hub, property service and logd stand-in); this one
+worked in an APFS clone of that root (/Volumes/SteamARMAndroid/x86disp,
+a few seconds and no space to make) with private binder and property
+directories, so neither saw the other. No Steam client, no account, no
+Google software; nothing downloaded is committed (the Weston root is built
+from pinned Fedora packages by a script; the Android images are Waydroid's,
+as at stage 25).
+Labels: MEASURED, VERIFIED IN SOURCE, HYPOTHESIS, UNKNOWN.
+
+Result
+------
+MEASURED:
+1. Weston 14.0.2 (Fedora 43 aarch64) runs under lxrun with its X11 backend
+   and the pixman renderer: its output is an X window on :2, a macOS window.
+   weston-simple-shm draws into it at 56 frame callbacks/s; a raw wl_shm
+   client (tests/android/wl_shm_client.c) at 57 frames/s.
+2. The same client built for x86-64 and run under FEX from the x86_64
+   Android root draws into the aarch64 Weston at 57.5 frames/s; xwd of
+   Weston's window finds exactly its pixels. Buffers shared by memfd across
+   an FEX guest and a native guest work.
+3. Android's own SurfaceFlinger (x86_64 image, FEX), with the image's
+   graphics allocator, Waydroid's composer HAL (hwcomposer.waydroid) and
+   SwiftShader GLES, presents the LineageOS boot animation (the image's
+   bootanimation) in Weston's window: 57 page flips/s, 56.8 buffer
+   commits/s from the composer to Weston.
+4. Three runtime changes made this possible, each with a test:
+   mremap of MAP_SHARED file mappings (Weston could not start its shell),
+   the syscall trampoline now preserving v0-v31, FPSR and NZCV (a Linux
+   syscall does; the dispatcher clobbered them), and LXRT_BINDER_UID (the
+   uid binder peers see, as init's `user` line gives it).
+5. Binder works for x86-64 guests under FEX (servicemanager, hwservicemanager
+   and the HALs of the x86_64 image; stage 25 had it UNTESTED).
+
+R1  The Weston root
+-------------------
+scripts/mkwestonroot.sh (new): seeds glibc libgcc libstdc++ bash
+coreutils-single weston weston-demo wayland-utils xkeyboard-config xwd
+xwininfo xdpyinfo fontconfig dejavu-sans-fonts dejavu-sans-mono-fonts
+glibc-common glibc-langpack-en; scripts/mkroot-rpm.sh resolves their
+shared-library closure into scripts/mkwestonroot.lock (today's Fedora 43
+repodata: releases 1761190638, updates 1790641463), fetches, sha256-checks
+and unpacks. A root of its own beside the Steam client's (scripts/mkarmroot.sh
+not re-resolved: adding seeds there would relock and rebuild the live
+client root).
+  $ scripts/mkwestonroot.sh
+  265 RPMs unpacked, 464M (stage); westonroot ready: ~/SteamARM-roots/westonroot (510M)
+The closure is large because weston-libs links every backend's libraries
+(FreeRDP, GStreamer, PipeWire, neatvnc).
+
+R2  Weston under lxrun, first try: mremap
+-----------------------------------------
+  weston --backend=x11 --renderer=pixman --width=800 --height=600 --socket=wayland-0 --idle-time=0
+  [..] x11 output 800x600, window id 6291461
+  [..] launching '/usr/libexec/weston-desktop-shell'
+  [lxrt] mremap: file-backed range 0x7efffe748000..0x7efffe74c000: not supported yet
+  [..] Error: /usr/libexec/weston-desktop-shell apparently cannot run at all.
+       Quitting...wl_shm_pool#3: error 2: failed mremap
+VERIFIED IN SOURCE (libwayland-server, shm.c, shm_pool_grow_mapping): on
+Linux a pool grown by wl_shm_pool.resize is remapped with
+mremap(MREMAP_MAYMOVE); the client's fd is closed after the first mmap, so
+nothing else leads back to the file. lxrun's mremap handled anonymous
+memory only.
+Fix (runtime/mremap.c, runtime/dispatch.c): every MAP_SHARED file mapping
+(host-page aligned, not executable) is recorded with a Mach fileport of its
+descriptor (fileport_makeport: keeps the open file, takes no descriptor
+number the guest could see); mremap of a recorded range grows it in place
+when the pages after it are free, else (MAYMOVE, FIXED) maps the file anew
+at the new length and unmaps the old range. munmap, MAP_FIXED over it and
+shrinking trim the records; a fork child drops them (Mach rights are not
+inherited: its inherited mappings keep the old behaviour).
+Test: tests/elf/shm_mremap.c (SHM_MREMAP in tests/elf/run.sh), a
+compositor/client pattern with two processes:
+  HEAD runtime: [lxrt] mremap: file-backed range ...: not supported yet
+                MAL maymove  Cannot allocate memory   == shm mremap: 6 mal
+  now, 16 KiB and 4 KiB guest pages:
+    ok  maymove  64 KiB -> 1 MiB, old bytes kept
+    ok  file     a store past the old end is in the file, and pwrite shows in the mapping
+    ok  peer     another process's stores past the old end seen through the grown mapping, and ours in its
+    ok  inplace  64 -> 192 KiB at the same address, file-backed past the old end
+    ok  shrink   1 MiB -> 128 KiB in place, then back to 1 MiB with the file's bytes
+    ok  fixed    moved to the address asked for, still the file
+    == shm mremap: ok
+
+R3  Weston up
+-------------
+After the fix: Weston's X window "Weston Compositor - screen0", 800x600 at
++0+22 on :2 (xwininfo, the Mac's), with the desktop shell's panel and
+background. Its log: "Using Pixman renderer", "Will use x8r8g8b8 format for
+SHM surfaces", "x11 output 800x600", desktop-shell and weston-keyboard
+launched. Harmless: "could not load cursor 'dnd-move'" (no cursor theme),
+"couldn't find a Compose file for locale C.UTF-8".
+wayland-info (aarch64, the Weston root), 20 globals:
+  wl_compositor 5, wl_subcompositor 1, wp_viewporter 1, zxdg_output_manager_v1 2,
+  wp_presentation 1, wp_single_pixel_buffer_manager_v1 1, wp_tearing_control_manager_v1 1,
+  zwp_relative_pointer_manager_v1 1, zwp_pointer_constraints_v1 1,
+  zwp_input_timestamps_manager_v1 1, weston_capture_v1 1, wl_data_device_manager 3,
+  wl_shm 2, wl_seat 7, wl_output 4, zwp_input_panel_v1 1, zwp_input_method_v1 1,
+  zwp_text_input_manager_v1 1, xdg_wm_base 5, weston_desktop_shell 1
+(headless with the kiosk shell: 16; no wl_seat, no input devices). No
+zwp_linux_dmabuf_v1: the pixman renderer does not offer it.
+The socket: XDG_RUNTIME_DIR=/dev/shm/<dir>, WAYLAND_DISPLAY=wayland-0. The
+runtime maps /dev/shm to /tmp/lxrt-shm-<uid> for every guest whatever its
+root (runtime/dispatch.c translate_one), so the Fedora root, the Android
+root and FEX guests all reach it with the same two variables.
+
+weston-simple-shm (aarch64), `xwd -id 0x600005` of Weston's window (the
+Weston root's xwd under lxrun; tests/android/xwd_colors.py reads the dump,
+the Mac's ImageMagick has no XWD reader): the panel, the background and
+simple-shm's rings in a 250x250 window.
+Frame rate, WAYLAND_DEBUG=client, 12 s: 673 frame callbacks over 11.95 s =
+56.2/s, interval median 17.9 ms, p95 22.5 ms (the X11 output repaints at
+60 Hz; the debug printing is included).
+CPU over 10 s with simple-shm running: Weston 1.8% of a core, simple-shm
+0.4%, XQuartz 28% (7.6% idle before). RSS: Weston 13.8 MB.
+Not working: weston-terminal ("failed to fork and create pty (No such file
+or directory)"): the runtime passes /dev/null, zero, full, random, urandom
+and /dev/fd through, not /dev/ptmx (VERIFIED IN SOURCE, translate_one).
+
+R4  A raw client, and the trampoline
+------------------------------------
+tests/android/wl_shm_client.c (new): a Wayland client with no library at
+all (raw syscalls, the wire protocol by hand), so one source builds for
+aarch64 and x86-64: memfd_create, ftruncate, mmap MAP_SHARED, wl_shm pool
+sent with SCM_RIGHTS, two buffers, xdg_toplevel, frame callbacks; four
+quadrants 0xff2080c0 0xffc04020 0xff20c040 0xffe0e0e0 and a black band
+that moves a row per frame.
+First runs (aarch64): "== wl_shm_client: FAIL sendmsg (-90)" at different
+points in different runs (after create_pool, or at the first attach);
+Weston saw the client close. Traced:
+  [lxrt] syscall 211 -> 16          (create_pool, with the fd)
+  [lxrt] syscall 211 -> -90         (the next sendmsg)
+  with a debug print in lxrt_sendmsg: errno 40 (Darwin EMSGSIZE) iovlen 0
+The msghdr the client built had msg_iovlen 0. The compiler built it from a
+16-byte constant {iovlen 1, control 0} kept in q2 across several inline
+`svc`s (llvm-objdump: `ldr q2, [sp, #0x90]` once, `stur q2, [x9, #0x18]`
+at each send). A Linux syscall preserves every vector register; lxrun's
+trampoline saved x0-x30 only, and the dispatcher (Darwin C, libsystem's
+memcpy/memset) clobbered q2. A debug build that happened not to keep it in
+a register ran fine (59.2 fps).
+The same holds for the condition flags: tests/elf/simd_syscall.c's counted
+loop (subs; svc; b.ne) ran a fraction of its iterations, and its own
+verdict counter, computed from flags across a write(), printed MAL and
+counted ok.
+Fix (runtime/trampoline.S): the trampoline saves q0-q31 (st1, 512 bytes),
+FPSR and NZCV above the general-purpose block and restores them after the
+dispatcher (FPSR written back only if it changed). The frame is 784 bytes
+instead of 256; struct lxrt_regs (the dispatcher's argument, clone's
+register file) is unchanged at its base. rt_sigreturn does not return
+through the trampoline (lxrt_restore_regs), so it is unaffected. FPCR is
+not saved (nothing in the runtime changes it). (A scripted rewrite of the
+stp/ldp pairs into st1/ld1 also deleted lxrt_restore_regs' 16 vector
+loads, the sigreturn path; the diff review caught it before the commit,
+they are back byte for byte as in HEAD, and the final checks below were
+run again on the corrected build.)
+Test: tests/elf/simd_syscall.c (SIMD_SYSCALL in tests/elf/run.sh):
+  HEAD runtime:  MAL vregs (round 0, v0), ok fpsr, MAL nzcv
+  now:           ok vregs: v0-v31 unchanged across 2000 syscall rounds
+                 (openat/read/close/getpid), ok fpsr, ok nzcv (all 16)
+Cost, getpid round trip (simd_syscall's counted loop, 200,000 calls, median
+of 10 runs, alternating binaries):
+  first set:   old trampoline 18.2 ns, new 26.5 ns
+  second set:  old 18.8 ns, vectors only 24.1, flags only 23.6, both 23.5
+The vector block alone and the flags alone cost about the same, so most of
+the price is the larger frame (and the longer trampoline), not the stores;
+an unconditional `msr fpsr` and 16 stp-q pairs instead of st1 measured the
+same. A null syscall is 25-45% dearer; one that does work (openat, read,
+a binder call at 36-55 us) is not measurably so.
+Who could have been hit before: code that keeps a value in a vector
+register or in the flags across an inline syscall. glibc's syscall
+wrappers are functions (callers treat v0-v7/v16-v31 and the flags as
+clobbered), but INTERNAL_SYSCALL inside larger functions and freestanding
+code are not; no earlier failure is attributed to it (UNKNOWN).
+
+After both fixes, aarch64 client, 300 frames, 3 runs: 56.3, 57.4, 57.4
+frames/s, 93-104 us to draw a 480x320 frame.
+
+R5  x86-64 client under FEX into the aarch64 Weston
+---------------------------------------------------
+The same source built with clang --target=x86_64-linux-gnu (freestanding
+static-pie, no relocations), in the x86_64 Android root's /data/local/tmp,
+run by scripts/run-android-x86.sh with
+ANDROID_X86_GENV="XDG_RUNTIME_DIR=/dev/shm/<dir> WAYLAND_DISPLAY=wayland-0":
+  connected: /dev/shm/.../wayland-0, wl_compositor v4, configure 0x0, buffer 480x320,
+             pool 1228800 bytes at 0x00007eff:0xa64cc000
+  == wl_shm_client: 300 frames in 5199 ms, 57.5 fps, draw 289 us/frame (x86_64)
+With -n 60 -H 5000 (hold the last frame), xwd of Weston's window during the
+hold, colour counts (tests/android/xwd_colors.py --expect):
+  2080c0: 37440 pixels   c04020: 37440   20c040: 38400   e0e0e0: 38411
+= 240x156, 240x156, 240x160, 240x160 (+11 of the panel's text): exactly the
+client's four quadrants less the four-row band at frame 59, in the band's
+place. The pixels an x86-64 FEX guest wrote into its MAP_SHARED memfd are
+what the native aarch64 compositor read from its own mapping of the fd it
+received. Drawing costs 2.8x the native client (289 vs 103 us, translated
+code).
+
+R6  The x86_64 Android root on the display path
+-----------------------------------------------
+A private clone (see top). First attempt with the clone at
+/Volumes/SteamARMAndroid/root-x86_64-display:
+  run-android-x86: FEXServer did not start
+  fexserver.log: E Failed to create FEXServer socket: error 22 (Invalid argument)
+  trace: socket -> 5; bind(5, ..., 0x41) -> -22
+FEXServer also binds a path socket in $XDG_RUNTIME_DIR=/data/local/tmp:
+<root>/data/local/tmp/steamarm-android-<hash>.FEXServer.Socket is 107
+bytes on the host, over Darwin's 104-byte sun_path. Renamed to
+/Volumes/SteamARMAndroid/x86disp: works. (The shared root's path, 36 bytes,
+gives 99.) Documented in scripts/run-android-display.sh.
+
+Binder under FEX (x86-64 image's own programs), private LXRT_BINDER_DIR:
+  servicemanager; service list -> "Found 1 services: 0 manager: [android.os.IServiceManager]"
+  hwservicemanager -> getprop hwservicemanager.ready = true;
+    logcat "hwservicemanager is ready now."
+  vndservicemanager /dev/vndbinder
+Waydroid's host properties, with the image's setprop (the property service
+of stage 26; /vendor/waydroid.prop is a dummy "# Dummy prop files" in the
+image, Waydroid's container manager bind-mounts the real one):
+  ro.hardware.gralloc=default  ro.hardware.egl=swiftshader  sys.use_memfd=true
+  waydroid.xdg_runtime_dir=/dev/shm/<dir>  waydroid.wayland_display=wayland-0
+  waydroid.active_apps=Waydroid  waydroid.background_start=false
+  (each read back with getprop)
+HALs: allocator@2.0-service, vendor.waydroid.task@1.0-service,
+configstore@1.1-service: "Registered ..." in logcat; lshal lists
+IAllocator/default, ISurfaceFlingerConfigs 1.0/1.1, IWaydroidTask/default
+(the task HAL is needed: hwcomposer.waydroid's create_display ends with
+IWaydroidTask::getService(), and the vendor VINTF manifest declares it, so
+libhidl waits for it; VERIFIED IN SOURCE, below).
+
+composer@2.1-service (loads hwcomposer.waydroid through HWC2On1Adapter):
+  hwcomposer: WAYLAND_DISPLAY: wayland-0
+  hwcomposer: XDG_RUNTIME_DIR: /dev/shm/steamarm-wl-and2b
+  hwcomposer: *** presentation_clock_id: clk_id 4 CLOCK_MONOTONIC 1
+  HWC2On1Adapter: Setting active config to 0 for HWC1 config 0
+  Registered vendor.waydroid.display@1.2::IWaydroidDisplay/default
+  Registered android.hardware.graphics.composer@2.1::IComposer/default
+  Registered vendor.waydroid.window@1.2 ..., vendor.waydroid.clipboard@1.0 ...
+  hwcomposer: Waydroid hwcomposer services are ready.
+  libEGL: loaded /vendor/lib64/egl/libEGL_swiftshader.so (and GLES)
+  hwcomposer: eglInitialize/eglChooseConfig/eglCreateContext/eglMakeCurrent: EGL_SUCCESS
+WAYLAND_DEBUG on the composer (it routes libwayland's debug output to
+logcat): binds wl_compositor 5 ... ; wl_output mode 800x600 60000 mHz;
+creates the "Waydroid" toplevel, set_maximized, configure 800x568 (the
+output less Weston's 32-row panel), a 1x1 black background subsurface with
+a viewport, then the main surface's buffers.
+
+surfaceflinger (x86_64, FEX):
+  SurfaceFlinger: Using HWComposer service: 'default'
+  SurfaceFlinger: SurfaceFlinger's main thread ready to run. Initializing graphics H/W...
+  RenderEngine: RenderEngine GLES Backend
+  RenderEngine: vendor Google Inc., renderer Google SwiftShader, version OpenGL ES 3.0 SwiftShader 4.1.0.7
+  RenderEngine: EGLSurface: 8-8-8-8, config=0x2e
+  Gralloc2: Adding additional valid usage bits: 0x0   (mapper 4.x/3.x absent: 2.0 used)
+  FramebufferSurface: framebuffer size has been limited to [800x568] from [800x568]
+  RenderEngine: shader cache generated - 48 shaders in 127.653999 ms
+  libc: Unable to set property "ctl.start" to "bootanim": error code: 0x20   (no init)
+  Registered android.frameworks.displayservice@1.0::IDisplayService/default
+  SurfaceFlinger: Setting power mode 2 on display 0
+  service list: "SurfaceFlinger: [android.ui.ISurfaceComposer]"
+Noise, explained: libprocessgroup's cgroup warnings (no cgroups);
+"HWComposer: isConnected failed for display 0" and
+"getDisplayConnectionType ... Unsupported (8)" (HWC 2.1 has neither).
+No frame yet: SurfaceFlinger composes when a layer changes.
+
+bootanimation (x86_64, FEX), first as uid 501:
+  BootAnimation: BootAnimationPreloadStopTiming ...
+  ServiceManager: Waiting to check permission android.permission.ACCESS_SURFACE_FLINGER from uid=501 pid=9172
+(forever). VERIFIED IN SOURCE (frameworks/native SurfaceFlinger
+CheckTransactCodeCredentials): uids other than AID_GRAPHICS and AID_SYSTEM
+are checked with system_server's permission service, which does not run.
+Every guest's binder uid was the Mac's (501). Fix (runtime/binder.c):
+LXRT_BINDER_UID=<n> makes the process present uid n in its binder hello,
+as init's `user` line would (bootanimation.rc: user graphics = 1003;
+surfaceflinger.rc: user system = 1000). The hub already trusts the uid its
+peers report; every guest is the same Mac user; nothing is granted that a
+guest could not claim before by talking to the hub socket itself. Test:
+tests/android/run.sh, the native binder service logs sender_euid: 1003
+with the variable, the Mac's uid without.
+
+bootanimation as uid 1003:
+  libEGL: loaded .../libEGL_swiftshader.so ...
+  BootAnimation: BootAnimationShownTiming start time: 176884346ms
+  SurfaceFlinger: Enter boot animation
+  FMQ: grantorIdx must be less than 3   (x4: benign, VERIFIED IN SOURCE:
+    LineageOS android_system_libfmq 19c77ec, include/fmq/MessageQueue.h:622
+    maps the optional event-flag word, 1204-1207 log and return nullptr for
+    a queue without one, and 623 handles nullptr)
+  hwcomposer: Failed to open pipe to InputFlinger: No such device or address
+    (repeated when the pointer is over the window: the composer's input
+    FIFOs have no reader, there is no InputFlinger; below)
+xwd of Weston's window: 93.3% 000000 (the boot animation's black), Weston's
+panel, and 4,479 pixels of 167c80, the teal of the LineageOS logo
+animation: the arc and circle, centred. Three screenshots over 8 s: the
+first differs from the second in 185 pixels (the circle), the second and
+third are identical (part1 of the animation loops 120 frames, 97 distinct:
+a coincidence of phase); a burst of five 0.45 s apart: 1003, 11, 3133 and
+4902 pixels differ; the circle moves along the arc. The zip: 1080x360 at
+60 fps, part0 121 frames once, part1 loop until boot completes, part2-4.
+SurfaceFlinger page-flip count (service call SurfaceFlinger 1013, as uid
+1000; as uid 2000 it waits for android.permission.HARDWARE_TEST):
+  12819 -> 13404 in 10.3 s: 57.0 flips/s;  805 -> 1391 in 10.3 s: 57.0/s (fresh start)
+Composer buffer commits to Weston (WAYLAND_DEBUG, attach+commit pairs):
+  1268 commits, 4 wl_shm pools; 56.8/s over the last 10 s, interval median 16.9 ms, p95 22.6 ms
+Start-up (a script polling logcat, fresh composer, SurfaceFlinger,
+bootanimation):
+  composer launched -> "services are ready"         0.52 s
+  surfaceflinger launched -> power mode 2            0.88 s
+  bootanimation launched -> "Enter boot animation"   2.41 s
+  (second run: 0.47, 0.91, 2.43 s)
+CPU over 10 s, boot animation running, and RSS:
+  bootanimation   34.6% (38.3% with WAYLAND_DEBUG)   207-329 MB
+  surfaceflinger  40.5% (47.8%)                       38-144 MB
+  composer         4.2% (4.8%)                        29-60 MB
+  allocator        0.0%                                5-14 MB
+  weston           4.2% (5.0%)                        17-19 MB
+  xquartz         22.8% (30.2%)                       30-32 MB
+  servicemanager, hwservicemanager, vndservicemanager, task, configstore:
+                   ~0.1%                              5-7 MB each
+  (macOS's RSS of FEX processes varies from sample to sample)
+The composer's CPU is 0.7 ms per frame for everything it does, including
+the 800x568 copy with the red/blue swap, translated by FEX.
+
+scripts/run-android-display.sh start (new; the same sequence, private
+ANDROID_DISPLAY_DIR, the clone as ANDROID_X86_ROOT, logd stand-in on):
+  run-android-display: binder and properties up in 4.5 s; SurfaceFlinger registered 4.9 s after start
+  allocator, composer, configstore, hwservicemanager, logd, servicemanager,
+  surfaceflinger, task, vndservicemanager, bootanimation: running
+  xwd: 167c80 4,513 pixels (the boot animation)
+scripts/run-android-display.sh stop: everything it started gone (ps).
+
+R7  How hwcomposer.waydroid connects (VERIFIED IN SOURCE)
+---------------------------------------------------------
+github.com/waydroid/android_hardware_waydroid, branch lineage-18.1, checked
+out at 3b2f29d0 (2025-05-20, the last hwcomposer commit before the image's
+build date 2025-06-28; strings in the image's hwcomposer.waydroid.so match:
+no "Wait until the window is configured" of the July 2025 commits), and
+Lepton's pin gitlab.steamos.cloud/frame-public/android_hardware_waydroid
+896f6528 (2026-05-20):
+- hwcomposer.cpp:1260-1268 (Lepton 755-760): XDG_RUNTIME_DIR from
+  waydroid.xdg_runtime_dir (default /run/user/1000), WAYLAND_DISPLAY from
+  waydroid.wayland_display (default wayland-0), gralloc type from
+  ro.hardware.gralloc; wayland-hwc.cpp:1953 wl_display_connect(NULL).
+- wayland-hwc.cpp:1817-1899 registry_handle_global: wl_compositor (min 5),
+  wl_subcompositor 1, xdg_wm_base 1, wl_shell 1, wl_seat, wl_shm 1,
+  wl_output (min 3), wp_presentation 1, wp_viewporter 1, android_wlegl
+  (gralloc "android" only), zwp_linux_dmabuf_v1 3 (gbm / minigbm only),
+  zwp_tablet_manager_v2, zwp_pointer_constraints_v1,
+  zwp_relative_pointer_manager_v1, zwp_idle_inhibit_manager_v1,
+  wp_fractional_scale_manager_v1, wl_data_device_manager, gtk_shell1; Lepton
+  adds mir_shell_v1. No Waydroid-specific Wayland protocol is needed with
+  gralloc "default" (wayland-android.xml is android_wlegl).
+- wayland-hwc.cpp:1971 IWaydroidTask::getService() in create_display.
+- hwcomposer.cpp:154-183 update_shm_buffer (lock, copy with R/B swap),
+  187-262 get_wl_buffer, wayland-hwc.cpp:260-293 create_shm_wl_buffer
+  (memfd_create "buffer", MFD_ALLOW_SEALING; mmap MAP_SHARED; wl_shm pool).
+- hwcomposer.cpp:494-540: waydroid.active_apps "none" / "Waydroid" / app
+  windows; 1279: waydroid.background_start=false creates the first window
+  at open.
+- hwcomposer.cpp:1246 sw_sync_timeline_create(), 976-977 retire fences:
+  there is no sw_sync device here, so these are -1 (HYPOTHESIS from the
+  source); SurfaceFlinger runs "without sync framework" per the image's
+  build.prop and presented.
+- wayland-hwc.cpp:1292-1323, 1809: mkfifo /dev/input/wl_{pointer,keyboard,
+  touch,tablet}_events when the seat has them; 694 opens them O_WRONLY |
+  O_NONBLOCK (ENXIO with no reader).
+Weston offers everything the composer needs (R3).
+
+R8  The GL path (inventory, MEASURED by listing; function as labelled)
+----------------------------------------------------------------------
+x86_64 and arm64 images alike:
+  /vendor/lib64/egl: libEGL/libGLESv1_CM/libGLESv2 _mesa and _swiftshader
+  /vendor/lib64/hw: gralloc.default, gralloc.gbm, gralloc.minigbm_gbm_mesa,
+    hwcomposer.waydroid, vulkan.{broadcom,freedreno,lvp,panfrost,radeon,virtio}
+    (+ intel, intel_hasvk in x86_64)
+  no ANGLE.
+Used here: SwiftShader (MEASURED, "OpenGL ES 3.0 SwiftShader 4.1.0.7").
+Mesa EGL needs a DRM render node and gbm (none: HYPOTHESIS that it fails,
+not tried). vulkan.lvp.so is Mesa lavapipe, Vulkan on the CPU (UNTESTED).
+GPU later: HYPOTHESIS, docs/ANDROID_ZERO_VM_FEASIBILITY.md 3.11.
+
+R9  Tests added
+---------------
+tests/elf/run.sh: SIMD_SYSCALL (tests/elf/simd_syscall.c, freestanding),
+  SHM_MREMAP (tests/elf/shm_mremap.c, 16 and 4 KiB pages).
+tests/android/run.sh: LXRT_BINDER_UID (sender_euid seen by the native
+  service); a display section: Weston headless with wayland-info (the
+  globals the composer needs), the aarch64 and the x86-64 (FEX) wl_shm
+  clients; with an X server on :2, the x86-64 client's colours read back
+  from Weston's X window; then scripts/run-android-display.sh with
+  SurfaceFlinger's boot animation (teal pixels in the window) and its
+  page-flip rate. The display section alone (on the clone):
+    ok Weston (headless, pixman) under lxrun: wayland-info lists 16 globals, ...
+    ok aarch64 wl_shm client ...: 60 frames in 1701 ms, 34.6 fps
+    ok x86-64 wl_shm client under FEX into the aarch64 Weston: 60 frames in 1720 ms, 34.3 fps
+    ok Weston's X window 0x800005 on :2 ... x86-64 client's four colours:
+       2080c0: 37440 pixels c04020: 37440 pixels 20c040: 38400 pixels e0e0e0: 38411 pixels
+    ok Android SurfaceFlinger (x86_64, FEX) presents the LineageOS boot animation
+       in Weston's window: 59 page flips/s
+    5 passed, 0 failed, 31 s
+  (Weston's headless backend repaints at ~34 frames/s here, the X11 one at
+  ~57.)
+
+R10 Walls and loose ends, as found
+----------------------------------
+- Input: hwcomposer.waydroid writes pointer/keyboard events into FIFOs for
+  Android's EventHub. The runtime maps /dev/input to one host directory for
+  all guests (/tmp/lxrt-input, runtime/evdev.c, steamarm-inputd's nodes),
+  so the FIFOs land there; they have no reader without InputFlinger
+  (system_server). scripts/run-android-display.sh stop removes them when no
+  composer runs. Per-root /dev/input for these FIFOs, next to inputd's
+  nodes, is needed before input works.
+- No init: bootanimation had to be started by hand (ctl.start refused), and
+  nothing sets service.bootanim.exit (no system_server): the animation
+  loops until stopped.
+- Weston's log attributed a client connection to the pid of an unrelated
+  FEXServer (the other session's): the runtime's SO_PEERCRED answer comes
+  from a table keyed by socket that can hold a stale sender; only Weston's
+  log line is affected here (not investigated further).
+- weston-terminal: no /dev/ptmx (R3).
+- Everything is CPU: four passes over each frame (SurfaceFlinger's GLES
+  composition, the composer's copy, Weston's pixman composite, the X
+  server's copy to the window).
+
+Final checks (MEASURED, this tree, default lxrun build)
+------------------------------------------------------
+Run twice. The first run (all passed: 78 / 18 / 48 + 1 xfail) was on the
+build whose lxrt_restore_regs had lost its vector loads (R4); the numbers
+below are the second run, on the corrected build that is committed.
+make lxrt launcher: rc 0 (1 s, up to date after the rebuild; 21 s building).
+make test-launcher-core: rc 0, 59 s -- application core: all checks
+  passed; app entry: all checks passed; 39/0; 32/0; 10/0; guest_env 26/0;
+  mkarmroot 25/0; run_steam_arm64 10/0; 35/0.
+tests/elf/run.sh: 78 passed, 0 failed, 27 s (vulkaninfo skipped, as
+  before); SIMD_SYSCALL (getpid 23 ns) and SHM_MREMAP among them.
+tests/elf/run_i386.sh: 18 passed, 0 failed, 47 s (smc_subpage xfail and
+  two probes without a verdict, as before).
+tests/android/run.sh: 48 passed, 0 failed, 1 expected failure (arm64
+  dalvikvm64, the heap wall), 60 s: arm64 18 + 1 xfail, x86_64 13, binder
+  and properties 12 (LXRT_BINDER_UID new), display 5 (all new): headless
+  Weston 16 globals; aarch64 client 60 frames 35.5 fps; x86-64 client under
+  FEX 60 frames 34.8 fps; Weston's X window 0x600005: 37440 / 37440 / 38400
+  / 38408 pixels of the client's colours; SurfaceFlinger's boot animation
+  in the window, 58 page flips/s. x86_64 ART in that run: -Xint 155.9, JIT
+  76.8 ms/round.
+  ART against HEAD's runtime, alternating, 3 rounds each (on the clone):
+    JIT Loop 20000000 5:    HEAD 76.8 76.4 76.8   now 76.8 77.8 76.7 ms/round
+    -Xint Loop 2000000 2:   HEAD 157.4 156.3 156.0  now 155.7 156.0 156.8 ms/round
+  (stage 25: 77 and 156): the trampoline change does not show there. (The
+  first run's 163.8 / 130.3 were taken while another session's Android
+  stack was running.)
+python3 -m unittest tests/test_docs_records.py: OK (6 tests).
+
+What was not done
+-----------------
+- Input (the composer's FIFOs need a per-root /dev/input and InputFlinger),
+  zygote, system_server, apps: the boot animation is Android's first frame,
+  not an app.
+- The arm64 root: its SurfaceFlinger would need nothing ART-related, but it
+  was not tried (its hwcomposer and SwiftShader are aarch64 bionic code,
+  native under lxrun; HYPOTHESIS that the same chain works there).
+- A GPU path, dmabuf, a CAMetalLayer composer: HYPOTHESIS, docs.
+- End-to-end latency from an Android frame to the macOS window: not
+  measured.

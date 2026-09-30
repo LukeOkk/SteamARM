@@ -25,7 +25,7 @@ _lxrt_tramp_template:
     // glibc's clone wrapper relies on it: it stashes the thread function and
     // its argument in registers before `svc` and calls them in the child. A
     // snapshot that stopped at x18 left the child branching through zero.
-    sub     sp, sp, #256
+    sub     sp, sp, #784
     stp     x0,  x1,  [sp, #0]
     stp     x2,  x3,  [sp, #16]
     stp     x4,  x5,  [sp, #32]
@@ -43,6 +43,37 @@ _lxrt_tramp_template:
     stp     x28, x29, [sp, #224]
     str     x30,      [sp, #240]
 
+    // And the vector registers, FPSR and the condition flags (NZCV), above
+    // the general-purpose block
+    // (the dispatcher's argument, struct lxrt_regs, stays at sp). The Linux
+    // kernel preserves the whole FP/SIMD file across a syscall, so a compiler
+    // may keep values in v0-v31 across an inline `svc` (glibc's
+    // INTERNAL_SYSCALL, any freestanding code); the dispatcher is Darwin C
+    // code and libsystem's memcpy/memset clobber them. MEASURED: a raw
+    // Wayland client kept a msghdr template in q2 across its syscalls and
+    // sent iovlen 0 (EMSGSIZE) after a few calls
+    // (benchmarks/stage27-android-display.txt). The same holds for NZCV: a
+    // counted loop compiles to `subs; svc; b.ne`, and the dispatcher's own
+    // comparisons changed the flags under it (tests/elf/simd_syscall.c).
+    // FPCR is left alone: nothing in the runtime changes the rounding mode
+    // or the trap enables. Cost (MEASURED, median of 10 runs of 200,000
+    // getpid): 18.8 -> 23.5 ns per syscall; the vector block alone and the
+    // flags alone each cost about the same 5 ns, so the price is mostly the
+    // larger frame, not the stores.
+    add     x16, sp, #256
+    st1     {v0.2d, v1.2d, v2.2d, v3.2d}, [x16], #64
+    st1     {v4.2d, v5.2d, v6.2d, v7.2d}, [x16], #64
+    st1     {v8.2d, v9.2d, v10.2d, v11.2d}, [x16], #64
+    st1     {v12.2d, v13.2d, v14.2d, v15.2d}, [x16], #64
+    st1     {v16.2d, v17.2d, v18.2d, v19.2d}, [x16], #64
+    st1     {v20.2d, v21.2d, v22.2d, v23.2d}, [x16], #64
+    st1     {v24.2d, v25.2d, v26.2d, v27.2d}, [x16], #64
+    st1     {v28.2d, v29.2d, v30.2d, v31.2d}, [x16]
+    mrs     x16, fpsr
+    mrs     x17, nzcv
+    str     x16, [sp, #768]
+    str     x17, [sp, #776]
+
     // The guest's resume address. `svc` leaves no trace of where it was, and
     // clone's child has to start executing at the instruction after it, so the
     // rewriter patches it in per site and the trampoline hands it over.
@@ -52,6 +83,25 @@ _lxrt_tramp_template:
     mov     x0, sp                  // the saved block is the dispatcher's arg
     ldr     x16, Llxrt_lit
     blr     x16
+
+    // FPSR is written back only when the dispatcher changed it (the usual
+    // case is that it did not); NZCV always.
+    ldr     x16, [sp, #768]
+    mrs     x17, fpsr
+    cmp     x16, x17
+    b.eq    1f
+    msr     fpsr, x16
+1:  ldr     x17, [sp, #776]
+    msr     nzcv, x17
+    add     x16, sp, #256
+    ld1     {v0.2d, v1.2d, v2.2d, v3.2d}, [x16], #64
+    ld1     {v4.2d, v5.2d, v6.2d, v7.2d}, [x16], #64
+    ld1     {v8.2d, v9.2d, v10.2d, v11.2d}, [x16], #64
+    ld1     {v12.2d, v13.2d, v14.2d, v15.2d}, [x16], #64
+    ld1     {v16.2d, v17.2d, v18.2d, v19.2d}, [x16], #64
+    ld1     {v20.2d, v21.2d, v22.2d, v23.2d}, [x16], #64
+    ld1     {v24.2d, v25.2d, v26.2d, v27.2d}, [x16], #64
+    ld1     {v28.2d, v29.2d, v30.2d, v31.2d}, [x16]
 
     // Restore in reverse, x0/x1 last: the dispatcher wrote the syscall result
     // into the x0 slot and it must survive.
@@ -71,7 +121,7 @@ _lxrt_tramp_template:
     ldp     x4,  x5,  [sp, #32]
     ldp     x2,  x3,  [sp, #16]
     ldp     x0,  x1,  [sp, #0]
-    add     sp, sp, #256
+    add     sp, sp, #784
 
 Llxrt_branch:
     b       Llxrt_branch            // patched: back to the instruction after svc
