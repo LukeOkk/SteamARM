@@ -710,6 +710,23 @@ else
     echo "  skip  POSIX timer test (run scripts/mkroot-rpm.sh first)"
 fi
 
+# 19d. A SIGSEGV handler that never fixes the fault: the process dies of
+# signal 11 after 10000 identical faults (runtime/signal.c) instead of
+# spinning forever (an i386 Android daemon under FEX did, at 100% CPU).
+if [ -f "$STAGE/usr/lib64/libc.a" ] && [ -n "$GCCDIR" ]; then
+    if err=$(glibc_cc -static-pie -O0 -o build/segv_spin tests/elf/segv_spin.c 2>&1); then
+        t0=$SECONDS
+        out=$(deadline 60 ./build/lxrun "$PWD/build/segv_spin" 2>&1); rc=$?
+        if [ "$rc" -eq 139 ] && grep -q "10000 times in a row" <<<"$out"; then
+            ok "a fault its handler never fixes ends the process (signal 11 after $((SECONDS - t0)) s)"
+        else
+            bad "unfixed SIGSEGV ends the process" "rc=$rc $(tail -2 <<<"$out" | tr '\n' ' ')"
+        fi
+    else
+        bad "build segv_spin" "$err"
+    fi
+fi
+
 # 19c. 32-bit bionic needs process and thread IDs below 65536. Exercise the
 # opt-in namespace with native aarch64 first, leaving the normal run untouched.
 if [ -f "$STAGE/usr/lib64/libc.a" ] && [ -n "$GCCDIR" ]; then

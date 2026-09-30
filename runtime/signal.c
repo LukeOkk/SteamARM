@@ -760,6 +760,38 @@ static void host_handler(int dsig, siginfo_t *dinfo, void *uap)
     // The runtime's own faults first (shared with main.c's fault_report).
     if (lxrt_absorb_runtime_fault(dsig, dinfo, uap))
         return;
+    // A SIGSEGV the guest's handler returns from without fixing comes back
+    // at once, at the same pc and address: a thread that took 10000 of them
+    // in a row, with no other fault between, makes no progress and never
+    // will. It dies of the fault, as the process would without a handler,
+    // instead of spinning a core forever (MEASURED: an i386 Android daemon
+    // that aborted under FEX, and the OMX store after its seccomp filter,
+    // each at 100% CPU for as long as it was left, FEX faulting at 0x0 in
+    // its own code). SIGBUS repeats legitimately (FEX's split-lock atomics).
+    if (dsig == SIGSEGV && dinfo && uap) {
+        static _Thread_local uint64_t spin_pc, spin_addr;
+        static _Thread_local unsigned spin_n;
+        uint64_t pc = ((ucontext_t *)uap)->uc_mcontext->__ss.__pc;
+        uint64_t addr = (uint64_t)(uintptr_t)dinfo->si_addr;
+        if (pc == spin_pc && addr == spin_addr) {
+            if (++spin_n >= 10000) {
+                char b[160];
+                int n = snprintf(b, sizeof b, "[lxrt] pid %d: SIGSEGV at pc 0x%llx addr 0x%llx 10000 times "
+                                 "in a row, unhandled: the process dies of it\n", (int)getpid(),
+                                 (unsigned long long)pc, (unsigned long long)addr);
+                write(2, b, (size_t)n);
+                struct sigaction dfl;
+                memset(&dfl, 0, sizeof dfl);
+                dfl.sa_handler = SIG_DFL;
+                sigaction(SIGSEGV, &dfl, NULL);
+                return;     // the instruction faults again, now with the default action
+            }
+        } else {
+            spin_pc = pc;
+            spin_addr = addr;
+            spin_n = 0;
+        }
+    }
     // LXRT_FAULT_LOG=1: a synchronous fault that goes on to the guest (its
     // handler or the default action), with pc, word, address and registers,
     // without a syscall trace (whose timing hid a stage 25 crash).
