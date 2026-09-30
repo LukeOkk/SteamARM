@@ -697,8 +697,14 @@ def launch(s, pkg, apk=None, force=False):
     log("am start -W -n %s/%s: %s%s (%.1f s)" % (pkg, act, status.group(1) if status else "no status",
                                                 ", TotalTime %s ms" % total.group(1) if total else "",
                                                 time.time() - t0))
-    for _ in range(60):
+    for n in range(60):
         f = focused(s)
+        if n == 15 and not f.startswith(pkg + "/"):
+            # Once in a while the focus stays on the home screen after a
+            # successful am start (MEASURED: tests/android/run.sh, stage 29);
+            # asking again brings the app's task to the front.
+            log("no focus after 30 s (focus: %s): am start again" % (f or "none"))
+            guest(s, ["/system/bin/am", "start", "-n", "%s/%s" % (pkg, act)], timeout=120)
         if f.startswith(pkg + "/"):
             log("focused window: %s (%.1f s after am start; %d lxrun processes on the Mac)"
                 % (f, time.time() - t0, lxrun_count()))

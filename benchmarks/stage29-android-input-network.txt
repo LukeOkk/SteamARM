@@ -117,3 +117,32 @@ shows Android's desktop mode with the app in a freeform window. Idle CPU
 0.1%, RSS 259 MB. Fixed on the way: wl_pointer.set_cursor was taken for
 release (protocol error, the composer reconnecting); the window stayed 1x1
 (Waydroid sizes its window with wp_viewport, not with a new buffer).
+
+== Release matrix (0.3.7 candidate, the runtime with POSIX timers and 16-bit ids)
+tests/elf/run.sh            == 88 passed, 0 failed
+tests/elf/run_i386.sh       == i386: 18 passed, 0 failed
+tests/win/run.sh            == 11 passed, 0 failed (D3D9/11/12, 64- and 32-bit, 159-162 fps)
+tests/elf/run_vk_device.sh  == vk_device: 2 passed, 0 failed
+tests/arm64/run.sh          == 4 passed, 0 failed
+make test-launcher-core     == 35 passed, 0 failed
+tests/wlmac/run.sh          == 3 passed, 0 failed
+tests/android/run.sh        == 80 passed, 0 failed (2 expected failures), no FEXServer left;
+                               input from the Mac window, network and the session all passing
+tests/win/run_steam_path.sh tone passes; xinput is intermittent. Runs passed:
+  this stage's final runtime 3 of 6; with timer_create answering ENOSYS 3 of 5;
+  with every timer accepted 0 of 2; the runtime before the 16-bit ids
+  (59857cd) 3 of 4; 0.3.6's runtime (a310f0c) 3 of 4. A failing run leaves no result file
+  (the probe never finishes starting under Proton/FEX). Not caused by this
+  stage; it passed 2/2 when 0.3.6 was released. A leftover steamarm-inputd
+  from an earlier Steam start also fails it by design ("stop it first").
+Realtime-signal POSIX timers (glibc's and bionic's SIGEV_THREAD) answer
+ENOSYS: their helper thread needs si_code SI_TIMER and si_value, which the
+runtime's signal paths do not carry yet.
+
+== Steam from the launcher's entries (scripts/run-app.sh), the release runtime
+steam (x86 client under FEX): first start after the other sessions: no window
+  in 300 s (the known intermittent hang early in the start); then twice:
+  main window at 91 s, mapped 4/4 more samples (0.3.6: 125 s)
+steam-arm64 (Fedora root): sign-in window at 16 s
+steam-arm64-frame (Steam Frame root): sign-in window at 20 s
+after each --stop: no guest left

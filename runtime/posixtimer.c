@@ -139,6 +139,13 @@ long lxrt_posix_timer_create(int clockid, const void *event, int *id_out)
         if (notify != 0 && notify != 1 && notify != 2 && notify != 4)
             return LERR(EINVAL);
         if (notify != 1 && (signo < 1 || signo > 64)) return LERR(EINVAL);
+        // A realtime signal is how glibc and bionic run SIGEV_THREAD timers:
+        // a helper thread waits for it and takes the timer from the
+        // siginfo (si_code SI_TIMER, si_value), which the runtime's signal
+        // paths do not carry yet, so its callbacks would never run. These
+        // are answered as before timers existed here, ENOSYS, and callers
+        // keep their fallback. Watchdogs with SIGABRT or SIGALRM work.
+        if (notify != 1 && signo >= 32) return LERR(ENOSYS);
         pthread_t target;
         if (notify == 4 && !lxrt_thread_lookup(tid, &target)) return LERR(EINVAL);
     }
