@@ -156,10 +156,11 @@ PROFILES = {
             "apexd": "flattened APEXes (ro.apex.updatable unset), already under /apex",
             "netd": "exits at once: NETLINK_KOBJECT_UEVENT, route netlink, iptables, BPF; its "
                     "'onrestart restart zygote' then kills the zygote every 5 s",
-            "vendor.audio-hal": "i386 (32-bit) binary: runs under FEX with patches/fex-lxrt-i386-bionic.patch, "
-                                "then stops at binder ('Binder driver /dev/vndbinder could not be opened': the "
-                                "runtime's binder takes a 32-bit guest's pointers as host ones, BINDER_VERSION "
-                                "fails with EFAULT); audioserver waits for it",
+            # Started instead with --linkerconfig when the root's FEX carries
+            # patches/fex-lxrt-i386-bionic.patch (Boot.__init__).
+            "vendor.audio-hal": "i386 (32-bit): needs a FEX with patches/fex-lxrt-i386-bionic.patch and "
+                                "--linkerconfig (the legacy /linkerconfig has no VNDK namespace for "
+                                "android.hardware.audio@4.0.so); audioserver waits for it",
             "vendor.audio-hal-2-0": "declares the same interface; no such binary in this image",
             "vendor.hwcomposer-2-1": "Waydroid's composer is a Wayland client: no display here",
             # Started instead when the root's FEX carries
@@ -424,10 +425,13 @@ class Boot:
         # i386 programs run under a FEX with patches/fex-lxrt-i386-bionic.patch
         # (it carries this string): then the secondary zygote is started too
         # (benchmarks/stage28-android-reliability.txt).
+        # With --linkerconfig the 32-bit audio HAL links as well (binder for
+        # 32-bit guests, runtime/binder.c), and audioserver stops waiting.
         if self.x86 and a.profile == "headless" and self.fex_has(b"lxrt-i386-bionic"):
+            extra = {"zygote_secondary"} | ({"vendor.audio-hal"} if a.linkerconfig else set())
             prof = dict(self.profile)
-            prof["start"] = set(prof["start"]) | {"zygote_secondary"}
-            prof["left_out"] = {k: v for k, v in prof["left_out"].items() if k != "zygote_secondary"}
+            prof["start"] = set(prof["start"]) | extra
+            prof["left_out"] = {k: v for k, v in prof["left_out"].items() if k not in extra}
             self.profile = prof
         self.t0 = time.time()
 
