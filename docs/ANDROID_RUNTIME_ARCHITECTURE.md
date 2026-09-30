@@ -1,10 +1,12 @@
 # Android userspace on lxrun, with no VM
 
-Status 2026-09-29, stage 27 (`benchmarks/stage25-android-userspace.txt`,
+Status 2026-09-30, stage 28 (`benchmarks/stage25-android-userspace.txt`,
 `benchmarks/stage25-binder.txt`, `benchmarks/stage25-art-x86-fex.txt`,
 `benchmarks/stage26-android-properties.txt`,
 `benchmarks/stage27-android-framework.txt`,
-`benchmarks/stage27-android-display.txt`).
+`benchmarks/stage27-android-display.txt`,
+`benchmarks/stage28-android-reliability.txt`,
+`benchmarks/stage28-android-apk.txt`).
 The owner's goal is Android on the Mac: install APKs and, later, the Google
 Play Store, with **zero VM** (`AGENTS.md`). This page says what of Android
 runs today, how to run it, what stops Java on arm64, how Java runs on the
@@ -56,6 +58,13 @@ SurfaceFlinger renders the LineageOS boot animation with SwiftShader and
 presents it through Waydroid's hwcomposer to Weston running under lxrun,
 whose X11 window on SteamARM's X server is a macOS window, at 57 frames/s
 (MEASURED, section "Display").
+And since stage 28 the two meet: with the display profile the framework
+boots to `sys.boot_completed=1` (17-27 s warm), an APK from the launcher's
+library is installed with the image's own `pm install` and started with
+`am start`, and its window is in the macOS window, input from the window
+reaching Android's InputDispatcher. `scripts/android-session.py` does it
+end to end and the launcher's Android cards open with it (MEASURED,
+section "Session: an APK in a macOS window").
 
 ## What runs today (MEASURED)
 
@@ -599,13 +608,15 @@ a seccomp profile that answers success and a bionic fake-uid patch
 | get/set[res]uid, get/set[res]gid, setfs*, get/setgroups | the virtual ids; CAP_SETUID/CAP_SETGID decide; saved ids as kernel/sys.c moves them; groups kept sorted |
 | capget, capset, prctl capability options | kernel/capability.c's subset rules; keepcaps and the effective-set fixups on a uid change; bounding set 0..40 then EINVAL; ambient; securebits; no_new_privs |
 | execve, fork | the next image gets them, recomputed as for a file without capabilities (root: bounding and inheritable; others: the ambient set); the bind table goes along |
-| chown, fchown, fchownat | a change Linux would allow reports success; the file stays the Mac user's |
+| chown, fchown, fchownat | a change Linux would allow reports success; the file stays the Mac user's and the owner is recorded in its `org.steamarm.lxrt.owner` xattr, which stat, fstat, fstatat and statx report to guests with Android ids (stage 28: installd checks the owners it set) |
 | unshare, mount, umount2, setns | namespaces and propagation changes succeed for CAP_SYS_ADMIN (one view); `MS_BIND` is an entry in the per-process bind table (`runtime/mounts.c`); other mounts EPERM |
 | SO_PEERCRED, SCM_CREDENTIALS, capget of a pid, binder sender euid | another process's virtual ids (effective for SO_PEERCRED, real for SCM_CREDENTIALS) and capabilities, from `/tmp/lxrt-shm-<uid>/android-ids.v2` (pid, checked against its start time) |
 
 Without the variable nothing changes. What the kernel would enforce is not
-enforced: files are all the Mac user's (stat shows 501) and any process can
-signal any other.
+enforced: files are all the Mac user's (a recorded owner is only what stat
+shows) and any process can signal any other. `/proc/self/status` and
+`/proc/<pid>/status` show the virtual ids (ActivityManager matches a pid to
+an app by its `Uid:` line).
 
 ## Boot: init, zygote64, system_server (stage 27, `benchmarks/stage27-android-framework.txt`)
 
@@ -821,11 +832,63 @@ scripts/run-weston.sh stop
   (`/dev/ptmx`), which the runtime does not pass through (VERIFIED IN
   SOURCE, `runtime/dispatch.c` `translate_one`).
 
+## Session: an APK in a macOS window (stage 28, `benchmarks/stage28-android-apk.txt`)
+
+### What works (MEASURED)
+
+| step | result |
+|---|---|
+| `android-boot.py --wayland ...` (the display profile: headless's services, Waydroid's composer and task HALs, bootanim, mediametrics, stand-ins for netd and vold, lmkd's socket) | `sys.boot_completed=1`: 122.6 s on a clone's first boot (package scan, dexopt), 17-27 s warm; Trebuchet, SystemUI and the keyboard run |
+| `pm install` (the image's pm and installd, dexopt by dex2oat64 under FEX) | "Success" in 5-6 s for a 16.7 MB F-Droid APK (dex only) |
+| `am start -W -n <pkg>/<activity>` | "Status: ok", TotalTime 2.5-2.9 s; `dumpsys window`: the app's window has the focus |
+| the window | in Weston's X window, a macOS window: `xwd -id` of it shows the app (`scripts/android-session.py xwd`, `tests/android/xwd_colors.py`) |
+| input | InputFlinger opens the composer's `wl_keyboard_events` and `wl_pointer_events` FIFOs (`LXRT_INPUT_DIR`); pointer motion sent to Weston's X window arrives in InputDispatcher at the same coordinates. Clicks and keys were not sent (no XTEST; Weston aborts on a synthetic button): HYPOTHESIS that they take the same path |
+| `scripts/android-session.py launch <pkg>` from a fresh clone of the root | 45 s to the focused window (boot 25 s, first-boot trim 9 s, install 6 s, start 3 s); warm `run` 23 s; Detener (`session.py stop`) leaves nothing |
+
+### What it needed (stage 28)
+
+| change | why | where |
+|---|---|---|
+| sendfile, splice | `pm install`: "sendfile failed: ENOSYS" (FileUtils.copy of the APK into the install session) | `runtime/dispatch.c` |
+| services run in the root (cwd) | relative paths resolved against the Mac's `/`: "Failed rename" (makeDirRecursive walks `data`, `data/app` relative) | `scripts/android-boot.py` |
+| lmkd's socket, with a reader | every oom_adj change waited 3 s for lmkd with ActivityManager's lock held: ANRs, "Lost network stack" | `scripts/android-boot.py` |
+| BOOTTIME timerfds on BOOTTIME | guest BOOTTIME runs 4.3 s behind MONOTONIC here: AlarmManager's alarms fired early, "Too many (100000) false wakeups" | `runtime/timerfd_signalfd.c` |
+| descriptors in flight stay referenced; the hub acknowledges each thread channel (a new one otherwise) | a new binder thread channel arrived closed at the hub: "Bad file descriptor", system_server died 0-5 times a boot; with the first fix a thread could wait forever instead | `runtime/binder.c`, `runtime/binder_hub.c` |
+| virtual ownership, user. xattrs, process_vm_readv, `/proc/<pid>/status` ids, alarm timerfd clocks, a futex deadline past 64-bit ns, SO_DOMAIN, empty SCM_RIGHTS, MSG_TRUNC | installd's owner checks, UserDataPreparer's user.serial, ART's fault handler (NullPointerException from compiled code), ActivityManager's pid-to-uid, AlarmManager, audioserver's TimeCheck, the zygote's accept, libbase's descriptor receive | runtime (the stage's WIP, reviewed and tested) |
+| binder stand-ins (netd, dnsresolver, vold, storaged), the audio HAL passthrough, init_user0, host properties | system_server waits for netd and vold forever and reboots on a null vold; no block devices, FUSE, netlink or BPF here | `scripts/android-boot.py`, `scripts/android/java` |
+| 14 of the image's apps disabled once per session root; the safeguard allows 100 more processes during a session | Android is one lxrun process per service and app; the safeguard stopped every guest at 81 > 80 | `scripts/android-session.py`, `scripts/safeguard.sh` |
+
+### How to run it
+
+```sh
+make lxrt
+scripts/android-pm.py install app.apk                 # into ~/SteamARM-roots/android/packages
+scripts/android-session.py launch <package>           # X server on :2, Weston, boot, install, am start
+scripts/android-session.py xwd /tmp/android.xwd       # the window's pixels
+scripts/android-session.py shell /system/bin/dumpsys window   # any guest program, as root
+scripts/android-session.py stop
+scripts/android-session.py launch <package> --headless        # no window (tests)
+```
+
+- The session root is `/Volumes/SteamARMAndroid/session` (`ANDROID_SESSION_ROOT`),
+  an APFS clone of `root-x86_64` made the first time; its `/data` keeps the
+  installed apps and their data. `--fex FILE` puts a FEX-emu into it when it
+  is made; the root's own FEX (stage 27's) was enough (MEASURED).
+- Host state `/tmp/lxrt-android-session-<uid>` (binder, properties,
+  `/dev/input`, `init.log`, `logcat.txt`); log
+  `~/SteamARM-roots/logs/android-<date>.log`.
+- One session at a time (`~/SteamARM-roots/android/session.json`).
+- What it cannot run: arm64-v8a-only code (the ART heap wall), 32-bit ARM,
+  32-bit x86 (`android-boot.py --abi32` exists, not measured end to end), a
+  minSdk above 30. No sound, no network, no camera; SwiftShader draws on
+  the CPU; Android's clock is UTC.
+
 ## APKs and the Google Play Store
 
 - An APK is a zip: its dex runs on ART (blocked above in the arm64 root;
-  running in the x86_64 root under FEX) and its `lib/<abi>/*.so` load into
-  an ART process of that ABI. `lib/arm64-v8a` needs the arm64 root;
+  running in the x86_64 root under FEX, where `pm install` and `am start`
+  now work: "Session" above) and its `lib/<abi>/*.so` load into an ART
+  process of that ABI. `lib/arm64-v8a` needs the arm64 root;
   `lib/x86_64` (and, untested, `lib/x86`) runs in the x86_64 root;
   `armeabi-v7a`-only apps cannot run on Apple silicon (no AArch32; 1,684
   32-bit arm files in the arm64 image are unusable for the same reason) and
@@ -841,37 +904,33 @@ scripts/run-weston.sh stop
 
 ## Order of work
 
-1. The ART heap (above): without it, nothing Java runs in the arm64 root.
-   Start with a feasibility count of the reference sites outside the
-   poisoning hooks in ART's source. In the x86_64 root ART already runs Java
-   under FEX (stage 25, above).
-2. Binder: done in userspace (stage 25), and x86-64 guests reach it
-   through FEX (stage 27). Next on it: ashmem/memfd sharing across
-   processes, the binder debug logs `lshal` reads, the cost per call.
+1. The ART heap (above): without it, nothing Java runs in the arm64 root,
+   and arm64-v8a-only apps stay disabled. Start with a feasibility count of
+   the reference sites outside the poisoning hooks in ART's source. In the
+   x86_64 root ART runs Java under FEX (stage 25).
+2. Binder: done in userspace (stage 25), for x86-64 guests (stage 27) and
+   i386 guests (stage 28); descriptors in flight kept referenced (stage 28).
+   Next on it: the cost per call, the binder debug logs `lshal` reads, why
+   a thread channel could arrive closed (UNKNOWN; now refused and replaced).
 3. Properties: done (stage 26), for x86-64 guests too (stage 27).
-4. init, zygote64, system_server: running up to LightsService in the
-   x86_64 root (stage 27). The next wall is a display composer for
-   SurfaceFlinger: Waydroid's with a working Wayland compositor, or one of
-   SteamARM's. After it, in the order system_server meets them:
-   PackageManagerService (`pm list packages`, `pm install`), then
-   audioserver's i386 audio HAL (FEX's 32-bit mode) and netd.
-5. Then a window, input and audio (Lepton's graphics analysis, 4), and the
-   rebuilt ART for arm64-v8a APKs in the native root.
-2. Binder: done in userspace (stage 25, above). Next on it: ashmem/memfd
-   sharing across processes, the binder debug logs `lshal` reads, the cost
-   per call, and x86-64 guests reaching it through FEX (UNTESTED).
-3. Properties: done (stage 26, above). The next wall for native Android
-   services is init: a start order for the daemons and HALs, restarts, and
-   the property triggers of the `.rc` files, on top of this property
-   service (also what linkerconfig's `VENDOR_VNDK_VERSION` abort asks for);
-   then shared memory between a HAL and its clients.
-4. Then zygote, system_server, `pm install` and a window: the window's
-   path exists (stage 27, "Display": SurfaceFlinger through Waydroid's
-   hwcomposer into Weston, a macOS window); input (the composer's FIFOs to
-   InputFlinger) and a GPU path are next. First in the x86_64 root for
-   Java and x86-64 apps, then with the rebuilt ART for arm64-v8a APKs.
+4. init, zygote64, system_server, a window, `pm install`, `am start`: done
+   in the x86_64 root (stage 28, "Session"). Next, in the order an app
+   meets them: clicks and keys measured end to end (pointer motion arrives),
+   sound (the audio HAL with a PulseAudio socket, `--pulse`), network (a
+   netd that does something), Android's time zone from the host, 32-bit x86
+   apps (`--abi32`), then a GPU path (Lepton's graphics analysis, 4) instead
+   of SwiftShader, and per-app windows (Waydroid's multi-window mode).
+5. The rebuilt ART for arm64-v8a APKs in the native root.
 
 ## Tests and records
+
+- `tests/android/run.sh`, stage 28: `x86_segv_ctx` (what ART's fault handler
+  reads from a SIGSEGV), dalvikvm64 NullCheck (NPEs from JIT-compiled code),
+  and an APK end to end (`scripts/android-session.py launch --headless` in
+  its own clone, `ANDROID_TEST_SESSION_ROOT`: boot, pm install, am start,
+  focus, stop). `tests/elf/run.sh` ANDROID_BOOT_RT
+  (`tests/elf/android_boot_rt.c`): the runtime pieces of stage 28 with no
+  Android root.
 
 - `tests/android/run.sh`: the programs above against the arm64 root (ART
   an expected failure with the heap reason); binder with servicemanager,
