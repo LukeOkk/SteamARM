@@ -7,7 +7,11 @@
 #  3. input: with --selftest-input the compositor feeds a mouse move, a
 #     click and the A key to the first window, and a host wire client
 #     (tests/wlmac/input_client.py) must get wl_pointer enter, motion,
-#     BTN_LEFT and wl_keyboard KEY_A (30).
+#     BTN_LEFT and wl_keyboard KEY_A (30);
+#  4. the clipboard (tests/wlmac/clipboard_client.py): text on a private
+#     named pasteboard reaches a client as a wl_data_offer, and a client's
+#     wl_data_source reaches the pasteboard. The Mac's own clipboard is not
+#     touched.
 # A macOS window appears for a few seconds. No screen capture is used.
 set -uo pipefail
 cd "$(dirname "$0")/../.." || exit 1
@@ -37,10 +41,10 @@ if [ -d "$WR/tmp" ] && [ -x build/lxrun ]; then
     if [ -n "$fps" ] && [ -n "$png" ] && colours=$(python3 tests/wlmac/check_png.py "$png" 2>&1); then
         ok "an aarch64 client under lxrun drew 60 frames ($fps) into its own macOS window; $colours"
     else bad "frames into a window" "$(tail -2 <<<"$out" | tr '\n' ' ') png='$png' $colours"; fi
-    # What hwcomposer.waydroid needs of a compositor (no clipboard yet).
+    # What hwcomposer.waydroid needs of a compositor.
     gl=$(client -g | grep -oE '(wl|xdg|wp)_[a-z_]+' | tr '\n' ' ')
     missing=""
-    for w in wl_compositor wl_subcompositor wl_shm wl_output wl_seat xdg_wm_base wp_viewporter; do
+    for w in wl_compositor wl_subcompositor wl_shm wl_output wl_seat xdg_wm_base wp_viewporter wl_data_device_manager; do
         grep -qw "$w" <<<"$gl" || missing="$missing $w"
     done
     [ -z "$missing" ] && ok "globals: $gl" || bad "globals" "missing:$missing (listed: $gl)"
@@ -53,6 +57,13 @@ fi
 WLMAC_XDG=$xdg scripts/run-wlmac.sh start --selftest-input >/dev/null || { bad "start steamarm-wlmac --selftest-input"; exit 1; }
 if out=$(python3 tests/wlmac/input_client.py "$host/wayland-0" 2>&1); then ok "$out"
 else bad "input" "$(tail -3 <<<"$out" | tr '\n' ' ')"; fi
+stop
+
+# 4. The clipboard, both ways, on a private named pasteboard.
+board=steamarm-wlmac-test-$$
+WLMAC_PASTEBOARD=$board WLMAC_XDG=$xdg scripts/run-wlmac.sh start >/dev/null || { bad "start steamarm-wlmac (clipboard)"; exit 1; }
+if out=$(python3 tests/wlmac/clipboard_client.py "$host/wayland-0" "$board" 2>&1); then ok "$out"
+else bad "clipboard" "$(tail -3 <<<"$out" | tr '\n' ' ')"; fi
 stop
 
 echo "== $PASS passed, $FAIL failed"

@@ -16,8 +16,17 @@ root) connects to it instead of to Weston under lxrun on SteamARM's X server.
 ABGR8888, XBGR8888), `wl_output` 3 (the main screen), `wl_seat` 5 (pointer
 and keyboard: Linux button and key codes, an evdev/pc105/us XKB keymap in
 `us.xkb`, compiled from `keymap-source.xkb`), `xdg_wm_base` 2 and
-`wp_viewporter` 1. Not yet: clipboard (`wl_data_device_manager`), touch,
-tablets, `wp_presentation`, dmabuf.
+`wp_viewporter` 1 and `wl_data_device_manager` 3 (the clipboard, text only).
+Not yet: drag and drop, touch, tablets, `wp_presentation`, dmabuf.
+
+The clipboard is the Mac's pasteboard: its text is offered to the client
+that has the keyboard (when it gets its data device, when one of its windows
+becomes key, and twice a second while it has the key window, if the
+pasteboard changed), and a client's `set_selection` is read through a pipe
+and put on the pasteboard. Changes the compositor made itself are not
+offered back. `WLMAC_PASTEBOARD=<name>` uses a private named pasteboard
+instead (the tests do: they must not touch the clipboard of the person at
+the Mac).
 
 Each commit copies the shm buffer into a CGImage (the buffer is released at
 once). Frame callbacks fire at the display's refresh.

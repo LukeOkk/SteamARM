@@ -18,6 +18,8 @@ static BOOL exitWhenEmpty;       // leave 5 s after the last window closed (an a
 static BOOL hadWindow;
 static void shutdownServer(int signalNumber);
 static void windowsChanged(void);
+@class Client;
+static void offerPasteboard(Client *c);
 static uint32_t serialNumber = 1;
 static uint32_t serialNext(void) { return ++serialNumber; }
 static uint32_t word(const uint8_t *p) { uint32_t v; memcpy(&v,p,4); return v; }
@@ -62,6 +64,8 @@ static void logLine(NSString *s) { fprintf(stderr,"%s\n",s.UTF8String); fflush(s
 @property(nonatomic) double offX,offY;      // the window's origin in root-surface coordinates
 @property(nonatomic) BOOL hasPendingAttach,hasInput, synchronous, pendingSubPos, configured, maximized, fullscreen;
 @property(nonatomic,strong) NSString *kind,*title,*appID;
+@property(nonatomic,strong) NSMutableArray<NSString *> *mimes;   // wl_data_source
+@property(nonatomic,strong) NSString *text;                       // wl_data_offer: what the Mac's pasteboard held
 @property(nonatomic,strong) CALayer *layer;
 @property(nonatomic,strong) NSImage *image;
 @property(nonatomic,strong) WWindow *window;
@@ -83,7 +87,8 @@ static NSArray<NSDictionary *> *globals(void) { return @[
     @{@"name":@4,@"iface":@"wl_output",@"version":@3},
     @{@"name":@5,@"iface":@"wl_seat",@"version":@5},
     @{@"name":@6,@"iface":@"xdg_wm_base",@"version":@2},
-    @{@"name":@7,@"iface":@"wp_viewporter",@"version":@1} ]; }
+    @{@"name":@7,@"iface":@"wp_viewporter",@"version":@1},
+    @{@"name":@8,@"iface":@"wl_data_device_manager",@"version":@3} ]; }
 
 @interface Client : NSObject
 @property(nonatomic) int fd;
@@ -92,6 +97,8 @@ static NSArray<NSDictionary *> *globals(void) { return @[
 @property(nonatomic,strong) NSMutableArray<NSNumber *> *fds;
 @property(nonatomic,strong) NSMutableDictionary<NSNumber *,Obj *> *objects;
 @property(nonatomic) uint32_t pointerID,keyboardID,pointerFocus,keyboardFocus,buttonMask;
+@property(nonatomic) uint32_t dataDeviceID,nextServerID;
+@property(nonatomic) NSInteger offeredChange;      // the pasteboard changeCount last offered to this client
 @property(nonatomic) BOOL dead;
 - (instancetype)initWithFD:(int)fd;
 - (void)event:(uint32_t)id opcode:(uint16_t)op body:(NSData *)body fd:(int)passed;
@@ -153,7 +160,9 @@ static void configureTop(Obj *top, int w, int h) {
     Obj *s=self.top; if(s && s.configured) { NSSize z=self.contentView.bounds.size; configureTop(s,(int)z.width,(int)z.height); }
 }
 - (void)windowDidBecomeKey:(NSNotification *)n {
-    Obj *s=self.top; Client *c=s.client; if (!c || !c.keyboardID) return;
+    Obj *s=self.top; Client *c=s.client; if (!c) return;
+    offerPasteboard(c);
+    if (!c.keyboardID) return;
     c.keyboardFocus=s.oid;
     NSMutableData *b=[NSMutableData data]; append32(b,serialNext()); append32(b,s.oid); append32(b,0);
     [c event:c.keyboardID opcode:1 body:b fd:-1];
@@ -415,6 +424,60 @@ attached:
     }
 }
 
+// ------------------------------------------------ the clipboard
+// wl_data_device_manager between a client and the Mac's pasteboard, text
+// only. The Mac's text is offered to the client that has the keyboard
+// (Waydroid's composer hands it to Android's clipboard); a client's
+// selection is read through a pipe and put on the pasteboard. Changes this
+// compositor made itself are not offered back (the two sides would echo).
+static NSInteger ownChange=-1;
+// WLMAC_PASTEBOARD=<name>: a private pasteboard instead of the Mac's
+// (tests, which must not touch the clipboard of the person at the Mac).
+static NSPasteboard *board(void) {
+    static NSPasteboard *pb; if(pb) return pb;
+    const char *name=getenv("WLMAC_PASTEBOARD");
+    pb=name&&*name?[NSPasteboard pasteboardWithName:[NSString stringWithUTF8String:name]]:[NSPasteboard generalPasteboard];
+    return pb;
+}
+static NSString *pasteboardText(void) { return [board() stringForType:NSPasteboardTypeString]; }
+static void offerPasteboard(Client *c) {
+    if(!c.dataDeviceID || c.dead) return;
+    NSInteger change=board().changeCount;
+    if(change==c.offeredChange || change==ownChange) { c.offeredChange=change; return; }
+    c.offeredChange=change;
+    NSString *text=pasteboardText(); if(!text) return;
+    if(!c.nextServerID) c.nextServerID=0xff000000;
+    uint32_t oid=c.nextServerID++;
+    Obj *offer=[c create:oid kind:@"wl_data_offer" version:3]; if(!offer) return; offer.text=text;
+    [c event:c.dataDeviceID opcode:0 body:u32(oid) fd:-1];                       // data_offer
+    for(NSString *m in @[@"text/plain;charset=utf-8",@"text/plain",@"UTF8_STRING",@"TEXT",@"STRING"]) {
+        NSMutableData *b=[NSMutableData data]; appendString(b,m); [c event:oid opcode:0 body:b fd:-1];   // offer
+    }
+    [c event:c.dataDeviceID opcode:5 body:u32(oid) fd:-1];                       // selection
+}
+static void readSelection(Client *c, Obj *src) {
+    NSString *mime=nil;
+    for(NSString *m in @[@"text/plain;charset=utf-8",@"UTF8_STRING",@"text/plain",@"TEXT",@"STRING"]) if([src.mimes containsObject:m]) { mime=m; break; }
+    if(!mime) return;
+    int fds[2]; if(pipe(fds)) return;
+    NSMutableData *b=[NSMutableData data]; appendString(b,mime);
+    [c event:src.oid opcode:1 body:b fd:fds[1]];                                  // send(mime, fd)
+    close(fds[1]);
+    int rfd=fds[0];
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY,0),^{
+        NSMutableData *all=[NSMutableData data]; uint8_t buf[65536]; ssize_t r;
+        while((r=read(rfd,buf,sizeof buf))>0 && all.length<16*1024*1024) [all appendBytes:buf length:r];
+        close(rfd);
+        NSString *text=[[NSString alloc] initWithData:all encoding:NSUTF8StringEncoding];
+        dispatch_async(dispatch_get_main_queue(),^{
+            if(!text || [text isEqualToString:pasteboardText()?:@""]) return;
+            NSPasteboard *pb=board(); [pb clearContents]; [pb setString:text forType:NSPasteboardTypeString];
+            ownChange=pb.changeCount;
+            if(verbose) logLine([NSString stringWithFormat:@"clipboard: %lu characters from the client",(unsigned long)text.length]);
+        });
+    });
+}
+
 @implementation Client
 - (instancetype)initWithFD:(int)fd {
     if((self=[super init])) { _fd=fd; _incoming=[NSMutableData data]; _fds=[NSMutableArray array]; _objects=[NSMutableDictionary dictionary];
@@ -563,6 +626,36 @@ attached:
         if(pointer && op==0) { if(n<16) goto malformed; }
         else if((pointer && op==1) || (!pointer && op==0)) { if(pointer) _pointerID=0; else _keyboardID=0; [self remove:id]; }
         else goto malformed;
+    } else if([k isEqual:@"wl_data_device_manager"]) {
+        if(op==0 && n>=4) { Obj *src=[self create:word(p) kind:@"wl_data_source" version:o.version]; src.mimes=[NSMutableArray array]; }
+        else if(op==1 && n>=8) { if(![self create:word(p) kind:@"wl_data_device" version:o.version]) return;
+            _dataDeviceID=word(p); _offeredChange=-2; offerPasteboard(self); }
+        else goto malformed;
+    } else if([k isEqual:@"wl_data_source"]) {
+        size_t a=0;
+        if(op==0) { NSString *m=readString(p,n,&a); if(!m) goto malformed; [o.mimes addObject:m]; }
+        else if(op==1) [self remove:id];
+        else if(op==2) { }
+        else goto malformed;
+    } else if([k isEqual:@"wl_data_device"]) {
+        if(op==0) { }                                   // start_drag: no drag and drop
+        else if(op==1 && n>=8) { Obj *src=[self object:word(p)]; if(src && [src.kind isEqual:@"wl_data_source"]) readSelection(self,src); }
+        else if(op==2) { if(_dataDeviceID==id) _dataDeviceID=0; [self remove:id]; }
+        else goto malformed;
+    } else if([k isEqual:@"wl_data_offer"]) {
+        size_t a=0;
+        if(op==0 || op==3 || op==4) { }                 // accept, finish, set_actions
+        else if(op==1) {                                // receive(mime, fd): the text, then EOF
+            NSString *m=readString(p,n,&a); (void)m;
+            if(!_fds.count) goto malformed;
+            int wfd=_fds.firstObject.intValue; [_fds removeObjectAtIndex:0];
+            NSData *d=[o.text dataUsingEncoding:NSUTF8StringEncoding]?:[NSData data];
+            if(verbose) logLine([NSString stringWithFormat:@"clipboard: the client read %lu characters (%@)",(unsigned long)o.text.length,m]);
+            dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY,0),^{
+                const uint8_t *q=d.bytes; size_t left=d.length; while(left) { ssize_t w=write(wfd,q,left); if(w<=0) break; q+=w; left-=(size_t)w; }
+                close(wfd); });
+        } else if(op==2) [_objects removeObjectForKey:@(id)];     // a server-made id: no delete_id
+        else goto malformed;
     } else if([k isEqual:@"xdg_wm_base"]) {
         if(op==0) [self remove:id];
         else if(op==2 && n>=8) { Obj *xdg=[self create:word(p) kind:@"xdg_surface" version:o.version], *s=[self object:word(p+4)];
@@ -627,6 +720,9 @@ malformed: [self error:id text:[NSString stringWithFormat:@"malformed %@ request
 @end
 
 static void tick(void) {
+    static unsigned ticks; if(++ticks%30==0) {              // twice a second: the Mac's clipboard changed?
+        NSWindow *key=NSApp.keyWindow; if([key isKindOfClass:[WWindow class]]) { Client *c=((WWindow *)key).top.client; if(c) offerPasteboard(c); }
+    }
     for(Client *c in [clients copy]) for(Obj *o in [c.objects.allValues copy]) if([o.kind isEqual:@"wl_surface"] && o.frames.count) {
         NSArray *frames=[o.frames copy]; [o.frames removeAllObjects];
         for(NSNumber *f in frames) { [c event:f.unsignedIntValue opcode:0 body:u32(eventTime()) fd:-1]; [c remove:f.unsignedIntValue]; }
