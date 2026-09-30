@@ -23,7 +23,7 @@ this stack: show them greyed out with the reason as help text, never fake.
 | launchSteamOnStart | bool | false | launcher starts Steam when it opens |
 | confirmStop | bool | true | ask before stopping a running app |
 | guestLanguage | "auto" or a locale like "es_ES.UTF-8", "en_US.UTF-8", "pt_BR.UTF-8", "fr_FR.UTF-8", "de_DE.UTF-8", "it_IT.UTF-8", "ja_JP.UTF-8" | "auto" (= the Mac's) | LANG / LC_ALL of the guest |
-| timezone | "auto" or an IANA name ("UTC", "America/Montevideo", …) | "auto" (= the Mac's) | TZ of the guest |
+| timezone | "auto" or an IANA name ("UTC", "Europe/Berlin", …) | "auto" (= the Mac's) | TZ of the guest |
 | vsync | "game" \| "on" \| "off" (shown AUTO / ON / OFF) | "game" | on/off: DXVK dxgi.syncInterval and d3d9.presentInterval 1/0, and VKD3D_SWAPCHAIN_PRESENT_MODE FIFO/IMMEDIATE (uppercase: vkd3d-proton compares with strcmp; Proton 10.0's vkd3d has no such variable). game: nothing set. MoltenVK offers only FIFO and IMMEDIATE; the effect on screen is not measured |
 | dramGB | 0 = automático, or N GB | 0 | memory ceiling for everything SteamARM runs (Steam + game): the memory guard stops the guests above it instead of letting the Mac run out |
 | vramGB | 0 = automático, or N GB | 0 | video memory reported to games: Vulkan heap size in the shim (LXRT_VK_MAX_VRAM_MB) and DXVK dxgi.maxDeviceMemory |

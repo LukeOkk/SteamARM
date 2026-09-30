@@ -15,7 +15,7 @@ struct SettingsTests {
         precondition(legacy.extraEnv == ["TEST": "1"] && legacy.hotkeys["screenshot"] == "F8")
         var changed = defaults
         changed.guestLanguage = "es_ES.UTF-8"
-        changed.timezone = "America/Montevideo"
+        changed.timezone = "Europe/Berlin"
         changed.fexTSO = "fast"
         changed.hotkeys["stopApp"] = "Cmd+F9"
         changed.dramGB = 12
