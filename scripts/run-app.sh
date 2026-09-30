@@ -483,6 +483,14 @@ if [ -n "$(guest_pids)" ]; then
 fi
 
 [ -n "$APP_ANDROID" ] || scripts/env-links.sh "$STATE" >/dev/null || exit 1
+# The guest root must be there before anything is made in it: a root on a
+# volume that is not attached (the Steam Frame root's sparsebundle) left
+# /tmp/lxrt-arm64root missing, and scripts/audio.sh then created
+# /tmp/lxrt-arm64root/tmp/pulse as a real directory where the link belongs.
+if [ -z "$APP_ANDROID" ] && [ ! -d "$APP_ROOT/usr" ]; then
+    echo "run-app: the root $APP_ROOT of $APP_NAME is not there (a volume that is not attached?)" >&2
+    exit 2
+fi
 [ -z "$APP_PREFIX" ] || mkdir -p "$APP_ROOT$APP_PREFIX" || exit 1
 if [ "$MODE" = native ]; then ensure_native_x; else ensure_xvnc; fi
 
