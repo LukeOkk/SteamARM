@@ -126,7 +126,17 @@ static _Atomic unsigned g_handover_seq;
 // The page-protection lock: this table, subpage.c's records, and every
 // protection change of a host page either one owns.
 static pthread_mutex_t g_lock = PTHREAD_MUTEX_INITIALIZER;
-LXRT_FORK_SAFE(wxsplit_g_lock, g_lock)
+// Across fork(), as LXRT_FORK_SAFE, and with shmirror.c's lock, which is
+// taken under this one (see lxrt_shmirror_fork_lock): in that order, and
+// released the other way round.
+void lxrt_shmirror_fork_lock(void);
+void lxrt_shmirror_fork_unlock(void);
+static void wxsplit_fork_prepare(void) { pthread_mutex_lock(&g_lock); lxrt_shmirror_fork_lock(); }
+static void wxsplit_fork_release(void) { lxrt_shmirror_fork_unlock(); pthread_mutex_unlock(&g_lock); }
+__attribute__((constructor(200))) static void wxsplit_fork_register(void)
+{
+    pthread_atfork(wxsplit_fork_prepare, wxsplit_fork_release, wxsplit_fork_release);
+}
 static _Thread_local int t_held;        // this thread holds g_lock
 
 // Every path that holds g_lock runs with the asynchronous signals blocked: the

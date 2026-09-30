@@ -94,8 +94,28 @@ stopped client: 193 files, 4.4 GB in /tmp/lxrt-shm-501 after the day's starts.
 scripts/run-app.sh --stop now removes them once no guest is left: 0 files,
 7.5 MB.
 
+== Native ARM64 Steam: a deadlock in the runtime at fork()
+e2e and a sampled loop: the first start of each series had no window
+(2 of 9 starts); the others 15-36 s. Sample of the web helper's browser:
+  ThreadPoolForegroundWorker: do_mmap -> lxrt_subpage_mmap ->
+    subpage_mmap_locked -> back_range -> lxrt_shmirror_take_view -> mutex wait
+  ThreadPoolSingleThreadForegroundBlocking1: lxrt_fork -> fork ->
+    _pthread_atfork_prepare_handlers -> mutex wait
+  ThreadPoolServiceThread, Chrome_IOThread: lxrt_epoll_pwait -> mutex wait
+fork's prepare handlers run in the reverse of registration order, which is
+link order across files (constructor priorities only sort within a file,
+measured with two files): shmirror.c links after wxsplit.c, so a fork took
+the mirror's lock, then waited for the page lock -- held by the thread that
+was placing a sub-page mapping and waiting for the mirror's lock.
+tests/elf/fork_mirror.c (a thread placing sub-page mappings beside a mirrored
+read-only shared view, another forking, 4 s): at c35b284 it never ended (30 s
+alarm, same stacks); moving shmirror's lock to constructor(150) changed
+nothing (cross-file). Now wxsplit.c's prepare handler takes the page lock and
+then the mirror's: "125685 sub-page placements, 3884 forks, no deadlock".
+ARM64 Steam after it, 8 starts: 16, 15, 16, 15, 15, 16, 15, 25 s (8 of 8).
+
 == Release matrix (0.3.9 candidate)
-tests/elf 91/0; i386 18/0; tests/win 11/0; vk_device 2/0; arm64 4/0;
+tests/elf 92/0; i386 18/0; tests/win 11/0; vk_device 2/0; arm64 4/0;
 launcher core 35/0; tests/wlmac 4/0; Python unit tests 135 OK;
 tests/android 83 passed, 0 failed, 2 expected failures (clipboard included).
 x86 Steam 7 of 8 (above).

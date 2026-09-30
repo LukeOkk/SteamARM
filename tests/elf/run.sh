@@ -763,6 +763,22 @@ if [ -f "$STAGE/usr/lib64/libc.a" ] && [ -n "$GCCDIR" ]; then
     fi
 fi
 
+# 19g. fork() while another thread places sub-page mappings next to a
+# mirrored shared view: the fork's prepare handlers must take the page lock
+# before the mirror's (Steam's native web helper deadlocked there).
+if [ -f "$STAGE/usr/lib64/libc.a" ] && [ -n "$GCCDIR" ]; then
+    if err=$(glibc_cc -static-pie -O2 -pthread -o build/fork_mirror tests/elf/fork_mirror.c 2>&1); then
+        out=$(deadline 40 ./build/lxrun "$PWD/build/fork_mirror" 2>&1); rc=$?
+        if [ "$rc" -eq 0 ] && grep -q "no deadlock" <<<"$out"; then
+            ok "fork against sub-page placement: $(grep -o '[0-9]* sub-page placements, [0-9]* forks' <<<"$out"), no deadlock"
+        else
+            bad "fork against sub-page placement" "rc=$rc (a deadlock ends at the 40 s deadline) $(tail -1 <<<"$out")"
+        fi
+    else
+        bad "build fork_mirror" "$err"
+    fi
+fi
+
 # 19c. 32-bit bionic needs process and thread IDs below 65536. Exercise the
 # opt-in namespace with native aarch64 first, leaving the normal run untouched.
 if [ -f "$STAGE/usr/lib64/libc.a" ] && [ -n "$GCCDIR" ]; then

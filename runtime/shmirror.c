@@ -51,7 +51,18 @@ static int g_nnotes;
 static struct mirror g_mir[MIRROR_MAX];
 static int g_nmir;
 static pthread_mutex_t g_lock = PTHREAD_MUTEX_INITIALIZER;
-LXRT_FORK_SAFE(shmirror_lock, g_lock)
+// Held across fork() like every runtime lock, but taken AFTER the
+// page-protection lock: subpage.c holds that one when it calls in here
+// (take_view, adopt, forget). fork's prepare handlers run in the reverse of
+// their registration order, which is link order across files (constructor
+// priorities only sort within one file), and shmirror.c links after
+// wxsplit.c: its own LXRT_FORK_SAFE took this lock first, then waited for
+// the page lock, while a thread placing a sub-page mapping held the page lock
+// and waited for this one. Steam's native web helper froze before its window
+// that way (MEASURED; tests/elf/fork_mirror.c). wxsplit.c's prepare handler
+// takes it now, right after its own.
+void lxrt_shmirror_fork_lock(void) { pthread_mutex_lock(&g_lock); }
+void lxrt_shmirror_fork_unlock(void) { pthread_mutex_unlock(&g_lock); }
 static bool g_thread_started;
 
 bool lxrt_trace_on(void);
