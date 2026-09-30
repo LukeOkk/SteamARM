@@ -413,7 +413,7 @@ static void gen_pid_dir(int pid, const char *pd)
         int tids[512];
         int count = lxrt_ids_threads(pid, tids, 512);
         if (count > 512) count = 512;
-        DIR *tasks = opendir(taskdir);
+        DIR *tasks = lxrt_opendir_private(taskdir);
         if (tasks) {
             struct dirent *e;
             while ((e = readdir(tasks))) {
@@ -429,7 +429,7 @@ static void gen_pid_dir(int pid, const char *pd)
                     snprintf(stale, sizeof stale, "%s/%ld", taskdir, old); rmdir(stale);
                 }
             }
-            closedir(tasks);
+            lxrt_closedir_private(tasks);
         }
         for (int i = 0; i < count; i++) {
             char td[1300], file[1400];
@@ -458,7 +458,7 @@ static void gen_pid_fds(int pid, const char *pd)
         bytes = proc_pidinfo(pid, PROC_PIDLISTFDS, 0, fds, bytes);
     int nf = fds && bytes > 0 ? bytes / (int)sizeof *fds : 0;
     // Only entries whose descriptor is gone are removed (see lxrt_link_set).
-    DIR *d = opendir(fdd);
+    DIR *d = lxrt_opendir_private(fdd);
     if (d) {
         struct dirent *e;
         char p[1500];
@@ -473,7 +473,7 @@ static void gen_pid_fds(int pid, const char *pd)
                 unlink(p);
             }
         }
-        closedir(d);
+        lxrt_closedir_private(d);
     }
     if (!fds)
         return;
@@ -550,7 +550,7 @@ void lxrt_procpid_list(const char *dir)
     static int pids[MAXPIDS];
     int np = guest_pids(pids, MAXPIDS);
     // Drop entries of processes that are gone.
-    DIR *d = opendir(dir);
+    DIR *d = lxrt_opendir_private(dir);
     if (d) {
         struct dirent *e;
         while ((e = readdir(d))) {
@@ -567,7 +567,7 @@ void lxrt_procpid_list(const char *dir)
                 unlink(p);
             }
         }
-        closedir(d);
+        lxrt_closedir_private(d);
     }
     for (int i = 0; i < np; i++) {
         if (pids[i] == getpid())

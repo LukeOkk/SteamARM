@@ -779,6 +779,23 @@ if [ -f "$STAGE/usr/lib64/libc.a" ] && [ -n "$GCCDIR" ]; then
     fi
 fi
 
+# 19h. The runtime's own descriptors stay out of the guest's way: after a
+# directory is read, the next open() is the lowest free number, and
+# /proc/self/fd shows no directory the program never opened (Android's
+# zygote aborts on one before it forks).
+if [ -f "$STAGE/usr/lib64/libc.a" ] && [ -n "$GCCDIR" ]; then
+    if err=$(glibc_cc -static-pie -O2 -o build/private_fds tests/elf/private_fds.c 2>&1); then
+        out=$(deadline 30 ./build/lxrun "$PWD/build/private_fds" 2>&1); rc=$?
+        if [ "$rc" -eq 0 ] && [ "$(grep -c '^  OK  ' <<<"$out")" -eq 3 ]; then
+            ok "the runtime's descriptors: the lowest free number after a readdir, none in /proc/self/fd"
+        else
+            bad "the runtime's descriptors out of the guest's way" "rc=$rc $(grep -E 'MAL|never opened' <<<"$out" | head -3 | tr '\n' ' ')"
+        fi
+    else
+        bad "build private_fds" "$err"
+    fi
+fi
+
 # 19c. 32-bit bionic needs process and thread IDs below 65536. Exercise the
 # opt-in namespace with native aarch64 first, leaving the normal run untouched.
 if [ -f "$STAGE/usr/lib64/libc.a" ] && [ -n "$GCCDIR" ]; then

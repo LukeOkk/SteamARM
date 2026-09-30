@@ -57,12 +57,11 @@ static DIR *dir_for(int fd)
             return d;
         }
     // fdopendir takes ownership of what it is given, and the guest still owns
-    // its fd, so hand it a duplicate.
+    // its fd, so hand it a duplicate -- the runtime's own, out of the guest's
+    // way and out of /proc/self/fd (lxrt_fd_private).
     int dup_fd = dup(fd);
-    DIR *d = dup_fd < 0 ? NULL : fdopendir(dup_fd);
+    DIR *d = dup_fd < 0 ? NULL : lxrt_fdopendir_private(dup_fd);
     if (!d) {
-        if (dup_fd >= 0)
-            close(dup_fd);
         pthread_mutex_unlock(&g_dirs_lock);
         return NULL;
     }
@@ -73,7 +72,7 @@ static DIR *dir_for(int fd)
             pthread_mutex_unlock(&g_dirs_lock);
             return d;
         }
-    closedir(d);
+    lxrt_closedir_private(d);
     pthread_mutex_unlock(&g_dirs_lock);
     return NULL;
 }
@@ -83,7 +82,7 @@ void lxrt_dirents_close(int fd)
     pthread_mutex_lock(&g_dirs_lock);
     for (int i = 0; i < MAX_DIRS; i++)
         if (g_dirs[i].dir && g_dirs[i].fd == fd) {
-            closedir(g_dirs[i].dir);
+            lxrt_closedir_private(g_dirs[i].dir);
             g_dirs[i].dir = NULL;
             break;
         }

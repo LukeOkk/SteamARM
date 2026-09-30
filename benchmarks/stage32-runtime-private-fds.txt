@@ -1,0 +1,30 @@
+Stage 32: the runtime's own descriptors out of the guest's way
+Mac mini M4, macOS 27; x86_64 LineageOS 18.1 root under FEX (sesstest clone).
+
+== Android's zygote exiting right after the boot
+Five quick headless session restarts (start, 15 s, stop): one had
+  init.log: service zygote (pid 67947) exited with status 1 after 18.2 s
+  logcat:   zygote64: jni_internal.cc:729] JNI FatalError called: (zygote)
+            Unsupported st_mode for FD 40:  DIR
+right at sys.boot_completed=1, then the framework restarted (audioserver,
+media, netd... "onrestart zygote"); an app launched then was not installed
+("pm install: rc 20") or never took the focus. The same as stage 30's "one
+run of about ten had the zygote exit (status 1)".
+
+The zygote checks every descriptor it would hand to a child (from
+/proc/self/fd) before it forks. getdents64 (runtime/dirents.c) reads a
+directory through a dup() of the guest's descriptor, kept open while the
+guest reads: the lowest free number, not hidden from /proc/self/fd.
+tests/elf/private_fds.c, on the 0.3.9 runtime:
+  MAL  the next open() is the lowest free number: 5 after 3
+       a directory the program never opened: fd 4 -> /
+  MAL  /proc/self/fd lists 6 descriptors, no directory but the program's own
+Now (lxrt_fd_private: moved to 800/400/200/64 and above, close-on-exec,
+hidden; also procfs.c's and procpid.c's own opendir()s and inotify's scan):
+  OK   the next open() is the lowest free number: 4 after 3
+  OK   /proc/self/fd lists 5 descriptors, no directory but the program's own
+Ten quick headless restarts afterwards: zygote exits 0, "Unsupported st_mode"
+0 (10 of 10).
+tests/elf 93/0 (inotify 41/41 needed the scan to use dirfd() of the moved
+descriptor); i386 18/0; win 11/0; arm64 4/0; vk_device 2/0; wlmac 4/0;
+launcher core 35/0; tests/android 83 passed, 0 failed, 2 expected failures.

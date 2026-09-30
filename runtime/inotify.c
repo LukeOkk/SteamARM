@@ -123,8 +123,9 @@ static int snapshot(int fd, struct dir_entry **out)
     *out = NULL;
     int scanfd = openat(fd, ".", O_RDONLY | O_DIRECTORY | O_CLOEXEC);
     if (scanfd < 0) return errno;
-    DIR *dir = fdopendir(scanfd);
-    if (!dir) { int e = errno; close(scanfd); return e; }
+    DIR *dir = lxrt_fdopendir_private(scanfd);    // moves it: use dirfd(dir) from here
+    if (!dir) return errno;
+    scanfd = dirfd(dir);
     int error = 0;
     for (;;) {
         errno = 0;
@@ -143,7 +144,7 @@ static int snapshot(int fd, struct dir_entry **out)
         strlcpy(e->name, de->d_name, sizeof e->name);
         e->next = *out; *out = e;
     }
-    closedir(dir);
+    lxrt_closedir_private(dir);
     if (error) { free_entries(*out); *out = NULL; }
     return error;
 }

@@ -62,6 +62,54 @@ bool lxrt_fd_hidden(int fd)
 {
     return fd >= 0 && fd < 65536 && (__atomic_load_n(&g_fd_hidden[fd >> 3], __ATOMIC_RELAXED) >> (fd & 7)) & 1;
 }
+
+// A descriptor the runtime keeps for itself inside the guest's table: moved
+// above the numbers a guest expects next (Linux hands out the lowest free
+// one), close-on-exec, and left out of /proc/self/fd. getdents64's duplicate
+// of a directory the guest reads (dirents.c) was not: Android's zygote, which
+// checks every descriptor before it forks, found "Unsupported st_mode for FD
+// 40: DIR" and aborted, one boot in about ten (MEASURED: zygote exit status
+// 1 right at sys.boot_completed, the framework restarted).
+int lxrt_fd_private(int fd)
+{
+    if (fd < 0)
+        return fd;
+    static const int bases[] = { 800, 400, 200, 64 };
+    for (size_t i = 0; i < sizeof bases / sizeof bases[0]; i++) {
+        int n = fcntl(fd, F_DUPFD_CLOEXEC, bases[i]);
+        if (n >= 0) { close(fd); fd = n; break; }
+    }
+    fcntl(fd, F_SETFD, FD_CLOEXEC);
+    lxrt_fd_hide(fd, true);
+    return fd;
+}
+DIR *lxrt_fdopendir_private(int fd)
+{
+    fd = lxrt_fd_private(fd);
+    if (fd < 0)
+        return NULL;
+    DIR *d = fdopendir(fd);
+    if (!d) {
+        int e = errno;
+        lxrt_fd_hide(fd, false);
+        close(fd);
+        errno = e;
+    }
+    return d;
+}
+DIR *lxrt_opendir_private(const char *path)
+{
+    int fd = open(path, O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+    return fd < 0 ? NULL : lxrt_fdopendir_private(fd);
+}
+void lxrt_closedir_private(DIR *d)
+{
+    if (!d)
+        return;
+    int fd = dirfd(d);
+    closedir(d);
+    lxrt_fd_hide(fd, false);
+}
 // The open descriptors, in one call (a probe of every number cost 4096
 // fcntl calls at every start); `fn` gets each.
 static void each_open_fd(void (*fn)(int))
@@ -213,7 +261,7 @@ static void regenerate_fds(void)
     if (maxfd < 0 || maxfd > 4096)
         maxfd = 4096;
     // Stale entries: only the descriptors that are closed now.
-    DIR *existing = opendir(dir);
+    DIR *existing = lxrt_opendir_private(dir);
     if (existing) {
         struct dirent *e;
         while ((e = readdir(existing))) {
@@ -226,7 +274,7 @@ static void regenerate_fds(void)
             snprintf(p, sizeof p, "%s/%s", dir, e->d_name);
             unlink(p);
         }
-        closedir(existing);
+        lxrt_closedir_private(existing);
     }
     for (int fd = 0; fd < maxfd; fd++) {
         if (fcntl(fd, F_GETFD) < 0)
@@ -301,7 +349,7 @@ static void sweep_dead(const char *tmp)
         return;
     int fd = open(mark, O_WRONLY | O_CREAT, 0600);
     if (fd >= 0) { futimens(fd, NULL); close(fd); }
-    DIR *d = opendir(tmp);
+    DIR *d = lxrt_opendir_private(tmp);
     if (!d)
         return;
     struct dirent *e;
@@ -318,7 +366,7 @@ static void sweep_dead(const char *tmp)
         snprintf(path, sizeof path, "%s/%s", tmp, e->d_name);
         remove_tree(path);
     }
-    closedir(d);
+    lxrt_closedir_private(d);
 }
 
 void lxrt_proc_cleanup(void)
@@ -425,7 +473,7 @@ static void regenerate_tasks(void)
     for (int i = 0; i < n; i++) if (tids[i] == lxrt_ids_pid()) have_main = true;
     if (!have_main && n < 512) tids[n++] = lxrt_ids_pid();
     // Entries of threads that are gone go too.
-    DIR *d = opendir(dir);
+    DIR *d = lxrt_opendir_private(dir);
     if (d) {
         struct dirent *e;
         while ((e = readdir(d))) {
@@ -441,7 +489,7 @@ static void regenerate_tasks(void)
                 remove_tree(sub);
             }
         }
-        closedir(d);
+        lxrt_closedir_private(d);
     }
     for (int i = 0; i < n; i++) {
         char sub[700];

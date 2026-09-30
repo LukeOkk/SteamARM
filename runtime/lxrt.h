@@ -308,6 +308,13 @@ void lxrt_proc_set_cmdline(const char *args, size_t len);
 // (procfs.c). A guest close or dup2 onto the number makes it the guest's.
 void lxrt_fd_hide(int fd, bool hide);
 bool lxrt_fd_hidden(int fd);
+// The runtime's own descriptors in the guest's table: high numbers, hidden
+// from /proc/self/fd (procfs.c).
+#include <dirent.h>
+int lxrt_fd_private(int fd);
+DIR *lxrt_fdopendir_private(int fd);
+DIR *lxrt_opendir_private(const char *path);
+void lxrt_closedir_private(DIR *d);
 // procpid.c: other guest processes in /proc, and /proc/net.
 bool lxrt_procpid_is_guest(int pid);
 bool lxrt_procpid_fd_target(int pid, int fd, char *out, size_t n);
