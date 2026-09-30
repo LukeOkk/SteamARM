@@ -187,7 +187,13 @@ add an offset.
 What could get past it, zero-VM, in order of promise:
 
 1. **An ART built with the heap above 4 GiB (HYPOTHESIS, the recommended
-   next step).** Map every heap space and the boot image in [4 GiB, 8 GiB),
+   next step).** Studied in `docs/ART_HEAP_ABOVE_4GB.md` (stage 28): 232
+   source lines bypass ART's central reference compression, a prototype
+   patch series is in `patches/art-heap-base/`, and the window moved to
+   `0x4000000000` (256 GiB), clear of what Darwin maps in the low GiBs
+   (HYPOTHESIS) and of lxrun's own placements; its first stage needs only the runtime
+   rebuilt (upstream boot image, `-Xint`). The original sketch follows.
+   Map every heap space and the boot image in [4 GiB, 8 GiB),
    keep references 32-bit (the low half of the address, as now), and
    decompress with the high bit added back (null stays 0; the page at
    exactly 4 GiB stays unused). ART already has a hook at every reference
@@ -842,9 +848,10 @@ scripts/run-weston.sh stop
 ## Order of work
 
 1. The ART heap (above): without it, nothing Java runs in the arm64 root.
-   Start with a feasibility count of the reference sites outside the
-   poisoning hooks in ART's source. In the x86_64 root ART already runs Java
-   under FEX (stage 25, above).
+   The feasibility count is done (`docs/ART_HEAP_ABOVE_4GB.md`: GO for a
+   runtime-only first stage, prototype patches in `patches/art-heap-base/`);
+   next is building it on a Linux host and running it here. In the x86_64
+   root ART already runs Java under FEX (stage 25, above).
 2. Binder: done in userspace (stage 25), and x86-64 guests reach it
    through FEX (stage 27). Next on it: ashmem/memfd sharing across
    processes, the binder debug logs `lshal` reads, the cost per call.

@@ -1,0 +1,316 @@
+From 55e6d069480f9677059114919daac990e3901470 Mon Sep 17 00:00:00 2001
+From: LukeOkk <85941941+LukeOkk@users.noreply.github.com>
+Date: Wed, 30 Sep 2026 02:15:13 -0300
+Subject: [PATCH 7/9] arm64: decompress references in the quick entrypoints
+ (SteamARM, HYPOTHESIS)
+
+HYPOTHESIS, UNTESTED: not assembled, not run.
+
+With a heap reference base, compiled code keeps full pointers in X
+registers and 32-bit compressed references in memory (see the compiler
+patch). The hand-written entrypoints relied on "uncompress = do nothing,
+already zero-extended" (their own comments). New macros in
+asm_support_arm64.S, empty without a base:
+
+  DECOMPRESS_HEAP_REF_NOT_NULL xRef   orr xRef, xRef, #BASE
+  DECOMPRESS_HEAP_REF xRef, wRef      cbz wRef, 1f; orr xRef, xRef, #BASE
+
+Sites:
+
+- art_quick_invoke_stub, art_quick_invoke_static_stub: "this" and every
+  'L' argument are decompressed as they are loaded into registers (a
+  second, 24-byte-per-entry table indexed by twice the integer counter);
+  stack arguments stay compressed (the callee reloads and decompresses);
+- READ_BARRIER (art_quick_aput_obj): decompress the loaded classes; the
+  slow path returns all 64 bits;
+- COMPUTE_ARRAY_SIZE_UNKNOWN: the component type;
+- art_quick_imt_conflict_trampoline: the declaring class and dex cache;
+- READ_BARRIER_MARK_REG: accept a compressed argument, pass and return
+  x registers to artReadBarrierMark, decompress the forwarding address
+  read from the lock word;
+- art_quick_read_barrier_mark_introspection: the reference arrives
+  compressed from the thunk and stays compressed in IP0 (the return switch
+  keeps ref_reg*8 in IP0's high word), the lock word is addressed through
+  IP1, the slow path decompresses before calling the runtime, and the
+  field slow path moves out of line to keep the 256-byte budget before the
+  array switch. The returned value is a W move; the generated code
+  decompresses after the return label.
+
+Card marking (lsr x0, x0, #CARD_TABLE_CARD_SHIFT) already uses the full
+address; allocation fast paths store the class with a 32-bit store (the
+compression) and return full pointers.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01L6ANQQienC2qRCeZBzUfuS
+---
+ runtime/arch/arm64/asm_support_arm64.S       | 23 +++++
+ runtime/arch/arm64/quick_entrypoints_arm64.S | 88 +++++++++++++++++++-
+ 2 files changed, 107 insertions(+), 4 deletions(-)
+
+diff --git a/runtime/arch/arm64/asm_support_arm64.S b/runtime/arch/arm64/asm_support_arm64.S
+index b1e5c86..56d50ff 100644
+--- a/runtime/arch/arm64/asm_support_arm64.S
++++ b/runtime/arch/arm64/asm_support_arm64.S
+@@ -83,6 +83,29 @@
+ #endif  // USE_HEAP_POISONING
+ .endm
+ 
++// SteamARM (HYPOTHESIS, UNTESTED): with a heap reference base
++// (ART_HEAP_REFERENCE_BASE, a single bit at or above 2^32) a reference loaded
++// as 32 bits, and so zero-extended, becomes a pointer by ORing the base in;
++// 0 stays null. The 32-bit store of a pointer is the compression. Without a
++// base both macros expand to nothing.
++#if defined(ART_HEAP_REFERENCE_BASE) && (ART_HEAP_REFERENCE_BASE != 0)
++#define ART_HAS_HEAP_REFERENCE_BASE 1
++#endif
++
++.macro DECOMPRESS_HEAP_REF_NOT_NULL xRef
++#ifdef ART_HAS_HEAP_REFERENCE_BASE
++    orr \xRef, \xRef, #ART_HEAP_REFERENCE_BASE
++#endif
++.endm
++
++.macro DECOMPRESS_HEAP_REF xRef, wRef
++#ifdef ART_HAS_HEAP_REFERENCE_BASE
++    cbz \wRef, 1f
++    orr \xRef, \xRef, #ART_HEAP_REFERENCE_BASE
++1:
++#endif
++.endm
++
+ .macro INCREASE_FRAME frame_adjustment
+     sub sp, sp, #(\frame_adjustment)
+     .cfi_adjust_cfa_offset (\frame_adjustment)
+diff --git a/runtime/arch/arm64/quick_entrypoints_arm64.S b/runtime/arch/arm64/quick_entrypoints_arm64.S
+index 634c762..67774ca 100644
+--- a/runtime/arch/arm64/quick_entrypoints_arm64.S
++++ b/runtime/arch/arm64/quick_entrypoints_arm64.S
+@@ -500,6 +500,9 @@ ENTRY art_quick_invoke_stub
+     adr  x12, .LstoreX2
+     adr  x13, .LstoreS0
+     adr  x14, .LstoreD0
++#ifdef ART_HAS_HEAP_REFERENCE_BASE
++    adr  x16, .LstoreRefW2  // SteamARM: references, decompressed as they are loaded.
++#endif
+ 
+     // Initialize routine offsets to 0 for integers and floats.
+     // x8 for integers, x15 for floating point.
+@@ -508,6 +511,7 @@ ENTRY art_quick_invoke_stub
+ 
+     add x10, x5, #1         // Load shorty address, plus one to skip return value.
+     ldr w1, [x9],#4         // Load "this" parameter, and increment arg pointer.
++    DECOMPRESS_HEAP_REF_NOT_NULL x1  // SteamARM: compiled code expects full pointers.
+ 
+     // Loop to fill registers.
+ .LfillRegisters:
+@@ -547,6 +551,13 @@ ENTRY art_quick_invoke_stub
+     cmp x8, # 6*12          // Skip this load if all registers full.
+     beq .Ladvance4
+ 
++#ifdef ART_HAS_HEAP_REFERENCE_BASE
++    cmp w17, #'L'           // SteamARM: a reference? (24-byte entries)
++    bne 1f
++    add x17, x16, x8, lsl #1
++    br x17
++1:
++#endif
+     add x17, x11, x8        // Calculate subroutine to jump to.
+     br x17
+ 
+@@ -568,6 +579,27 @@ ENTRY art_quick_invoke_stub
+     b \return
+ .endm
+ 
++#ifdef ART_HAS_HEAP_REFERENCE_BASE
++// SteamARM: load a reference argument and decompress it; 24 bytes per entry,
++// so the entry for the counter's register is at twice the counter.
++.macro LOADREF counter wreg xreg return
++    ldr \wreg, [x9], #4
++    add \counter, \counter, 12
++    cbz \wreg, \return
++    orr \xreg, \xreg, #ART_HEAP_REFERENCE_BASE
++    b \return
++    nop
++.endm
++
++.LstoreRefW2:
++    LOADREF x8 w2 x2 .LfillRegisters
++    LOADREF x8 w3 x3 .LfillRegisters
++    LOADREF x8 w4 x4 .LfillRegisters
++    LOADREF x8 w5 x5 .LfillRegisters
++    LOADREF x8 w6 x6 .LfillRegisters
++    LOADREF x8 w7 x7 .LfillRegisters
++#endif
++
+ // Store ints.
+ .LstoreW2:
+     LOADREG x8 4 w2 .LfillRegisters
+@@ -634,6 +666,9 @@ ENTRY art_quick_invoke_static_stub
+     adr  x12, .LstoreX1_2
+     adr  x13, .LstoreS0_2
+     adr  x14, .LstoreD0_2
++#ifdef ART_HAS_HEAP_REFERENCE_BASE
++    adr  x16, .LstoreRefW1_2  // SteamARM: references, decompressed as they are loaded.
++#endif
+ 
+     // Initialize routine offsets to 0 for integers and floats.
+     // x8 for integers, x15 for floating point.
+@@ -680,6 +715,13 @@ ENTRY art_quick_invoke_static_stub
+     cmp x8, # 7*12          // Skip this load if all registers full.
+     beq .Ladvance4_2
+ 
++#ifdef ART_HAS_HEAP_REFERENCE_BASE
++    cmp w17, #'L'           // SteamARM: a reference? (24-byte entries)
++    bne 1f
++    add x17, x16, x8, lsl #1
++    br x17
++1:
++#endif
+     add x17, x11, x8        // Calculate subroutine to jump to.
+     br x17
+ 
+@@ -691,6 +733,18 @@ ENTRY art_quick_invoke_static_stub
+     add x9, x9, #8
+     b .LfillRegisters2
+ 
++#ifdef ART_HAS_HEAP_REFERENCE_BASE
++// Store references (SteamARM).
++.LstoreRefW1_2:
++    LOADREF x8 w1 x1 .LfillRegisters2
++    LOADREF x8 w2 x2 .LfillRegisters2
++    LOADREF x8 w3 x3 .LfillRegisters2
++    LOADREF x8 w4 x4 .LfillRegisters2
++    LOADREF x8 w5 x5 .LfillRegisters2
++    LOADREF x8 w6 x6 .LfillRegisters2
++    LOADREF x8 w7 x7 .LfillRegisters2
++#endif
++
+ // Store ints.
+ .LstoreW1_2:
+     LOADREG x8 4 w1 .LfillRegisters2
+@@ -1065,6 +1119,7 @@ END art_quick_check_instance_of
+     add \xObj, \xObj, \xTemp, lsr #32
+     ldr \wDest, [\xObj, #\offset]   // Heap reference = 32b. This also zero-extends to \xDest.
+     UNPOISON_HEAP_REF \wDest
++    DECOMPRESS_HEAP_REF_NOT_NULL \xDest  // SteamARM: a class, never null.
+     b .Lrb_exit\number
+ # endif  // USE_BAKER_READ_BARRIER
+ .Lrb_slowpath\number:
+@@ -1081,7 +1136,7 @@ END art_quick_check_instance_of
+     bl artReadBarrierSlow           // artReadBarrierSlow(ref, xObj, offset)
+     // No need to unpoison return value in w0, artReadBarrierSlow() would do the unpoisoning.
+     .ifnc \wDest, w0
+-        mov \wDest, w0              // save return value in wDest
++        mov \xDest, x0              // save return value in xDest (SteamARM: all 64 bits)
+     .endif
+ 
+     // Conditionally restore saved registers
+@@ -1096,6 +1151,7 @@ END art_quick_check_instance_of
+ #else
+     ldr \wDest, [\xObj, #\offset]   // Heap reference = 32b. This also zero-extends to \xDest.
+     UNPOISON_HEAP_REF \wDest
++    DECOMPRESS_HEAP_REF_NOT_NULL \xDest  // SteamARM: a class, never null.
+ #endif  // USE_READ_BARRIER
+ .endm
+ 
+@@ -1596,6 +1652,7 @@ END \name
+     // Array classes are never finalizable or uninitialized, no need to check.
+     ldr    \wTemp0, [\xClass, #MIRROR_CLASS_COMPONENT_TYPE_OFFSET] // Load component type
+     UNPOISON_HEAP_REF \wTemp0
++    DECOMPRESS_HEAP_REF_NOT_NULL \xTemp0  // SteamARM
+     ldr    \wTemp0, [\xTemp0, #MIRROR_CLASS_OBJECT_PRIMITIVE_TYPE_OFFSET]
+     lsr    \xTemp0, \xTemp0, #PRIMITIVE_TYPE_SIZE_SHIFT_SHIFT // Component size shift is in high 16
+                                                               // bits.
+@@ -1713,8 +1770,10 @@ ENTRY art_quick_imt_conflict_trampoline
+     ldp wIP0, w15, [xIP0, #ART_METHOD_DECLARING_CLASS_OFFSET]
+     // If the method is obsolete, just go through the dex cache miss slow path.
+     tbnz x15, #ACC_OBSOLETE_METHOD_SHIFT, .Limt_conflict_trampoline_dex_cache_miss
++    DECOMPRESS_HEAP_REF_NOT_NULL xIP0  // SteamARM: the declaring class.
+     ldr wIP0, [xIP0, #MIRROR_CLASS_DEX_CACHE_OFFSET]  // Load the DexCache (without read barrier).
+     UNPOISON_HEAP_REF wIP0
++    DECOMPRESS_HEAP_REF_NOT_NULL xIP0  // SteamARM: the dex cache.
+     ubfx x15, xIP1, #0, #METHOD_DEX_CACHE_HASH_BITS  // Calculate DexCache method slot index.
+     ldr xIP0, [xIP0, #MIRROR_DEX_CACHE_RESOLVED_METHODS_OFFSET]  // Load the resolved methods.
+     add xIP0, xIP0, x15, lsl #(POINTER_SIZE_SHIFT + 1)  // Load DexCache method slot address.
+@@ -2217,6 +2276,8 @@ END art_quick_string_builder_append
+ ENTRY \name
+     // Reference is null, no work to do at all.
+     cbz \wreg, .Lret_rb_\name
++    // SteamARM: accept a compressed reference too (the ORR is idempotent).
++    DECOMPRESS_HEAP_REF_NOT_NULL \xreg
+     // Use wIP0 as temp and check the mark bit of the reference. wIP0 is not used by the compiler.
+     ldr   wIP0, [\xreg, #MIRROR_OBJECT_LOCK_WORD_OFFSET]
+     tbz   wIP0, #LOCK_WORD_MARK_BIT_SHIFT, .Lnot_marked_rb_\name
+@@ -2261,11 +2322,11 @@ ENTRY \name
+     stp   d30, d31, [sp, #336]
+ 
+     .ifnc \wreg, w0
+-      mov   w0, \wreg                   // Pass arg1 - obj from `wreg`
++      mov   x0, \xreg                   // Pass arg1 - obj from `xreg` (SteamARM: 64 bits)
+     .endif
+     bl    artReadBarrierMark            // artReadBarrierMark(obj)
+     .ifnc \wreg, w0
+-      mov   \wreg, w0                   // Return result into `wreg`
++      mov   \xreg, x0                   // Return result into `xreg` (SteamARM: 64 bits)
+     .endif
+ 
+     // Restore core regs, except `xreg`, as `wreg` is used to return the
+@@ -2300,6 +2361,7 @@ ENTRY \name
+     // Shift left by the forwarding address shift. This clears out the state bits since they are
+     // in the top 2 bits of the lock word.
+     lsl   \wreg, wIP0, #LOCK_WORD_STATE_FORWARDING_ADDRESS_SHIFT
++    DECOMPRESS_HEAP_REF_NOT_NULL \xreg  // SteamARM: the lock word holds the compressed address.
+     ret
+ END \name
+ .endm
+@@ -2437,8 +2499,9 @@ READ_BARRIER_MARK_REG art_quick_read_barrier_mark_reg29, w29, x29
+     stp   d30, d31, [sp, #320]
+ 
+     mov   x0, xIP0
++    DECOMPRESS_HEAP_REF_NOT_NULL x0   // SteamARM: the thunk passes a compressed reference.
+     bl    artReadBarrierMark          // artReadBarrierMark(obj)
+-    mov   xIP0, x0
++    mov   xIP0, x0                    // (Returned through a W move; code decompresses it.)
+ 
+     // Restore core regs, except x0 and x1 as the return register switch case
+     // address calculation is smoother with an extra register.
+@@ -2534,7 +2597,15 @@ ENTRY_ALIGNED art_quick_read_barrier_mark_introspection, 512
+     // If reference is null, just return it in the right register.
+     cbz   wIP0, .Lmark_introspection_return
+     // Use wIP1 as temp and check the mark bit of the reference.
++#ifdef ART_HAS_HEAP_REFERENCE_BASE
++    // SteamARM: xIP0 stays compressed, because the return below keeps ref_reg*8
++    // in its high word; the lock word is addressed through xIP1. The return
++    // switch moves wIP0, and the generated code decompresses after its label.
++    orr   xIP1, xIP0, #ART_HEAP_REFERENCE_BASE
++    ldr   wIP1, [xIP1, #MIRROR_OBJECT_LOCK_WORD_OFFSET]
++#else
+     ldr   wIP1, [xIP0, #MIRROR_OBJECT_LOCK_WORD_OFFSET]
++#endif
+     tbz   wIP1, #LOCK_WORD_MARK_BIT_SHIFT, .Lmark_introspection_unmarked
+ .Lmark_introspection_return:
+     // Without an extra register for the return switch case address calculation,
+@@ -2549,7 +2620,12 @@ ENTRY_ALIGNED art_quick_read_barrier_mark_introspection, 512
+     // Check if the top two bits are one, if this is the case it is a forwarding address.
+     tst   wIP1, wIP1, lsl #1
+     bmi   .Lmark_introspection_forwarding_address
++#ifdef ART_HAS_HEAP_REFERENCE_BASE
++    // SteamARM: out of line, so that this code stays within its 256 bytes.
++    b     .Lmark_introspection_field_slow_path
++#else
+     READ_BARRIER_MARK_INTROSPECTION_SLOW_PATH BAKER_MARK_INTROSPECTION_FIELD_LDR_OFFSET
++#endif
+ 
+ .Lmark_introspection_forwarding_address:
+     // Shift left by the forwarding address shift. This clears out the state bits since they are
+@@ -2571,6 +2647,10 @@ art_quick_read_barrier_mark_introspection_arrays:
+     .global art_quick_read_barrier_mark_introspection_gc_roots
+ art_quick_read_barrier_mark_introspection_gc_roots:
+     READ_BARRIER_MARK_INTROSPECTION_SLOW_PATH BAKER_MARK_INTROSPECTION_GC_ROOT_LDR_OFFSET
++#ifdef ART_HAS_HEAP_REFERENCE_BASE
++.Lmark_introspection_field_slow_path:
++    READ_BARRIER_MARK_INTROSPECTION_SLOW_PATH BAKER_MARK_INTROSPECTION_FIELD_LDR_OFFSET
++#endif
+ END art_quick_read_barrier_mark_introspection
+ 
+ .extern artInvokePolymorphic

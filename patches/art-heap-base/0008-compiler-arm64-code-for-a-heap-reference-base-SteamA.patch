@@ -1,0 +1,537 @@
+From e0040d1a380451e9a3cc5bb38c0eea0fdaa3e160 Mon Sep 17 00:00:00 2001
+From: LukeOkk <85941941+LukeOkk@users.noreply.github.com>
+Date: Wed, 30 Sep 2026 05:03:37 -0300
+Subject: [PATCH 8/9] compiler: arm64 code for a heap reference base (SteamARM,
+ HYPOTHESIS)
+
+HYPOTHESIS, UNTESTED: not compiled, no code generated or run.
+
+Upstream arm64 code keeps a reference in a W register and dereferences its
+X view, relying on the zero extension of 32-bit writes; heap poisoning hooks
+mark the heap loads and stores. With kTargetHeapReferenceBase != 0 the
+invariant becomes: a reference in a core register is a full pointer (null
+0); in memory it is the low 32 bits. Compression is the existing 32-bit
+store. Decompression (Arm64Assembler::DecompressHeapReference) is
+"cbz w, 1f; orr x, x, #base; 1:", or one ORR when the value cannot be null;
+it is idempotent on a full pointer.
+
+Changed (numbers from SteamARM's patches/art-heap-base/count_sites.py):
+
+- the load hook: MaybeUnpoisonHeapReference() also decompresses (24 call
+  sites, C1), and so does MaybeGenerateReadBarrierSlow()'s no-barrier path;
+- Baker read barriers: field, array, acquire and CAS old-value loads
+  decompress after the return label, where the not-gray LDR, the
+  introspection entrypoint's W move and the thunk all arrive (16 call
+  sites, C4); the thunk layout and BAKER_MARK_INTROSPECTION_*_LDR_OFFSET do
+  not change;
+- GC roots (declaring class, .bss, JIT roots): GenerateGcRootFieldLoad()
+  decompresses at its end (5 call sites, C3); the GC-root thunk decompresses
+  the root before reading its lock word (C5);
+- 32-bit values that are addresses in the window: .data.bimg.rel.ro entries
+  (classes, strings, boot image ArtMethods), JIT boot image literals and
+  JIT root-table slot addresses (C6); their DCHECKed 32-bit casts become
+  compressions;
+- Thread fields that hold objects: exception load and clear, peer load, as
+  64 bits (C7);
+- address arithmetic on references: array element addresses, far and
+  acquire Baker field bases, UnsafeGet, vector addresses, card marking (C8);
+  HIntermediateAddress (a kInt32 value the register allocator may spill as
+  32 bits) is no longer extracted;
+- moves: register moves of references keep 64 bits, reloads from 32-bit
+  spill slots and stack arguments decompress, and the parallel move
+  resolver passes the reference type (C9); HSelect of references selects X
+  registers; an interface call's receiver reloaded from the stack is
+  decompressed.
+
+HeapOperand() and the 61 dereferences through it (C10) are unchanged: they
+use the X view, which now holds the full pointer. Card marking uses the full
+address, matching the runtime's card table over the window.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01L6ANQQienC2qRCeZBzUfuS
+---
+ compiler/optimizing/code_generator_arm64.cc   | 128 ++++++++++++++----
+ .../optimizing/code_generator_vector_arm64.cc |   7 +-
+ .../instruction_simplifier_arm64.cc           |   9 ++
+ compiler/optimizing/intrinsics_arm64.cc       |   9 +-
+ compiler/utils/arm64/assembler_arm64.cc       |  17 +++
+ compiler/utils/arm64/assembler_arm64.h        |   9 ++
+ 6 files changed, 152 insertions(+), 27 deletions(-)
+
+diff --git a/compiler/optimizing/code_generator_arm64.cc b/compiler/optimizing/code_generator_arm64.cc
+index 7d1b0ea..5902c84 100644
+--- a/compiler/optimizing/code_generator_arm64.cc
++++ b/compiler/optimizing/code_generator_arm64.cc
+@@ -87,6 +87,21 @@ using helpers::XRegisterFrom;
+ // generates less code/data with a small num_entries.
+ static constexpr uint32_t kPackedSwitchCompareJumpThreshold = 7;
+ 
++#if defined(__aarch64__) && defined(ART_TARGET)
++// SteamARM: the JIT runs this code generator inside the runtime it serves.
++static_assert(kTargetHeapReferenceBase == kHeapReferenceBase,
++              "The arm64 code generator and the runtime disagree on the heap reference base");
++#endif
++
++// SteamARM (HYPOTHESIS, UNTESTED; docs/ART_HEAP_ABOVE_4GB.md in SteamARM): with a
++// heap reference base, a reference in a core register is a full pointer (the
++// base ORed in, null 0) and in memory (heap, 32-bit stack slots, GC roots,
++// .bss, .data.bimg.rel.ro, literals) its low 32 bits. Loads decompress
++// (Arm64Assembler::DecompressHeapReference, also reached through
++// MaybeUnpoisonHeapReference); 32-bit stores are the compression; register
++// moves and selects of references keep all 64 bits; address arithmetic on a
++// reference uses X registers.
++
+ // Reference load (except object array loads) is using LDR Wt, [Xn, #offset] which can handle
+ // offset < 16KiB. For offsets >= 16KiB, the load shall be emitted as two or more instructions.
+ // For the Baker read barrier implementation using link-time generated thunks we need to split
+@@ -1058,7 +1073,13 @@ void ParallelMoveResolverARM64::FreeScratchLocation(Location loc) {
+ 
+ void ParallelMoveResolverARM64::EmitMove(size_t index) {
+   MoveOperands* move = moves_[index];
+-  codegen_->MoveLocation(move->GetDestination(), move->GetSource(), DataType::Type::kVoid);
++  // SteamARM: a reference move needs its type (64-bit register moves,
++  // decompression when reloaded from a 32-bit spill slot).
++  DataType::Type type =
++      (kTargetHeapReferenceBase != 0u && move->GetType() == DataType::Type::kReference)
++          ? DataType::Type::kReference
++          : DataType::Type::kVoid;
++  codegen_->MoveLocation(move->GetDestination(), move->GetSource(), type);
+ }
+ 
+ void CodeGeneratorARM64::MaybeIncrementHotness(bool is_frame_entry) {
+@@ -1256,7 +1277,9 @@ void CodeGeneratorARM64::AddLocationAsTemp(Location location, LocationSummary* l
+ void CodeGeneratorARM64::MarkGCCard(Register object, Register value, bool value_can_be_null) {
+   UseScratchRegisterScope temps(GetVIXLAssembler());
+   Register card = temps.AcquireX();
+-  Register temp = temps.AcquireW();   // Index within the CardTable - 32bit.
++  // SteamARM: the index comes from the object's full address (the card table
++  // covers the heap reference window, see Heap::Heap()).
++  Register temp = (kTargetHeapReferenceBase != 0u) ? temps.AcquireX() : temps.AcquireW();
+   vixl::aarch64::Label done;
+   if (value_can_be_null) {
+     __ Cbz(value, &done);
+@@ -1265,7 +1288,7 @@ void CodeGeneratorARM64::MarkGCCard(Register object, Register value, bool value_
+   __ Ldr(card, MemOperand(tr, Thread::CardTableOffset<kArm64PointerSize>().Int32Value()));
+   // Calculate the offset (in the card table) of the card corresponding to
+   // `object`.
+-  __ Lsr(temp, object, gc::accounting::CardTable::kCardShift);
++  __ Lsr(temp, temp.IsX() ? object.X() : object, gc::accounting::CardTable::kCardShift);
+   // Write the `art::gc::accounting::CardTable::kCardDirty` value into the
+   // `object`'s card.
+   //
+@@ -1433,13 +1456,21 @@ void CodeGeneratorARM64::MoveLocation(Location destination,
+     if (source.IsStackSlot() || source.IsDoubleStackSlot()) {
+       DCHECK(dst.Is64Bits() == source.IsDoubleStackSlot());
+       __ Ldr(dst, StackOperandFrom(source));
++      if (dst_type == DataType::Type::kReference) {
++        // SteamARM: a reference spill slot (or stack argument) is compressed.
++        GetAssembler()->DecompressHeapReference(Register(dst));
++      }
+     } else if (source.IsSIMDStackSlot()) {
+       __ Ldr(QRegisterFrom(destination), StackOperandFrom(source));
+     } else if (source.IsConstant()) {
+       DCHECK(CoherentConstantAndType(source, dst_type));
+       MoveConstant(dst, source.GetConstant());
+     } else if (source.IsRegister()) {
+-      if (destination.IsRegister()) {
++      if (destination.IsRegister() &&
++          dst_type == DataType::Type::kReference && kTargetHeapReferenceBase != 0u) {
++        // SteamARM: a W move would drop the heap reference base.
++        __ Mov(XRegisterFrom(destination), XRegisterFrom(source));
++      } else if (destination.IsRegister()) {
+         __ Mov(Register(dst), RegisterFrom(source, dst_type));
+       } else {
+         DCHECK(destination.IsFpuRegister());
+@@ -2535,7 +2566,7 @@ void InstructionCodeGeneratorARM64::VisitArrayGet(HArrayGet* instruction) {
+         }
+         temp = obj;
+       } else {
+-        __ Add(temp, obj, offset);
++        __ Add(temp.X(), obj.X(), offset);  // SteamARM: the full address.
+       }
+       if (maybe_compressed_char_at) {
+         vixl::aarch64::Label uncompressed_load, done;
+@@ -2646,7 +2677,7 @@ void InstructionCodeGeneratorARM64::VisitArraySet(HArraySet* instruction) {
+         }
+         temp = array;
+       } else {
+-        __ Add(temp, array, offset);
++        __ Add(temp.X(), array.X(), offset);  // SteamARM: the full address.
+       }
+       destination = HeapOperand(temp,
+                                 XRegisterFrom(index),
+@@ -2745,7 +2776,7 @@ void InstructionCodeGeneratorARM64::VisitArraySet(HArraySet* instruction) {
+       destination = HeapOperand(array, offset);
+     } else {
+       Register temp_base = temps.AcquireSameSizeAs(array);
+-      __ Add(temp_base, array, offset);
++      __ Add(temp_base.X(), array.X(), offset);  // SteamARM: the full address.
+       destination = HeapOperand(temp_base,
+                                 XRegisterFrom(index),
+                                 LSL,
+@@ -3489,6 +3520,13 @@ void InstructionCodeGeneratorARM64::VisitSelect(HSelect* select) {
+              InputFPRegisterAt(select, 1),
+              InputFPRegisterAt(select, 0),
+              csel_cond);
++  } else if (select->GetType() == DataType::Type::kReference && kTargetHeapReferenceBase != 0u) {
++    // SteamARM: select full pointers (a reference constant is null).
++    LocationSummary* locations = select->GetLocations();
++    __ Csel(XRegisterFrom(locations->Out()),
++            helpers::OperandFrom(locations->InAt(1), DataType::Type::kInt64),
++            helpers::OperandFrom(locations->InAt(0), DataType::Type::kInt64),
++            csel_cond);
+   } else {
+     __ Csel(OutputRegister(select),
+             InputOperandAt(select, 1),
+@@ -4117,6 +4155,8 @@ void InstructionCodeGeneratorARM64::VisitInvokeInterface(HInvokeInterface* invok
+   // Ensure that between load and MaybeRecordImplicitNullCheck there are no pools emitted.
+   if (receiver.IsStackSlot()) {
+     __ Ldr(temp.W(), StackOperandFrom(receiver));
++    // SteamARM: a compressed reference; null stays 0 for the implicit null check.
++    GetAssembler()->DecompressHeapReference(temp.W());
+     {
+       EmissionCheckScope guard(GetVIXLAssembler(), kMaxMacroInstructionSizeInBytes);
+       // /* HeapReference<Class> */ temp = temp->klass_
+@@ -4243,7 +4283,9 @@ void CodeGeneratorARM64::GenerateStaticOrDirectCall(
+       // Add LDR with its PC-relative .data.bimg.rel.ro patch.
+       vixl::aarch64::Label* ldr_label = NewBootImageRelRoPatch(boot_image_offset, adrp_label);
+       // Note: Boot image is in the low 4GiB and the entry is 32-bit, so emit a 32-bit load.
++      // SteamARM: in the heap reference window; the entry is the low half.
+       EmitLdrOffsetPlaceholder(ldr_label, WRegisterFrom(temp), XRegisterFrom(temp));
++      GetAssembler()->DecompressHeapReferenceNotNull(WRegisterFrom(temp));
+       break;
+     }
+     case HInvokeStaticOrDirect::MethodLoadKind::kBssEntry: {
+@@ -4460,7 +4502,9 @@ vixl::aarch64::Label* CodeGeneratorARM64::NewPcRelativePatch(
+ 
+ vixl::aarch64::Literal<uint32_t>* CodeGeneratorARM64::DeduplicateBootImageAddressLiteral(
+     uint64_t address) {
+-  return DeduplicateUint32Literal(dchecked_integral_cast<uint32_t>(address));
++  // SteamARM: the compressed address (the code ORs the base back in).
++  DCHECK(IsInHeapReferenceWindow(address));
++  return DeduplicateUint32Literal(CompressHeapAddress(address));
+ }
+ 
+ vixl::aarch64::Literal<uint32_t>* CodeGeneratorARM64::DeduplicateJitStringLiteral(
+@@ -4522,12 +4566,14 @@ void CodeGeneratorARM64::LoadBootImageAddress(vixl::aarch64::Register reg,
+     // Add LDR with its PC-relative .data.bimg.rel.ro patch.
+     vixl::aarch64::Label* ldr_label = NewBootImageRelRoPatch(boot_image_reference, adrp_label);
+     EmitLdrOffsetPlaceholder(ldr_label, reg.W(), reg.X());
++    GetAssembler()->DecompressHeapReferenceNotNull(reg.W());  // SteamARM
+   } else {
+     DCHECK(Runtime::Current()->UseJitCompilation());
+     gc::Heap* heap = Runtime::Current()->GetHeap();
+     DCHECK(!heap->GetBootImageSpaces().empty());
+     const uint8_t* address = heap->GetBootImageSpaces()[0]->Begin() + boot_image_reference;
+     __ Ldr(reg.W(), DeduplicateBootImageAddressLiteral(reinterpret_cast<uintptr_t>(address)));
++    GetAssembler()->DecompressHeapReferenceNotNull(reg.W());  // SteamARM
+   }
+ }
+ 
+@@ -4840,6 +4886,7 @@ void InstructionCodeGeneratorARM64::VisitLoadClass(HLoadClass* cls) NO_THREAD_SA
+       vixl::aarch64::Label* ldr_label =
+           codegen_->NewBootImageRelRoPatch(boot_image_offset, adrp_label);
+       codegen_->EmitLdrOffsetPlaceholder(ldr_label, out.W(), out.X());
++      GetAssembler()->DecompressHeapReferenceNotNull(out.W());  // SteamARM
+       break;
+     }
+     case HLoadClass::LoadKind::kBssEntry: {
+@@ -4865,15 +4912,18 @@ void InstructionCodeGeneratorARM64::VisitLoadClass(HLoadClass* cls) NO_THREAD_SA
+     }
+     case HLoadClass::LoadKind::kJitBootImageAddress: {
+       DCHECK_EQ(read_barrier_option, kWithoutReadBarrier);
+-      uint32_t address = reinterpret_cast32<uint32_t>(cls->GetClass().Get());
++      uintptr_t address = reinterpret_cast<uintptr_t>(cls->GetClass().Get());
+       DCHECK_NE(address, 0u);
+       __ Ldr(out.W(), codegen_->DeduplicateBootImageAddressLiteral(address));
++      GetAssembler()->DecompressHeapReferenceNotNull(out.W());  // SteamARM
+       break;
+     }
+     case HLoadClass::LoadKind::kJitTableAddress: {
+       __ Ldr(out, codegen_->DeduplicateJitClassLiteral(cls->GetDexFile(),
+                                                        cls->GetTypeIndex(),
+                                                        cls->GetClass()));
++      // SteamARM: the root slot's address (JIT data is in the window).
++      GetAssembler()->DecompressHeapReferenceNotNull(out);
+       codegen_->GenerateGcRootFieldLoad(cls,
+                                         out_loc,
+                                         out.X(),
+@@ -4937,7 +4987,10 @@ void LocationsBuilderARM64::VisitLoadException(HLoadException* load) {
+ }
+ 
+ void InstructionCodeGeneratorARM64::VisitLoadException(HLoadException* instruction) {
+-  __ Ldr(OutputRegister(instruction), GetExceptionTlsAddress());
++  // SteamARM: Thread::tlsPtr_.exception is a full 64-bit pointer.
++  __ Ldr(kTargetHeapReferenceBase != 0u ? OutputRegister(instruction).X()
++                                        : OutputRegister(instruction),
++         GetExceptionTlsAddress());
+ }
+ 
+ void LocationsBuilderARM64::VisitClearException(HClearException* clear) {
+@@ -4945,7 +4998,8 @@ void LocationsBuilderARM64::VisitClearException(HClearException* clear) {
+ }
+ 
+ void InstructionCodeGeneratorARM64::VisitClearException(HClearException* clear ATTRIBUTE_UNUSED) {
+-  __ Str(wzr, GetExceptionTlsAddress());
++  // SteamARM: clear all 64 bits (the upper half is the heap reference base).
++  __ Str(kTargetHeapReferenceBase != 0u ? xzr : wzr, GetExceptionTlsAddress());
+ }
+ 
+ HLoadString::LoadKind CodeGeneratorARM64::GetSupportedLoadStringKind(
+@@ -5016,6 +5070,7 @@ void InstructionCodeGeneratorARM64::VisitLoadString(HLoadString* load) NO_THREAD
+       vixl::aarch64::Label* ldr_label =
+           codegen_->NewBootImageRelRoPatch(boot_image_offset, adrp_label);
+       codegen_->EmitLdrOffsetPlaceholder(ldr_label, out.W(), out.X());
++      GetAssembler()->DecompressHeapReferenceNotNull(out.W());  // SteamARM
+       return;
+     }
+     case HLoadString::LoadKind::kBssEntry: {
+@@ -5045,15 +5100,18 @@ void InstructionCodeGeneratorARM64::VisitLoadString(HLoadString* load) NO_THREAD
+       return;
+     }
+     case HLoadString::LoadKind::kJitBootImageAddress: {
+-      uint32_t address = reinterpret_cast32<uint32_t>(load->GetString().Get());
++      uintptr_t address = reinterpret_cast<uintptr_t>(load->GetString().Get());
+       DCHECK_NE(address, 0u);
+       __ Ldr(out.W(), codegen_->DeduplicateBootImageAddressLiteral(address));
++      GetAssembler()->DecompressHeapReferenceNotNull(out.W());  // SteamARM
+       return;
+     }
+     case HLoadString::LoadKind::kJitTableAddress: {
+       __ Ldr(out, codegen_->DeduplicateJitStringLiteral(load->GetDexFile(),
+                                                         load->GetStringIndex(),
+                                                         load->GetString()));
++      // SteamARM: the root slot's address (JIT data is in the window).
++      GetAssembler()->DecompressHeapReferenceNotNull(out);
+       codegen_->GenerateGcRootFieldLoad(load,
+                                         out_loc,
+                                         out.X(),
+@@ -6047,6 +6105,9 @@ void CodeGeneratorARM64::GenerateGcRootFieldLoad(
+     // Note that GC roots are not affected by heap poisoning, thus we
+     // do not have to unpoison `root_reg` here.
+   }
++  // SteamARM: after the Baker thunk's return address, so that every path
++  // (plain load, marked, forwarded) is decompressed; idempotent.
++  GetAssembler()->DecompressHeapReference(root_reg);
+   MaybeGenerateMarkingRegisterCheck(/* code= */ __LINE__);
+ }
+ 
+@@ -6059,14 +6120,17 @@ void CodeGeneratorARM64::GenerateUnsafeCasOldValueMovWithBakerReadBarrier(
+   // Similar to the Baker RB path in GenerateGcRootFieldLoad(), with a MOV instead of LDR.
+   uint32_t custom_data = EncodeBakerReadBarrierGcRootData(marked.GetCode());
+ 
+-  ExactAssemblyScope guard(GetVIXLAssembler(), 3 * vixl::aarch64::kInstructionSize);
+-  vixl::aarch64::Label return_address;
+-  __ adr(lr, &return_address);
+-  static_assert(BAKER_MARK_INTROSPECTION_GC_ROOT_LDR_OFFSET == -8,
+-                "GC root LDR must be 2 instructions (8B) before the return address label.");
+-  __ mov(marked, old_value);
+-  EmitBakerReadBarrierCbnz(custom_data);
+-  __ bind(&return_address);
++  {
++    ExactAssemblyScope guard(GetVIXLAssembler(), 3 * vixl::aarch64::kInstructionSize);
++    vixl::aarch64::Label return_address;
++    __ adr(lr, &return_address);
++    static_assert(BAKER_MARK_INTROSPECTION_GC_ROOT_LDR_OFFSET == -8,
++                  "GC root LDR must be 2 instructions (8B) before the return address label.");
++    __ mov(marked, old_value);
++    EmitBakerReadBarrierCbnz(custom_data);
++    __ bind(&return_address);
++  }
++  GetAssembler()->DecompressHeapReference(marked);  // SteamARM: as for GC roots.
+ }
+ 
+ void CodeGeneratorARM64::GenerateFieldLoadWithBakerReadBarrier(HInstruction* instruction,
+@@ -6136,6 +6200,9 @@ void CodeGeneratorARM64::GenerateFieldLoadWithBakerReadBarrier(HInstruction* ins
+     }
+     __ bind(&return_address);
+   }
++  // SteamARM: after the return address, where the not-gray path (the LDR) and
++  // the introspection entrypoint (a W move) both arrive; idempotent.
++  GetAssembler()->DecompressHeapReference(RegisterFrom(ref, DataType::Type::kReference));
+   MaybeGenerateMarkingRegisterCheck(/* code= */ __LINE__, /* temp_loc= */ LocationFrom(ip1));
+ }
+ 
+@@ -6151,13 +6218,14 @@ void CodeGeneratorARM64::GenerateFieldLoadWithBakerReadBarrier(HInstruction* ins
+   if (use_load_acquire) {
+     DCHECK(maybe_temp.IsRegister());
+     base = WRegisterFrom(maybe_temp);
+-    __ Add(base, obj, offset);
++    __ Add(base.X(), obj.X(), offset);  // SteamARM: the full address.
+     offset = 0u;
+   } else if (offset >= kReferenceLoadMinFarOffset) {
+     DCHECK(maybe_temp.IsRegister());
+     base = WRegisterFrom(maybe_temp);
+     static_assert(IsPowerOfTwo(kReferenceLoadMinFarOffset), "Expecting a power of 2.");
+-    __ Add(base, obj, Operand(offset & ~(kReferenceLoadMinFarOffset - 1u)));
++    // SteamARM: the full address.
++    __ Add(base.X(), obj.X(), Operand(offset & ~(kReferenceLoadMinFarOffset - 1u)));
+     offset &= (kReferenceLoadMinFarOffset - 1u);
+   }
+   MemOperand src(base.X(), offset);
+@@ -6244,6 +6312,9 @@ void CodeGeneratorARM64::GenerateArrayLoadWithBakerReadBarrier(HArrayGet* instru
+     }
+     __ bind(&return_address);
+   }
++  // SteamARM: after the return address, where the not-gray path (the LDR) and
++  // the introspection entrypoint (a W move) both arrive; idempotent.
++  GetAssembler()->DecompressHeapReference(RegisterFrom(ref, DataType::Type::kReference));
+   MaybeGenerateMarkingRegisterCheck(/* code= */ __LINE__, /* temp_loc= */ LocationFrom(ip1));
+ }
+ 
+@@ -6300,8 +6371,9 @@ void CodeGeneratorARM64::MaybeGenerateReadBarrierSlow(HInstruction* instruction,
+     // If heap poisoning is enabled, unpoisoning will be taken care of
+     // by the runtime within the slow path.
+     GenerateReadBarrierSlow(instruction, out, ref, obj, offset, index);
+-  } else if (kPoisonHeapReferences) {
+-    GetAssembler()->UnpoisonHeapReference(WRegisterFrom(out));
++  } else {
++    // SteamARM: unpoison if needed, and decompress.
++    GetAssembler()->MaybeUnpoisonHeapReference(WRegisterFrom(out));
+   }
+ }
+ 
+@@ -6354,7 +6426,9 @@ static void PatchJitRootUse(uint8_t* code,
+   uintptr_t address =
+       reinterpret_cast<uintptr_t>(roots_data) + index_in_table * sizeof(GcRoot<mirror::Object>);
+   uint8_t* data = code + literal_offset;
+-  reinterpret_cast<uint32_t*>(data)[0] = dchecked_integral_cast<uint32_t>(address);
++  // SteamARM: the compressed address; the code ORs the base back in.
++  DCHECK(IsInHeapReferenceWindow(address));
++  reinterpret_cast<uint32_t*>(data)[0] = CompressHeapAddress(address);
+ }
+ 
+ void CodeGeneratorARM64::EmitJitRootPatches(uint8_t* code, const uint8_t* roots_data) {
+@@ -6513,6 +6587,10 @@ void CodeGeneratorARM64::CompileBakerReadBarrierThunk(Arm64Assembler& assembler,
+       temps.Exclude(ip0, ip1);
+       vixl::aarch64::Label return_label, not_marked, forwarding_address;
+       __ Cbz(root_reg, &return_label);
++      if (kTargetHeapReferenceBase != 0u) {
++        // SteamARM: the root was loaded as 32 bits; decompress it before using it.
++        __ Orr(root_reg.X(), root_reg.X(), kTargetHeapReferenceBase);
++      }
+       MemOperand lock_word(root_reg.X(), mirror::Object::MonitorOffset().Int32Value());
+       __ Ldr(ip0.W(), lock_word);
+       __ Tbz(ip0.W(), LockWord::kMarkBitStateShift, &not_marked);
+diff --git a/compiler/optimizing/code_generator_vector_arm64.cc b/compiler/optimizing/code_generator_vector_arm64.cc
+index df95c88..e292283 100644
+--- a/compiler/optimizing/code_generator_vector_arm64.cc
++++ b/compiler/optimizing/code_generator_vector_arm64.cc
+@@ -1423,7 +1423,12 @@ MemOperand InstructionCodeGeneratorARM64::VecAddress(
+     return HeapOperand(base, offset);
+   } else {
+     *scratch = temps_scope->AcquireSameSizeAs(base);
+-    __ Add(*scratch, base, Operand(WRegisterFrom(index), LSL, shift));
++    if (kTargetHeapReferenceBase != 0u) {
++      // SteamARM: the full address (the array register holds a full pointer).
++      __ Add(scratch->X(), base.X(), Operand(WRegisterFrom(index), UXTW, shift));
++    } else {
++      __ Add(*scratch, base, Operand(WRegisterFrom(index), LSL, shift));
++    }
+     return HeapOperand(*scratch, offset);
+   }
+ }
+diff --git a/compiler/optimizing/instruction_simplifier_arm64.cc b/compiler/optimizing/instruction_simplifier_arm64.cc
+index e23decb..c953be3 100644
+--- a/compiler/optimizing/instruction_simplifier_arm64.cc
++++ b/compiler/optimizing/instruction_simplifier_arm64.cc
+@@ -195,6 +195,12 @@ void InstructionSimplifierArm64Visitor::VisitAnd(HAnd* instruction) {
+ }
+ 
+ void InstructionSimplifierArm64Visitor::VisitArrayGet(HArrayGet* instruction) {
++  // SteamARM: HIntermediateAddress is a 32-bit value (kInt32) that the register
++  // allocator may spill as such; with a heap reference base it cannot hold an
++  // array's address. Not extracted there.
++  if (kTargetHeapReferenceBase != 0u) {
++    return;
++  }
+   size_t data_offset = CodeGenerator::GetArrayDataOffset(instruction);
+   if (TryExtractArrayAccessAddress(instruction,
+                                    instruction->GetArray(),
+@@ -205,6 +211,9 @@ void InstructionSimplifierArm64Visitor::VisitArrayGet(HArrayGet* instruction) {
+ }
+ 
+ void InstructionSimplifierArm64Visitor::VisitArraySet(HArraySet* instruction) {
++  if (kTargetHeapReferenceBase != 0u) {
++    return;  // SteamARM: see VisitArrayGet.
++  }
+   size_t access_size = DataType::Size(instruction->GetComponentType());
+   size_t data_offset = mirror::Array::DataOffset(access_size).Uint32Value();
+   if (TryExtractArrayAccessAddress(instruction,
+diff --git a/compiler/optimizing/intrinsics_arm64.cc b/compiler/optimizing/intrinsics_arm64.cc
+index d88e034..b2a523b 100644
+--- a/compiler/optimizing/intrinsics_arm64.cc
++++ b/compiler/optimizing/intrinsics_arm64.cc
+@@ -732,6 +732,13 @@ void IntrinsicLocationsBuilderARM64::VisitThreadCurrentThread(HInvoke* invoke) {
+ }
+ 
+ void IntrinsicCodeGeneratorARM64::VisitThreadCurrentThread(HInvoke* invoke) {
++  if (kTargetHeapReferenceBase != 0u) {
++    // SteamARM: Thread::tlsPtr_.opeer is a full 64-bit pointer.
++    MacroAssembler* masm = GetVIXLAssembler();
++    __ Ldr(XRegisterFrom(invoke->GetLocations()->Out()),
++           MemOperand(tr, Thread::PeerOffset<kArm64PointerSize>().Int32Value()));
++    return;
++  }
+   codegen_->Load(DataType::Type::kReference, WRegisterFrom(invoke->GetLocations()->Out()),
+                  MemOperand(tr, Thread::PeerOffset<kArm64PointerSize>().Int32Value()));
+ }
+@@ -756,7 +763,7 @@ static void GenUnsafeGet(HInvoke* invoke,
+     Register temp = WRegisterFrom(locations->GetTemp(0));
+     MacroAssembler* masm = codegen->GetVIXLAssembler();
+     // Piggy-back on the field load path using introspection for the Baker read barrier.
+-    __ Add(temp, base, offset.W());  // Offset should not exceed 32 bits.
++    __ Add(temp.X(), base.X(), offset);  // SteamARM: the full address.
+     codegen->GenerateFieldLoadWithBakerReadBarrier(invoke,
+                                                    trg_loc,
+                                                    base,
+diff --git a/compiler/utils/arm64/assembler_arm64.cc b/compiler/utils/arm64/assembler_arm64.cc
+index d722e00..8348764 100644
+--- a/compiler/utils/arm64/assembler_arm64.cc
++++ b/compiler/utils/arm64/assembler_arm64.cc
+@@ -180,6 +180,23 @@ void Arm64Assembler::MaybeUnpoisonHeapReference(Register reg) {
+   if (kPoisonHeapReferences) {
+     UnpoisonHeapReference(reg);
+   }
++  DecompressHeapReference(reg);
++}
++
++void Arm64Assembler::DecompressHeapReference(Register reg) {
++  if (kTargetHeapReferenceBase != 0u) {
++    DCHECK(reg.IsW());
++    vixl::aarch64::Label done;
++    ___ Cbz(reg, &done);
++    ___ Orr(reg.X(), reg.X(), kTargetHeapReferenceBase);
++    ___ Bind(&done);
++  }
++}
++
++void Arm64Assembler::DecompressHeapReferenceNotNull(Register reg) {
++  if (kTargetHeapReferenceBase != 0u) {
++    ___ Orr(reg.X(), reg.X(), kTargetHeapReferenceBase);
++  }
+ }
+ 
+ void Arm64Assembler::GenerateMarkingRegisterCheck(Register temp, int code) {
+diff --git a/compiler/utils/arm64/assembler_arm64.h b/compiler/utils/arm64/assembler_arm64.h
+index fe2f176..d4c7cec 100644
+--- a/compiler/utils/arm64/assembler_arm64.h
++++ b/compiler/utils/arm64/assembler_arm64.h
+@@ -112,8 +112,17 @@ class Arm64Assembler final : public Assembler {
+   // Poison a heap reference contained in `reg` if heap poisoning is enabled.
+   void MaybePoisonHeapReference(vixl::aarch64::Register reg);
+   // Unpoison a heap reference contained in `reg` if heap poisoning is enabled.
++  // SteamARM: then decompress it (DecompressHeapReference); every caller has
++  // just loaded a heap reference into `reg`, or restores one it poisoned.
+   void MaybeUnpoisonHeapReference(vixl::aarch64::Register reg);
+ 
++  // SteamARM (HYPOTHESIS, UNTESTED): turn the 32-bit reference in W register
++  // `reg` (zero-extended) into a pointer in its X register by ORing in
++  // kTargetHeapReferenceBase; null stays 0. Idempotent. No code without a base.
++  void DecompressHeapReference(vixl::aarch64::Register reg);
++  // The same for a value known to be non-null (one ORR).
++  void DecompressHeapReferenceNotNull(vixl::aarch64::Register reg);
++
+   // Emit code checking the status of the Marking Register, and aborting
+   // the program if MR does not match the value stored in the art::Thread
+   // object.
