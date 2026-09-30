@@ -587,37 +587,70 @@ static struct tchan *tchan_get(struct bfile *f, long *err)
         if (t_chans[i].f->closed) tchan_drop(&t_chans[i]);
         else i++;
     if (t_nchans >= MAX_TCHAN) { *err = LERR(ENOMEM); return NULL; }
-    int sv[2];
-    if (socketpair(AF_UNIX, SOCK_STREAM, 0, sv) != 0) { *err = LERR(errno); return NULL; }
-    int mine = hide_fd(sv[0]);
-    // The hub's end goes to the hub by SCM_RIGHTS, and this process keeps a
-    // copy of it until the hub has answered on the channel. Closed at once,
-    // the end in flight had no reference but the message, and XNU's unix
-    // socket garbage collection (unp_gc, which any close of a descriptor-
-    // carrying socket anywhere on the Mac runs) could flush it: the hub then
-    // received a channel already at end of file, dropped the thread, and the
-    // guest's call failed with EBADF ("Bad file descriptor" from
-    // BinderProxy.transactNative; system_server itself died of it several
-    // times a boot, MEASURED at stage 28 with the hub's "thread channel
-    // arrived closed at the other end").
-    int hubs = hide_fd(sv[1]);
-    int sz = 1 << 20;
-    setsockopt(mine, SOL_SOCKET, SO_SNDBUF, &sz, sizeof sz);
-    setsockopt(mine, SOL_SOCKET, SO_RCVBUF, &sz, sizeof sz);
-    struct bh_thread bt = { .tid = lxrt_gettid() };
-    struct bh_hdr h = { .type = BH_THREAD, .nfds = 1, .len = sizeof bt };
-    pthread_mutex_lock(&f->lock);
-    int r = send_msg(f->chan, &h, &bt, sizeof bt, &hubs, 1);
-    pthread_mutex_unlock(&f->lock);
-    if (r != 0) {
-        binder_diag("new thread channel: send on the file's channel %d failed: %s", f->chan, strerror(-r));
+    int mine = -1, hubs = -1;
+    for (int attempt = 1; ; attempt++) {
+        int sv[2];
+        if (socketpair(AF_UNIX, SOCK_STREAM, 0, sv) != 0) { *err = LERR(errno); return NULL; }
+        mine = hide_fd(sv[0]);
+        // The hub's end goes to the hub by SCM_RIGHTS, and this process keeps
+        // a copy of it until the hub has acknowledged the channel. Closed at
+        // once, the end in flight had no reference but the message, and
+        // XNU's unix-socket garbage collection (unp_gc) can flush such a
+        // socket (HYPOTHESIS for the mechanism): the hub received a channel
+        // already at end of file, dropped the thread, and the guest's call
+        // failed with EBADF ("Bad file descriptor" from
+        // BinderProxy.transactNative; system_server died of it several times
+        // a boot, MEASURED at stage 28).
+        hubs = hide_fd(sv[1]);
+        int sz = 1 << 20;
+        setsockopt(mine, SOL_SOCKET, SO_SNDBUF, &sz, sizeof sz);
+        setsockopt(mine, SOL_SOCKET, SO_RCVBUF, &sz, sizeof sz);
+        struct bh_thread bt = { .tid = lxrt_gettid() };
+        struct bh_hdr h = { .type = BH_THREAD, .nfds = 1, .len = sizeof bt };
+        pthread_mutex_lock(&f->lock);
+        int r = send_msg(f->chan, &h, &bt, sizeof bt, &hubs, 1);
+        pthread_mutex_unlock(&f->lock);
+        if (r != 0) {
+            binder_diag("new thread channel: send on the file's channel %d failed: %s", f->chan, strerror(-r));
+            close(hubs);
+            close(mine);
+            *err = LERR(EBADF);
+            return NULL;
+        }
+        // The hub acknowledges the channel on it, and refuses one that reaches
+        // it already at end of file: a few per boot even with our copy held
+        // (cause UNKNOWN, benchmarks/stage28-android-apk.txt); the thread's
+        // first call then waited forever (am start -W for 300 s, MEASURED).
+        // A new channel instead, a few times at most.
+        bool acked = false;
+        for (int waited = 0; waited < 5000 && !acked; ) {
+            struct pollfd pfd = { mine, POLLIN, 0 };
+            int pr = poll(&pfd, 1, 100);
+            if (pr < 0 && errno == EINTR) continue;
+            waited += 100;
+            if (pr <= 0) continue;
+            struct bh_hdr ah;
+            uint8_t *apl = NULL;
+            int afds[BH_MAX_FDS], anfds = 0;
+            if (recv_msg(mine, &ah, &apl, afds, &anfds, NULL) != 0) break;
+            free(apl);
+            for (int i = 0; i < anfds; i++) close(afds[i]);
+            acked = ah.type == BH_THREAD_ACK;
+            if (!acked) break;
+        }
+        if (acked) break;
         close(hubs);
         close(mine);
-        *err = LERR(EBADF);
-        return NULL;
+        if (attempt >= 4) {
+            binder_diag("new thread channel: not acknowledged by the hub after %d attempts", attempt);
+            *err = LERR(EBADF);
+            return NULL;
+        }
+        binder_diag("new thread channel: not acknowledged by the hub (attempt %d); another one", attempt);
     }
+    close(hubs);                        // acknowledged: the hub has its end
+    hubs = -1;
     chan_register(mine);
-    chan_register(hubs);
     pthread_mutex_lock(&g_lock);
     f->refs++;
     pthread_mutex_unlock(&g_lock);

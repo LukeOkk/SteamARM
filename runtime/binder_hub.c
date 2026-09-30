@@ -2268,11 +2268,22 @@ static void proc_message(struct proc *p)
         pid_t peer = 0;
         socklen_t pl2 = sizeof peer;
         int gp = getsockopt(fds[0], SOL_LOCAL, LOCAL_PEERPID, &peer, &pl2);
-        if (pk == 0 || !sock || (gp == 0 && peer != p->pid))
-            hub_log("%d:%d thread channel arrived %s (socket %d, peer pid %d%s)", p->pid, bt.tid,
+        if (pk == 0 || !sock || (gp == 0 && peer != p->pid)) {
+            // The runtime waits for BH_THREAD_ACK and makes a new channel
+            // when it does not come (runtime/binder.c tchan_get).
+            hub_log("%d:%d thread channel arrived %s (socket %d, peer pid %d%s); refused", p->pid, bt.tid,
                     pk == 0 ? "closed at the other end" : "odd", sock, gp == 0 ? peer : -1,
                     pk < 0 && pe != EAGAIN ? ", peek failed" : "");
-        new_thread(p, fds[0], bt.tid);
+            close(fds[0]);
+        } else {
+            struct thread *nt = new_thread(p, fds[0], bt.tid);
+            struct bh_hdr ack = { .type = BH_THREAD_ACK };
+            struct iovec iov = { &ack, sizeof ack };
+            if (send_all(nt->fd, &iov, 1, NULL, 0) != 0) {
+                hub_log("%d:%d thread channel: acknowledgement not sent: %s; dropped", p->pid, bt.tid, strerror(errno));
+                thread_release(nt);
+            }
+        }
     } else {
         hub_log("proc %d: unexpected message %u", p->pid, h.type);
         for (int i = 0; i < nfds; i++) close(fds[i]);

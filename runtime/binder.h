@@ -216,7 +216,7 @@ enum binder_driver_command_protocol {
 // doorbells have been written so far and whether one should still be
 // pending; the runtime drains to that count, so readability tracks the
 // driver's state instead of drifting.
-#define BH_VERSION 1
+#define BH_VERSION 2              // 2: BH_THREAD_ACK
 #define BH_MAX_FDS 250          // file descriptors in one message (SCM_RIGHTS)
 #define BH_MAX_MSG (8u << 20)   // no request is larger than 2 receive buffers
 
@@ -230,6 +230,7 @@ enum bh_type {
     BH_MMAP,            // thread channel: struct bh_mmap + 1 fd (the buffer's file)
     BH_POLL,            // thread channel: this thread polls the descriptor
     BH_RESULT,          // thread channel, hub -> runtime: struct bh_result + ...
+    BH_THREAD_ACK,      // thread channel, hub -> runtime: the channel is registered
 };
 
 struct bh_hdr {
