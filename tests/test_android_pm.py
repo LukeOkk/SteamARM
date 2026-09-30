@@ -5,6 +5,7 @@ Run: python3 -m unittest tests/test_android_pm.py      (no network, no guest)
 import hashlib
 import importlib.util
 import json
+import os
 from pathlib import Path
 import shutil
 import subprocess
@@ -285,7 +286,10 @@ class PMTests(unittest.TestCase):
         files = fx.split_set(self.dir, CERT_A, package="org.example.game", code=10)
         source = fx.zip_of(str(self.dir / "game.xapk"), {"manifest.json": b"{}", **files,
             "Android/obb/org.example.game/main.10.org.example.game.obb": b"game-data"})
-        pm.install(self.layout, source)
+        # A Spanish device: base, x86_64, xxhdpi and es (the set does not
+        # depend on the $LANG of the machine running the test).
+        with mock.patch.dict(os.environ, {"LANG": "es_ES.UTF-8"}):
+            pm.install(self.layout, source)
         root = self.dir / "session-root"
         (root / "data/local/tmp").mkdir(parents=True)
         commands = []
