@@ -653,8 +653,9 @@ static void windowsChanged(void) {
 }
 static void handleSignal(int signo) { dispatch_async(dispatch_get_main_queue(),^{ shutdownServer(signo); }); }
 // Test input (SIGUSR1): <socket>.cmd holds lines "click X Y" (points from the
-// top left of the newest window's content) and "key MACKEYCODE"; each goes
-// through the same path as a person's mouse and keyboard.
+// top left of the newest window's content), "key MACKEYCODE" and "close";
+// each goes through the same path as a person's mouse, keyboard and the
+// window's close button.
 static void runCommands(void) {
     NSString *text=[NSString stringWithContentsOfFile:[socketPath stringByAppendingString:@".cmd"] encoding:NSUTF8StringEncoding error:nil];
     WWindow *w=newestWindow; WView *v=(WView *)w.contentView;
@@ -669,6 +670,9 @@ static void runCommands(void) {
             NSEvent *up=[NSEvent mouseEventWithType:NSEventTypeLeftMouseUp location:loc modifierFlags:0 timestamp:0 windowNumber:w.windowNumber context:nil eventNumber:3 clickCount:1 pressure:0];
             pointerEvent(v,move,0); pointerEvent(v,down,2); pointerEvent(v,up,3);
             logLine([NSString stringWithFormat:@"command: click %@,%@ in \"%@\"",a[1],a[2],w.title]);
+        } else if(a.count==1 && [a[0] isEqual:@"close"]) {      // the window's close button
+            [w performClose:nil];
+            logLine([NSString stringWithFormat:@"command: close \"%@\"",w.title]);
         } else if(a.count==2 && [a[0] isEqual:@"key"]) {
             NSEvent *k=[NSEvent keyEventWithType:NSEventTypeKeyDown location:NSZeroPoint modifierFlags:0 timestamp:0 windowNumber:w.windowNumber context:nil characters:@"" charactersIgnoringModifiers:@"" isARepeat:NO keyCode:(unsigned short)a[1].intValue];
             keyboardEvent(v,k,YES); keyboardEvent(v,k,NO);
