@@ -177,7 +177,7 @@ def write_icon(apk_path, report, dest_dir):
         return png
     raw = dest_dir / ("icon." + (fmt or "bin"))
     raw.write_bytes(data)
-    sips = shutil.which("sips") or ("/usr/bin/sips" if os.path.exists("/usr/bin/sips") else None)
+    sips = find_sips()
     if fmt in ("webp", "jpeg") and sips:
         r = subprocess.run([sips, "-s", "format", "png", str(raw), "--out", str(png)],
                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
@@ -187,6 +187,13 @@ def write_icon(apk_path, report, dest_dir):
         if png.exists():
             png.unlink()
     return raw
+
+
+def find_sips():
+    """sips, when this Mac has it. The tests replace this function to exercise
+    the fallback; replacing os.path.exists instead also fooled pathlib, which
+    calls it on Python 3.13 (the macOS CI runner)."""
+    return shutil.which("sips") or ("/usr/bin/sips" if os.path.exists("/usr/bin/sips") else None)
 
 
 def summary(meta, layout):
