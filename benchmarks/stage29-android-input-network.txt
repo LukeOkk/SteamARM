@@ -88,3 +88,32 @@ pm path:
   package:/data/app/.../base.apk
   package:/data/app/.../split_config.xhdpi.apk
 (the F-Droid build was put back afterwards)
+
+== 16-bit ids (runtime/ids.c, LXRT_SMALL_IDS=1 for the Android stack)
+tests/elf/run.sh: == 88 passed, 0 failed, including
+  small IDs: 12/12 (threads, fork, signals, proc, credentials, wait, reuse)
+tests/android/run.sh with the stack in the mode: == 79 passed, 1 failed
+(2 expected failures: arm64 ART's heap; the headless boot's display wall).
+Now passing (expected failures before, the Mac's pids past 65535):
+  i386 bionic under FEX: AT_SYSINFO, CMP_REQUEUE, sigwait, SO_RCVTIMEO, SO_DOMAIN, SCM_RIGHTS, mmap hint, msync (8 ok)
+  i386 bionic: a second thread relocks and unlocks its own recursive and error-checking mutexes
+  dalvikvm32 (i386) Hello: java.vm.name=Dalvik java.vm.version=2.1.0 os.arch=i686
+  dex2oat32 (i386) compiled hello.dex to a 29196-byte i386 odex, and dalvikvm32 runs it
+  an i386 native service ... answered an x86-64 client: i32 41 -> 42, and read the descriptor it was passed
+  android-boot: zygote_secondary (i386 app_process32) listening
+The one failure: the windowed session's app never had the focus (focus
+stayed on the launcher) once in that run; the same launch by hand focused
+in 4.5 s (the intermittent focus failure seen before).
+
+== steamarm-wlmac (tools/wlmac), the native Wayland compositor
+tests/wlmac/run.sh: 3 passed
+  an aarch64 client under lxrun drew 60 frames (60.0 fps) into its own macOS window;
+  PNG 480x320: (32, 128, 192)=37440, (192, 64, 32)=37440, (32, 192, 64)=38400, (224, 224, 224)=38400
+  globals: wl_compositor wl_subcompositor wl_shm wl_output wl_seat xdg_wm_base wp_viewporter
+  input: pointer enter/motion/BTN_LEFT(0x110), keyboard KEY_A(30) received
+Android (ANDROID_SESSION_COMPOSITOR=wlmac): sys.boot_completed=1 in 20.4 s,
+Simple Solitaire focused 6.3 s after am start; the composed window 1920x974
+shows Android's desktop mode with the app in a freeform window. Idle CPU
+0.1%, RSS 259 MB. Fixed on the way: wl_pointer.set_cursor was taken for
+release (protocol error, the composer reconnecting); the window stayed 1x1
+(Waydroid sizes its window with wp_viewport, not with a new buffer).

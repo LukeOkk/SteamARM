@@ -203,12 +203,26 @@ def start_sound():
     return ok
 
 
+# The compositor: Weston under lxrun with one macOS window for all of
+# Android (its X11 backend on SteamARM's X server; the default), or
+# steamarm-wlmac (tools/wlmac, ANDROID_SESSION_COMPOSITOR=wlmac), a native
+# macOS Wayland compositor in which Waydroid's multi-window mode gives every
+# Android app its own macOS window. Headless sessions always use Weston.
+COMPOSITOR = os.environ.get("ANDROID_SESSION_COMPOSITOR") or "weston"
+
+
+def compositor_script(s=None):
+    kind = (s or {}).get("compositor") or COMPOSITOR
+    return os.path.join(HERE, "run-wlmac.sh" if kind == "wlmac" else "run-weston.sh")
+
+
 def weston_env():
-    return dict(os.environ, WESTON_XDG=XDG, WESTON_SOCKET=SOCKET, LXRUN=LXRUN, DISPLAY=DISPLAY)
+    return dict(os.environ, WESTON_XDG=XDG, WESTON_SOCKET=SOCKET, WLMAC_XDG=XDG, WLMAC_SOCKET=SOCKET,
+                LXRUN=LXRUN, DISPLAY=DISPLAY)
 
 
-def weston_pid():
-    r = subprocess.run([os.path.join(HERE, "run-weston.sh"), "status"], env=weston_env(),
+def weston_pid(s=None):
+    r = subprocess.run([compositor_script(s), "status"], env=weston_env(),
                        stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, cwd=REPO)
     m = re.search(r"pid (\d+)", r.stdout.decode(errors="replace"))
     return int(m.group(1)) if r.returncode == 0 and m else None
@@ -341,19 +355,24 @@ def start(a, exit_with=0):
         # The display: SteamARM's X server on :2 (its windows are macOS
         # windows), then Weston on it -- or headless.
         wenv = weston_env()
-        if not a.headless:
+        kind = "wlmac" if COMPOSITOR == "wlmac" and not a.headless else "weston"
+        state = {"compositor": kind}
+        if kind == "weston" and not a.headless:
             r = subprocess.run([os.path.join(HERE, "run-x11-native.sh"), "start", DISPLAY], cwd=REPO,
                                stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
             if r.returncode != 0:
                 die("the X server on %s did not start: %s" % (DISPLAY, r.stdout.decode(errors="replace").strip()))
-        wargs = ["start", "--kiosk", "--size", a.size] + (["--headless"] if a.headless else [])
-        had_weston = weston_pid() is not None
-        r = subprocess.run([os.path.join(HERE, "run-weston.sh")] + wargs, env=wenv, cwd=REPO,
+        if kind == "wlmac":
+            wargs = ["start"]
+        else:
+            wargs = ["start", "--kiosk", "--size", a.size] + (["--headless"] if a.headless else [])
+        had_weston = weston_pid(state) is not None
+        r = subprocess.run([compositor_script(state)] + wargs, env=wenv, cwd=REPO,
                            stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
         log(r.stdout.decode(errors="replace").strip())
-        wpid = weston_pid()
+        wpid = weston_pid(state)
         if r.returncode != 0 or not wpid:
-            die("Weston did not start")
+            die("the compositor (%s) did not start" % kind)
         # The boot, in a session of its own so that it outlives this command
         # (start returns; stop or run's end stop it).
         cmd = [sys.executable, os.path.join(HERE, "android-boot.py"), "--root", ROOT, "--state", RUN_DIR,
@@ -361,12 +380,16 @@ def start(a, exit_with=0):
                "--until-prop", "sys.boot_completed=1", "--keep-running"]
         if not a.headless and os.environ.get("STEAMARM_ANDROID_SOUND") != "0" and start_sound():
             cmd += ["--pulse", "/tmp/pulse"]
+        if kind == "wlmac":
+            # Waydroid's composer: one Wayland toplevel per Android task.
+            cmd += ["--prop", "persist.waydroid.multi_windows=true", "--prop", "waydroid.active_apps=none"]
         if exit_with:
             cmd += ["--exit-with", str(exit_with)]
         p = subprocess.Popen(cmd, stdin=subprocess.DEVNULL, stdout=LOGF, stderr=subprocess.STDOUT,
                              start_new_session=True, cwd=REPO, env=dict(os.environ, LXRUN=LXRUN))
         s = {"bootPid": p.pid, "root": ROOT, "dir": RUN_DIR, "xdg": XDG, "socket": SOCKET,
-             "display": "headless" if a.headless else DISPLAY, "size": a.size, "log": logpath,
+             "display": "headless" if a.headless else ("wlmac" if kind == "wlmac" else DISPLAY),
+             "size": a.size, "log": logpath, "compositor": kind,
              "westonPid": wpid, "westonWasRunning": had_weston, "started": time.time()}
         write_session(s)
         log("boot started (pid %d); Weston pid %d; waiting for sys.boot_completed=1" % (p.pid, wpid))
@@ -435,7 +458,7 @@ def leftover(s):
 
 
 def stop_weston(s):
-    r = subprocess.run([os.path.join(HERE, "run-weston.sh"), "stop"], env=weston_env(), cwd=REPO,
+    r = subprocess.run([compositor_script(s), "stop"], env=weston_env(), cwd=REPO,
                        stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
     log(r.stdout.decode(errors="replace").strip())
 
@@ -479,7 +502,7 @@ def cmd_stop(a):
 def cmd_status(a):
     s = read_session()
     alive = bool(s and boot_alive(s))
-    out = dict(s or {}, running=alive, westonRunning=bool(weston_pid()))
+    out = dict(s or {}, running=alive, westonRunning=bool(weston_pid(s)))
     if alive:
         rc, o = guest(s, ["/system/bin/getprop", "sys.boot_completed"], timeout=60)
         out["sys.boot_completed"] = o.strip()
@@ -630,8 +653,8 @@ def name_window(s, title):
     window, titled "Weston Compositor - screen0" by Weston's X11 backend,
     and quartz-wm shows WM_NAME / _NET_WM_NAME in the title bar and the
     Window menu. Nothing to do headless."""
-    if s.get("display") in (None, "headless"):
-        return
+    if s.get("display") in (None, "headless", "wlmac"):
+        return          # steamarm-wlmac titles each window with the app's own title
     try:
         import ctypes
         X = ctypes.CDLL("/opt/homebrew/lib/libX11.dylib")

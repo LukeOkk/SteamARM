@@ -7,10 +7,16 @@ CC        := clang
 
 .PHONY: all clean
 
-all: lxrt shim launcher inputd
+all: lxrt shim launcher inputd wlmac
 
 # steamarm-inputd: the Mac's controllers as /dev/input for guests (tools/inputd).
 .PHONY: inputd
+# steamarm-wlmac: the native macOS Wayland compositor for Android sessions
+# (tools/wlmac/README.md; ANDROID_SESSION_COMPOSITOR=wlmac).
+wlmac: build/steamarm-wlmac
+build/steamarm-wlmac: tools/wlmac/wlmac.m tools/wlmac/build.sh
+	tools/wlmac/build.sh
+.PHONY: wlmac
 inputd: build/steamarm-inputd
 build/steamarm-inputd: tools/inputd/inputd.c
 	@mkdir -p build

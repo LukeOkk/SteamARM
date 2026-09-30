@@ -1125,6 +1125,30 @@ system_server stops at the display in these boots.
   audioserver gets `ALSA_PLUGIN_DIR=/vendor/lib64/hw`, alsa-lib's own
   override. `STEAMARM_ANDROID_SOUND=0` leaves the session silent.
 
+### 16-bit ids for the Android stack (`runtime/ids.c`)
+
+32-bit bionic keeps process and thread ids in 16 bits: it refused to start
+when the Mac's pid was above 65535 ("32 bit bionic libc only accepts pid <=
+65535"), and a second thread's tid (lxrun's 200000 + pid*10000 + n) broke
+its own recursive mutexes. With the Mac's pids past 78000 most of the day,
+every i386 program of Android failed: mediaserver, the OMX store, the 32-bit
+audio HAL, zygote_secondary, dalvikvm32, dex2oat32, 32-bit apps.
+`LXRT_SMALL_IDS=1` (set by `android-boot.py` and `run-android-x86.sh` for
+every process of the stack; `LXRT_SMALL_IDS=0` turns it off) gives every
+guest process and thread an id in 2..65535 from a table shared by all lxrun
+processes of the user (`/tmp/lxrt-ids-<uid>`, claimed with compare-and-swap;
+an entry whose Mac process is gone, checked by pid and start time, is
+reused). getpid, gettid, getppid, fork's return, kill, tgkill, wait4,
+waitid, `/proc/<pid>` paths, SO_PEERCRED and SCM_CREDENTIALS, and binder's
+sender pid all speak these ids. MEASURED: `tests/elf/small_ids_test.c` 12/12
+(threads, fork, signals, /proc, credentials, wait, 200 children without
+running out); in `tests/android/run.sh` every i386 check now passes where
+it was an expected failure (i386 bionic 8/8, the recursive mutex of a
+second thread, dalvikvm32, dex2oat32 and an odex it runs, an i386 binder
+service answering an x86-64 client) and zygote_secondary runs;
+`tests/elf` stays 88/88 with the mode off. `/proc` lists no process
+directories in either mode (`toybox ps` shows nothing): not changed here.
+
 ### Limits (by design unless marked)
 
 - No Wi-Fi or mobile network is shown: the network is Ethernet; its address
