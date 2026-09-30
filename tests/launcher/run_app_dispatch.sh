@@ -22,8 +22,18 @@ cat > "$W/launcher/apps.json" <<'JSON'
  {"id":"heroic","name":"Heroic Games Launcher","command":["/opt/apps/heroic/Heroic-2.22.3-linux-arm64/heroic","--no-sandbox","--disable-gpu","--js-flags=--no-opt"],"root":"/tmp/lxrt-armroot","fexRootfs":null,"env":{"HOME_IN_GUEST":"/tmp/heroichome","LXRT_X18_ALL_TEXT":"/opt/apps/heroic/"},"kind":"heroic","architecture":"aarch64","readiness":"experimental"},
  {"id":"steam","name":"Fake","command":["/bin/fake"],"kind":"custom"},
  {"id":"android-org.example.game","name":"Juego","command":[],"root":"/s/android/packages/org.example.game","kind":"android","architecture":"aarch64","android":{"package":"org.example.game"}},
- {"id":"android-cmd","name":"Juego2","command":["/system/bin/app_process64"],"kind":"android","architecture":"aarch64"}]
+ {"id":"android-cmd","name":"Juego2","command":["/system/bin/app_process64"],"kind":"android","architecture":"aarch64"},
+ {"id":"android-dex","name":"Solitario","command":[],"kind":"android","architecture":"aarch64","android":{"package":"org.example.dex","abis":[],"minSdk":"11"}},
+ {"id":"android-multi","name":"Multi","command":[],"kind":"android","architecture":"aarch64","android":{"package":"org.example.multi","abis":["arm64-v8a","armeabi-v7a","x86","x86_64"],"minSdk":"24"}},
+ {"id":"android-arm64","name":"A64","command":[],"kind":"android","architecture":"aarch64","android":{"package":"org.example.a64","abis":["arm64-v8a"],"minSdk":"24"}},
+ {"id":"android-arm32","name":"A32","command":[],"kind":"android","architecture":"armv7","android":{"package":"org.example.a32","abis":["armeabi-v7a"],"minSdk":"24"}},
+ {"id":"android-i386","name":"I386","command":[],"kind":"android","architecture":"i386","android":{"package":"org.example.i386","abis":["x86"],"minSdk":"24"}},
+ {"id":"android-new","name":"New","command":[],"kind":"android","architecture":"aarch64","android":{"package":"org.example.new","abis":[],"minSdk":"33"}},
+ {"id":"android-meta","name":"Meta","command":[],"kind":"android","architecture":"x86_64","android":{"package":"org.example.meta"}}]
 JSON
+# android-pm.py's record of org.example.meta: the ABIs come from there when the entry has none.
+mkdir -p "$W/android/packages/org.example.meta"
+echo '{"package":"org.example.meta","abis":["x86_64"],"minSdk":21}' > "$W/android/packages/org.example.meta/meta.json"
 # A Vulkan shim that reads STEAMARM_VK_ICD (settings-env.py looks for the name).
 mkdir -p "$W/steamroot/usr/lib/lxrt-emu"
 echo STEAMARM_VK_ICD > "$W/steamroot/usr/lib/lxrt-emu/libvulkan.so.1"
@@ -70,9 +80,21 @@ expect_in "$W2" steam-arm64 'display:  native (DISPLAY=:2)'
 expect_in "$W2" steam-arm64 'VNC cannot serve it'
 expect_in "$W2" steam 'display:  vnc (DISPLAY=:1)'
 expect bad   "architecture 'armv7'"
-# Android apps (docs/APK_SUPPORT.md): no runtime yet, refused whatever the entry holds.
-expect android-org.example.game "is an Android app; SteamARM's Android environment does not run apps yet" 'command:'
-expect android-cmd "is an Android app" 'command:'
+# Android apps (docs/APK_SUPPORT.md, benchmarks/stage28-android-apk.txt): the
+# Android session (scripts/android-session.py run <package>) for dex-only and
+# x86_64 code; everything else refused with the reason, before anything starts.
+expect android-dex 'command:  scripts/android-session.py run org.example.dex'
+expect android-dex 'android:  org.example.dex in the Android session'
+expect android-dex 'arch:     x86_64 (translator: FEX, session: ZERO-VM)'
+expect android-multi 'command:  scripts/android-session.py run org.example.multi'
+expect android-meta 'command:  scripts/android-session.py run org.example.meta'
+STEAMARM_DISPLAY=vnc expect android-dex 'its screen is a Weston window on the native X server, using native windows'
+expect android-arm64 "cannot run: its native code is arm64-v8a only: Android's arm64 ART does not start on macOS" 'command:'
+expect android-arm32 "32-bit ARM only" 'command:'
+expect android-i386 "32-bit x86 only" 'command:'
+expect android-new "it needs API 33; the session is Android 11 (API 30)" 'command:'
+expect android-org.example.game "its ABIs are unknown" 'command:'
+expect android-cmd "it names no valid package" 'command:'
 
 # LaunchPlanner's rule: the ARM64 base runs aarch64 only, the Steam root x86 only.
 expect armx86root "is aarch64 but its root is /tmp/lxrt-steamroot" 'command:'

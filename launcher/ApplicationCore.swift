@@ -999,16 +999,22 @@ enum AndroidABI: String, Codable, Equatable {
         let list = abis.sorted().joined(separator: ", ")
         switch self {
         case .arm64:
-            return "ARM64 nativo (arm64-v8a, preferido): Apple Silicon ejecuta su código directamente"
+            return abis.contains("x86_64")
+                ? "ARM64 (arm64-v8a, preferido) y x86-64: el ART de ARM64 no arranca en macOS, así que "
+                    + "la sesión Android de SteamARM usa su código x86-64 bajo FEX"
+                : "Solo ARM64 (arm64-v8a): el ART de ARM64 no arranca en macOS (su heap tiene que estar "
+                    + "por debajo de 4 GiB), así que todavía no puede ejecutarse"
         case .arm32Only:
             return "Solo ARM de 32 bits (\(list)): Apple Silicon no tiene modo AArch32, "
                 + "así que este código no puede ejecutarse de forma nativa"
         case .x86Only:
-            return "Solo x86 (\(list)): necesitaría FEX; todavía no se admite para apps Android"
+            return abis.contains("x86_64")
+                ? "Solo x86 (\(list)): la sesión Android de SteamARM ejecuta su código x86-64 bajo FEX"
+                : "Solo x86 de 32 bits (\(list)): la sesión Android de SteamARM (x86-64 bajo FEX) todavía no lo ejecuta"
         case .unsupported:
             return "Código nativo solo para \(list): no se admite"
         case .none:
-            return "Sin código nativo (solo ART): no depende de la arquitectura"
+            return "Sin código nativo (solo ART): se ejecuta en la sesión Android de SteamARM (ART x86-64 bajo FEX)"
         }
     }
 
@@ -1276,23 +1282,51 @@ struct AndroidCard: Equatable {
 }
 
 enum AndroidApps {
-    /// Why no Android card can be opened; the card shows it capitalised.
-    /// It goes away only when an Android runtime exists: no fake launch.
-    static let launchUnavailableReason =
-        "el entorno Android de SteamARM todavía no ejecuta apps (docs/ANDROID_ZERO_VM_FEASIBILITY.md)"
+    /// The Android that SteamARM's session boots: Waydroid's LineageOS 18.1
+    /// x86_64 build under FEX, zero VM (scripts/android-session.py,
+    /// benchmarks/stage28-android-apk.txt). Android 11 is API 30.
+    static let sessionSdk = 30
 
-    /// The card's reason, with what its native code adds.
-    static func unavailableReason(_ info: AndroidAppInfo?) -> String {
-        switch info?.verdict ?? .none {
+    /// What "Abrir" does for an Android card, in Spanish (the card's help and
+    /// the Información sheet).
+    static let sessionNote = "Se abre en la sesión Android de SteamARM: Android 11 x86-64 bajo FEX, sin VM, "
+        + "en una ventana de macOS (Weston). El primer arranque de la sesión tarda uno o dos minutos."
+
+    /// Whether the session can run this app: no native code (ART only), or
+    /// x86_64 native code (run under FEX, as the session's own Android is).
+    /// arm64-v8a-only code needs Android's arm64 ART, which does not start on
+    /// macOS (docs/ANDROID_RUNTIME_ARCHITECTURE.md, "The ART heap wall").
+    static func runsInSession(_ info: AndroidAppInfo?) -> Bool {
+        unavailableReason(info) == nil
+    }
+
+    /// Why this card cannot be opened, in Spanish (the card shows it
+    /// capitalised), or nil when the session runs it. Never a fake launch.
+    static func unavailableReason(_ info: AndroidAppInfo?) -> String? {
+        guard let info = info, let package = info.package, isValidPackage(package) else {
+            return "no se sabe qué paquete es; vuelve a instalar el APK"
+        }
+        if let min = Int(info.minSdk ?? ""), min > sessionSdk {
+            return "necesita Android con API \(min) o posterior; la sesión Android de SteamARM es Android 11 (API \(sessionSdk))"
+        } else if let min = info.minSdk, !min.isEmpty, Int(min) == nil {
+            return "necesita una versión preliminar de Android (\(min)); la sesión Android de SteamARM es Android 11 (API \(sessionSdk))"
+        }
+        let abis = info.abis ?? []
+        if abis.contains("x86_64") { return nil }
+        switch info.verdict {
+        case .none:
+            return abis.isEmpty ? nil : "su código nativo es de una arquitectura no admitida"
+        case .arm64:
+            return "su código nativo es solo ARM64 (arm64-v8a): el ART de ARM64 no arranca en macOS, porque su heap "
+                + "tiene que estar por debajo de 4 GiB y macOS no deja mapear nada ahí "
+                + "(docs/ANDROID_RUNTIME_ARCHITECTURE.md); la sesión Android de SteamARM es x86-64 bajo FEX"
         case .arm32Only:
-            return launchUnavailableReason
-                + "; además, su código nativo es solo ARM de 32 bits, que Apple Silicon no ejecuta"
+            return "su código nativo es solo ARM de 32 bits, que Apple Silicon no ejecuta"
         case .x86Only:
-            return launchUnavailableReason + "; además, su código nativo es solo x86 y necesitaría FEX"
+            return "su código nativo es solo x86 de 32 bits; la sesión Android de SteamARM ejecuta apps x86-64 "
+                + "o sin código nativo"
         case .unsupported:
-            return launchUnavailableReason + "; además, su código nativo es de una arquitectura no admitida"
-        case .arm64, .none:
-            return launchUnavailableReason
+            return "su código nativo es de una arquitectura no admitida"
         }
     }
 

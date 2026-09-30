@@ -418,6 +418,8 @@ struct AndroidInfoView: View {
                 if let reason = model.unavailableReason(app) {
                     Text(reason.prefix(1).uppercased() + reason.dropFirst())
                         .font(.caption).foregroundStyle(.orange)
+                } else {
+                    Text(AndroidApps.sessionNote).font(.caption).foregroundStyle(.secondary)
                 }
             }
             .formStyle(.grouped)
