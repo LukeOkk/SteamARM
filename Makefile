@@ -175,7 +175,7 @@ test-launcher-core:
 	    launcher/tests/AppEntryTests.swift -o build/app-entry-tests
 	build/app-entry-tests
 	python3 -m unittest tests/test_settings_env.py tests/test_compat_status.py tests/test_docs_records.py \
-	    tests/test_apk_inspect.py tests/test_android_pm.py
+	    tests/test_apk_inspect.py tests/test_android_pm.py tests/test_android_gapps.py
 	tests/launcher/run_app_dispatch.sh
 	tests/launcher/session.sh
 	tests/launcher/safeguard.sh
