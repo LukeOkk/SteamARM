@@ -371,6 +371,12 @@ static int server(int ready_wr, pid_t child, bool bench)
     CHECK(m != MAP_FAILED, "mmap %d bytes PROT_READ", MAP_SZ);
     void *m2 = mmap(NULL, MAP_SZ, PROT_READ, MAP_PRIVATE, fd, 0);
     CHECK(m2 == MAP_FAILED && errno == EBUSY, "second mmap refused (EBUSY)");
+    // binder_mmap clears VM_MAYWRITE: the buffer can never become writable.
+    // 16 KiB from its start, a whole host page for either guest page size.
+    errno = 0;
+    int mw = mprotect(m, 16384, PROT_READ | PROT_WRITE);
+    CHECK(mw < 0 && errno == EACCES, "mprotect of the receive buffer to PROT_WRITE refused (EACCES)");
+    CHECK(mprotect(m, 16384, PROT_READ) == 0, "mprotect of the receive buffer to PROT_READ allowed");
     uint32_t zero = 0;
     CHECK(ioctl(fd, BINDER_SET_MAX_THREADS, &zero) == 0, "BINDER_SET_MAX_THREADS 0");
     struct flat_binder_object ctx;
@@ -742,12 +748,27 @@ static void *pool_loop(void *arg)
     return NULL;
 }
 
-struct pcall { uint32_t code; int32_t ans[2]; uint32_t r; int delay_ms; };
+struct pcall { uint32_t code; int32_t ans[2]; uint32_t r; int delay_ms; bool extra; };
 static volatile int g_sigs;
-static void on_usr1(int s) { (void)s; g_sigs++; }
+static volatile int g_extra_fd = -1;
+static volatile int g_extra_closed;
+// The handler closes another binder descriptor the interrupted thread has
+// used (its runtime channel was set up before the blocked call's): closing
+// it inside the handler must not disturb the call in flight underneath.
+static void on_usr1(int s)
+{
+    (void)s;
+    g_sigs++;
+    if (g_extra_fd >= 0) { g_extra_closed = close(g_extra_fd) == 0; g_extra_fd = -1; }
+}
 static void *pool_client_call(void *arg)
 {
     struct pcall *c = arg;
+    if (c->extra) {
+        int fd = open("/dev/binder", O_RDWR | O_CLOEXEC);
+        struct binder_version v;
+        if (fd >= 0 && ioctl(fd, BINDER_VERSION, &v) == 0) g_extra_fd = fd;
+    }
     if (c->delay_ms) usleep((useconds_t)c->delay_ms * 1000);
     size_t rn = sizeof c->ans;
     c->r = transact(0, c->code, 0, NULL, 0, NULL, 0, 0, (uint8_t *)c->ans, &rn);
@@ -775,7 +796,7 @@ static int pool_test(void)
         memset(&sa, 0, sizeof sa);
         sa.sa_handler = on_usr1;
         sigaction(SIGUSR1, &sa, NULL);
-        struct pcall a = { .code = P_BLOCK }, b = { .code = P_RELEASE, .delay_ms = 400 };
+        struct pcall a = { .code = P_BLOCK, .extra = true }, b = { .code = P_RELEASE, .delay_ms = 400 };
         pthread_t ta, tb;
         pthread_create(&ta, NULL, pool_client_call, &a);
         pthread_create(&tb, NULL, pool_client_call, &b);
@@ -785,6 +806,8 @@ static int pool_test(void)
         pthread_join(tb, NULL);
         CHECK(g_sigs == 1 && g_eintr >= 1 && a.r == 0,
               "a signal during a blocked call: handler ran, EINTR x%d, the call then completed", g_eintr);
+        CHECK(g_extra_closed && a.r == 0,
+              "the handler closed another binder descriptor of that thread; the interrupted call was unharmed");
         CHECK(a.r == 0 && b.r == 0 && a.ans[1] == 1 && b.ans[1] == 1,
               "two client threads, two calls in flight: BLOCK (held) released by RELEASE");
         CHECK(a.ans[0] != b.ans[0] && a.ans[0] && b.ans[0],

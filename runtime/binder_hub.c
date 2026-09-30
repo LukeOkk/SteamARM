@@ -689,10 +689,21 @@ static void buffer_release(struct proc *p, struct thread *t, struct buffer *b,
                 hub_log("transaction release: bad FDA parent");
                 break;
             }
-            uint64_t fda_off = parent.buffer - (p->user_base + b->off) + fda.parent_offset;
+            // binder_transaction_buffer_release's checks, before any offset
+            // is followed: the number of fds against the parent's length,
+            // and the array inside this buffer (computed without wrapping).
+            uint64_t ubase = p->user_base + b->off;
+            if (fda.num_fds >= (1ull << 60) || 4 * fda.num_fds > parent.length ||
+                fda.parent_offset > parent.length - 4 * fda.num_fds ||
+                parent.buffer < ubase || parent.buffer - ubase > b->size ||
+                fda.parent_offset > b->size - (parent.buffer - ubase) ||
+                4 * fda.num_fds > b->size - (parent.buffer - ubase) - fda.parent_offset) {
+                hub_log("transaction release: bad FDA");
+                break;
+            }
+            uint64_t fda_off = parent.buffer - ubase + fda.parent_offset;
             for (uint64_t i = 0; i < fda.num_fds; i++) {
                 uint64_t o = fda_off + i * 4;
-                if (o + 4 > b->size) break;
                 int32_t fd;
                 memcpy(&fd, p->map + b->off + o, 4);
                 thread_add_close(t, fd);
@@ -2341,6 +2352,27 @@ int lxrt_binder_hub_main(int argc, char **argv)
         fprintf(stderr, "binder hub: %s: path too long\n", g_dir);
         return 1;
     }
+    // One hub per directory: hub.pid is held locked for the hub's whole life
+    // (the daemon inherits this descriptor) and let go only after the socket
+    // is gone, as the property service does with service.lock. A client
+    // whose connect failed while a hub still held it (a listen backlog full
+    // while the hub was busy, a hub leaving) used to start a second one,
+    // which unlinked the live hub's socket and bound its own: two drivers,
+    // and processes on the new one found no context manager. A hub that is
+    // leaving holds the lock a moment longer: wait a little.
+    char lockp[1024];
+    snprintf(lockp, sizeof lockp, "%s/hub.pid", g_dir);
+    int life = open(lockp, O_RDWR | O_CREAT | O_CLOEXEC, 0600);
+    bool locked = false;
+    for (int i = 0; life >= 0 && i < 100 && !locked; i++) {    // up to 10 s
+        if (flock(life, LOCK_EX | LOCK_NB) == 0) locked = true;
+        else usleep(100000);
+    }
+    if (!locked) {
+        if (life < 0) fprintf(stderr, "binder hub: %s: %s\n", lockp, strerror(errno));
+        else fprintf(stderr, "binder hub: another hub holds %s\n", lockp);
+        return 1;
+    }
     int ls = socket(AF_UNIX, SOCK_STREAM, 0);
     if (ls < 0) { perror("binder hub: socket"); return 1; }
     fcntl(ls, F_SETFD, FD_CLOEXEC);
@@ -2370,6 +2402,8 @@ int lxrt_binder_hub_main(int argc, char **argv)
         if (lfd >= 0) { dup2(lfd, 2); if (lfd != 2) close(lfd); }
         setvbuf(stderr, NULL, _IOLBF, 0);
     }
+    if (ftruncate(life, 0) == 0)
+        dprintf(life, "%d\n", (int)getpid());
     hub_log("started, pid %d, %s", (int)getpid(), sa.sun_path);
 
     time_t idle_since = time(NULL);

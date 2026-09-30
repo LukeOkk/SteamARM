@@ -1242,6 +1242,23 @@ else
     echo "  skip  BINDER_IPC (no $STAGE with linux/android/binder.h)"
 fi
 
+# BINDER_ONE_HUB: a hub started for a directory whose hub is alive does not
+# take over its socket (it waits for hub.pid's lock, held for the live hub's
+# whole life). Before, the second hub unlinked the first one's socket and
+# bound its own: two binder drivers for one user.
+bdir=$(mktemp -d /tmp/lxrt-binder-hubs.XXXXXX)
+LXRT_BINDER_HUB_IDLE=2 ./build/lxrun --binder-hub "$bdir" --daemon; rc=$?
+ino1=$(stat -f %i "$bdir/hub.sock" 2>/dev/null)
+LXRT_BINDER_HUB_IDLE=2 ./build/lxrun --binder-hub "$bdir" --daemon & second=$!
+sleep 1
+ino2=$(stat -f %i "$bdir/hub.sock" 2>/dev/null)
+kill "$second" 2>/dev/null; wait "$second" 2>/dev/null
+if [ "$rc" -eq 0 ] && [ -n "$ino1" ] && [ "$ino1" = "$ino2" ]; then
+    ok "BINDER_ONE_HUB: a second hub for a live hub's directory leaves its socket alone"
+else bad "BINDER_ONE_HUB" "rc=$rc socket inode $ino1 -> $ino2"; fi
+sleep 3
+rm -rf "$bdir"
+
 # SIMD_SYSCALL: a syscall preserves v0-v31, FPSR and NZCV, as on Linux
 # (runtime/trampoline.S). Compilers keep values in vector registers and the
 # flags across an inline `svc`; the dispatcher is Darwin C code that clobbers

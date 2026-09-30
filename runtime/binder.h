@@ -299,7 +299,7 @@ long lxrt_binder_open(int context, int lflags);
 bool lxrt_binder_is(int fd);
 long lxrt_binder_ioctl(int fd, unsigned long req, uint64_t arg);
 long lxrt_binder_mmap(uint64_t addr, uint64_t len, int prot, int lflags, int fd, uint64_t off);
-bool lxrt_binder_munmap(uint64_t addr, uint64_t len, long *ret);
+bool lxrt_binder_munmap(uint64_t addr, uint64_t len, long *ret);   // closes the buffers in the range; the caller still unmaps it
 void lxrt_binder_close(int fd);
 void lxrt_binder_dup(int oldfd, int newfd);
 void lxrt_binder_polled(int fd);

@@ -376,7 +376,9 @@ binder device and gone 10 s after the last one closes
 (`LXRT_BINDER_HUB_IDLE`). The directory is `/tmp/lxrt-binder-<uid>`
 (`LXRT_BINDER_DIR` overrides it; the tests use private ones); it must be
 the user's own and closed to others (mode 0700), or no binder device is
-offered. It keeps
+offered. A hub holds `hub.pid` locked for its whole life: a guest that
+cannot connect while a hub holds it waits (up to 10 s) instead of starting
+a second hub over its socket (`tests/elf/run.sh` BINDER_ONE_HUB). It keeps
 what the kernel driver keeps, under the kernel's names: procs (one per open
 of a device, so a process with `/dev/binder` and `/dev/hwbinder` has two),
 threads, nodes, refs and descriptors, transaction stacks, work lists,
@@ -393,8 +395,8 @@ The guest side (`runtime/binder.c`):
 | `poll`, `epoll` on it | work for a polling thread makes the hub write one doorbell byte. Every answer says how many it has written and whether one should stay unread, and the runtime reads up to that count, so readability follows `binder_poll` instead of drifting (0 wakeups with nothing to read in about 20,000, MEASURED). `epoll_ctl` and `ppoll` mark the calling thread as a poller (`LOOPER_STATE_POLL`) |
 | `ioctl(BINDER_WRITE_READ)` | on the calling thread's own channel (a socketpair per guest thread and open, handed to the hub): the write bytes plus, per BC_TRANSACTION(_SG) or BC_REPLY(_SG), what the kernel would copy from the sender (data, offsets, scatter-gather buffers) and the descriptors named by FD and FDA objects (SCM_RIGHTS). The answer carries the BR_* bytes for the read buffer, the descriptors to install, where in the receive buffer their numbers go, and FDA descriptors to close |
 | other ioctls | BINDER_VERSION (8), SET_MAX_THREADS, SET_CONTEXT_MGR(_EXT), THREAD_EXIT, GET_NODE_DEBUG_INFO and GET_NODE_INFO_FOR_REF go to the hub; anything else (BINDER_FREEZE, ...) is EINVAL, as on a kernel without it |
-| `mmap` | the receive buffer: a file mapped read-only for the guest (PROT_WRITE is EPERM and a second mapping EBUSY, as on Linux) and read-write in the hub, which copies each incoming transaction into it and hands out offsets, as the kernel does. The runtime keeps a read-write view only to write the numbers of the descriptors it installed (Linux's fd fixups) |
-| `munmap` of it | binder_vma_close: the hub allocates nothing more there, and a transaction to the process gets BR_DEAD_REPLY |
+| `mmap` | the receive buffer: a file mapped read-only for the guest (PROT_WRITE is EPERM, a second mapping EBUSY and an mprotect that adds write EACCES, as on Linux) and read-write in the hub, which copies each incoming transaction into it and hands out offsets, as the kernel does. The runtime keeps a read-write view only to write the numbers of the descriptors it installed (Linux's fd fixups) |
+| `munmap` of it | binder_vma_close: the hub allocates nothing more there, and a transaction to the process gets BR_DEAD_REPLY; whatever else the range covers is unmapped too |
 | `read`, `write` | EINVAL: binder has neither |
 | `access`, `stat`, `fstat` | the devices exist, as character devices. libbinder's `initWithDriver` falls back to `/dev/binder` when `access()` fails, which would put vndservicemanager on the wrong context (MEASURED: "Binder driver /dev/binder is unavailable. Using /dev/binder instead.") |
 | a signal while blocked | the hub is told (BH_CANCEL) and answers -EINTR unless it already had the real answer; libbinder retries, and SA_RESTART restarts the ioctl with the consumed counts, as Linux's restart does |
