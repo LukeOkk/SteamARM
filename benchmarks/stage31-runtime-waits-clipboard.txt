@@ -119,3 +119,12 @@ tests/elf 92/0; i386 18/0; tests/win 11/0; vk_device 2/0; arm64 4/0;
 launcher core 35/0; tests/wlmac 4/0; Python unit tests 135 OK;
 tests/android 83 passed, 0 failed, 2 expected failures (clipboard included).
 x86 Steam 7 of 8 (above).
+After the fork fix (8c359d9): tests/elf 92/0; i386 18/0; win 11/0; vk 2/0;
+arm64 4/0; wlmac 4/0; x86 Steam 8 of 8 (90, 90, 90, 90, 91, 91, 91, 95 s);
+ARM64 Steam 8 of 8 (15-25 s). tests/android: 82 passed, 1 failed ("input
+from the Mac window": the Weston session's app never took the focus; in a
+repeat by hand, 2 of 3 launches fine and the third had system_server fail to
+reach the zygote's socket ("Got error connecting to zygote ... No such file
+or directory") and the zygote killed 20 s into the session, right after the
+previous session's stop in the same directories). Rerun: 83 passed, 0
+failed, 2 expected failures.
