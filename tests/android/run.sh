@@ -644,10 +644,18 @@ if [ -n "$ready" ] && [ -f "$STAGE/usr/include/linux/android/binder.h" ] && [ -f
     local out2
     out2=$(xg 30 /system/bin/service call steamarm.test 2 fd /system/etc/hosts)
     xg 30 /system/bin/service call steamarm.test 3 >/dev/null
+    # Bounded: perl's alarm reaches the guest, not lxrun, and an i386 bionic
+    # that aborted on a pid above 65535 spun under FEX instead of dying
+    # (MEASURED: 12 minutes at 99% CPU with the Mac's pids past 78000).
+    local w
+    for w in $(seq 1 150); do kill -0 "$svcpid32" 2>/dev/null || break; sleep 0.2; done
+    kill -9 "$svcpid32" 2>/dev/null
     wait "$svcpid32" 2>/dev/null
     if [ -n "$got32" ] && grep -q "Result: Parcel(00000000 $want" <<<"$out2"; then
         ok "an i386 native service (32-bit bionic under FEX) registered and answered an x86-64 client: i32 41 -> 42, and read the descriptor it was passed ($want)"
     elif [ "$i386_ok" = 0 ]; then xfail "i386 native binder service" "the root's FEX predates patches/fex-lxrt-i386-bionic.patch"
+    elif pid_cap "$(cat "$svclog32")"; then
+        xfail "i386 native binder service" "32-bit bionic keeps pids in 16 bits and this Mac's pids are past 65535 ($(grep -o 'current pid is [0-9]*' "$svclog32" | head -1))"
     else bad "i386 native binder service" "i32: $(tr '\n' ' ' <<<"$out") fd: $(tr '\n' ' ' <<<"$out2") / $(grep -v '^\[lxrt' "$svclog32" | head -2 | tr '\n' ' ')"; fi
     rm -f "$svclog32" "$X86_ROOT/data/local/tmp/binder_service32"
 fi
@@ -1122,12 +1130,66 @@ else bad "pm install" "$(grep -E 'pm install' <<<"$out" | tail -2 | tr '\n' ' ')
 if [ "$rc" -eq 0 ] && grep -q '^ok' <<<"$start" && grep -q 'de.tobiasbielefeld.solitaire/' <<<"$focus"; then
     ok "am start: $start; $focus ($((SECONDS - t0)) s in all)"
 else bad "am start and focus" "rc=$rc start='$start' $(grep -E 'focus|am start' <<<"$out" | tail -2 | tr '\n' ' ')"; fi
+# The network (scripts/android_dnsproxy.py, NetworkAgentStandIn.java): the
+# Mac's network as Android's default one, validated by the network stack's
+# own HTTP probes, and the image's curl resolving and fetching through it.
+# Needs the Mac online: skipped when the Mac's own curl gets no 204.
+local conn code n
+for n in $(seq 1 15); do    # the agent registers after boot; the probes take seconds
+    conn=$(env "${senv[@]}" python3 scripts/android-session.py shell /system/bin/dumpsys connectivity 2>/dev/null)
+    grep -q VALIDATED <<<"$conn" && break
+    sleep 2
+done
+if grep -q 'Active default network: [0-9]' <<<"$conn" && grep -q 'type: Ethernet.*state: CONNECTED' <<<"$conn"; then
+    if [ "$(curl -s -m 10 -o /dev/null -w '%{http_code}' http://connectivitycheck.gstatic.com/generate_204)" = 204 ]; then
+        code=$(env "${senv[@]}" python3 scripts/android-session.py shell --timeout 60 /system/bin/curl -s -m 20 -o /dev/null \
+               -w '%{http_code}' https://www.google.com/generate_204 2>/dev/null)
+        if grep -q 'VALIDATED' <<<"$conn" && [ "$code" = 204 ]; then
+            ok "network: Android's default network is the Mac's (Ethernet, validated by the network stack), curl https in Android: $code"
+        else bad "network through the Mac" "validated: $(grep -c VALIDATED <<<"$conn"), curl: '$code'"; fi
+    else
+        echo "  skip  network validation and curl (the Mac itself got no 204)"
+    fi
+else bad "network: a default network" "$(grep -E 'Active default network|NetworkAgentInfo' <<<"$conn" | head -2 | cut -c1-200 | tr '\n' ' ')"; fi
 env "${senv[@]}" python3 scripts/android-session.py stop >/dev/null 2>&1
 local left
 left=$(ps -axEww -o pid=,command= 2>/dev/null | grep -F "LXRT_PROPERTY_DIR=$sdir/props" | grep -v grep | wc -l | tr -d ' ')
 # The session root's FEXServer too (android-boot.py starts it and must stop it).
 [ -z "$(ANDROID_X86_ROOT="$sroot" scripts/run-android-x86.sh --server-pid)" ] || left=$((left + 1))
 [ "$left" = 0 ] && ok "android-session.py stop: nothing of the session left" || bad "session stop" "$left processes left"
+# Clicks and keys from the Mac, as a person's (XTEST on SteamARM's X server,
+# scripts/run-x11-native.sh; tests/android/xtest_input.py): the same session
+# with its window on :2 (a macOS window for about a minute). A click on the
+# status bar opens the notification shade (focus: NotificationShade); Escape,
+# which XQuartz now numbers as Linux does (patches/xquartz-evdev-keycodes.
+# patch), reaches Android as BACK and closes it; A arrives as KEYCODE_A.
+# (xdpyinfo's output taken whole: under pipefail, grep -q closing the pipe
+# early made the check fail whenever XTEST was listed before the end.)
+local xinfo
+xinfo=$(DISPLAY=:2 /opt/homebrew/bin/xdpyinfo 2>/dev/null)
+if [ -z "${ANDROID_SKIP_INPUT:-}" ] && grep -q XTEST <<<"$xinfo"; then
+    local wid focus1 focus2 keys
+    out=$(env "${senv[@]}" perl -e 'alarm shift; exec @ARGV' 900 python3 scripts/android-session.py launch de.tobiasbielefeld.solitaire 2>&1); rc=$?
+    wid=$(DISPLAY=:2 /opt/homebrew/bin/xwininfo -root -tree 2>/dev/null | grep -o '0x[0-9a-f]* "Weston Compositor' | head -1 | cut -d' ' -f1)
+    if [ "$rc" -eq 0 ] && [ -n "$wid" ]; then
+        python3 tests/android/xtest_input.py :2 "$wid" click 8 8 >/dev/null
+        sleep 2
+        focus1=$(env "${senv[@]}" python3 scripts/android-session.py shell /system/bin/dumpsys window 2>/dev/null | grep -m1 mCurrentFocus)
+        python3 tests/android/xtest_input.py :2 "$wid" key Escape >/dev/null
+        sleep 2
+        focus2=$(env "${senv[@]}" python3 scripts/android-session.py shell /system/bin/dumpsys window 2>/dev/null | grep -m1 mCurrentFocus)
+        python3 tests/android/xtest_input.py :2 "$wid" key a >/dev/null
+        sleep 1
+        keys=$(env "${senv[@]}" python3 scripts/android-session.py shell /system/bin/dumpsys input 2>/dev/null |
+               grep -c 'KeyEvent(.*action=DOWN.*keyCode=29, scanCode=30,')
+        if grep -q NotificationShade <<<"$focus1" && grep -q de.tobiasbielefeld.solitaire <<<"$focus2" && [ "$keys" -ge 1 ]; then
+            ok "input from the Mac window: a click opened the notification shade, Escape (BACK) closed it, A arrived as KEYCODE_A"
+        else bad "input from the Mac window" "after click: '$focus1'; after Escape: '$focus2'; KEYCODE_A events: $keys"; fi
+    else bad "input from the Mac window" "windowed session rc=$rc window '$wid' $(tail -2 <<<"$out" | tr '\n' ' ')"; fi
+    env "${senv[@]}" python3 scripts/android-session.py stop >/dev/null 2>&1
+else
+    echo "  skip  input from the Mac window (no XTEST on :2, or ANDROID_SKIP_INPUT)"
+fi
 rm -rf "$st" "$sdir"
 }
 

@@ -35,10 +35,24 @@ MEASURED, `benchmarks/stage11-native-x11.txt`:
 - quartz-wm (pinned commit, one patch) gives native title bars, moving and
   resizing (stage 14).
 - 21 extensions, including MIT-SHM, GLX, RANDR, RENDER, Present and
-  XKEYBOARD. **No Composite.**
+  XKEYBOARD, and XTEST (22) since stage 29: `run-x11-native.sh` sets
+  XQuartz's `enable_test_extensions` in the server's own defaults domain
+  (`STEAMARM_X11_XTEST=0` leaves it off). XTEST acts inside this server only,
+  whose clients are SteamARM's guests (no TCP); Steam Input's desktop
+  configuration and `tests/android/xtest_input.py` use it. **No Composite.**
+- Keycodes as on Linux (stage 29, `xquartz-evdev-keycodes`): XQuartz
+  numbered keys as macOS virtual key codes plus 8, Xorg with evdev as Linux
+  key codes plus 8, and Linux programs assume the latter (Weston's X11
+  backend, and through it Android's key layouts; Chromium's and Electron's
+  `KeyboardEvent.code`). The keysyms still come from the macOS layout key by
+  key, so what a key types is unchanged. MEASURED: `xmodmap -pke` shows
+  keycode 38 = a, 9 = Escape, 50 = Shift_L, 133 = the Command key (Meta_L).
+  `STEAMARM_X11_EVDEV_KEYCODES=0` keeps XQuartz's numbering. Both take effect
+  when the server starts; `scripts/setup.sh` restarts it after a rebuild when
+  no guest is running.
 - Patches: `xquartz-log-file-env`, `xquartz-signals-to-server-thread`
-  (clean stops in 0.22 s instead of SIGKILL after 20 s), and the remote layer
-  below.
+  (clean stops in 0.22 s instead of SIGKILL after 20 s),
+  `xquartz-evdev-keycodes`, and the remote layer below.
 
 ## Vulkan frames without a copy (CALayerHost)
 

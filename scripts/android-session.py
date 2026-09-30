@@ -50,6 +50,11 @@ logcat.txt. Log: $STATE/logs/android-<date>.log (this program and the boot).
 Weston: WESTON_XDG=$ANDROID_SESSION_XDG (/dev/shm/steamarm-android), kiosk
 shell (Android's one window fills Weston's output), 1024x768 by default.
 
+Sound (with a window; STEAMARM_ANDROID_SOUND=0: none): SteamARM's PulseAudio
+(scripts/audio.sh) with a socket in the session root, /tmp/pulse/native to
+Android, where Waydroid's audio HAL in audioserver plays to it
+(android-boot.py --pulse).
+
 Stops only what it started: the boot it recorded (checked to be
 android-boot.py on this session's directory) and the Weston on its own socket.
 """
@@ -184,6 +189,18 @@ def boot_alive(s):
         return False
     c = command_of(pid)
     return "android-boot.py" in c and s.get("dir", "") in c
+
+
+def start_sound():
+    """SteamARM's PulseAudio with a socket at ROOT/tmp/pulse/native
+    (scripts/audio.sh; one server for every root). False when it cannot
+    start: the session then has no sound, as before."""
+    r = subprocess.run([os.path.join(HERE, "audio.sh"), "start"], cwd=REPO,
+                       env=dict(os.environ, LXRT_ROOT=ROOT), stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+    ok = r.returncode == 0 and os.path.exists(ROOT + "/tmp/pulse/native")
+    log("sound: %s" % ("PulseAudio on /tmp/pulse/native" if ok else
+                       "none (%s)" % r.stdout.decode(errors="replace").strip()[-200:]))
+    return ok
 
 
 def weston_env():
@@ -342,6 +359,8 @@ def start(a, exit_with=0):
         cmd = [sys.executable, os.path.join(HERE, "android-boot.py"), "--root", ROOT, "--state", RUN_DIR,
                "--lxrun", LXRUN, "--wayland", "%s:%s" % (XDG, SOCKET), "--seconds", "0",
                "--until-prop", "sys.boot_completed=1", "--keep-running"]
+        if not a.headless and os.environ.get("STEAMARM_ANDROID_SOUND") != "0" and start_sound():
+            cmd += ["--pulse", "/tmp/pulse"]
         if exit_with:
             cmd += ["--exit-with", str(exit_with)]
         p = subprocess.Popen(cmd, stdin=subprocess.DEVNULL, stdout=LOGF, stderr=subprocess.STDOUT,

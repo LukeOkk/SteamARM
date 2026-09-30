@@ -1,0 +1,246 @@
+--- a/hw/xquartz/quartzKeyboard.h
++++ b/hw/xquartz/quartzKeyboard.h
+@@ -40,6 +40,10 @@
+ #define MIN_KEYCODE    XkbMinLegalKeyCode      // unfortunately, this isn't 0...
+ #define MAX_KEYCODE    NUM_KEYCODES + MIN_KEYCODE - 1
+ 
++/* SteamARM: the X keycode of a macOS virtual key code (quartzKeyboard.c). */
++int
++DarwinXKeycode(int vk);
++
+ /* These functions need to be implemented by Xquartz, XDarwin, etc. */
+ Bool
+ QuartsResyncKeymap(Bool sendDDXEvent);
+--- a/hw/xquartz/quartzKeyboard.c
++++ b/hw/xquartz/quartzKeyboard.c
+@@ -214,7 +214,98 @@
+  *      Use the keyMap field of keyboard info structure to populate
+  *      the modMap and modifierKeycodes fields.
+  */
++/*
++ * SteamARM: X keycodes as Xorg gives them with evdev -- the Linux key code
++ * (linux/input-event-codes.h) plus 8 -- instead of XQuartz's macOS virtual
++ * key code plus 8. Linux programs assume the former: Weston's X11 backend
++ * passes keycode - 8 on as a Linux key code (to Android's EventHub, through
++ * hwcomposer.waydroid, where the A key, macOS code 0, was no key at all),
++ * Chromium and Electron map keycodes to KeyboardEvent.code with an evdev
++ * table, and the default XKB keycodes (rules "base") are evdev's. The
++ * keysyms still come from the macOS layout key by key, so what each key
++ * types is unchanged. Apple's ISO keyboards swap the codes of the key left
++ * of 1 and the key right of left shift (Chromium swaps them back the same
++ * way). STEAMARM_X11_EVDEV_KEYCODES=0 keeps XQuartz's own numbering.
++ */
++static const unsigned short darwin_vk_to_evdev[128] = {
++    [0x00] = 30, [0x01] = 31, [0x02] = 32, [0x03] = 33, [0x04] = 35, [0x05] = 34,
++    [0x06] = 44, [0x07] = 45, [0x08] = 46, [0x09] = 47, [0x0a] = 86, [0x0b] = 48,
++    [0x0c] = 16, [0x0d] = 17, [0x0e] = 18, [0x0f] = 19, [0x10] = 21, [0x11] = 20,
++    [0x12] = 2, [0x13] = 3, [0x14] = 4, [0x15] = 5, [0x16] = 7, [0x17] = 6,
++    [0x18] = 13, [0x19] = 10, [0x1a] = 8, [0x1b] = 12, [0x1c] = 9, [0x1d] = 11,
++    [0x1e] = 27, [0x1f] = 24, [0x20] = 22, [0x21] = 26, [0x22] = 23, [0x23] = 25,
++    [0x24] = 28, [0x25] = 38, [0x26] = 36, [0x27] = 40, [0x28] = 37, [0x29] = 39,
++    [0x2a] = 43, [0x2b] = 51, [0x2c] = 53, [0x2d] = 49, [0x2e] = 50, [0x2f] = 52,
++    [0x30] = 15, [0x31] = 57, [0x32] = 41, [0x33] = 14, [0x35] = 1, [0x36] = 126,
++    [0x37] = 125, [0x38] = 42, [0x39] = 58, [0x3a] = 56, [0x3b] = 29, [0x3c] = 54,
++    [0x3d] = 100, [0x3e] = 97, [0x40] = 187, [0x41] = 83, [0x43] = 55, [0x45] = 78,
++    [0x47] = 69, [0x48] = 115, [0x49] = 114, [0x4a] = 113, [0x4b] = 98, [0x4c] = 96,
++    [0x4e] = 74, [0x4f] = 188, [0x50] = 189, [0x51] = 117, [0x52] = 82, [0x53] = 79,
++    [0x54] = 80, [0x55] = 81, [0x56] = 75, [0x57] = 76, [0x58] = 77, [0x59] = 71,
++    [0x5a] = 190, [0x5b] = 72, [0x5c] = 73, [0x5d] = 124, [0x5e] = 89, [0x5f] = 95,
++    [0x60] = 63, [0x61] = 64, [0x62] = 65, [0x63] = 61, [0x64] = 66, [0x65] = 67,
++    [0x66] = 123, [0x67] = 87, [0x68] = 122, [0x69] = 183, [0x6a] = 186, [0x6b] = 184,
++    [0x6d] = 68, [0x6e] = 127, [0x6f] = 88, [0x71] = 185, [0x72] = 110, [0x73] = 102,
++    [0x74] = 104, [0x75] = 111, [0x76] = 62, [0x77] = 107, [0x78] = 60, [0x79] = 109,
++    [0x7a] = 59, [0x7b] = 105, [0x7c] = 106, [0x7d] = 108, [0x7e] = 103,
++};
++
++/* macOS virtual key code -> X keycode - MIN_KEYCODE; a bijection on
++   0..NUM_KEYCODES-1 (keys with no Linux code take the free numbers). */
++static unsigned char darwin_vk_to_x[NUM_KEYCODES];
++static Bool darwin_vk_to_x_ready;
++
+ static void
++DarwinBuildKeycodeMap(UInt32 keyboard_type)
++{
++    const char *e = getenv("STEAMARM_X11_EVDEV_KEYCODES");
++    Bool evdev = !(e && e[0] == '0');
++    Bool iso = KBGetLayoutType(keyboard_type) == kKeyboardISO;
++    Bool taken[NUM_KEYCODES];
++    Bool placed[NUM_KEYCODES];
++    int vk, x = 0;
++
++    memset(taken, 0, sizeof(taken));
++    memset(placed, 0, sizeof(placed));
++    for (vk = 0; vk < NUM_KEYCODES; vk++) {
++        int src = vk, code = vk;
++
++        if (evdev) {
++            if (iso && vk == kVK_ISO_Section)
++                src = kVK_ANSI_Grave;
++            else if (iso && vk == kVK_ANSI_Grave)
++                src = kVK_ISO_Section;
++            code = src < 128 ? darwin_vk_to_evdev[src] : 0;
++            if (code == 0)
++                continue;
++        }
++        if (code < NUM_KEYCODES && !taken[code]) {
++            darwin_vk_to_x[vk] = code;
++            taken[code] = placed[vk] = TRUE;
++        }
++    }
++    for (vk = 0; vk < NUM_KEYCODES; vk++) {
++        if (placed[vk])
++            continue;
++        while (taken[x])
++            x++;
++        darwin_vk_to_x[vk] = x;
++        taken[x] = TRUE;
++    }
++    darwin_vk_to_x_ready = TRUE;
++    ErrorF("keycodes: %s%s\n", evdev ? "Linux evdev + 8" : "macOS + 8",
++           evdev && iso ? " (ISO keyboard)" : "");
++}
++
++int
++DarwinXKeycode(int vk)
++{
++    if (vk < 0 || vk >= NUM_KEYCODES || !darwin_vk_to_x_ready)
++        return vk + MIN_KEYCODE;
++    return darwin_vk_to_x[vk] + MIN_KEYCODE;
++}
++
++static void
+ DarwinBuildModifierMaps(darwinKeyboardInfo *info)
+ {
+     int i;
+@@ -229,7 +320,7 @@
+         switch (*k) {
+         case XK_Shift_L:
+             info->modifierKeycodes[NX_MODIFIERKEY_SHIFT][0] = i;
+-            info->modMap[MIN_KEYCODE + i] = ShiftMask;
++            info->modMap[DarwinXKeycode(i)] = ShiftMask;
+             break;
+ 
+         case XK_Shift_R:
+@@ -238,12 +329,12 @@
+ #else
+             info->modifierKeycodes[NX_MODIFIERKEY_SHIFT][0] = i;
+ #endif
+-            info->modMap[MIN_KEYCODE + i] = ShiftMask;
++            info->modMap[DarwinXKeycode(i)] = ShiftMask;
+             break;
+ 
+         case XK_Control_L:
+             info->modifierKeycodes[NX_MODIFIERKEY_CONTROL][0] = i;
+-            info->modMap[MIN_KEYCODE + i] = ControlMask;
++            info->modMap[DarwinXKeycode(i)] = ControlMask;
+             break;
+ 
+         case XK_Control_R:
+@@ -252,17 +343,17 @@
+ #else
+             info->modifierKeycodes[NX_MODIFIERKEY_CONTROL][0] = i;
+ #endif
+-            info->modMap[MIN_KEYCODE + i] = ControlMask;
++            info->modMap[DarwinXKeycode(i)] = ControlMask;
+             break;
+ 
+         case XK_Caps_Lock:
+             info->modifierKeycodes[NX_MODIFIERKEY_ALPHALOCK][0] = i;
+-            info->modMap[MIN_KEYCODE + i] = LockMask;
++            info->modMap[DarwinXKeycode(i)] = LockMask;
+             break;
+ 
+         case XK_Alt_L:
+             info->modifierKeycodes[NX_MODIFIERKEY_ALTERNATE][0] = i;
+-            info->modMap[MIN_KEYCODE + i] = Mod1Mask;
++            info->modMap[DarwinXKeycode(i)] = Mod1Mask;
+             if (!XQuartzOptionSendsAlt)
+                 *k = XK_Mode_switch;     // Yes, this is ugly.  This needs to be cleaned up when we integrate quartzKeyboard with this code and refactor.
+             break;
+@@ -275,7 +366,7 @@
+ #endif
+             if (!XQuartzOptionSendsAlt)
+                 *k = XK_Mode_switch;     // Yes, this is ugly.  This needs to be cleaned up when we integrate quartzKeyboard with this code and refactor.
+-            info->modMap[MIN_KEYCODE + i] = Mod1Mask;
++            info->modMap[DarwinXKeycode(i)] = Mod1Mask;
+             break;
+ 
+         case XK_Mode_switch:
+@@ -285,12 +376,12 @@
+ #ifdef NX_MODIFIERKEY_RALTERNATE
+             info->modifierKeycodes[NX_MODIFIERKEY_RALTERNATE][0] = i;
+ #endif
+-            info->modMap[MIN_KEYCODE + i] = Mod1Mask;
++            info->modMap[DarwinXKeycode(i)] = Mod1Mask;
+             break;
+ 
+         case XK_Meta_L:
+             info->modifierKeycodes[NX_MODIFIERKEY_COMMAND][0] = i;
+-            info->modMap[MIN_KEYCODE + i] = Mod2Mask;
++            info->modMap[DarwinXKeycode(i)] = Mod2Mask;
+             break;
+ 
+         case XK_Meta_R:
+@@ -299,11 +390,11 @@
+ #else
+             info->modifierKeycodes[NX_MODIFIERKEY_COMMAND][0] = i;
+ #endif
+-            info->modMap[MIN_KEYCODE + i] = Mod2Mask;
++            info->modMap[DarwinXKeycode(i)] = Mod2Mask;
+             break;
+ 
+         case XK_Num_Lock:
+-            info->modMap[MIN_KEYCODE + i] = Mod3Mask;
++            info->modMap[DarwinXKeycode(i)] = Mod3Mask;
+             break;
+         }
+     }
+@@ -367,11 +458,11 @@
+ 
+             keycode = keyInfo.modifierKeycodes[i][0];
+             if (keycode)
+-                ClearBit(ctrl->per_key_repeat, keycode + MIN_KEYCODE);
++                ClearBit(ctrl->per_key_repeat, DarwinXKeycode(keycode));
+ 
+             keycode = keyInfo.modifierKeycodes[i][1];
+             if (keycode)
+-                ClearBit(ctrl->per_key_repeat, keycode + MIN_KEYCODE);
++                ClearBit(ctrl->per_key_repeat, DarwinXKeycode(keycode));
+         }
+ 
+         /* Hurray for data duplication */
+@@ -422,7 +513,14 @@
+     pthread_mutex_lock(&keyInfo_mutex);
+     {
+         /* Initialize our keySyms */
+-        keySyms.map = keyInfo.keyMap;
++        /* In X keycode order (DarwinXKeycode) */
++        static KeySym xKeyMap[NUM_KEYCODES * GLYPHS_PER_KEY];
++        int vk;
++
++        for (vk = 0; vk < NUM_KEYCODES; vk++)
++            memcpy(xKeyMap + (DarwinXKeycode(vk) - MIN_KEYCODE) * GLYPHS_PER_KEY,
++                   keyInfo.keyMap + vk * GLYPHS_PER_KEY, GLYPHS_PER_KEY * sizeof(KeySym));
++        keySyms.map = xKeyMap;
+         keySyms.mapWidth = GLYPHS_PER_KEY;
+         keySyms.minKeyCode = MIN_KEYCODE;
+         keySyms.maxKeyCode = MAX_KEYCODE;
+@@ -861,6 +959,7 @@
+     }
+ #endif
+ 
++    DarwinBuildKeycodeMap(keyboard_type);
+     DarwinBuildModifierMaps(info);
+ 
+     return TRUE;
+--- a/hw/xquartz/darwinEvents.c
++++ b/hw/xquartz/darwinEvents.c
+@@ -568,7 +568,7 @@
+ {
+     input_lock();
+     {
+-        QueueKeyboardEvents(darwinKeyboard, ev_type, keycode + MIN_KEYCODE);
++        QueueKeyboardEvents(darwinKeyboard, ev_type, DarwinXKeycode(keycode));
+         DarwinPokeEQ();
+     } input_unlock();
+ }

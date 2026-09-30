@@ -339,10 +339,9 @@ on the same cases.
 
 1. **The rest of the runtime.** The session runs dex-only and x86_64 apps
    (stage 28). Missing: arm64-v8a-only apps (Android's arm64 ART, the heap
-   wall), 32-bit x86 apps in the session, sound, network (netd is a
-   stand-in), camera, a GPU path (SwiftShader draws on the CPU), clicks and
-   keys from the Mac measured end to end (pointer motion reaches Android;
-   `benchmarks/stage28-android-apk.txt`).
+   wall), 32-bit x86 apps in the session, sound, camera, a GPU path
+   (SwiftShader draws on the CPU). Clicks, keys and the network work since
+   stage 29 (`benchmarks/stage29-android-input-network.txt`).
 2. **Split APKs, XAPK, APKS, APKM and OBB data.** The formats are
    recognised and refused. Installing a base with its configuration splits
    is the next piece a Play Store-delivered app needs.

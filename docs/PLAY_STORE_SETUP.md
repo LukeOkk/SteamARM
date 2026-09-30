@@ -41,9 +41,9 @@ meets them.
 | # | prerequisite | state | label |
 |---|---|---|---|
 | 1 | Java runs | x86-64 ART runs Java under FEX in the x86_64 root; the arm64 root cannot map ART's heap below 4 GiB on macOS | MEASURED (`benchmarks/stage25-art-x86-fex.txt`) |
-| 2 | system_server reaches PackageManagerService and `sys.boot_completed=1` | system_server starts its bootstrap services up to LightsService and waits for SurfaceFlinger; PackageManagerService never starts; another stage is working on it | MEASURED (`benchmarks/stage27-android-framework.txt`) |
-| 3 | a display and input for the store's UI | SurfaceFlinger's boot animation shows in a macOS window through Weston; input is not done | MEASURED (`benchmarks/stage27-android-display.txt`) |
-| 4 | networking Android considers online, DNS, TLS, a correct clock | netd exits at once (no route netlink, iptables or BPF); nothing reports a validated network to ConnectivityService | MEASURED (netd, stage 27); HYPOTHESIS (what Play needs, `docs/ANDROID_ZERO_VM_FEASIBILITY.md` 3.14) |
+| 2 | system_server reaches PackageManagerService and `sys.boot_completed=1` | the display profile boots to `sys.boot_completed=1` in 17-27 s warm; `pm install` and `am start` work | MEASURED (`benchmarks/stage28-android-apk.txt`) |
+| 3 | a display and input for the store's UI | apps show in a macOS window through Weston; clicks and keys from that window reach apps (a click opens a game, Escape is BACK, A is KEYCODE_A) | MEASURED (`benchmarks/stage29-android-input-network.txt`) |
+| 4 | networking Android considers online, DNS, TLS, a correct clock | an Ethernet network registered with ConnectivityService (netd stays a stand-in) and VALIDATED by the network stack's own probes; DNS through a dnsproxyd served from the Mac; `curl` https answers 204; the clock and time zone are the Mac's | MEASURED (`benchmarks/stage29-android-input-network.txt`); HYPOTHESIS (that this is all Play needs of the network, `docs/ANDROID_ZERO_VM_FEASIBILITY.md` 3.14) |
 | 5 | WebView (Google's sign-in and many store pages are web content) | the image has `com.android.webview` 137.0.7151.72 with x86 and x86_64 libraries in `/system/product/app/webview`; whether Chromium's multi-process renderer runs under lxrun and FEX is not known | MEASURED (file read, see below); UNKNOWN (runs) |
 | 6 | AccountManagerService and Google's account authenticator | part of system_server and of Play services: nothing to test before row 2 | UNKNOWN |
 | 7 | keystore and a keymaster HAL | keymaster 4.0 and keystore run in the headless profile | MEASURED (stage 27) |

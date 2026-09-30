@@ -62,6 +62,7 @@ import argparse
 import os
 import re
 import shlex
+import shutil
 import signal
 import socket
 import struct
@@ -189,7 +190,13 @@ PROFILES["display"] = {
         "mediametrics",            # media.metrics: audioserver waits 5 s for it per call and its
                                    # TimeCheck aborts it (MEASURED)
     },
-    "env_x86": dict(PROFILES["headless"]["env_x86"]),
+    # audioserver loads Waydroid's audio HAL in-process (vintf_passthrough,
+    # below), 64-bit, and the HAL opens ALSA's "pulse" device; the image's
+    # 64-bit alsa-lib was built with /vendor/lib/hw/ as its plugin
+    # directory, where the plugin is 32-bit ("is 32-bit" x4400, no sound,
+    # MEASURED). ALSA_PLUGIN_DIR is alsa-lib's own override.
+    "env_x86": dict(PROFILES["headless"]["env_x86"],
+                    audioserver={"ALSA_PLUGIN_DIR": "/vendor/lib64/hw"}),
     "left_out": {k: v for k, v in PROFILES["headless"]["left_out"].items()
                  if k not in ("vendor.hwcomposer-2-1", "bootanim", "netd", "vold")},
     # Services replaced by a stand-in (scripts/android/java/.../BinderStandIn.java):
@@ -211,7 +218,9 @@ PROFILES["display"] = {
     # (isCheckpointing, needsCheckpoint, ...), answered no. "storaged" goes
     # with it (StorageManagerService asks for both).
     "stand_ins": {
-        "netd": ["netd=android.net.INetd", "dnsresolver=android.net.IDnsResolver", "socket=mdns"],
+        # network=@mac: the one network, the Mac's (NetworkAgentStandIn;
+        # Boot.network_spec fills it in).
+        "netd": ["netd=android.net.INetd", "dnsresolver=android.net.IDnsResolver", "socket=mdns", "network=@mac"],
         "vold": ["vold=android.os.IVold:false", "storaged=android.os.IStoraged"],
     },
     # HIDL HALs whose service binary cannot run here, served in-process
@@ -224,6 +233,19 @@ PROFILES["display"] = {
     # media.audio_flinger, which AudioService waits for (MEASURED).
     "vintf_passthrough": ["android.hardware.audio", "android.hardware.audio.effect"],
 }
+
+
+def host_timezone():
+    """The Mac's time zone for Android (persist.sys.timezone, as Settings
+    sets it): its IANA name from /etc/localtime's link (a name the image's
+    tzdata lacks leaves Android on GMT, as with none). Without it Android
+    kept UTC (MEASURED: 11:27 on a Mac at 08:27, UTC-3)."""
+    try:
+        link = os.readlink("/etc/localtime")
+    except OSError:
+        return []
+    m = re.search(r"zoneinfo/(.+)$", link)
+    return [("persist.sys.timezone", m.group(1))] if m else []
 
 
 # Properties the host sets before init's first action, as Waydroid's host
@@ -697,10 +719,11 @@ class Boot:
             if m:
                 self.props[m.group(1)] = m.group(2)
         log("property service up: %d properties" % len(self.props))
-        for k, v in HOST_PROPS + [tuple(x.split("=", 1)) for x in (self.a.prop or [])]:
+        host = HOST_PROPS + host_timezone()
+        for k, v in host + [tuple(x.split("=", 1)) for x in (self.a.prop or [])]:
             if self.props.get(k) != v:
                 self.props.set(k, v)
-        log("host properties: %s" % ", ".join("%s=%s" % (k, self.props.get(k, "")) for k, _ in HOST_PROPS))
+        log("host properties: %s" % ", ".join("%s=%s" % (k, self.props.get(k, "")) for k, _ in host))
 
     def start_logd(self):
         out = open(os.path.join(self.state, "logd.out"), "a")
@@ -756,6 +779,30 @@ class Boot:
 
         threading.Thread(target=reader, name="lmkd", daemon=True).start()
         log("lmkd stand-in on /dev/socket/lmkd (commands read and dropped)")
+
+    def network_spec(self):
+        """The netd stand-in's network=IFACE,ADDRESS,GATEWAY,DNS;...: an
+        Ethernet interface with a nominal address (sockets go out through
+        the Mac, whatever it says) and the Mac's name servers.
+        STEAMARM_ANDROID_NETWORK=0: none, as before."""
+        if os.environ.get("STEAMARM_ANDROID_NETWORK") == "0":
+            return None
+        import android_dnsproxy
+        # A scoped link-local server (fe80::1%en0) names a Mac interface.
+        dns = [d for d in android_dnsproxy.nameservers() if "%" not in d]
+        return "network=eth0,10.0.2.15/24,10.0.2.2," + ";".join(dns)
+
+    def start_dnsproxy(self):
+        """netd's /dev/socket/dnsproxyd, answered by the Mac's resolver
+        (scripts/android_dnsproxy.py): netd itself is a stand-in here, and
+        with no dnsproxyd every app's getaddrinfo failed at once."""
+        import android_dnsproxy
+        try:
+            self.dnsproxy, self.dns_counts = android_dnsproxy.serve(self.root, log)
+        except OSError as e:
+            log("dnsproxyd: %s" % e)
+            return
+        log("dnsproxyd on /dev/socket/dnsproxyd (the Mac's resolver)")
 
     # -- identities
     def uid_of(self, name):
@@ -844,7 +891,9 @@ class Boot:
             if not dex:
                 log("start %s (%s): its stand-in could not be built" % (name, why))
                 return False
-            argv = ["/system/bin/app_process64", "/system/bin", "org.steamarm.android.BinderStandIn"] + stand_in
+            args = [self.network_spec() if x == "network=@mac" else x for x in stand_in]
+            argv = ["/system/bin/app_process64", "/system/bin", "org.steamarm.android.BinderStandIn"] + \
+                [x for x in args if x]
             keep = [x.split("=", 1)[1] for x in stand_in if x.startswith("socket=")]
             fds, senv = self.make_sockets(svc, only=keep)
             senv["CLASSPATH"] = dex + ":/system/framework/services.jar"
@@ -928,7 +977,8 @@ class Boot:
         None."""
         if getattr(self, "_standin", None):
             return self._standin
-        src = os.path.join(HERE, "android", "java", "org", "steamarm", "android", "BinderStandIn.java")
+        pkgsrc = os.path.join(HERE, "android", "java", "org", "steamarm", "android")
+        srcs = sorted(os.path.join(pkgsrc, f) for f in os.listdir(pkgsrc) if f.endswith(".java"))
         out = os.path.join(REPO, "build", "android", "standin")
         dex = os.path.join(out, "classes.dex")
         # R8_JAR, else the state dir's copy, else the default state dir's: a
@@ -940,11 +990,12 @@ class Boot:
             for d in (os.environ.get("STEAMARM_STATE"), os.path.expanduser("~/SteamARM-roots")) if d]
         r8 = next((c for c in cands if c and os.path.exists(c)), cands[-1])
         try:
-            if not os.path.exists(dex) or os.path.getmtime(dex) < os.path.getmtime(src):
+            if not os.path.exists(dex) or os.path.getmtime(dex) < max(os.path.getmtime(f) for f in srcs):
                 cls = os.path.join(out, "classes")
+                shutil.rmtree(cls, ignore_errors=True)
                 os.makedirs(cls, exist_ok=True)
                 subprocess.run(["javac", "--release", "8", "-nowarn", "-d", cls, "-sourcepath",
-                                os.path.join(HERE, "android", "stubs"), src], check=True, timeout=300)
+                                os.path.join(HERE, "android", "stubs")] + srcs, check=True, timeout=300)
                 pkg = os.path.join(cls, "org", "steamarm", "android")
                 subprocess.run(["java", "-cp", r8, "com.android.tools.r8.D8", "--min-api", "30", "--release",
                                 "--output", out] + [os.path.join(pkg, f) for f in sorted(os.listdir(pkg))
@@ -1289,6 +1340,7 @@ class Boot:
             self.start_propsvc()
             self.start_logd()
             self.start_lmkd_socket()
+            self.start_dnsproxy()
             self.rc = Rc(self.root, self.props)
             self.rc.parse_file("/system/etc/init/hw/init.rc")
             for d in ("/system/etc/init", "/system_ext/etc/init", "/product/etc/init",
@@ -1357,7 +1409,8 @@ class Boot:
             time.sleep(0.1)
 
     def shutdown(self):
-        log("stopping (lmkd stand-in read %d commands)" % getattr(self, "lmkd_msgs", 0))
+        log("stopping (lmkd stand-in read %d commands; dnsproxyd answered %s)" %
+            (getattr(self, "lmkd_msgs", 0), getattr(self, "dns_counts", None) or "nothing"))
         for name, svc in getattr(self, "rc", Rc(self.root, {})).services.items():
             if svc.proc and svc.proc.poll() is None:
                 try:

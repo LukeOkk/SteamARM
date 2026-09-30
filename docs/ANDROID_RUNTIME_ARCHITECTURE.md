@@ -1058,6 +1058,87 @@ SYN) to an EventHub-style reader (`tests/android/input_fifo.c`,
 does not see the FIFO. InputFlinger itself has not read them:
 system_server stops at the display in these boots.
 
+## Input, network and time from the Mac (stage 29, `benchmarks/stage29-android-input-network.txt`)
+
+### What works (MEASURED, x86_64 root under FEX, `scripts/android-session.py`)
+
+| what | result |
+|---|---|
+| a click in the session's macOS window | InputDispatcher gets MotionEvent DOWN and UP from the mouse (source 0x2002, buttonState 1); a click on Klondike's tile in Simple Solitaire opens the game (`mResumedActivity` GameManager); a click on the status bar opens the notification shade |
+| keys | Escape arrives as BACK (scanCode 1, keyCode 4) and closes the shade; A as KEYCODE_A (scanCode 30, keyCode 29); 1 as KEYCODE_1; Shift as SHIFT_LEFT, with Android's own `Generic.kl` |
+| the network | `dumpsys connectivity`: "Active default network: 100", an Ethernet network CONNECTED, capabilities INTERNET, NOT_METERED, ... and VALIDATED (everValidated, lastValidated: the network stack's own HTTP probes went out through the Mac) |
+| DNS and HTTP from Android | the image's `curl`: http://connectivitycheck.gstatic.com/generate_204 and https://www.google.com/generate_204 answer 204 (over IPv6, as the Mac's resolver answered); the boot's dnsproxyd answered 6 getaddrinfo calls in that session |
+| time | `persist.sys.timezone` is the Mac's zone; before, Android showed UTC |
+| sound (a session with a window) | an `AudioTrack` of 16-bit stereo PCM at 48 kHz (a Java program run with `app_process64`) plays through audioserver, Waydroid's audio HAL and ALSA's pulse plugin: while it plays, SteamARM's PulseAudio lists the stream "Waydroid" / "ALSA Playback"; 288000 samples written in 3 s |
+
+### What it needed
+
+- **Real clicks and keys to test with.** SteamARM's X server is XQuartz,
+  which leaves XTEST off unless asked (`enable_test_extensions`);
+  `scripts/run-x11-native.sh` now asks, in its own defaults domain
+  (`STEAMARM_X11_XTEST=0` leaves it off). XTEST acts inside that X server,
+  whose clients are SteamARM's own guests (no TCP); Steam Input's desktop
+  configuration types and clicks through it too.
+  `tests/android/xtest_input.py` sends a click or a key with it; an
+  XSendEvent button, by contrast, makes Weston's X11 backend abort
+  (`xsend_motion.py`).
+- **Linux keycodes from the X server.** XQuartz numbered keys as macOS
+  virtual key codes plus 8. Weston's X11 backend passes keycode - 8 on as a
+  Linux key code, so Android's EventHub got macOS codes as scan codes: A
+  (macOS code 0) was scan code 0, which Android's key layouts cannot map
+  (KeyLayoutMap looks a key up only for a nonzero scan code; MEASURED:
+  keyCode 0). `patches/xquartz-evdev-keycodes.patch` makes the X server
+  number keys as Xorg does with evdev (Linux code + 8): a table from macOS
+  key codes to Linux ones, with the keysyms still read from the macOS layout
+  key by key, so what each key types does not change for X programs;
+  Apple's ISO keyboards swap two codes, and the swap is undone when macOS
+  reports an ISO keyboard, as Chromium and Firefox do (a Mac with no
+  keyboard type reports ANSI). The same numbering is what Chromium and
+  Electron (Steam's web views, Heroic) assume for `KeyboardEvent.code`.
+  `STEAMARM_X11_EVDEV_KEYCODES=0` keeps XQuartz's own numbering.
+- **DNS.** Every app lookup (bionic's getaddrinfo, gethostbyname,
+  gethostbyaddr; libnetd_client's resnsend) is a text command on netd's
+  `/dev/socket/dnsproxyd`. netd is a stand-in, so there was no such socket
+  and every lookup failed at once. `scripts/android_dnsproxy.py` serves it
+  from the boot's own process with the Mac's resolver, the replies laid out
+  as netd's DnsProxyListener writes them (`tests/test_android_dnsproxy.py`
+  reads them back the way bionic does).
+- **A network.** With no network agent ConnectivityService reported no
+  network, which apps check before they connect.
+  `scripts/android/java/.../NetworkAgentStandIn.java`, in the netd stand-in
+  (`network=` argument), registers an Ethernet network "eth0" with a nominal
+  address, the Mac's name servers and a default route once the system has
+  booted, speaking ConnectivityService's own agent protocol (Android 11's
+  `registerNetworkAgent` and AsyncChannel messages) by reflection.
+  ConnectivityService programs it into the netd stand-in, which accepts
+  every call; sockets bound to the network find no fwmarkd and carry on as
+  ordinary sockets on the Mac. `STEAMARM_ANDROID_NETWORK=0` leaves Android
+  with no network, as before.
+- **Time zone.** `android-boot.py` sets `persist.sys.timezone` from
+  `/etc/localtime`'s link.
+- **Sound.** A session with a window starts SteamARM's PulseAudio with a
+  socket in the session root (`scripts/audio.sh`, `/tmp/pulse/native` to
+  Android) and boots with `--pulse`. audioserver loads Waydroid's audio HAL
+  in-process (64-bit, passthrough), and the HAL opens ALSA's "pulse" device;
+  the image's 64-bit alsa-lib looks for its plugins in `/vendor/lib/hw/`,
+  where they are 32-bit (4400 "is 32-bit" errors, no stream, MEASURED), so
+  audioserver gets `ALSA_PLUGIN_DIR=/vendor/lib64/hw`, alsa-lib's own
+  override. `STEAMARM_ANDROID_SOUND=0` leaves the session silent.
+
+### Limits (by design unless marked)
+
+- No Wi-Fi or mobile network is shown: the network is Ethernet; its address
+  (10.0.2.15) is nominal (UNKNOWN whether an app's `NetworkInterface` lists
+  it: interfaces come from netlink, not from ConnectivityService).
+- VPN apps, tethering, per-app firewall rules, data usage accounting: the
+  netd stand-in accepts and does nothing.
+- The ISO key swap follows the keyboard type macOS reports.
+- Compressed sound (system sounds, SoundPool, MediaCodec) needs
+  `media.extractor`, and mediaextractor aborts under lxrun: its watchdog's
+  `timer_create` is not implemented ("Watchdog: Failed to create timer:
+  Function not implemented", MEASURED). MediaPlayer needs mediaserver,
+  which is i386 and meets 32-bit bionic's 16-bit pid limit.
+
 ## APKs and the Google Play Store
 
 - An APK is a zip: its dex runs on ART (blocked above in the arm64 root;
@@ -1075,8 +1156,9 @@ system_server stops at the display in these boots.
   Play Store also expects a device registered as certified and Play
   Integrity verdicts; SteamARM must not falsify certification or bypass
   Play Integrity or SafetyNet, so apps that require them will refuse to run
-  (UNKNOWN which ones). None of this is reachable before the ART heap wall
-  and binder.
+  (UNKNOWN which ones). In the x86_64 root the pieces the Play Store needs
+  from the system are now there (an APK installs and starts, a validated
+  network, DNS); a supplied GApps package has not been run yet.
 
 ## Order of work
 
@@ -1092,12 +1174,13 @@ system_server stops at the display in these boots.
    a thread channel could arrive closed (UNKNOWN; now refused and replaced).
 3. Properties: done (stage 26), for x86-64 guests too (stage 27).
 4. init, zygote64, system_server, a window, `pm install`, `am start`: done
-   in the x86_64 root (stage 28, "Session"). Next, in the order an app
-   meets them: clicks and keys measured end to end (pointer motion arrives),
-   sound (the audio HAL with a PulseAudio socket, `--pulse`), network (a
-   netd that does something), Android's time zone from the host, 32-bit x86
-   apps (`--abi32`), then a GPU path (Lepton's graphics analysis, 4) instead
-   of SwiftShader, and per-app windows (Waydroid's multi-window mode).
+   in the x86_64 root (stage 28, "Session"). Clicks and keys from the Mac,
+   the network and the time zone: done (stage 29). Next, in the order an
+   app meets them: sound (the audio HAL with a PulseAudio socket,
+   `--pulse`), a supplied GApps package (`scripts/android-gapps.py`), 32-bit
+   x86 apps (`--abi32`), then a GPU path (Lepton's graphics analysis, 4)
+   instead of SwiftShader, and per-app windows (Waydroid's multi-window
+   mode).
    audioserver's i386 audio HAL, zygote_secondary and dex2oat32 run since
    stage 28 (with `--linkerconfig`); 32-bit bionic's 16-bit thread ids
    are the open limit there.

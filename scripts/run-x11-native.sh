@@ -8,7 +8,8 @@
 # Display :1 is refused (Xvnc serves it for the running Steam).
 # Server log: ~/SteamARM-roots/logs/x11-native.log (previous run: .old)
 #
-# Env overrides: XQ_ROOT, X11_NATIVE_LOG, X11_NATIVE_ARGS (extra server args).
+# Env overrides: XQ_ROOT, X11_NATIVE_LOG, X11_NATIVE_ARGS (extra server args),
+# STEAMARM_X11_XTEST (1, the default: the XTEST extension; 0: none).
 set -euo pipefail
 
 XQ_ROOT="${XQ_ROOT:-${STEAMARM_BUILD:-$HOME/SteamARM-build}/xquartz}"
@@ -97,6 +98,17 @@ do_start() {
     defaults write "$BUNDLE_ID" no_randr_alert -bool true
     defaults write "$BUNDLE_ID" no_quit_alert -bool true
     defaults write "$BUNDLE_ID" window_item_modifiers -string command
+    #  XTEST, which XQuartz leaves off unless asked (enable_test_extensions):
+    #  Steam Input's desktop configuration (a controller as mouse and keys)
+    #  types and clicks through it, and tests/android/xtest_input.py sends
+    #  real clicks and keys with it. It acts inside this X server only, whose
+    #  clients are SteamARM's own guests (no TCP); STEAMARM_X11_XTEST=0 leaves
+    #  it off. Read when the server starts.
+    if [ "${STEAMARM_X11_XTEST:-1}" = 0 ]; then
+        defaults write "$BUNDLE_ID" enable_test_extensions -bool false
+    else
+        defaults write "$BUNDLE_ID" enable_test_extensions -bool true
+    fi
 
     mkdir -p "$LOGDIR"
     # xtrans refuses to create the socket dir when euid != 0; make sure it exists.

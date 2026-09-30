@@ -66,6 +66,13 @@ step_thunks() {
 step_xquartz() {
     log "native X server + window manager (scripts/build-xquartz.sh)"
     scripts/build-xquartz.sh
+    # A running server keeps its old binary and preferences (XTEST, Linux
+    # keycodes: patches/xquartz-evdev-keycodes.patch) until it starts again:
+    # restart it now if no guest program is running, else at its next start.
+    if pgrep -f "SteamARM-X11.app/Contents/MacOS/X11.bin :2" >/dev/null 2>&1 &&
+       ! pgrep -f "build/lxrun " >/dev/null 2>&1; then
+        scripts/run-x11-native.sh restart :2 || true
+    fi
 }
 
 step_roots() {

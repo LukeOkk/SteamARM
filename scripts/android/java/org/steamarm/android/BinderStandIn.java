@@ -15,14 +15,16 @@
 // (logcat tag SteamARMStandIn), so what the framework asked is on record.
 // "socket=NAME" accepts connections on the socket init made for the daemon
 // (ANDROID_SOCKET_NAME) and drops what arrives (sink, below).
+// "network=IFACE,ADDRESS/PREFIX,GATEWAY,DNS[;DNS]" registers one network with
+// ConnectivityService once the system has booted (NetworkAgentStandIn).
 //
 // Why: netd needs netlink route and uevent sockets, iptables, BPF maps and
 // traffic control, none of which a Mac has; its "netd" (INetd) and
 // "dnsresolver" (IDnsResolver) services are waited for forever by
 // system_server's NetworkManagementService and ConnectivityService
 // (NetdService.get() loops, "WARNING: returning null INetd instance.",
-// MEASURED). With this stand-in the framework boots with no network: every
-// network request is accepted and nothing happens.
+// MEASURED). With this stand-in every network request is accepted and nothing
+// happens; the one network there is comes from NetworkAgentStandIn.
 package org.steamarm.android;
 
 import android.os.Binder;
@@ -185,6 +187,10 @@ public final class BinderStandIn extends Binder {
             if (name.equals("socket")) {
                 String env = System.getenv("ANDROID_SOCKET_" + iface);
                 if (env != null) sink(iface, Integer.parseInt(env));
+                continue;
+            }
+            if (name.equals("network")) {           // NetworkAgentStandIn: the Mac's network
+                NetworkAgentStandIn.start(iface);
                 continue;
             }
             // INTERFACE[:false]: booleans answer true ("it worked": netd's

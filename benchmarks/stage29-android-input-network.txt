@@ -1,0 +1,72 @@
+Stage 29: clicks, keys, network and time zone for the Android session
+Mac mini M4, macOS 27; x86_64 LineageOS 18.1 root under FEX (sesstest clone);
+Simple Solitaire Collection 71 (F-Droid); scripts/android-session.py.
+
+== Keys through XQuartz before the patch (session on :2, XTEST on)
+tests/android/xtest_input.py :2 <weston window> key a      -> X keycode 8
+dumpsys input, RecentQueue:
+  KeyEvent(deviceId=3, source=0x00000101, action=DOWN, keyCode=0, scanCode=0, ...)
+A layout with "key 0 A" in /data/system/devices/keylayout/wayland_keyboard.kl
+was loaded (KeyLayoutFile: /data/system/devices/keylayout/wayland_keyboard.kl)
+and still gave keyCode=0 for scanCode 0; Shift (scan code 56 = macOS 0x38)
+mapped: keyCode=59. KeyLayoutMap looks a key up only for a nonzero scan code.
+
+== After patches/xquartz-evdev-keycodes.patch (server log: "keycodes: Linux evdev + 8")
+xmodmap -pke: keycode 38 = a A, 9 = Escape, 10 = 1 exclam, 50 = Shift_L,
+133 = Meta_L (Command); 49 = less greater and 94 = masculine ordfeminine on
+this Mac's Spanish layout (no keyboard type reported: LMGetKbdType 40, ANSI).
+Android's own Generic.kl:
+  key a      -> KeyEvent DOWN keyCode=29 (KEYCODE_A) scanCode=30
+  key 1      -> KeyEvent DOWN keyCode=8 (KEYCODE_1) scanCode=2
+  key Escape -> KeyEvent DOWN keyCode=4 (BACK) scanCode=1
+
+== Clicks (XTEST)
+click at 512,384 -> MotionEvent source=0x00002002 action=DOWN buttonState=0x1,
+                    then button press/release, action=UP
+click at 8,8 (status bar)       -> notification shade opened (screenshot)
+key Escape                      -> shade closed
+click at 428,380 (Klondike tile)-> mResumedActivity de.tobiasbielefeld.solitaire/.ui.GameManager
+
+== Network (scripts/android_dnsproxy.py, NetworkAgentStandIn)
+logcat: SteamARMNetwork: registered eth0 (10.0.2.15/24, gateway 10.0.2.2, dns 192.168.1.1): network 100
+        SteamARMNetwork: ConnectivityService connected to the agent
+dumpsys connectivity:
+  Active default network: 100
+  NetworkAgentInfo{ ni{[type: Ethernet[], state: CONNECTED/CONNECTED, ...
+  everValidated{true} lastValidated{true} partialConnectivity{false}
+  Capabilities: NOT_METERED&INTERNET&NOT_RESTRICTED&TRUSTED&NOT_VPN&VALIDATED&NOT_ROAMING&FOREGROUND&NOT_CONGESTED&NOT_SUSPENDED
+curl in Android:
+  http://connectivitycheck.gstatic.com/generate_204 -> http 204 (IPv6 address)
+  https://www.google.com/generate_204               -> https 204 (IPv6 address)
+boot log at stop: dnsproxyd answered {'getaddrinfo': 6}
+Before: no dnsproxyd socket (every lookup failed at once), no network agent.
+
+== Time zone
+host properties: ... persist.sys.timezone=<the Mac's zone>
+(before: the status bar showed 11:27 with the Mac at 08:27, UTC)
+
+== FEXServer lifetime (same stage)
+Two FEXServers of Android roots found alive after an hour (--persistent=60 is
+ignored with --foreground); android-boot.py now stops the root's server it
+started. tests/android: 77 passed, 0 failed (3 expected failures), no
+FEXServer left.
+
+== i386 service test hang
+build/lxrun /data/local/tmp/binder_service32 at 99% CPU for 12 minutes: its
+log said "32 bit bionic libc only accepts pid <= 65535, but current pid is
+78831". perl's alarm (the test's deadline) reaches the guest, not lxrun. The
+test now waits at most 30 s, kills it, and records the pid limit as an
+expected failure.
+
+== Sound (session with a window, android-session.py passes --pulse)
+Before ALSA_PLUGIN_DIR: audioserver.log, 4400 x "Cannot open shared library
+libasound_module_pcm_pulse.so (dlopen failed: "/vendor/lib/hw/libasound_module_pcm_pulse.so"
+is 32-bit ...)"; logcat: "audio_hw_primary: Failed to open pcm_out after 100 tries".
+With ALSA_PLUGIN_DIR=/vendor/lib64/hw for audioserver: a Java AudioTrack
+(STREAM_MUSIC, 48000 Hz, stereo, PCM 16) run with app_process64 ->
+"wrote 288000 samples"; pactl list sink-inputs during it:
+  application.name = "Waydroid", media.name = "ALSA Playback"
+System sounds: "SoundPool::Sound: doLoad: unable to load sound"
+("MediaExtractorFactory: extractor service not running"). With mediaextractor
+started: it aborts after 11 s, "Watchdog: Failed to create timer: Function
+not implemented" (timer_create), restarted every 5 s.
