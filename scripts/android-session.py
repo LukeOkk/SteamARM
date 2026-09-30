@@ -625,6 +625,42 @@ def focused(s):
     return m.group(1) if m else ""
 
 
+def name_window(s, title):
+    """The session's macOS window takes the app's name: it is Weston's X
+    window, titled "Weston Compositor - screen0" by Weston's X11 backend,
+    and quartz-wm shows WM_NAME / _NET_WM_NAME in the title bar and the
+    Window menu. Nothing to do headless."""
+    if s.get("display") in (None, "headless"):
+        return
+    try:
+        import ctypes
+        X = ctypes.CDLL("/opt/homebrew/lib/libX11.dylib")
+    except OSError:
+        return
+    X.XOpenDisplay.restype = ctypes.c_void_p
+    X.XOpenDisplay.argtypes = [ctypes.c_char_p]
+    X.XInternAtom.restype = ctypes.c_ulong
+    X.XInternAtom.argtypes = [ctypes.c_void_p, ctypes.c_char_p, ctypes.c_int]
+    X.XStoreName.argtypes = [ctypes.c_void_p, ctypes.c_ulong, ctypes.c_char_p]
+    X.XChangeProperty.argtypes = [ctypes.c_void_p, ctypes.c_ulong, ctypes.c_ulong, ctypes.c_ulong,
+                                  ctypes.c_int, ctypes.c_int, ctypes.c_char_p, ctypes.c_int]
+    X.XFlush.argtypes = [ctypes.c_void_p]
+    X.XCloseDisplay.argtypes = [ctypes.c_void_p]
+    r = subprocess.run(["/opt/homebrew/bin/xwininfo", "-root", "-tree"], env=dict(os.environ, DISPLAY=s["display"]),
+                       stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+    m = re.search(r"(0x[0-9a-f]+) \"Weston Compositor[^\"]*\"", r.stdout.decode(errors="replace"))
+    d = X.XOpenDisplay(s["display"].encode())
+    if not m or not d:
+        return
+    win, name = int(m.group(1), 16), title.encode("utf-8")
+    X.XStoreName(d, win, name)
+    utf8 = X.XInternAtom(d, b"UTF8_STRING", 0)
+    X.XChangeProperty(d, win, X.XInternAtom(d, b"_NET_WM_NAME", 0), utf8, 8, 0, name, len(name))
+    X.XFlush(d)
+    X.XCloseDisplay(d)
+    log("window: %s" % title)
+
+
 def launch(s, pkg, apk=None, force=False):
     if not install(s, pkg, apk, force):
         die("%s was not installed" % pkg, 4)
@@ -645,6 +681,7 @@ def launch(s, pkg, apk=None, force=False):
                 % (f, time.time() - t0, lxrun_count()))
             s["app"] = pkg
             write_session(s)
+            name_window(s, meta_field(package_meta(pkg), "label") or pkg)
             return True
         time.sleep(2)
     log("its window never had the focus (last focus: %s)" % (focused(s) or "none"))
