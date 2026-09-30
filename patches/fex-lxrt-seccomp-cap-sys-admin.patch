@@ -1,0 +1,67 @@
+From: SteamARM
+Subject: [PATCH] Seccomp: CAP_SYS_ADMIN also allows installing a filter
+
+Linux refuses SECCOMP_SET_MODE_FILTER/STRICT with EACCES only when the task
+has neither no_new_privs nor CAP_SYS_ADMIN. The emulator checked only
+no_new_privs, so Android's zygote child (root, CAP_SYS_ADMIN) could not
+install its seccomp policy under FEX. Used with FEX_NEEDSSECCOMP=1.
+---
+--- a/Source/Tools/LinuxEmulation/LinuxSyscalls/Seccomp/SeccompEmulator.cpp
++++ b/Source/Tools/LinuxEmulation/LinuxSyscalls/Seccomp/SeccompEmulator.cpp
+@@ -25,6 +25,7 @@
+ #include <linux/filter.h>
+ #include <linux/seccomp.h>
+ #include <sys/prctl.h>
++#include <sys/syscall.h>
+ 
+ // seccomp
+ //
+@@ -120,6 +121,30 @@
+ // TRACE_syscall
+ // - ptrace unsupported
+ 
++namespace {
++// Linux (kernel/seccomp.c seccomp_prepare_filter, and the strict-mode check
++// FEX mirrors): installing a filter is refused with EACCES unless the task
++// has no_new_privs set OR has CAP_SYS_ADMIN in its user namespace. Only the
++// first half was emulated, so a root guest with CAP_SYS_ADMIN and without
++// no_new_privs -- Android's zygote child installing its seccomp policy
++// before it drops root (com_android_internal_os_Zygote.cpp SpecializeCommon)
++// -- got EACCES under FEX where the kernel accepts it.
++bool MayInstallFilter() {
++  if (::prctl(PR_GET_NO_NEW_PRIVS, 0, 0, 0, 0) != 0) {
++    return true;
++  }
++  struct {
++    uint32_t version;
++    int pid;
++  } Header {0x20080522 /* _LINUX_CAPABILITY_VERSION_3 */, 0};
++  struct {
++    uint32_t effective, permitted, inheritable;
++  } Data[2] {};
++  constexpr int CAP_SYS_ADMIN_BIT = 21;
++  return ::syscall(SYS_capget, &Header, Data) == 0 && (Data[0].effective >> CAP_SYS_ADMIN_BIT) & 1;
++}
++} // namespace
++
+ namespace FEX::HLE {
+ uint64_t SeccompEmulator::Handle(FEXCore::Core::CpuStateFrame* Frame, uint32_t Op, uint32_t flags, void* arg) {
+   // If seccomp isn't enabled then say so.
+@@ -463,7 +488,7 @@
+ uint64_t SeccompEmulator::SetModeStrict(FEXCore::Core::CpuStateFrame* Frame, uint32_t flags, const void* arg) {
+   const auto Thread = FEX::HLE::ThreadManager::GetStateObjectFromCPUState(Frame);
+ 
+-  if (::prctl(PR_GET_NO_NEW_PRIVS, 0, 0, 0, 0) == 0) {
++  if (!MayInstallFilter()) {
+     // The caller did not have the CAP_SYS_ADMIN capability in its user namespace, or had not set no_new_privs before using SECCOMP_SET_MODE_FILTER.
+     return -EACCES;
+   }
+@@ -624,7 +649,7 @@
+     return -EFAULT;
+   }
+ 
+-  if (::prctl(PR_GET_NO_NEW_PRIVS, 0, 0, 0, 0) == 0) {
++  if (!MayInstallFilter()) {
+     // The caller did not have the CAP_SYS_ADMIN capability in its user namespace, or had not set no_new_privs before using SECCOMP_SET_MODE_FILTER.
+     return -EACCES;
+   }

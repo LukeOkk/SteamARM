@@ -18,6 +18,7 @@
 #include <dirent.h>
 #include <fcntl.h>
 #include <ftw.h>
+#include <libproc.h>
 #include <signal.h>
 #include <time.h>
 #include <mach/mach.h>
@@ -31,8 +32,70 @@
 
 static char g_dir[512];
 static void regenerate_fds(void);
+
+// Descriptors that are the runtime's or the emulator's, not the guest's.
+// Linux shows a process every descriptor it has, and so did this /proc; but
+// here one process holds three parties' descriptors: the guest's, the
+// runtime's (the private pipe ends behind an eventfd, epoll_eventfd.c) and,
+// under FEX, the emulator's (its FEXServer connections, its rootfs and /proc
+// directory descriptors). Android's zygote checks every descriptor it would
+// hand to a child and aborts on any it does not know ("Unsupported st_mode
+// for FD 35: FIFO", MEASURED), so /proc/self/fd leaves these out.
+//   - the runtime marks its own (lxrt_fd_hide);
+//   - FEX's are the ones it opened before the guest's first instruction:
+//     what is open when FEX names the guest's argv (PR_SET_MM_MAP,
+//     lxrt_proc_set_cmdline) and was not open when this runtime started
+//     (inherited descriptors are the guest's: the exec'ing guest passed them).
+// A hidden number that the guest closes, or dup2s over, is the guest's again
+// (dispatch.c guest_close/forget_fd call lxrt_fd_hide(fd, false)).
+static uint8_t g_fd_hidden[65536 / 8];
+static uint8_t g_fd_inherited[65536 / 8];
+void lxrt_fd_hide(int fd, bool hide)
+{
+    if (fd < 0 || fd >= 65536) return;
+    if (hide) __atomic_or_fetch(&g_fd_hidden[fd >> 3], (uint8_t)(1u << (fd & 7)), __ATOMIC_RELAXED);
+    else __atomic_and_fetch(&g_fd_hidden[fd >> 3], (uint8_t)~(1u << (fd & 7)), __ATOMIC_RELAXED);
+}
+bool lxrt_fd_hidden(int fd)
+{
+    return fd >= 0 && fd < 65536 && (__atomic_load_n(&g_fd_hidden[fd >> 3], __ATOMIC_RELAXED) >> (fd & 7)) & 1;
+}
+// The open descriptors, in one call (a probe of every number cost 4096
+// fcntl calls at every start); `fn` gets each.
+static void each_open_fd(void (*fn)(int))
+{
+    int n = proc_pidinfo(getpid(), PROC_PIDLISTFDS, 0, NULL, 0);
+    if (n <= 0) return;
+    struct proc_fdinfo *fds = malloc((size_t)n);
+    if (!fds) return;
+    n = proc_pidinfo(getpid(), PROC_PIDLISTFDS, 0, fds, n);
+    for (int i = 0; i < n / (int)sizeof *fds; i++)
+        if (fds[i].proc_fd >= 0 && fds[i].proc_fd < 65536)
+            fn(fds[i].proc_fd);
+    free(fds);
+}
+static void mark_inherited(int fd) { g_fd_inherited[fd >> 3] |= (uint8_t)(1u << (fd & 7)); }
+static void hide_if_new(int fd)
+{
+    if (fd > 2 && !((g_fd_inherited[fd >> 3] >> (fd & 7)) & 1))
+        lxrt_fd_hide(fd, true);
+}
+static void note_inherited_fds(void) { each_open_fd(mark_inherited); }
+static char g_exe[1024];
+static void hide_emulator_fds(void)
+{
+    static bool done;
+    if (done || getenv("LXRT_SHOW_ALL_FDS")) return;
+    done = true;
+    // Only when this image is FEX: a native guest that moves its own argv
+    // keeps every descriptor it opened.
+    const char *b = strrchr(g_exe, '/');
+    b = b ? b + 1 : g_exe;
+    if (strncmp(b, "FEX", 3) != 0) return;
+    each_open_fd(hide_if_new);
+}
 static void regenerate_tasks(void);
-static char g_exe[1024];        // the guest's name of its image
+// (g_exe, declared above: the guest's name of its image)
 static char g_exe_link[1024];   // what <procfs>/exe points at (a host path)
 static bool g_ready;
 
@@ -166,6 +229,12 @@ static void regenerate_fds(void)
     for (int fd = 0; fd < maxfd; fd++) {
         if (fcntl(fd, F_GETFD) < 0)
             continue;
+        if (lxrt_fd_hidden(fd)) {
+            char hl[1200];
+            snprintf(hl, sizeof hl, "%s/%d", dir, fd);
+            unlink(hl);
+            continue;
+        }
         char target[1024];
         if (lxrt_pathfd_path(fd))
             snprintf(target, sizeof target, "%s", lxrt_pathfd_path(fd));
@@ -189,8 +258,8 @@ static void regenerate_one_fd(int fd)
     snprintf(dir, sizeof dir, "%s/fd", g_dir);
     char link[1200];
     snprintf(link, sizeof link, "%s/%d", dir, fd);
-    if (fcntl(fd, F_GETFD) < 0) {
-        unlink(link);                   // closed: the lookup gets ENOENT
+    if (fcntl(fd, F_GETFD) < 0 || lxrt_fd_hidden(fd)) {
+        unlink(link);                   // closed (or not the guest's): ENOENT
         return;
     }
     mkdir(dir, 0700);
@@ -263,6 +332,7 @@ void lxrt_proc_init(const char *exe_path, const char *exe_link, int argc, char *
         tmp = "/tmp";
     sweep_dead(tmp);
     snprintf(g_dir, sizeof g_dir, "%s/lxrt-proc-%d", tmp, getpid());
+    note_inherited_fds();
     if (mkdir(g_dir, 0700) != 0 && errno != EEXIST)
         return;
 
@@ -444,6 +514,7 @@ void lxrt_proc_after_fork(void)
 // so /proc/<pid>/cmdline shows the x86 program rather than FEX itself).
 void lxrt_proc_set_cmdline(const char *args, size_t len)
 {
+    hide_emulator_fds();
     if (g_ready && args && len)
         write_file("cmdline", args, len);
 }
@@ -543,6 +614,16 @@ const char *lxrt_proc_translate(const char *path)
         return ext;
 
     const char *rest = path + 6;
+    // /proc/thread-self: the calling thread's /proc/self/task/<tid>, except
+    // attr/ (below), which is per process here.
+    static _Thread_local char tsbuf[600];
+    if (strncmp(rest, "thread-self", 11) == 0 && (rest[11] == '\0' || rest[11] == '/')) {
+        if (strncmp(rest + 11, "/attr/", 6) == 0)
+            snprintf(tsbuf, sizeof tsbuf, "self%s", rest + 11);
+        else
+            snprintf(tsbuf, sizeof tsbuf, "self/task/%d%s", lxrt_gettid(), rest + 11);
+        rest = tsbuf;
+    }
     // /proc/net/...: the socket tables of every guest process (procpid.c).
     {
         const char *net = lxrt_procnet_translate(rest, g_dir);
@@ -610,6 +691,32 @@ const char *lxrt_proc_translate(const char *path)
     } else if (strncmp(rest, "task", 4) == 0 &&
                (rest[4] == '\0' || rest[4] == '/')) {
         regenerate_tasks();
+    } else if (strncmp(rest, "attr/", 5) == 0 && strchr(rest + 5, '/') == NULL && rest[5]) {
+        // The LSM's view of this process. There is no SELinux here, but
+        // Android daemons ask for their own context first thing (keystore:
+        // "SELinux: Could not acquire target context. Aborting keystore.",
+        // MEASURED; libselinux getcon reads attr/current). On Waydroid's
+        // hosts that answer comes from AppArmor. Here it is the label the
+        // binder driver reports for this process too (LXRT_BINDER_SECCTX,
+        // runtime/binder.c), NUL-terminated as SELinux writes it; the other
+        // attr files (exec, fscreate, sockcreate, keycreate, prev) read
+        // empty and take writes.
+        char ad[600], af[700];
+        snprintf(ad, sizeof ad, "%s/attr", g_dir);
+        mkdir(ad, 0700);
+        snprintf(af, sizeof af, "%s/%s", ad, rest + 5);
+        if (!strcmp(rest + 5, "current") || !strcmp(rest + 5, "prev")) {
+            const char *sc = getenv("LXRT_BINDER_SECCTX");
+            char lab[256];
+            int n = snprintf(lab, sizeof lab, "%s", sc && *sc ? sc : "u:r:unlabeled:s0");
+            if (n > 0 && n < (int)sizeof lab) {
+                snprintf(ad, sizeof ad, "attr/%s", rest + 5);
+                write_file(ad, lab, (size_t)n + 1);
+            }
+        } else if (access(af, F_OK) != 0) {
+            int fd = open(af, O_WRONLY | O_CREAT | O_CLOEXEC, 0600);
+            if (fd >= 0) close(fd);
+        }
     } else if (strcmp(rest, "environ") == 0 && !getenv("LXRT_NO_ENVIRON")) {
         char ep[700];
         snprintf(ep, sizeof ep, "%s/environ", g_dir);

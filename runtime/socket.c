@@ -11,6 +11,7 @@
 //      has no such thing and rejects the type outright.
 
 #include "lxrt.h"
+#include "android_ids.h"
 #include "props.h"
 
 #include <arpa/inet.h>
@@ -198,7 +199,16 @@ static void addr_to_linux(const struct sockaddr *dsa, socklen_t dlen,
         struct linux_sockaddr_un lu;
         memset(&lu, 0, sizeof lu);
         lu.sun_family = L_AF_UNIX;
-        size_t n = strnlen(du->sun_path, sizeof du->sun_path);
+        // The name is what the kernel returned, dlen bytes: Darwin does not
+        // NUL-terminate a path that was bound without its terminator (Python
+        // and most host programs bind that way), and whatever follows in the
+        // caller's buffer is not part of it. Reading on to the next NUL
+        // handed the zygote "/dev/socket/zygote@A..." for a socket its init
+        // bound, and it refused to fork (MEASURED, stage 27).
+        size_t off = offsetof(struct sockaddr_un, sun_path);
+        size_t lim = dlen > off ? (size_t)dlen - off : 0;
+        if (lim > sizeof du->sun_path) lim = sizeof du->sun_path;
+        size_t n = strnlen(du->sun_path, lim);
         const char *src = du->sun_path;
         const char *root = getenv("LXRT_ROOT");
         size_t rl = root ? strlen(root) : 0;
@@ -552,6 +562,13 @@ long lxrt_getsockname(int fd, void *lsa, uint32_t *llen, bool peer)
     if (rc != 0)
         return LERR(errno);
     addr_to_linux((struct sockaddr *)&ss, dlen, lsa, llen);
+    if (lxrt_trace_on() && ss.ss_family == AF_UNIX && lsa && llen) {
+        size_t off = offsetof(struct sockaddr_un, sun_path);
+        int hl = dlen > off ? (int)(dlen - off) : 0;
+        fprintf(lxrt_trace_stream(), "[lxrt]    %s fd %d: host \"%.*s\" -> guest len %u \"%.*s\"\n",
+                peer ? "getpeername" : "getsockname", fd, hl, ((struct sockaddr_un *)&ss)->sun_path,
+                *llen, *llen > 2 ? (int)(*llen - 2) : 0, (const char *)lsa + 2);
+    }
     return 0;
 }
 
@@ -698,6 +715,28 @@ static void cred_note_send(int fd)
     }
 }
 
+// Does process `pid` (this user's) have a descriptor on the socket whose
+// kernel identity is `so`?
+static bool pid_holds_socket(pid_t pid, uint64_t so)
+{
+    if (pid == getpid()) return true;
+    int n = proc_pidinfo(pid, PROC_PIDLISTFDS, 0, NULL, 0);
+    if (n <= 0) return false;
+    struct proc_fdinfo *fds = malloc((size_t)n);
+    if (!fds) return true;                 // cannot tell: trust the record
+    n = proc_pidinfo(pid, PROC_PIDLISTFDS, 0, fds, n);
+    bool found = false;
+    for (int i = 0; i < n / (int)sizeof *fds && !found; i++) {
+        if (fds[i].proc_fdtype != PROX_FDTYPE_SOCKET) continue;
+        struct socket_fdinfo si;
+        if (proc_pidfdinfo(pid, fds[i].proc_fd, PROC_PIDFDSOCKETINFO, &si, sizeof si) == sizeof si &&
+            si.psi.soi_so == so)
+            found = true;
+    }
+    free(fds);
+    return found;
+}
+
 static pid_t cred_peer_pid(int fd)
 {
     uint64_t self, peer;
@@ -710,15 +749,20 @@ static pid_t cred_peer_pid(int fd)
         uint64_t cur = atomic_load(&e->so);
         if (cur == peer) {
             pid_t p = atomic_load(&e->pid);
-            // A recorded sender that has since exited is stale.
-            return (p > 0 && kill(p, 0) == 0) ? p : 0;
+            // A recorded sender that has since exited is stale; so is one
+            // that no longer holds the socket (its kernel address has been
+            // given to a new one since: a live FEXServer was reported as
+            // the peer of a fresh socketpair, MEASURED).
+            return (p > 0 && kill(p, 0) == 0 && pid_holds_socket(p, peer)) ? p : 0;
         }
         if (cur == 0) break;
     }
     return 0;
 }
 
-static bool peer_ucred(int fd, struct linux_ucred *out)
+// `real`: SCM_CREDENTIALS, which Linux fills with the sender's real ids;
+// SO_PEERCRED reports the effective ones.
+static bool peer_ucred(int fd, struct linux_ucred *out, bool real)
 {
     // The recorded sender first (see cred_note_send); LOCAL_PEERPID and
     // LOCAL_PEERCRED only answer for connected stream sockets -- a DGRAM
@@ -734,6 +778,13 @@ static bool peer_ucred(int fd, struct linux_ucred *out)
     // Every process here runs as this user; a peer outside the runtime says so.
     out->uid = have_cred ? xu.cr_uid : getuid();
     out->gid = have_cred ? (xu.cr_ngroups > 0 ? xu.cr_groups[0] : 0) : getgid();
+    // A peer with Android ids (runtime/android_ids.h) is who it says it is:
+    // its effective uid and gid, as Linux's SO_PEERCRED reports.
+    struct lxrt_aids_peer ap;
+    if (lxrt_aids_lookup(out->pid, &ap)) {
+        out->uid = real ? ap.ruid : ap.euid;
+        out->gid = real ? ap.rgid : ap.egid;
+    }
     return true;
 }
 
@@ -957,7 +1008,7 @@ long lxrt_recvmsg(int fd, void *lmsg, int flags)
             // SO_PASSCRED: every message carries the sender's credentials.
             struct linux_ucred uc;
             size_t need = LALIGN((uint32_t)(sizeof(struct linux_cmsghdr) + sizeof uc));
-            if (peer_ucred(fd, &uc) && (size_t)n + need <= (size_t)lm->msg_controllen) {
+            if (peer_ucred(fd, &uc, true) && (size_t)n + need <= (size_t)lm->msg_controllen) {
                 struct linux_cmsghdr *lc = (struct linux_cmsghdr *)((uint8_t *)(uintptr_t)lm->msg_control + n);
                 lc->cmsg_len = sizeof(*lc) + sizeof uc;
                 lc->cmsg_level = L_SOL_SOCKET_OPT;
@@ -1150,7 +1201,7 @@ long lxrt_getsockopt(int fd, int llevel, int lopt, void *val, unsigned *len)
             return 0;
         }
         struct linux_ucred uc;
-        if (!peer_ucred(fd, &uc)) return LERR(errno);
+        if (!peer_ucred(fd, &uc, false)) return LERR(errno);
         if (*len < sizeof uc) return LERR(EINVAL);
         memcpy(val, &uc, sizeof uc);
         *len = sizeof uc;

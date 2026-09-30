@@ -1,8 +1,9 @@
 # Android userspace on lxrun, with no VM
 
-Status 2026-09-29, stage 26 (`benchmarks/stage25-android-userspace.txt`,
+Status 2026-09-29, stage 27 (`benchmarks/stage25-android-userspace.txt`,
 `benchmarks/stage25-binder.txt`, `benchmarks/stage25-art-x86-fex.txt`,
-`benchmarks/stage26-android-properties.txt`).
+`benchmarks/stage26-android-properties.txt`,
+`benchmarks/stage27-android-framework.txt`).
 The owner's goal is Android on the Mac: install APKs and, later, the Google
 Play Store, with **zero VM** (`AGENTS.md`). This page says what of Android
 runs today, how to run it, what stops Java on arm64, how Java runs on the
@@ -38,6 +39,17 @@ and runs Java, interpreted and JIT-compiled, with the Mac JVM's results
 and apps with x86-64 native code possible now; apps whose native code is
 arm64-v8a only still need the native arm64 path, because the x86 image has
 no arm64 native bridge.
+
+In that x86_64 root the framework now starts (stage 27, "Boot" below):
+binder and properties work for x86-64 guests through FEX unchanged, a
+minimal init (`scripts/android-boot.py`) runs the image's own .rc files for
+a headless profile of 23 services, zygote64 preloads its 12,100 classes and
+forks system_server, which runs as uid 1000 under its seccomp policy and
+starts its bootstrap services up to LightsService. There it waits for
+SurfaceFlinger, which waits for a display composer; the image's only one
+is Waydroid's Wayland client, and there is no display here, so the
+framework's Watchdog restarts system_server every 96 s and
+PackageManagerService (after the display) never starts (MEASURED).
 
 ## What runs today (MEASURED)
 
@@ -290,8 +302,9 @@ The trade-off, honestly:
   the ART heap work above. This path runs Java today and lets binder,
   properties, init and zygote be built against a working ART meanwhile.
 
-Not done here: zygote, system_server, binder, properties, init, graphics,
-input, audio. `dalvikvm64` and `dex2oat64` only.
+Stage 25 ran `dalvikvm64` and `dex2oat64` only; stage 27 added binder,
+properties, an init, zygote64 and system_server (below). Graphics, input
+and audio are not done.
 
 ## Binder (stage 25, `benchmarks/stage25-binder.txt`)
 
@@ -535,14 +548,11 @@ LXRT_PROPERTY_SERVICE=0 ...                            # no properties (stage 25
 ### Around binder and properties, before anything Java could run even with ART fixed
 
 - **init.** Lepton runs Android's own init in a container with SELinux,
-  ueventd and device-mapper removed (`docs/LEPTON_REUSE_ANALYSIS.md` 3.7);
-  here init would have to run as an ordinary process with no mount or pid
-  namespace: a plan interpreter in the spirit of `runtime/mounts.c`, or a
-  hand-written start order (logd, servicemanager, hwservicemanager,
-  vndservicemanager, the HALs, then zygote). The property service has the
-  state init's `.rc` files act on, but no trigger hook yet ("on
-  property:...", `onrestart setprop hwservicemanager.ready false`). This is
-  now the first wall for native Android services.
+  ueventd and device-mapper removed (`docs/LEPTON_REUSE_ANALYSIS.md` 3.7).
+  Here it is `scripts/android-boot.py` (stage 27, "Boot" above): the
+  image's .rc files, init's triggers and restart rules, a profile of
+  services, and the property service's `LXRT_PROPERTY_INIT` hook for
+  ctl.* and "on property:" triggers.
 - **Shared memory across processes.** Parcels carry ashmem or memfd
   descriptors; binder passes them (FD objects), but lxrun's memfd seals
   hold only inside one process (`docs/LEPTON_REUSE_ANALYSIS.md` 7). HALs
@@ -560,6 +570,91 @@ LXRT_PROPERTY_SERVICE=0 ...                            # no properties (stage 25
   writes the main file before it stops on the missing properties (MEASURED;
   `libandroid_runtime.so` needs it to find `libstatssocket.so`).
 - **Graphics, input, audio**: `docs/LEPTON_REUSE_ANALYSIS.md` 4.
+
+## Identities (stage 27, `runtime/android_ids.c`)
+
+Android's init starts each daemon as root and drops it to the user, groups
+and capabilities its .rc file names; the zygote does the same for
+system_server and every app, and treats each failure as fatal. A Mac
+process cannot become another user, so the runtime keeps per-process
+virtual credentials for Android guests, switched on by `LXRT_ANDROID_IDS`
+(`ruid[,euid,suid]:rgid[,egid,sgid]:groups:eff,prm,inh,bnd,amb[:knb<hex>]`, or
+`root`), which the boot script sets per service. Lepton gets the same with
+a seccomp profile that answers success and a bionic fake-uid patch
+(`docs/LEPTON_REUSE_ANALYSIS.md` 3.3).
+
+| guest call | with Android ids (Linux's rules, MEASURED by tests/elf ANDROID_IDS) |
+|---|---|
+| get/set[res]uid, get/set[res]gid, setfs*, get/setgroups | the virtual ids; CAP_SETUID/CAP_SETGID decide; saved ids as kernel/sys.c moves them; groups kept sorted |
+| capget, capset, prctl capability options | kernel/capability.c's subset rules; keepcaps and the effective-set fixups on a uid change; bounding set 0..40 then EINVAL; ambient; securebits; no_new_privs |
+| execve, fork | the next image gets them, recomputed as for a file without capabilities (root: bounding and inheritable; others: the ambient set); the bind table goes along |
+| chown, fchown, fchownat | a change Linux would allow reports success; the file stays the Mac user's |
+| unshare, mount, umount2, setns | namespaces and propagation changes succeed for CAP_SYS_ADMIN (one view); `MS_BIND` is an entry in the per-process bind table (`runtime/mounts.c`); other mounts EPERM |
+| SO_PEERCRED, SCM_CREDENTIALS, capget of a pid, binder sender euid | another process's virtual ids (effective for SO_PEERCRED, real for SCM_CREDENTIALS) and capabilities, from `/tmp/lxrt-shm-<uid>/android-ids.v2` (pid, checked against its start time) |
+
+Without the variable nothing changes. What the kernel would enforce is not
+enforced: files are all the Mac user's (stat shows 501) and any process can
+signal any other.
+
+## Boot: init, zygote64, system_server (stage 27, `benchmarks/stage27-android-framework.txt`)
+
+### What runs (MEASURED, x86_64 root under FEX)
+
+| piece | result |
+|---|---|
+| binder from x86-64 guests | servicemanager, service list/call, dumpsys, vndservicemanager, hwservicemanager, lshal, an x86-64 HIDL HAL, and an x86-64 native service (linked against the image's bionic) that receives a descriptor and whose death is noticed: no change to the driver was needed |
+| properties from x86-64 guests | getprop, setprop, `__system_property_wait` (FUTEX_WAIT through FEX, woken by the service) |
+| `scripts/android-boot.py` | parses 93 .rc files (91 services, 184 actions), runs init's boot and property triggers in 1.8-2.1 s, starts 23 services with their .rc command lines, sockets, environment and Android ids, restarts them as init does |
+| HALs and daemons | suspend, configstore, memtrack, ashmem allocator, keymaster, graphics allocator, light, gatekeeper, health, vibrator, power register with hwservicemanager; keystore, gatekeeperd, installd, credstore, idmap2d, audioserver run; SurfaceFlinger renders with SwiftShader (GLES 3.0) |
+| zygote64 | preloads 12,100 classes in 1.1-1.9 s and listens on its init socket |
+| system_server | forked and specialized (uid 1000, capabilities, Android's x86_64 seccomp policy under FEX's emulation, `/mnt/user/0` bound on `/storage`); its classpath compiled by installd with dex2oat64; "Entered the Android system server!" 30 s after the boot starts (20 s of it waiting for the secondary zygote, which is i386); bootstrap services up to LightsService |
+| the wall | LightsService -> SurfaceControl -> SurfaceFlinger -> IComposer: `hwcomposer.waydroid` "Couldn't open Wayland display."; the Watchdog kills system_server after 60 s. With a headless weston (exploratory) the composer connects and then waits on a futex; IComposer is never registered |
+
+### What it took
+
+- Runtime: Android ids (above); an AF_UNIX name read within the length the
+  kernel returned (a host-bound init socket came back with stack bytes
+  after its name and the zygote refused to fork); `/proc/self/fd` without
+  the runtime's descriptors (eventfd pipe ends) and FEX's (opened before
+  the guest's first instruction), since the zygote aborts on any
+  descriptor it does not know; `/proc/self/attr/*` and `/proc/thread-self`
+  (keystore aborts without a context); SO_PEERCRED that no longer reports
+  a stale sender; the property service handing ctl.* and property changes
+  to an init (`LXRT_PROPERTY_INIT`).
+- FEX: `patches/fex-lxrt-seccomp-cap-sys-admin.patch` (a filter may be
+  installed with no_new_privs OR CAP_SYS_ADMIN, as on Linux), and
+  `FEX_NEEDSSECCOMP=1` for the zygote and its children: without seccomp
+  emulation FEX answers EINVAL and the zygote child aborts.
+- The boot script: init's `setpgid` instead of a new session (the zygote's
+  first call is `setpgid(0, 0)`), `/dev/null` stdio for the zygote, init's
+  mkdirs under `/data`, `/mnt` and `/storage`, Waydroid's `mount_all`
+  (`ro.crypto.state=unencrypted`), and host properties as Waydroid's and
+  Lepton's hosts set them: `bpf.progs_loaded=1`, `ro.cold_boot_done=true`,
+  `sys.use_memfd=true`, `ro.hardware.egl=swiftshader`,
+  `ro.hardware.gralloc=default`, `dalvik.vm.dex2oat64.enabled=true`.
+
+### Left out, and why (MEASURED unless marked)
+
+netd exits at once (no `NETLINK_KOBJECT_UEVENT`, route netlink, iptables
+or BPF) and its `onrestart restart zygote` would kill the zygote every 5 s;
+the audio HAL, dex2oat32 and zygote_secondary are i386 and die in FEX's
+32-bit mode ("NoExec instruction in entry block"; a JIT fault at address 0)
+-- audioserver waits for the audio HAL forever; statsd cannot link (the
+root's `/linkerconfig` was written before there were properties and has
+no namespace for its APEX); ueventd, logd (`tests/android/logd.py` stands
+in), lmkd, vold, apexd (flattened APEXes), tombstoned, bootanim and the
+camera, media, drm, wifi and tracing daemons are not started.
+
+### How to run it
+
+```sh
+make lxrt
+scripts/android-boot.py --seconds 120                  # the x86_64 root; state in /tmp/lxrt-android-<uid>-<hash>
+scripts/android-boot.py --state /tmp/b --persist /tmp/b/persistent_properties --seconds 60
+tail -f /tmp/b/logcat.txt                              # logcat (logd.py); /tmp/b/init.log, /tmp/b/svc/<name>.log
+scripts/android-boot.py --also vendor.hwcomposer-2-1   # a service outside the profile
+scripts/android-boot.py --trace zygote                 # LXRT_TRACE for one service
+```
 
 ## APKs and the Google Play Store
 
@@ -585,17 +680,18 @@ LXRT_PROPERTY_SERVICE=0 ...                            # no properties (stage 25
    Start with a feasibility count of the reference sites outside the
    poisoning hooks in ART's source. In the x86_64 root ART already runs Java
    under FEX (stage 25, above).
-2. Binder: done in userspace (stage 25, above). Next on it: ashmem/memfd
-   sharing across processes, the binder debug logs `lshal` reads, the cost
-   per call, and x86-64 guests reaching it through FEX (UNTESTED).
-3. Properties: done (stage 26, above). The next wall for native Android
-   services is init: a start order for the daemons and HALs, restarts, and
-   the property triggers of the `.rc` files, on top of this property
-   service (also what linkerconfig's `VENDOR_VNDK_VERSION` abort asks for);
-   then shared memory between a HAL and its clients.
-4. Then zygote, system_server, `pm install` and a window (Lepton's graphics
-   analysis, 4): first in the x86_64 root for Java and x86-64 apps, then
-   with the rebuilt ART for arm64-v8a APKs.
+2. Binder: done in userspace (stage 25), and x86-64 guests reach it
+   through FEX (stage 27). Next on it: ashmem/memfd sharing across
+   processes, the binder debug logs `lshal` reads, the cost per call.
+3. Properties: done (stage 26), for x86-64 guests too (stage 27).
+4. init, zygote64, system_server: running up to LightsService in the
+   x86_64 root (stage 27). The next wall is a display composer for
+   SurfaceFlinger: Waydroid's with a working Wayland compositor, or one of
+   SteamARM's. After it, in the order system_server meets them:
+   PackageManagerService (`pm list packages`, `pm install`), then
+   audioserver's i386 audio HAL (FEX's 32-bit mode) and netd.
+5. Then a window, input and audio (Lepton's graphics analysis, 4), and the
+   rebuilt ART for arm64-v8a APKs in the native root.
 
 ## Tests and records
 
@@ -616,7 +712,15 @@ LXRT_PROPERTY_SERVICE=0 ...                            # no properties (stage 25
   the binder driver between lxrun processes with raw ioctls.
 - `tests/elf/run.sh` ANDROID_BIONIC_RT and "kept TLS reads"
   (`tests/elf/android_bionic_rt.c`): the runtime changes, with no Android
-  root needed.
+  root needed; ANDROID_IDS (`tests/elf/android_ids.c`): Android ids, with
+  and without `LXRT_ANDROID_IDS`.
+- `tests/android/run.sh`, x86_64 section (stage 27): getprop, setprop and
+  `__system_property_wait` from x86-64 bionic; servicemanager, an x86-64
+  native service with a descriptor, dumpsys, vndservicemanager,
+  hwservicemanager, lshal and a HAL; `x86_initsock.c` (an init socket's
+  name, `/proc/self/fd`, `attr/current`); `android-boot.py` to
+  system_server, with the SurfaceFlinger wall an expected failure.
 - `benchmarks/stage25-android-userspace.txt`, `benchmarks/stage25-binder.txt`,
-  `benchmarks/stage25-art-x86-fex.txt` and
-  `benchmarks/stage26-android-properties.txt`: every run, before and after.
+  `benchmarks/stage25-art-x86-fex.txt`,
+  `benchmarks/stage26-android-properties.txt` and
+  `benchmarks/stage27-android-framework.txt`: every run, before and after.

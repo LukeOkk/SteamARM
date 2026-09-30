@@ -461,6 +461,13 @@ at most 256 entries (`runtime/mounts.c:20-39`). No cgroup filesystem.
 Recommendation (HYPOTHESIS): option 1 for stages 1-3; decide on option 2
 when stage 3 shows which init behaviours the framework really needs.
 
+Update, stage 27 (MEASURED, `benchmarks/stage27-android-framework.txt`):
+option 1 exists as `scripts/android-boot.py` for the x86_64 root: it reads
+the image's .rc files and runs init's triggers and restart rules for a
+headless profile of 23 services. The x86_64 image's init is a PIE (not
+ET_EXEC), but option 2 was not tried: init is also the property service,
+which SteamARM already provides.
+
 ### 3.8 zygote
 
 VERIFIED IN SOURCE (`frameworks_base` `8d14a16`
@@ -494,6 +501,18 @@ this path (`frameworks/base/0001-waydroid-disable-SELinux-parts.patch`,
 SOURCE by name; their effect under lxrun is UNKNOWN). Effort M; risk M (fork of a zygote with a
 large preloaded heap on Darwin: cost UNKNOWN).
 
+Update, stage 27 (MEASURED, `benchmarks/stage27-android-framework.txt`,
+x86_64 root under FEX): done as "Android ids" (`runtime/android_ids.c`,
+`LXRT_ANDROID_IDS`): setgroups, setresuid/setresgid, capset, keepcaps, the
+bounding set, `unshare(CLONE_NEWNS)`, propagation mounts and bind mounts
+(the per-process bind table) by Linux's rules. The HYPOTHESIS above held:
+`security_getenforce()` is -1, so the child installs Android's seccomp
+policy; under FEX that needs `FEX_NEEDSSECCOMP=1` and a FEX fix (a filter
+may be installed with CAP_SYS_ADMIN). The zygote also needed its init
+sockets' names back exactly and a `/proc/self/fd` without the runtime's and
+FEX's descriptors. zygote64 preloads 12,100 classes in 1.1-1.9 s; its fork
+of system_server works.
+
 ### 3.9 system_server
 
 Android 11's `SystemServer` starts about a hundred services
@@ -525,6 +544,13 @@ build, or a composer that reports a display and drops frames (Lepton's
 |---|---|
 | effort | L (mostly on binder, HALs and installd underneath) |
 | risk | H: unknown number of kernel assumptions surface only at this stage |
+
+Update, stage 27 (MEASURED): in the x86_64 root system_server runs as uid
+1000 under its seccomp policy, installd compiles its classpath with
+dex2oat64, and startBootstrapServices gets to LightsService, which waits
+for SurfaceFlinger (3.10: the image's only composer is a Wayland client);
+the Watchdog kills it after 60 s. PackageManagerService, netd and the
+audio HAL (i386 under FEX) come after that.
 
 ### 3.10 SurfaceFlinger, hwcomposer and gralloc
 

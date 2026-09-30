@@ -1,0 +1,516 @@
+Stage 27 -- Android's services and framework in the x86_64 root: binder and properties under FEX, an init, zygote64 and system_server, zero VM (2026-09-29)
+==================================================================================================================================================================
+
+ZERO-VM. No virtual machine, no guest kernel. Host: Mac mini M4, 16 GB,
+macOS 27.0. Base: bc27c17 (stage 25/26: binder, properties, x86-64 ART under
+FEX). Every Android program below is an unmodified x86-64 (or i386) file of
+Waydroid's LineageOS 18.1 x86_64 image (/Volumes/SteamARMAndroid/root-x86_64,
+benchmarks/stage25-art-x86-fex.txt), run by SteamARM's FEX under lxrun as an
+ordinary macOS process. Nothing was signed in to, no Google component was
+fetched, no Steam client was started, scripts/run-app.sh was not called.
+Other agents ran guests on the same Mac at the same time (a display agent's
+weston and Android root x86disp, the arm64 root's users); every process
+below was started by this session and stopped by its own PID or process
+group, or left by itself (property services, binder hubs, FEXServers, when
+idle). Home paths are written as ~. Labels: MEASURED, VERIFIED IN SOURCE,
+UPSTREAM DOCUMENTED, HYPOTHESIS, UNKNOWN.
+
+Result
+------
+MEASURED:
+1. Binder and properties work for x86-64 guests under FEX with no change to
+   the binder driver or the property service: FEX passes the ioctls, the
+   binder mmap, the property area mappings, the property_service socket and
+   FUTEX_WAIT through to lxrun, and the structures are the same on x86_64
+   and aarch64 (LP64). servicemanager, service list/check/call, dumpsys -l,
+   vndservicemanager/vndservice, hwservicemanager (hwservicemanager.ready),
+   lshal list and an x86-64 HIDL HAL all work; an x86-64 native service
+   (tests/android/binder_service.c built against the image's own bionic)
+   registers, answers, receives a file descriptor over binder (the hub's
+   SCM_RIGHTS) and its death is noticed; getprop/setprop and
+   __system_property_wait from x86-64 bionic work.
+2. scripts/android-boot.py is a minimal init: it parses the image's 93 .rc
+   files (91 services, 184 actions) as init does, runs init's boot triggers
+   with a safe subset of actions, and starts a headless profile of 23
+   services with their .rc command lines, sockets, environment and
+   user/groups/capabilities, with init's restart rules; ctl.* from guests
+   reaches it through the property service.
+3. zygote64 (app_process64 -Xzygote, x86-64 ART under FEX with
+   FEX_LOWWINDOW=1) preloads 12,100 classes in 1.2-1.9 s and listens on its
+   init socket; it forks system_server, which specializes (setgroups,
+   setresgid/setresuid to 1000, capset, seccomp policy under FEX's seccomp
+   emulation, bind mount of /mnt/user/0 on /storage), gets its classpath
+   compiled by installd + dex2oat64, prints "Entered the Android system
+   server!" and runs the first 15 steps of startBootstrapServices, up to
+   StartLightsService.
+4. The wall: LightsService asks SurfaceControl for the internal display,
+   which waits for SurfaceFlinger; SurfaceFlinger waits for the composer
+   HAL; the image's only composer, Waydroid's hwcomposer.waydroid, is a
+   Wayland client and exits with "Couldn't open Wayland display." After 60 s
+   the framework's Watchdog kills system_server ("Blocked in handler on main
+   thread ... SurfaceControl.nativeGetPhysicalDisplayIds ... LightsService
+   ... <init>"), the zygote exits with it, and it all starts again. So
+   sys.boot_completed is not reached, and PackageManagerService, which
+   starts after the display (DisplayManagerService's
+   PHASE_WAIT_FOR_DEFAULT_DISPLAY), never runs: no `pm list packages`, no
+   `pm install`.
+5. What it took: Android ids in the runtime (per-process virtual
+   credentials, Linux's rules), five runtime fixes, one FEX patch (seccomp
+   and CAP_SYS_ADMIN), host properties of the kind Waydroid's and Lepton's
+   hosts set, and the boot script. tests/android/run.sh: 58 passed, 0
+   failed, 2 expected failures (was 42 + 1); tests/elf: ANDROID_IDS added.
+
+Sources read (VERIFIED IN SOURCE; downloaded to the session's scratch
+directory for reading only, nothing committed)
+--------------------------------------------------------------------------
+- LineageOS/android_system_core lineage-18.1: init/builtins.cpp
+  (do_mount_all, queue_fs_event), fs_mgr/fs_mgr.cpp (fs_mgr_mount_all).
+- waydroid/android_vendor_waydroid lineage-18.1, base-patches-30/
+  system/core: 0002 (mount_all skips the mounts and always reports
+  FS_MGR_MNTALL_DEV_NOT_ENCRYPTED: ro.crypto.state=unencrypted and the
+  "nonencrypted" trigger), 0007 ("user host" is waydroid.host.uid, default
+  1000), 0009 (sys.use_memfd may be set before boot).
+- LineageOS/android_frameworks_base lineage-18.1: core/jni/fd_utils.cpp
+  (the zygote's descriptor whitelist: kPathWhitelist, GetSocketName cuts
+  exactly one trailing NUL, FIFOs/directories/unnamed sockets fatal),
+  core/jni/com_android_internal_os_Zygote.cpp (nativeForkSystemServer,
+  ForkCommon, SpecializeCommon, UnmountStorageOnInit, MountEmulatedStorage).
+- FEX 08f451d3b (SteamARM's pin): Source/Tools/LinuxEmulation/
+  LinuxSyscalls/Seccomp/SeccompEmulator.cpp (NeedsSeccomp off -> EINVAL;
+  the filter install checks PR_GET_NO_NEW_PRIVS only), Syscalls/Thread.cpp
+  (prctl PR_SET_SECCOMP goes to the emulator), BPFEmitter.cpp,
+  FEXCore Config.json.in (NeedsSeccomp, default false).
+
+Part 1: binder and properties for x86-64 guests (MEASURED)
+-----------------------------------------------------------
+All through scripts/run-android-x86.sh with private LXRT_PROPERTY_DIR and
+LXRT_BINDER_DIR (ANDROID_X86_GENV):
+P1  getprop ro.build.version.sdk -> 30: the first x86-64 bionic process
+    started the property service for the root, 213 properties loaded from
+    the x86 image's .prop files, ro.product.* and ro.build.fingerprint
+    derived (waydroid/lineage_waydroid_x86_64/waydroid_x86_64:11/
+    RQ3A.211001.001/147:userdebug/test-keys); 226 properties listed.
+P2  servicemanager + service list: "Found 1 services: 0 manager:
+    [android.os.IServiceManager]" -- the first try, no change.
+P3  hwservicemanager sets hwservicemanager.ready=true; lshal list shows its
+    5 interfaces (plus the passthrough -impl.so list of /vendor/lib and
+    /vendor/lib64); vndservicemanager /dev/vndbinder + vndservice list:
+    "Found 1 services". First try, no change.
+P4  An x86-64 native service: tests/android/binder_service.c compiled with
+    -DBIONIC_MIN (tests/android/bionic_min.h: bionic's __errno, stdout,
+    crtbegin's _start_main) against the image's
+    apex/com.android.runtime/lib64/bionic/libc.so, linker64 as interpreter,
+    the Linux UAPI binder.h (the same layout on both 64-bit ABIs):
+      service list    Found 2 services ... steamarm.test: [steamarm.test.IEcho]
+      call 1 i32 41   Result: Parcel(00000000 0000002a)
+      call 2 fd /system/etc/hosts
+                      Result: Parcel(00000000 00000038 00000dbc) -- 56 bytes,
+                      byte sum 3516, the file on the Mac (python)
+      dumpsys -l      manager, steamarm.test
+      call 3 (exit)   the next list finds 1 service (death notification)
+    So a descriptor goes x86 client -> FEX -> lxrun -> hub (SCM_RIGHTS) ->
+    lxrun -> FEX -> x86 service.
+P5  __system_property_wait: tests/android/props_wait.c built for x86_64
+    against the image's libc wakes when two setprops from other x86 guests
+    create and change the property ("woke: steamarm.x86.wait=go after
+    385 ms (2 futex wakeups)", the time including the two setprop starts).
+
+Part 2: an init (scripts/android-boot.py)
+------------------------------------------
+What it does, in order (the file's docstring has the rules):
+- starts the property service itself (LXRT_PROPERTY_IDLE=0) with
+  LXRT_PROPERTY_INIT=<state>/init.sock: runtime/propsvc.c now sends each
+  property change and each ctl.* message there as a datagram and answers
+  ctl.* with success, as Android's init queues them (without an init the
+  old refusal stays);
+- sets HOST_PROPS (below) before init's first action;
+- tests/android/logd.py as logd's write socket (<state>/logcat.txt);
+- parses /system/etc/init/hw/init.rc with its imports (init.environ.rc,
+  init.usb*.rc, init.${ro.zygote}.rc = init.zygote64_32.rc), then
+  /system/etc/init, /system_ext, /product, /odm, /vendor/etc/init and the
+  APEXes' etc/: 93 files, 91 services, 184 actions. init.waydroid.rc's
+  vendor.audio-hal, vendor.camera-provider-2-4 and vendor.hwcomposer-2-1
+  come first, so the vendor files' definitions are the "ignored
+  duplicates", as in init;
+- runs early-init, init, late-init (which queues early-fs ... boot), then
+  the property triggers: 1.8-2.1 s for all of it. Run: setprop, export,
+  trigger, mkdir/write/copy/symlink under /data, /mnt and /storage,
+  mount_all as Waydroid's init does it (ro.crypto.state=unencrypted,
+  "nonencrypted" -> class_start main and late_start), start, stop,
+  restart, class_start, class_stop, enable, exec_start. Counted and
+  skipped: chmod 287, chown 140, copy 14 (outside those trees), exec 7,
+  exec_background 4, exec_start 7 (not in the profile), write, mount,
+  restorecon, wait_for_prop, load_persist_props (the property service
+  loaded them), setrlimit and the rest;
+- starts the services of the "headless" profile when an action asks:
+  servicemanager, hwservicemanager, vndservicemanager; hidl_memory,
+  vendor.configstore-hal, vendor.health-hal-2-0, system_suspend,
+  vendor.power-hal-1-0, vendor.light-hal-2-0, vendor.memtrack-hal-1-0,
+  vendor.gralloc-2-0, vendor.keymaster-4-0, vendor.gatekeeper-1-0,
+  vendor.sensors-hal-1-0 (oneshot, exits 0 at once), vendor.vibrator-1-0;
+  keystore, gatekeeperd, installd, credstore, idmap2d, audioserver,
+  surfaceflinger; zygote. Each with the .rc argv, its sockets (bound in
+  the root's /dev/socket by the script, passed as ANDROID_SOCKET_<name>;
+  seqpacket becomes datagram, as lxrun does), init.environ.rc's exports
+  plus setenv, a process group of its own (setpgid, as init), and
+  LXRT_ANDROID_IDS from "user", "group", "capabilities" (AIDs from
+  android_filesystem_config.h; all 96 names agree with bionic's getpwnam
+  in the image, MEASURED with toybox id -u; "host" is waydroid.host.uid,
+  default 1000). The x86_64 root's services get
+  scripts/run-android-x86.sh's FEX environment and FEXServer; the zygote
+  also FEX_NEEDSSECCOMP=1 (below);
+- restarts: 5 s after an exit unless oneshot; "onrestart restart/setprop";
+  a critical service with more than 4 exits in 4 minutes ends the boot;
+  init.svc.<name>, ro.boottime.<name>; ctl.start/stop/restart and
+  ctl.interface_start/stop (hwservicemanager's lazy-HAL requests) act on
+  the table;
+- stops every process it started, and what those left (found by the state
+  directory in their environment), at the end.
+Left out, with the reason the script logs: ueventd, logd (the stand-in),
+lmkd, vold, apexd (flattened APEXes), netd, vendor.audio-hal(-2-0),
+vendor.hwcomposer-2-1, zygote_secondary, bootanim, statsd, and the rest of
+the .rc files' services (camera, drm, media, wifi, usb, tracing, ...).
+
+HOST_PROPS (set before the first action, as Waydroid's waydroid.prop and
+Lepton's lepton.prop are; each a real property with its documented meaning):
+  bpf.progs_loaded=1        no BPF, no bpfloader; netd waited for it forever
+                            ("LibBpfLoader: Waited 5s for bpf.progs_loaded"),
+                            Lepton sets it too
+  ro.cold_boot_done=true    no ueventd (Lepton; Waydroid 0013)
+  sys.use_memfd=true        no /dev/ashmem (Lepton; Waydroid 0009)
+  ro.hardware.egl=swiftshader, ro.hardware.gralloc=default
+                            software rendering, as Waydroid without a GPU;
+                            without them libEGL loaded SwiftShader's EGL with
+                            Mesa's GLESv2 and SurfaceFlinger died of SIGSEGV
+                            (fault addr 0x0) right after "EGLSurface:
+                            8-8-8-8"; with them it renders "OpenGL ES 3.0
+                            SwiftShader 4.1.0.7" (under FEX)
+  dalvik.vm.dex2oat64.enabled=true
+                            installd picks dex2oat32 otherwise (Android 11
+                            dexopt.cpp); see B9
+
+Part 3: zygote64 and system_server, run by run (MEASURED)
+----------------------------------------------------------
+B1  The daemons and HALs of the profile, no zygote: all start and register
+    (logcat "Registered android.hardware...": suspend, configstore,
+    memtrack, allocator/ashmem, keymaster, graphics allocator, light,
+    gatekeeper, health, vibrator, power). Findings, each handled below or
+    in the profile: keystore "SELinux: Could not acquire target context.
+    Aborting keystore." (B5); surfaceflinger SIGSEGV (EGL mix, HOST_PROPS);
+    audioserver waits forever for android.hardware.audio@4.0::
+    IDevicesFactory/default: the audio HAL (android.hardware.audio.service)
+    is an i386 binary and dies at once of SIGSEGV -- FEX in 32-bit mode:
+    "E NoExec instruction in entry block: F76AD000" (FEX_SILENTLOG=0);
+    netd exits 1 ("Unable to create netlink socket for family 15: Address
+    family not supported by protocol" -- NETLINK_KOBJECT_UEVENT; also no
+    /proc/sys/net, no route netlink, no BPF maps) and its "onrestart
+    restart zygote" then killed the zygote every 5 s: netd is left out.
+B2  zygote by hand, as root with no ids: "Error changing dalvik-cache
+    ownership : Operation not permitted" (app_main.cpp
+    maybeCreateDalvikCache chowns to root) -> Android ids (below), chown.
+B3  With LXRT_ANDROID_IDS=root: zygote preloads and reaches "Zygote:
+    Accepting command socket connections" in ~4 s (no system server).
+B4  In the boot, --start-system-server: ZygoteInit.main's first call,
+    Os.setpgid(0, 0), fails with EPERM because the script had made each
+    service a session leader (setsid); main returned before preloading
+    ("Shutting down VM", exit 0). init does setpgid(0, getpid()), no
+    setsid: the script does the same.
+B5  keystore: libselinux getcon reads /proc/thread-self/attr/current (or
+    /proc/self/task/<tid>/attr/current); lxrun had neither. Now
+    /proc/self/attr/{current,prev} read the label lxrun already gives
+    binder transactions (LXRT_BINDER_SECCTX, default u:r:unlabeled:s0),
+    the other attr files read empty and take writes, and /proc/thread-self
+    exists. keystore then runs ("found ... IKeymasterDevice ... seclevel
+    SOFTWARE").
+B6  system_server fork: "JNI FatalError called: (system_server) Not
+    whitelisted (32): .../svc/zygote.log" -- the zygote's stdio was the
+    script's log file. init gives services /dev/null; the script does for
+    the zygote (other services keep their log).
+B7  "Unsupported st_mode for FD 35: FIFO": lsof at the moment of the fork
+    showed fds 34 (unnamed unix socket), 35/36/37 (pipes), and FEX's 3, 4
+    (unix sockets), 8 (the rootfs directory), 9 (/proc). 35 and 36 are the
+    pipe behind an eventfd (runtime/epoll_eventfd.c: the guest's eventfd
+    37 is a dup of the read end; the zygote ignores 37, its USAP event fd).
+    Now /proc/self/fd leaves out the runtime's descriptors (the eventfd
+    pipe ends) and FEX's (whatever FEX opened between this runtime's start
+    and its PR_SET_MM_MAP, i.e. before the guest's first instruction, in a
+    process whose image is FEX;
+    inherited descriptors stay visible). A guest close or dup2 onto a
+    hidden number makes it the guest's again. x86-64 toybox ls -l
+    /proc/self/fd before: 0, 1, 2, 3 (socket), 4, 7 (/proc); after: 0, 1,
+    2, 4.
+B8  "Socket name not whitelisted : /dev/socket/zygote (fd=5)": with an
+    lxrun trace line added to getsockname, the host name came back as
+    ".../dev/socket/zygote@A...~" -- Darwin returns the bound length
+    (Python binds without the NUL) and lxrun read on to the next NUL in
+    its stack buffer. The same gave "/dev/socket/usap_pool_primary" plus
+    two bytes, hence the earlier "Unable to fetch USAP pool socket file
+    descriptor". Now the name is read within the returned length.
+B9  "fs_prepare_dir failed on /mnt/user/0: No such file or directory"
+    (MountEmulatedStorage): init.rc's mkdirs under /mnt were skipped; the
+    script now makes those under /mnt and /storage too. The bind mount of
+    /mnt/user/0 on /storage that follows now works (Android ids).
+B10 "seccomp_policy.cpp:179] Could not set seccomp filter of size 238:
+    Invalid argument": gIsSecurityEnforced = security_getenforce() is -1
+    (no selinuxfs), which is true, so the child installs Android's system
+    seccomp policy; FEX answers EINVAL when its seccomp emulation is off
+    (NeedsSeccomp, default false). With FEX_NEEDSSECCOMP=1: "Permission
+    denied" -- FEX's emulator refuses without no_new_privs even for a task
+    with CAP_SYS_ADMIN, which Linux accepts. Fixed in FEX
+    (patches/fex-lxrt-seccomp-cap-sys-admin.patch: no_new_privs OR
+    CAP_SYS_ADMIN, the latter read with capget, which Android ids answer)
+    and PR_SET/GET_NO_NEW_PRIVS are real in Android ids. The zygote runs
+    with FEX_NEEDSSECCOMP=1 (its children inherit it); FEX then enforces
+    Android's own x86_64 system policy on system_server's syscalls.
+B11 system_server: "Entered the Android system server!", then
+    startBootstrapServices ... StartLightsService, then "ServiceManager:
+    Waiting for service 'SurfaceFlinger' on '/dev/binder'..." and, 60 s
+    later, "*** WATCHDOG KILLING SYSTEM PROCESS: Blocked in handler on main
+    thread (main)" with the stack SurfaceControl.nativeGetPhysicalDisplayIds
+    <- getPhysicalDisplayIds <- getInternalDisplayToken <-
+    LightsService$LightImpl.<init> (LightsService.java:271) <-
+    populateAvailableLightsFromHidl <- LightsService.<init>. The zygote
+    exits with it ("Exit zygote because system server ... has terminated",
+    signal 9) and the boot starts it again (sys.system_server.start_count
+    1, 2, ...).
+    Before that, performSystemServerDexOpt: installd ran dex2oat32 (i386)
+    for service-permission.jar and android.net.ipsec.ike.jar and the child
+    died of SIGSEGV (status 0x000b; an lxrun trace of installd: fork,
+    setgid/setuid 1000, capset, execveat of /apex/com.android.art/bin/
+    dex2oat32, then FEX's JIT faulting on address 0 in 32-bit mode and
+    FEX raising SIGSEGV). With dalvik.vm.dex2oat64.enabled=true installd
+    runs dex2oat64: "dex2oat took 948.353ms", "(success)" for both jars.
+B12 SurfaceFlinger: "Initializing graphics H/W...", RenderEngine on
+    SwiftShader, then IComposer::getService retries every second
+    ("Waited one second for android.hardware.graphics.composer@2.1::
+    IComposer/default"); hwservicemanager asks init to start it as a lazy
+    HAL (ctl.interface_start, which the script receives). Starting
+    vendor.hwcomposer-2-1 (--also): "hwcomposer: WAYLAND_DISPLAY:
+    wayland-0", "XDG_RUNTIME_DIR: /run/user/1000", "Couldn't open Wayland
+    display.", "failed to open hwcomposer device: No such device", exit 1.
+B13 Exploratory, not part of the boot: a headless Wayland compositor --
+    Fedora weston 14 (--backend=headless --shell=kiosk) from
+    ~/SteamARM-roots/westonroot, a root another agent made for the display
+    work, run read-only by this session's lxrun with a bind of the Android
+    root's /run/user/1000 in its mount table (LXRT_MOUNTS). (With the
+    default desktop shell, weston-desktop-shell failed on "[lxrt] mremap:
+    file-backed range ... not supported yet".) The composer then connects
+    ("presentation_clock_id: clk_id 4") but never registers IComposer:
+    sample(1) of it after 15 s shows its main guest thread in lxrt_futex
+    (__ulock_wait) and the binder threads parked; SurfaceFlinger stays at
+    "Initializing graphics H/W..." (150 s). Not investigated further here:
+    the composer and the display path are the display work's. weston was
+    stopped by its PID and its socket directory removed.
+B14 The 20 s before system_server's dexopt: forkSystemServer waits for the
+    secondary zygote (hasSecondZygote: ro.product.cpu.abilist is
+    "x86_64,x86"), 401 "Got error connecting to zygote, retrying" then
+    "Failed to connect to Zygote through socket zygote_secondary" (a WTF
+    log, not fatal). zygote_secondary is app_process32, i386 (left out).
+
+The boot, timed (the last measurement run, 21:39:44; x86_64 root, other
+agents' guests running):
+  +0.8 s   property service up (226 properties), host properties set
+  +1.1 s   servicemanager started, then the other service managers, the
+           HALs and daemons of the profile (the last at +1.6 s)
+  +1.5 s   zygote started
+  +1.8 s   boot actions done
+  +3 s     ZygoteInit starts; "preloaded 12100 classes in 1437ms" (1138-
+           1918 ms over the runs of this record), "ZygoteInit took to
+           complete: 2174ms"
+  +7 s     system_server forked; zygote accepting connections
+  +27 s    zygote_secondary wait ends (B14); the system_server jars were
+           compiled by an earlier boot (the first time: +2 s, B11)
+  +30 s    "Entered the Android system server!"; +31 s StartLightsService
+  +96 s    Watchdog kills system_server (WAITED_HALF at +61 s)
+Memory (ps RSS, 3 s after StartLightsService, 25 processes of the boot):
+  run 21:36:58: 1,070 MB total -- system_server 247 MB, zygote 236 MB,
+  surfaceflinger 54 MB, audioserver 41 MB, installd/keystore/credstore/
+  gatekeeperd 28-30 MB each, the 11 HALs and service managers 15-28 MB
+  each, property service 9 MB, binder hub 1.7 MB. The same point of an
+  earlier run read 472 MB in all (largest 137 MB): RSS on this Mac under
+  memory pressure varies by 2x between runs; every lxrun process carries
+  FEX (the per-process FEX cost, stage 25: ~15 MB).
+tests/android/run.sh's boot check boots for 75 s; the whole suite took
+1:55 (both roots).
+
+Android ids (runtime/android_ids.c, .h)
+---------------------------------------
+What Android needs from credentials and namespaces, and Lepton gets from a
+seccomp profile that answers success plus a bionic fake-uid patch
+(docs/LEPTON_REUSE_ANALYSIS.md 3.3): LXRT_ANDROID_IDS=ruid[,euid,suid]:
+rgid[,egid,sgid]:groups:eff,prm,inh,bnd,amb[:knb<hex>] ("root" for 0 with every
+capability). With it:
+- getuid/geteuid/getgid/getegid/getresuid/getresgid/getgroups report the
+  virtual ids; setuid/setreuid/setresuid, setgid/setregid/setresgid,
+  setfsuid/setfsgid, setgroups follow kernel/sys.c: CAP_SETUID/CAP_SETGID
+  decide, the saved ids move as there, groups are kept sorted;
+- capabilities: capget/capset (kernel/capability.c's subset rules),
+  cap_emulate_setxuid on every uid change (keepcaps/SECURE_KEEP_CAPS,
+  effective set on euid 0 <-> non-0), prctl PR_CAPBSET_READ (0..40, then
+  EINVAL -- the zygote's drop loop ends on it), PR_CAPBSET_DROP,
+  PR_SET/GET_KEEPCAPS, PR_SET/GET_SECUREBITS (with their locks),
+  PR_CAP_AMBIENT, PR_SET/GET_NO_NEW_PRIVS;
+- execve: cap_bprm_creds_from_file for a file with no capabilities or
+  set-id bits (saved = effective, root gets bounding|inheritable, others
+  the ambient set, keepcaps cleared, the other securebits and
+  no_new_privs kept), carried in the next image's environment together
+  with the bind table (LXRT_MOUNTS); fork copies it;
+- chown/fchown/fchownat: a change Linux would allow these ids (CAP_CHOWN,
+  or the owner's own uid and groups) reports success and leaves the file
+  the Mac user's; the host's own ids are a real call;
+- unshare of namespaces (CAP_SYS_ADMIN): 0, the same single view;
+  CLONE_FILES EINVAL (no descriptor table of a thread's own here);
+  mount with only propagation flags: 0; mount(MS_BIND): an entry in the
+  per-process bind table of the bwrap emulation (mounts.c), MS_REMOUNT
+  honoured for read-only; other mounts (tmpfs, filesystems): EPERM;
+  umount2 of a bind removes it, otherwise EINVAL; setns EINVAL;
+- other processes see them: /tmp/lxrt-shm-<uid>/android-ids.v2 (pid ->
+  ids and capabilities, a seqlock per slot, checked against the process
+  start time) answers SO_PEERCRED (effective ids), SCM_CREDENTIALS (real
+  ids) and capget of another pid; runtime/binder.c's hello reports the
+  virtual euid as the transaction sender's.
+Without LXRT_ANDROID_IDS nothing changes (tests/elf ANDROID_IDS off).
+tests/elf/android_ids.c, with LXRT_ANDROID_IDS=root: 42 checks in zygote's
+order (unshare, MS_SLAVE, a refused tmpfs, a bind that shows the source's
+file, chown with CAP_CHOWN leaving the owner, SO_PEERCRED of a child that
+became 2000, capget of a child and of launchd, CLONE_FILES refused,
+securebits locks, the bounding set, setgroups sorted, keepcaps, setresgid/
+setresuid 1000, capset down, ambient, chown and unshare refused without
+the capabilities, no_new_privs, then an execve'd image with uid 1000,
+groups, permitted = effective = ambient, keepcaps cleared, no_new_privs
+and securebits kept, the bind still in place). Writing that test found one
+more runtime fault: SO_PEERCRED of a fresh socketpair named a live
+FEXServer (a stale entry in socket.c's sender table for a reused socket
+address); now a recorded sender must still hold the socket
+(proc_pidfdinfo) to be reported.
+
+Review
+------
+A read-only review of the runtime diff (Codex, gpt-6-sol) reported 12
+findings. Fixed (commit "Review fixes ..."): the getsockname trace line
+read the host name past its length; PR_SET_SECUREBITS ignored the lock
+bits (and PR_SET_KEEPCAPS the keepcaps lock); the securebits did not
+survive execve; chown to the host's own ids skipped the virtual permission
+check; unshare(CLONE_FILES) claimed success; a stale LXRT_MOUNTS could
+survive an execve after the last unbind; SCM_CREDENTIALS carried effective
+instead of real ids; closing one dup of a socket erased its live sender
+record (the close-time forgetting is gone; the holder check stays); the
+ids table could be read half-updated (now a seqlock); capget of another
+guest answered zeros (the table now carries capabilities). Left, and
+stated below: stacked binds on one target, and SO_PEERCRED's
+connect-time snapshot.
+
+Changes
+-------
+Runtime (commit "runtime: Android ids, and what booting x86-64 Android's
+framework needed"):
+  android_ids.c/.h (new), dispatch.c (the hook, mount/umount2, chown),
+  process.c (execve environment), binder.c (sender euid), mounts.c/.h
+  (bind, unbind, exec environment), procfs.c (/proc/self/fd hiding,
+  attr/*, thread-self), epoll_eventfd.c (its pipe ends hidden), socket.c
+  (AF_UNIX name within the returned length; peer ids; stale sender
+  records), propsvc.c (LXRT_PROPERTY_INIT), lxrt.h, Makefile.
+FEX: patches/fex-lxrt-seccomp-cap-sys-admin.patch, applied last by
+  scripts/build-fex-host.sh. Built with STEAMARM_BUILD=<scratch>, Release
+  only (26 s of ninja on the M4, the RPM cache copied from
+  ~/SteamARM-build/rpms): FEX-emu sha256 6d4aaa58828d2a4a6b30b110e0dcb72a
+  73b10c65b0ca904b01a48c230157cd88 (FEXServer d3fe5cd07e9c..., identical
+  to the stage 25 build's), installed into the x86_64 root only
+  (scripts/mkandroidroot.sh --arch x86_64 --emu). The stage 25 FEX-emu
+  (08daa48ab5e9...) is kept in the session's scratch. ~/SteamARM-build,
+  /tmp/lxrt-root and the Steam roots were not rebuilt or reinstalled.
+scripts/android-boot.py (new).
+tests: tests/elf/android_ids.c + ANDROID_IDS in tests/elf/run.sh;
+  tests/android/run.sh x86_64 services and boot; tests/android/
+  x86_initsock.c, bionic_min.h (new); binder_service.c (-DBIONIC_MIN
+  build), props_wait.c (an x86-64 _start).
+Root state written by this session: the x86_64 root's /data (init's
+  mkdirs, installd's dalvik-cache of the two system_server jars,
+  /data/local/tmp/and2a probes), /mnt/user/... and /storage mount points,
+  /dev/socket/* (the boot's sockets), usr/lib/lxrt-emu/FEX (above).
+  /linkerconfig was not rewritten (other agents' guests use the root).
+
+Deviations, stated rather than hidden
+-------------------------------------
+- Android ids are bookkeeping: every file stays the Mac user's (stat shows
+  501), every process can signal every other one, a chown is not applied,
+  a "namespace" is the one view there is. What Android asks and checks
+  agrees with Linux; what the kernel would enforce is not enforced.
+- /proc/self/fd hides FEX's descriptors by when they were opened (before
+  the guest's first instruction); a descriptor FEX opens later is shown.
+- A second bind on the same target replaces the first (Linux stacks them,
+  and umount2 would uncover the first).
+- SO_PEERCRED answers with the peer's ids now; Linux keeps those it had at
+  connect()/socketpair() time.
+- The boot runs only the profile; exec/exec_background actions are
+  skipped; no ueventd, logd, lmkd, vold, apexd, netd, tombstoned; no
+  cgroups (libprocessgroup logs "CgroupMap::FindController ... failed" per
+  process); /proc/sys, /sys/power, /sys/class are missing
+  (android.system.suspend logs it and runs).
+- The script's logcat is logd.py's: no pid per record, no logdr (no
+  logcat client).
+- seccomp is enforced by FEX's emulator, not a kernel; only for the zygote
+  and its children (FEX_NEEDSSECCOMP=1 turns off FEX's inline syscalls:
+  cost not measured).
+
+Not done, and why
+-----------------
+- sys.boot_completed: blocked at SurfaceFlinger (B11-B13). What comes next
+  is a composer that reports a display: Waydroid's with a working Wayland
+  compositor (the display work: B13 shows it connects to weston headless
+  and then waits on a futex), or a composer of SteamARM's.
+- pm list packages / pm install: PackageManagerService starts after the
+  default display. The APK samples' ABIs are in stage 25's record
+  (scripts/apk-inspect.py); none was installed.
+- i386: the audio HAL, dex2oat32 and zygote_secondary die in FEX's 32-bit
+  mode ("NoExec instruction in entry block", a JIT fault at address 0);
+  audioserver waits for the audio HAL forever, which AudioService in
+  system_server would meet after the display.
+- netd (NETLINK_KOBJECT_UEVENT, route netlink, iptables, BPF), which
+  NetworkManagementService waits for after the display.
+- statsd: the root's /linkerconfig has no namespace for its APEX
+  (linkerconfig ran before there were properties, stage 25).
+- An old intermittent hang, not fixed: the x86_64 check "sh: $(toybox ...)
+  returns" (a SIGCHLD that lands while FEX defers signals, the P3 case of
+  stage 25) hung once in a final-checks run whose lxrun binary was being
+  rebuilt underneath it; the perl deadline did not end it (FEX defers the
+  SIGALRM too). Measured in a loop of 40 runs each (20 s deadline): this
+  record's lxrun + this record's FEX 1 hang; this record's lxrun + stage
+  25's FEX 1; main's lxrun (bc27c17) + stage 25's FEX 2. So it predates
+  this stage and P3 made it rare rather than impossible; UNKNOWN which
+  window is left.
+
+Tests
+-----
+tests/android/run.sh (both roots): 58 passed, 0 failed, 2 expected
+  failures (arm64 dalvikvm64's heap; the SurfaceFlinger wall), 1:55.
+  New in the x86_64 section: getprop, setprop, __system_property_wait,
+  servicemanager + service list, native x86-64 service (list, i32, fd,
+  dumpsys, death), vndservicemanager, hwservicemanager.ready, lshal, a
+  HIDL HAL, x86_initsock, android-boot zygote, android-boot system_server,
+  xfail past LightsService.
+tests/elf/run.sh: ANDROID_IDS (42 checks) and ANDROID_IDS off.
+Final checks: see "Final checks" below.
+
+Final checks (MEASURED, at fff604a -- the code of this record after the
+review fixes; default lxrun build; other agents' guests running)
+------------------------------------------------------------------------
+make lxrt launcher: rc 0 (34 s when lxrun was rebuilt at cb97dfa; up to
+  date here).
+make test-launcher-core: rc 0, 60 s -- application core: all checks
+  passed; app entry: all checks passed; 39/0; 32/0; 10/0; guest_env 26/0;
+  mkarmroot 25/0; run_steam_arm64 10/0; 35/0.
+tests/elf/run.sh: 78 passed, 0 failed, 28 s (vulkaninfo skipped, as
+  before); ANDROID_IDS 42 checks and ANDROID_IDS off among them.
+tests/elf/run_i386.sh: 18 passed, 0 failed, 45 s (the shared FEX in
+  /tmp/lxrt-root, not rebuilt: the seccomp patch is not in it).
+tests/android/run.sh (both roots, the x86_64 root with the patched FEX):
+  58 passed, 0 failed (2 expected failures), 114 s.
+python3 -m unittest tests/test_docs_records.py: OK (6 tests).
+The same checks at cb97dfa, before the review: identical counts (38
+ANDROID_IDS checks then), android 119 s. A run between the two, at
+8d92dea, is not counted: lxrun was rebuilt twice while it ran; in it one
+launcher session check ("a program that ignores SIGTERM is killed after
+the grace period": status 143 after 1 s) and the x86_64 "sh: $(toybox
+...)" check failed (the intermittent hang above); both passed in the runs
+before and after it.
