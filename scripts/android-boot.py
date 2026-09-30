@@ -908,8 +908,14 @@ class Boot:
         src = os.path.join(HERE, "android", "java", "org", "steamarm", "android", "BinderStandIn.java")
         out = os.path.join(REPO, "build", "android", "standin")
         dex = os.path.join(out, "classes.dex")
-        r8 = os.environ.get("R8_JAR") or os.path.join(
-            os.environ.get("STEAMARM_STATE") or os.path.expanduser("~/SteamARM-roots"), "android/tools/r8-9.4.27.jar")
+        # R8_JAR, else the state dir's copy, else the default state dir's: a
+        # session with a scratch STEAMARM_STATE (tests/android/run.sh) has no
+        # tools/ of its own, and without the stand-ins netd never answers and
+        # system_server's Watchdog kills it at NetworkManagementService.
+        cands = [os.environ.get("R8_JAR")] + [
+            os.path.join(d, "android/tools/r8-9.4.27.jar")
+            for d in (os.environ.get("STEAMARM_STATE"), os.path.expanduser("~/SteamARM-roots")) if d]
+        r8 = next((c for c in cands if c and os.path.exists(c)), cands[-1])
         try:
             if not os.path.exists(dex) or os.path.getmtime(dex) < os.path.getmtime(src):
                 cls = os.path.join(out, "classes")
