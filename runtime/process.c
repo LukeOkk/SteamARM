@@ -27,6 +27,7 @@
 // it would on Linux.
 
 #include "lxrt.h"
+#include "android_ids.h"
 bool lxrt_trace_on(void);
 
 #include <errno.h>
@@ -157,6 +158,29 @@ long lxrt_execve(const char *path, char *const argv[], char *const envp[])
                 withobjc[ec + 1] = NULL;
                 use_env = withobjc;
             }
+        }
+    }
+    // Android ids (runtime/android_ids.h) follow execve, recomputed by
+    // Linux's rules for the new image; whatever the guest's environment
+    // said about them is replaced.
+    const char *aids = lxrt_aids_exec_env();
+    if (aids) {
+        // ... and so do the binds its zygote made (mounts.c: a mount
+        // namespace outlives exec).
+        const char *mnt = lxrt_mounts_exec_env();
+        int ec = 0;
+        while (use_env[ec]) ec++;
+        char **withids = calloc((size_t)ec + 3, sizeof(char *));
+        if (withids) {
+            int k = 0;
+            for (int j = 0; j < ec; j++)
+                if (strncmp(use_env[j], "LXRT_ANDROID_IDS=", 17) &&
+                    (!mnt || strncmp(use_env[j], "LXRT_MOUNTS=", 12)))
+                    withids[k++] = use_env[j];
+            withids[k++] = (char *)aids;
+            if (mnt) withids[k++] = (char *)mnt;
+            withids[k] = NULL;
+            use_env = withids;
         }
     }
     if (lxrt_trace_on()) {

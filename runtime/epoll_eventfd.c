@@ -470,10 +470,14 @@ static struct ev_obj *ev_find(int fd)
 static void ev_release(struct ev_obj *o)
 {
     if (o->dead && o->refs == 0) {
-        if (o->pr >= 0)
+        if (o->pr >= 0) {
+            lxrt_fd_hide(o->pr, false);
             close(o->pr);
-        if (o->wfd >= 0)
+        }
+        if (o->wfd >= 0) {
+            lxrt_fd_hide(o->wfd, false);
             close(o->wfd);
+        }
         o->pr = o->wfd = -1;
         if (o->sh)
             munmap(o->sh, EV_SHARED_BYTES);   // this process's view only
@@ -599,6 +603,9 @@ long lxrt_eventfd2(unsigned initval, int lflags)
     o->used = true;
     o->pr = p[0];
     o->wfd = p[1];
+    // The pipe ends are the runtime's: /proc/self/fd shows only `g`.
+    lxrt_fd_hide(p[0], true);
+    lxrt_fd_hide(p[1], true);
     o->fds[0] = g;
     o->nfds = 1;
     o->sh = sh;

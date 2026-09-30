@@ -51,6 +51,37 @@ static void add_mount(const char *dst, const char *src, bool ro)
 
 bool lxrt_mounts_active(void) { return g_n > 0; }
 
+void lxrt_mounts_bind(const char *dst, const char *src, bool ro)
+{
+    lxrt_mounts_unbind(dst);
+    add_mount(dst, src, ro);
+}
+
+bool lxrt_mounts_unbind(const char *dst)
+{
+    for (int i = 0; i < g_n; i++)
+        if (!strcmp(g_m[i].dst, dst)) {
+            memmove(&g_m[i], &g_m[i + 1], sizeof g_m[0] * (size_t)(g_n - i - 1));
+            g_n--;
+            return true;
+        }
+    return false;
+}
+
+static char *serialize(void);
+const char *lxrt_mounts_exec_env(void)
+{
+    static char *last;
+    if (!g_n) return NULL;
+    char *s = serialize();
+    if (!s) return NULL;
+    free(last);
+    last = malloc(strlen(s) + 13);
+    if (last) sprintf(last, "LXRT_MOUNTS=%s", s);
+    free(s);
+    return last;
+}
+
 // Is this guest path inside a read-only bind? bwrap makes the mount itself
 // read-only; here the dispatcher refuses the write with EROFS instead.
 bool lxrt_mounts_readonly(const char *path)

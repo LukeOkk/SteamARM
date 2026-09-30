@@ -11,6 +11,8 @@
 // fails reports which call it lacked rather than dying anonymously.
 
 #include "lxrt.h"
+#include "android_ids.h"
+#include "mounts.h"
 #include "offmap.h"
 
 #include <errno.h>
@@ -579,6 +581,7 @@ static long guest_close(int fd)
     lxrt_pathfd_close(fd);
     lxrt_evdev_close(fd);
     lxrt_binder_close(fd);
+    lxrt_fd_hide(fd, false);
     return ret_of(close(fd));
 }
 // For modules that close a descriptor on the guest's behalf (binder.c: the
@@ -937,6 +940,7 @@ static void forget_fd(int fd)
     lxrt_socket_close(fd);
     lxrt_memfd_close(fd);
     lxrt_binder_close(fd);
+    lxrt_fd_hide(fd, false);
 }
 
 // Linux places mmap(NULL, ...) top-down from just below the stack; Darwin
@@ -2316,6 +2320,10 @@ void lxrt_dispatch(struct lxrt_regs *r)
                 (unsigned long long)a2);
 
     extern _Thread_local int lxrt_sig_during_syscall;
+    // Android ids (runtime/android_ids.h): the credential, capability and
+    // namespace calls of a guest started with LXRT_ANDROID_IDS.
+    if (lxrt_aids_on() && lxrt_aids_syscall(nr, a0, a1, a2, a3, a4, &ret))
+        goto aids_done;
 restart:
     lxrt_sig_during_syscall = 0;
     switch (nr) {
@@ -2944,7 +2952,59 @@ restart:
                               translate((const char *)a1), (mode_t)a2,
                               lxrt_at_flags_to_darwin((int)a3)));
         break;
+    case 40:    // mount: only here for Android ids (android_ids.c sends MS_BIND/MS_REMOUNT on)
+    case 39:    // umount2
+        if (!lxrt_aids_on()) { ret = LERR(ENOSYS); break; }
+        if (nr == 39) {
+            // A bind this process (or its zygote) made goes; anything else
+            // is not a mount point here (one mount view).
+            const char *t = (const char *)a0;
+            ret = t && lxrt_mounts_unbind(t) ? 0 : LERR(EINVAL);
+            break;
+        }
+        {
+            // mount(src, dst, type, flags, data) with MS_BIND: an entry in
+            // the per-process bind table (mounts.c), what zygote's
+            // MountEmulatedStorage does for every child (/mnt/user/<n> on
+            // /storage). The table follows fork and exec, as a mount
+            // namespace follows its processes. MS_REMOUNT (flags or
+            // read-only on an existing bind): accepted, read-only honoured.
+            const char *src = (const char *)a0, *dst = (const char *)a1;
+            uint64_t fl = a3;
+            if (!dst) { ret = LERR(EFAULT); break; }
+            struct stat ds, ss;
+            char hdst[PATH_MAX];
+            snprintf(hdst, sizeof hdst, "%s", translate_follow(dst));
+            if (stat(hdst, &ds) != 0) { ret = LERR(errno); break; }
+            if (fl & 0x20) {                          // MS_REMOUNT
+                if (fl & 0x1000) {
+                    char cur[PATH_MAX];
+                    const char *h = lxrt_mounts_translate(dst, cur, sizeof cur);
+                    if (h) lxrt_mounts_bind(dst, h, (fl & 1) != 0);   // MS_RDONLY
+                }
+                ret = 0;
+                break;
+            }
+            if (!src) { ret = LERR(EFAULT); break; }
+            char hsrc[PATH_MAX];
+            snprintf(hsrc, sizeof hsrc, "%s", translate_follow(src));
+            if (stat(hsrc, &ss) != 0) { ret = LERR(errno); break; }
+            if (S_ISDIR(ss.st_mode) != S_ISDIR(ds.st_mode)) { ret = LERR(S_ISDIR(ss.st_mode) ? ENOTDIR : EISDIR); break; }
+            lxrt_mounts_bind(dst, hsrc, (fl & 1) != 0);
+            if (getenv("LXRT_ANDROID_IDS_LOG"))
+                fprintf(stderr, "[lxrt] pid %d: bind %s (%s) on %s\n", (int)getpid(), src, hsrc, dst);
+            ret = 0;
+        }
+        break;
     case LNR_fchown:
+        if (lxrt_aids_on()) {
+            // Android ids: a chown Linux would allow these ids succeeds
+            // without changing the file (every file stays the Mac user's).
+            int k = lxrt_aids_chown((uint32_t)a1, (uint32_t)a2);
+            struct stat cst;
+            if (k < 0) { ret = k; break; }
+            if (k == 0) { ret = fstat((int)a0, &cst) != 0 ? LERR(errno) : 0; break; }
+        }
         ret = ret_of(fchown((int)a0, (uid_t)a1, (gid_t)a2));
         break;
     case 88: {  // utimensat(dirfd, path, times[2], flags)
@@ -2975,6 +3035,20 @@ restart:
         break;
     }
     case LNR_fchownat:
+        if (lxrt_aids_on()) {
+            int k = lxrt_aids_chown((uint32_t)a2, (uint32_t)a3);
+            struct stat cst;
+            if (k < 0) { ret = k; break; }
+            if (k == 0) {
+                const char *cp = (const char *)a1;
+                if (cp && !*cp && ((int)a4 & 0x1000))           // AT_EMPTY_PATH
+                    ret = fstat((int)a0, &cst) != 0 ? LERR(errno) : 0;
+                else
+                    ret = ret_of(fstatat(lxrt_dirfd_to_darwin((int)a0), translate(cp), &cst,
+                                         lxrt_at_flags_to_darwin((int)a4 & 0x100)));
+                break;
+            }
+        }
         ret = ret_of(fchownat(lxrt_dirfd_to_darwin((int)a0),
                               translate((const char *)a1), (uid_t)a2, (gid_t)a3,
                               lxrt_at_flags_to_darwin((int)a4)));
@@ -3991,6 +4065,7 @@ restart:
         }
     }
 
+aids_done:
     if (g_trace && nr != LNR_clock_gettime)
         fprintf(lxrt_trace_stream(), "[lxrt] %d/%d syscall %ld -> %ld\n", (int)getpid(), lxrt_gettid(), nr, ret);
 

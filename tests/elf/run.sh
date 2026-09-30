@@ -1198,6 +1198,28 @@ else
     echo "  skip  ANDROID_BIONIC_RT (no $STAGE)"
 fi
 
+# ANDROID_IDS: Android ids (runtime/android_ids.h, benchmarks/stage27-android-
+# framework.txt): with LXRT_ANDROID_IDS=root, what zygote does to become
+# system_server -- unshare(CLONE_NEWNS), a bind mount, the bounding set,
+# setgroups, keepcaps, setresgid/setresuid, capset, ambient caps -- by
+# Linux's rules, then across fork (SO_PEERCRED of a child that dropped to
+# another uid) and execve (ids, ambient caps, no_new_privs, the bind); and
+# without it, the Mac's ids and nothing emulated.
+if [ -f "$STAGE/usr/lib64/libc.a" ] && [ -n "$GCCDIR" ]; then
+    if err=$(glibc_cc -static-pie -O2 -o build/android_ids tests/elf/android_ids.c); then
+        out=$(LXRT_ANDROID_IDS=root deadline 60 ./build/lxrun "$PWD/build/android_ids" 2>&1); rc=$?
+        if [ "$rc" -eq 0 ] && grep -q '^== android ids: ok' <<<"$out"; then
+            ok "ANDROID_IDS: $(grep -c '^  ok ' <<<"$out") checks (setresuid/setresgid/setgroups, keepcaps, capset, ambient, bounding set, chown, unshare, bind mount, fork, execve, SO_PEERCRED)"
+        else bad "ANDROID_IDS" "rc=$rc $(grep -E 'MAL|SIG|lxrun:' <<<"$out" | head -6)"; fi
+        out=$(deadline 60 ./build/lxrun "$PWD/build/android_ids" off 2>&1); rc=$?
+        if [ "$rc" -eq 0 ] && grep -q '^== android ids off: ok' <<<"$out"; then
+            ok "ANDROID_IDS off: the Mac's ids, setresuid(0) EPERM, unshare ENOSYS"
+        else bad "ANDROID_IDS off" "rc=$rc $(grep -E 'MAL|SIG|lxrun:' <<<"$out" | head -6)"; fi
+    else bad "build android_ids" "$err"; fi
+else
+    echo "  skip  ANDROID_IDS (no $STAGE)"
+fi
+
 # BINDER_IPC: Android binder between lxrun processes, raw ioctls against the
 # Linux UAPI header (runtime/binder.c, runtime/binder_hub.c; benchmarks/
 # stage25-binder.txt). A private hub directory, and a hub that leaves 2 s

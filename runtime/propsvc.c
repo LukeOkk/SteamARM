@@ -112,6 +112,8 @@ static const char kLongLegacyError[] = "Must use __system_property_read_callback
 #define PROP_ERROR_SET_FAILED             0x0024
 
 static const char *g_dir;              // the service's directory
+static struct sockaddr_un g_init_sa;   // LXRT_PROPERTY_INIT: an init to tell (see init_notify)
+static int g_init_fd = -1;
 static char g_root[PATH_MAX];          // the Android root (host path)
 static char g_persist[PATH_MAX];       // persistent property file (host path)
 static bool g_persist_loaded;
@@ -966,6 +968,47 @@ static bool check_type(const char *type, const char *value)
 
 static void write_persistent(const char *name, const char *value);
 
+// An init to hand control messages to and to tell about every property that
+// changes: LXRT_PROPERTY_INIT names a Unix datagram socket of this user
+// (scripts/android-boot.py binds one). Android's init is both the property
+// service and the one that acts on ctl.* and "on property:" triggers; here
+// they are separate processes, and this is the line between them. One
+// datagram per event, sent without waiting: "ctl\0<cmd>\0<value>\0<pid>" or
+// "set\0<name>\0<value>\0<pid>". An init that is not reading loses them.
+static bool init_notify(const char *kind, const char *a, const char *b, int pid)
+{
+    if (g_init_fd < 0) return false;
+    char buf[2048];
+    int n = snprintf(buf, sizeof buf, "%s%c%s%c%s%c%d", kind, 0, a, 0, b, 0, pid);
+    if (n < 0) return false;
+    if (n >= (int)sizeof buf) n = (int)sizeof buf - 1;
+    return sendto(g_init_fd, buf, (size_t)n, MSG_DONTWAIT, (struct sockaddr *)&g_init_sa,
+                  sizeof g_init_sa) == n;
+}
+
+static void init_channel_open(void)
+{
+    const char *p = getenv("LXRT_PROPERTY_INIT");
+    if (!p || !*p) return;
+    struct stat st;
+    // The socket must be this user's own: nothing else is told about
+    // properties or asked to start services.
+    if (lstat(p, &st) != 0 || !S_ISSOCK(st.st_mode) || st.st_uid != getuid()) {
+        plog("LXRT_PROPERTY_INIT=%s: not a socket of this user; ctl.* stays refused", p);
+        return;
+    }
+    g_init_sa.sun_family = AF_UNIX;
+    if (snprintf(g_init_sa.sun_path, sizeof g_init_sa.sun_path, "%s", p) >= (int)sizeof g_init_sa.sun_path) {
+        plog("LXRT_PROPERTY_INIT=%s: path too long", p);
+        return;
+    }
+    g_init_fd = socket(AF_UNIX, SOCK_DGRAM, 0);
+    if (g_init_fd >= 0) {
+        fcntl(g_init_fd, F_SETFD, FD_CLOEXEC);
+        plog("control messages and property changes go to the init at %s", p);
+    }
+}
+
 // init's PropertySet.
 static uint32_t property_set(const char *name, const char *value, const char **error)
 {
@@ -983,6 +1026,7 @@ static uint32_t property_set(const char *name, const char *value, const char **e
     }
     if (g_persist_loaded && starts_with(name, "persist."))
         write_persistent(name, value);
+    init_notify("set", name, value, 0);
     return PROP_SUCCESS;
 }
 
@@ -1011,6 +1055,12 @@ static uint32_t handle_set(const char *name, const char *value, int pid, const c
     uint32_t r = check_permissions(name, value, error);
     if (r != PROP_SUCCESS) return r;
     if (starts_with(name, "ctl.")) {
+        // Android's init queues the message and answers success; whether the
+        // service exists is its business (HandleControlMessage logs it).
+        if (init_notify("ctl", name + 4, value, pid)) {
+            plog("Received control message '%s' for '%s' from pid %d: passed to init", name + 4, value, pid);
+            return PROP_SUCCESS;
+        }
         // No init here to start, stop or restart a service.
         plog("Received control message '%s' for '%s' from pid %d: refused, no init to act on it",
              name + 4, value, pid);
@@ -1952,6 +2002,7 @@ int lxrt_property_service_main(int argc, char **argv)
     if (!locked) { plog("another property service holds %s", lockp); return 1; }
 
     g_vendor_api = vendor_api_level();
+    init_channel_open();
     struct timespec t0, t1;
     clock_gettime(CLOCK_MONOTONIC, &t0);
     bool adopted = false;

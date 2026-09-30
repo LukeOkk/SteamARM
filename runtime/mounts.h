@@ -24,6 +24,15 @@ const char *lxrt_mounts_translate(const char *path, char *buf, size_t n);
 bool lxrt_mounts_active(void);
 bool lxrt_mounts_readonly(const char *path);
 const char *lxrt_mounts_untranslate(const char *host, char *buf, size_t n);
+// A bind mount made by the guest itself (Android ids: mount(MS_BIND) in the
+// zygote's private "namespace", runtime/android_ids.h): dst is a guest path,
+// src the host path it shows. A later bind on the same dst replaces it.
+void lxrt_mounts_bind(const char *dst, const char *src, bool ro);
+// umount2 of a bind made above: true when there was one.
+bool lxrt_mounts_unbind(const char *dst);
+// "LXRT_MOUNTS=..." for the next image (execve), or NULL when the table is
+// empty. Valid until the next call.
+const char *lxrt_mounts_exec_env(void);
 // Interpret a bwrap command line (argv[0] is bwrap itself) and exec its
 // command through `exec_guest`. Returns only on failure, with -errno (Linux).
 long lxrt_bwrap_exec(char *const argv[], char *const envp[],

@@ -49,6 +49,7 @@
 #include <mach-o/dyld.h>
 
 #include "lxrt.h"
+#include "android_ids.h"
 #include "binder.h"
 
 #define LERR(e) (-lxrt_errno_to_linux(e))
@@ -414,7 +415,7 @@ long lxrt_binder_open(int context, int lflags)
             if (s < 0) continue;
         }
         // Hello. A hub that was just exiting closes on us: try again.
-        struct bh_hello hello = { .version = BH_VERSION, .pid = getpid(), .euid = geteuid(),
+        struct bh_hello hello = { .version = BH_VERSION, .pid = getpid(), .euid = lxrt_aids_euid(),
                                   .context = (uint32_t)context };
         const char *sc = getenv("LXRT_BINDER_SECCTX");
         snprintf(hello.secctx, sizeof hello.secctx, "%s", sc && *sc ? sc : "u:r:unlabeled:s0");

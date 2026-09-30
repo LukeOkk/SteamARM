@@ -285,6 +285,10 @@ bool lxrt_vdso_contains(uint64_t addr);
 struct rusage;
 void lxrt_rusage_to_linux(const struct rusage *d, void *out);
 void lxrt_proc_set_cmdline(const char *args, size_t len);
+// Descriptors /proc/self/fd does not show: the runtime's and the emulator's
+// (procfs.c). A guest close or dup2 onto the number makes it the guest's.
+void lxrt_fd_hide(int fd, bool hide);
+bool lxrt_fd_hidden(int fd);
 // procpid.c: other guest processes in /proc, and /proc/net.
 bool lxrt_procpid_is_guest(int pid);
 bool lxrt_procpid_fd_target(int pid, int fd, char *out, size_t n);

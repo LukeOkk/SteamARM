@@ -11,6 +11,7 @@
 //      has no such thing and rejects the type outright.
 
 #include "lxrt.h"
+#include "android_ids.h"
 #include "props.h"
 
 #include <arpa/inet.h>
@@ -198,7 +199,16 @@ static void addr_to_linux(const struct sockaddr *dsa, socklen_t dlen,
         struct linux_sockaddr_un lu;
         memset(&lu, 0, sizeof lu);
         lu.sun_family = L_AF_UNIX;
-        size_t n = strnlen(du->sun_path, sizeof du->sun_path);
+        // The name is what the kernel returned, dlen bytes: Darwin does not
+        // NUL-terminate a path that was bound without its terminator (Python
+        // and most host programs bind that way), and whatever follows in the
+        // caller's buffer is not part of it. Reading on to the next NUL
+        // handed the zygote "/dev/socket/zygote@A..." for a socket its init
+        // bound, and it refused to fork (MEASURED, stage 27).
+        size_t off = offsetof(struct sockaddr_un, sun_path);
+        size_t lim = dlen > off ? (size_t)dlen - off : 0;
+        if (lim > sizeof du->sun_path) lim = sizeof du->sun_path;
+        size_t n = strnlen(du->sun_path, lim);
         const char *src = du->sun_path;
         const char *root = getenv("LXRT_ROOT");
         size_t rl = root ? strlen(root) : 0;
@@ -552,6 +562,10 @@ long lxrt_getsockname(int fd, void *lsa, uint32_t *llen, bool peer)
     if (rc != 0)
         return LERR(errno);
     addr_to_linux((struct sockaddr *)&ss, dlen, lsa, llen);
+    if (lxrt_trace_on() && ss.ss_family == AF_UNIX && lsa && llen)
+        fprintf(lxrt_trace_stream(), "[lxrt]    %s fd %d: host \"%s\" -> guest len %u \"%.*s\"\n",
+                peer ? "getpeername" : "getsockname", fd, ((struct sockaddr_un *)&ss)->sun_path,
+                *llen, *llen > 2 ? (int)(*llen - 2) : 0, (const char *)lsa + 2);
     return 0;
 }
 
@@ -618,8 +632,10 @@ static void passcred_set(int fd, bool on)
     if (on) g_passcred[fd >> 3] |= (uint8_t)(1u << (fd & 7));
     else    g_passcred[fd >> 3] &= (uint8_t)~(1u << (fd & 7));
 }
+static void cred_forget(int fd);
 void lxrt_socket_close(int fd)
 {
+    cred_forget(fd);
     passcred_set(fd, false);
     if (fd >= 0 && fd < 65536) {
         int peer = atomic_exchange(&g_nl_peer[fd], 0);
@@ -646,6 +662,7 @@ void lxrt_socket_dup(int oldfd, int newfd) { passcred_set(newfd, passcred_get(ol
 struct cred_ent { _Atomic uint64_t so; _Atomic int32_t pid; };
 #define CRED_SLOTS 8192
 static struct cred_ent *g_creds;
+static _Atomic bool g_cred_sent;       // this process has recorded itself as a sender
 
 static struct cred_ent *cred_table(void)
 {
@@ -684,6 +701,7 @@ static void cred_note_send(int fd)
 {
     uint64_t self, peer;
     struct cred_ent *t;
+    atomic_store(&g_cred_sent, true);
     if (!unix_ids(fd, &self, &peer) || !self || !(t = cred_table()))
         return;
     uint32_t h = (uint32_t)((self * 0x9E3779B97F4A7C15ull) >> 51) % CRED_SLOTS;
@@ -698,6 +716,53 @@ static void cred_note_send(int fd)
     }
 }
 
+// A socket this process recorded itself as the sender on is closing: its
+// kernel identity will be handed to some later socket, which must not
+// inherit this process as its "sender" (MEASURED: SO_PEERCRED of a fresh
+// socketpair named a FEXServer that had once sent on a socket at the same
+// kernel address). The slot keeps its key, for the probe chains; pid 0 means
+// "nobody recorded", and the next send on the reused socket records again.
+static void cred_forget(int fd)
+{
+    uint64_t self, peer;
+    struct cred_ent *t;
+    if (!atomic_load(&g_cred_sent) || !unix_ids(fd, &self, &peer) || !self || !(t = cred_table()))
+        return;
+    uint32_t h = (uint32_t)((self * 0x9E3779B97F4A7C15ull) >> 51) % CRED_SLOTS;
+    for (int k = 0; k < 64; k++) {
+        struct cred_ent *e = &t[(h + (uint32_t)k) % CRED_SLOTS];
+        uint64_t cur = atomic_load(&e->so);
+        if (cur == self) {
+            int32_t me = (int32_t)getpid();
+            atomic_compare_exchange_strong(&e->pid, &me, 0);
+            return;
+        }
+        if (cur == 0) return;
+    }
+}
+
+// Does process `pid` (this user's) have a descriptor on the socket whose
+// kernel identity is `so`?
+static bool pid_holds_socket(pid_t pid, uint64_t so)
+{
+    if (pid == getpid()) return true;
+    int n = proc_pidinfo(pid, PROC_PIDLISTFDS, 0, NULL, 0);
+    if (n <= 0) return false;
+    struct proc_fdinfo *fds = malloc((size_t)n);
+    if (!fds) return true;                 // cannot tell: trust the record
+    n = proc_pidinfo(pid, PROC_PIDLISTFDS, 0, fds, n);
+    bool found = false;
+    for (int i = 0; i < n / (int)sizeof *fds && !found; i++) {
+        if (fds[i].proc_fdtype != PROX_FDTYPE_SOCKET) continue;
+        struct socket_fdinfo si;
+        if (proc_pidfdinfo(pid, fds[i].proc_fd, PROC_PIDFDSOCKETINFO, &si, sizeof si) == sizeof si &&
+            si.psi.soi_so == so)
+            found = true;
+    }
+    free(fds);
+    return found;
+}
+
 static pid_t cred_peer_pid(int fd)
 {
     uint64_t self, peer;
@@ -710,8 +775,11 @@ static pid_t cred_peer_pid(int fd)
         uint64_t cur = atomic_load(&e->so);
         if (cur == peer) {
             pid_t p = atomic_load(&e->pid);
-            // A recorded sender that has since exited is stale.
-            return (p > 0 && kill(p, 0) == 0) ? p : 0;
+            // A recorded sender that has since exited is stale; so is one
+            // that no longer holds the socket (its kernel address has been
+            // given to a new one since: a live FEXServer was reported as
+            // the peer of a fresh socketpair, MEASURED).
+            return (p > 0 && kill(p, 0) == 0 && pid_holds_socket(p, peer)) ? p : 0;
         }
         if (cur == 0) break;
     }
@@ -734,6 +802,13 @@ static bool peer_ucred(int fd, struct linux_ucred *out)
     // Every process here runs as this user; a peer outside the runtime says so.
     out->uid = have_cred ? xu.cr_uid : getuid();
     out->gid = have_cred ? (xu.cr_ngroups > 0 ? xu.cr_groups[0] : 0) : getgid();
+    // A peer with Android ids (runtime/android_ids.h) is who it says it is:
+    // its effective uid and gid, as Linux's SO_PEERCRED reports.
+    uint32_t au, ag;
+    if (lxrt_aids_lookup(out->pid, &au, &ag)) {
+        out->uid = au;
+        out->gid = ag;
+    }
     return true;
 }
 
