@@ -8,11 +8,16 @@
 #                                   /Volumes/SteamARMAndroid/root, arm64),
 #                                   ANDROID_X86_ROOT (default
 #                                   /Volumes/SteamARMAndroid/root-x86_64, run
-#                                   under FEX), LXRUN (default build/lxrun)
+#                                   under FEX), LXRUN (default build/lxrun),
+#                                   WESTON_ROOT (the display section,
+#                                   scripts/mkwestonroot.sh), ANDROID_DISPLAY_SF
+#                                   (0: no SurfaceFlinger in it)
 #
 # Writes only inside a root's /data/local/tmp and dev/socket (the logd
-# stand-in), and in private temporary directories for the binder hub and the
-# property service (both leave by themselves when idle). Starts no daemon it
+# stand-in), the Weston root's /tmp, and in private temporary directories for
+# the binder hub, the property service (both leave by themselves when idle)
+# and the Wayland socket. The display section shows Weston's window on the X
+# server :2 for a few seconds when one answers there. Starts no daemon it
 # does not stop; stops only its own PIDs.
 set -uo pipefail
 cd "$(dirname "$0")/../.." || exit 1
@@ -23,6 +28,18 @@ ok()    { echo "  ok    $1"; PASS=$((PASS+1)); }
 bad()   { echo "  FAIL  $1"; echo "        $2"; FAIL=$((FAIL+1)); }
 xfail() { echo "  xfail $1"; echo "        $2"; XFAIL=$((XFAIL+1)); }
 deadline() { perl -e 'alarm shift; exec @ARGV' "$@"; }
+# dlrun SECONDS cmd...: run cmd in a process group of its own and stop the
+# whole group at the deadline (TERM, then KILL 2 s later; status 142 as an
+# alarm gives). A plain alarm stopped only the first process: a guest shell's
+# child stayed, held the pipe open, and a hung x86_64 `sh -c $(toybox ...)`
+# (the intermittent SIGCHLD-under-FEX hang) held the suite for 43 minutes.
+# DLRUN_PL is the same, for callers that exec through env (a function cannot).
+DLRUN_PL='my $t = shift; my $p = fork; die "fork: $!" unless defined $p;
+    if (!$p) { setpgrp(0, 0); exec @ARGV or exit 127 }
+    $SIG{ALRM} = sub { kill "TERM", -$p; sleep 2; kill "KILL", -$p; waitpid($p, 0); exit 142 };
+    alarm $t; waitpid($p, 0); my $s = $?;
+    exit($s & 127 ? 128 + ($s & 127) : $s >> 8)'
+dlrun() { /usr/bin/perl -e "$DLRUN_PL" "$@"; }
 
 X86_ROOT="${ANDROID_X86_ROOT:-/Volumes/SteamARMAndroid/root-x86_64}"
 [ -x "$LXRUN" ] || { echo "  FAIL  no $LXRUN (make lxrt)"; exit 1; }
@@ -74,7 +91,7 @@ g() {
         ANDROID_I18N_ROOT=/apex/com.android.i18n ANDROID_TZDATA_ROOT=/apex/com.android.tzdata \
         ANDROID_STORAGE=/storage BOOTCLASSPATH="$BCP" \
         LXRT_ROOT="$ROOT" LXRT_GUEST_PAGE=4096 $PENV ${GENV:-} \
-        /usr/bin/perl -e 'alarm shift; exec @ARGV' "${DL:-30}" "$LXRUN" "$@" 2>/dev/null
+        /usr/bin/perl -e "$DLRUN_PL" "${DL:-30}" "$LXRUN" "$@" 2>/dev/null
 }
 # The same, for a daemon started with `gbg ... &`: the background subshell
 # execs into env, perl and lxrun, so $! is the daemon's own PID to stop.
@@ -276,7 +293,7 @@ fi
 x() {   # x DEADLINE guest-command...: the guest's output; $? is its status
     local dl=$1; shift
     ANDROID_X86_ROOT="$X86_ROOT" LXRUN="$LXRUN" \
-        /usr/bin/perl -e 'alarm shift; exec @ARGV' "$dl" scripts/run-android-x86.sh "$@" 2>&1 |
+        dlrun "$dl" scripts/run-android-x86.sh "$@" 2>&1 |
         grep -v -e '^\[lxrt\]' -e 'Abort trap'
     return "${PIPESTATUS[0]}"
 }
@@ -583,6 +600,135 @@ else bad "android-boot: the SurfaceFlinger wall moved" "$(grep -a 'SystemServerT
 rm -rf "$bst"
 }
 
+run_display() {
+# The display path (docs/ANDROID_RUNTIME_ARCHITECTURE.md, "Display";
+# benchmarks/stage27-android-display.txt): Weston (scripts/mkwestonroot.sh)
+# under lxrun, a Wayland client in another process drawing into it through a
+# memfd passed over the socket -- an aarch64 one and an x86-64 one under FEX
+# (tests/android/wl_shm_client.c) -- headless first; then, when SteamARM's X
+# server answers on :2, with the X11 backend (a macOS window for a few
+# seconds) and the pixels read back with xwd; then Android's own
+# SurfaceFlinger (x86_64 root, under FEX) presenting its boot animation
+# through Waydroid's hwcomposer into it (scripts/run-android-display.sh;
+# ANDROID_DISPLAY_SF=0 skips it). A private socket directory, binder hub and
+# property state; everything started is stopped.
+echo "== tests/android (display: Wayland under lxrun)"
+local wroot="${WESTON_ROOT:-${STEAMARM_STATE:-$HOME/SteamARM-roots}/westonroot}"
+if [ ! -x "$wroot/usr/bin/weston" ]; then
+    echo "  skip  no Weston root at $wroot (scripts/mkwestonroot.sh)"
+    return 0
+fi
+local llvm=/opt/homebrew/opt/llvm/bin/clang
+local cflags="-O2 -ffreestanding -fno-stack-protector -fno-builtin -nostdlib -static-pie -fPIE -fuse-ld=lld"
+# shellcheck disable=SC2086
+if ! "$llvm" --target=aarch64-linux-gnu $cflags -o build/wl_shm_client.aarch64 tests/android/wl_shm_client.c 2>/dev/null ||
+   ! "$llvm" --target=x86_64-linux-gnu $cflags -o build/wl_shm_client.x86_64 tests/android/wl_shm_client.c 2>/dev/null; then
+    bad "build wl_shm_client" "llvm clang"
+    return 0
+fi
+local have_x86=0
+[ -x "$X86_ROOT/usr/lib/lxrt-emu/FEX" ] && have_x86=1
+cp build/wl_shm_client.aarch64 "$wroot/tmp/wl_shm_client"
+[ "$have_x86" = 1 ] && cp build/wl_shm_client.x86_64 "$X86_ROOT/data/local/tmp/wl_shm_client"
+local xdg=/dev/shm/steamarm-wltest-$$ sock=wayland-0 out rc n
+export WESTON_XDG=$xdg WESTON_SOCKET=$sock
+wc_() {   # a guest of the Weston root, pointed at this Weston
+    local dl=$1; shift
+    dlrun "$dl" scripts/run-weston.sh client "$@" 2>&1 | grep --line-buffered -v '^\[lxrt\]'
+    return "${PIPESTATUS[0]}"
+}
+x86c() {  # a guest of the x86_64 Android root under FEX, pointed at it
+    local dl=$1; shift
+    ANDROID_X86_ROOT="$X86_ROOT" LXRUN="$LXRUN" ANDROID_X86_GENV="XDG_RUNTIME_DIR=$xdg WAYLAND_DISPLAY=$sock" \
+        dlrun "$dl" scripts/run-android-x86.sh "$@" 2>&1 | grep --line-buffered -v '^\[lxrt\]'
+    return "${PIPESTATUS[0]}"
+}
+
+# 1. Headless: the protocol, and buffers shared between processes.
+if out=$(scripts/run-weston.sh start --headless --kiosk 2>&1); then
+    out=$(wc_ 30 /usr/bin/wayland-info)
+    local need="wl_compositor wl_subcompositor wl_shm xdg_wm_base wl_output wp_presentation wp_viewporter"
+    local miss="" i
+    for i in $need; do grep -q "interface: '$i'" <<<"$out" || miss="$miss $i"; done
+    if [ -z "$miss" ]; then
+        ok "Weston (headless, pixman) under lxrun: wayland-info lists $(grep -c "interface:" <<<"$out") globals, among them the ones hwcomposer.waydroid needs ($need; wl_seat comes with the X11 backend)"
+    else bad "wayland-info" "missing:$miss"; fi
+    out=$(wc_ 60 /tmp/wl_shm_client -n 60); rc=$?
+    if [ "$rc" -eq 0 ] && grep -q '== wl_shm_client: 60 frames' <<<"$out"; then
+        ok "aarch64 wl_shm client, memfd buffers passed over the socket: $(sed -n 's/== wl_shm_client: //p' <<<"$out")"
+    else bad "aarch64 wl_shm client" "rc=$rc $(tail -2 <<<"$out" | tr '\n' ' ')"; fi
+    if [ "$have_x86" = 1 ]; then
+        out=$(x86c 90 /data/local/tmp/wl_shm_client -n 60); rc=$?
+        if [ "$rc" -eq 0 ] && grep -q '== wl_shm_client: 60 frames' <<<"$out"; then
+            ok "x86-64 wl_shm client under FEX into the aarch64 Weston: $(sed -n 's/== wl_shm_client: //p' <<<"$out")"
+        else bad "x86-64 wl_shm client under FEX" "rc=$rc $(tail -2 <<<"$out" | tr '\n' ' ')"; fi
+    fi
+    scripts/run-weston.sh stop >/dev/null
+else bad "Weston headless" "$out"; fi
+
+# 2. On the X server: the pixels, read back from Weston's X window.
+local xdpy xwin
+xdpy=$(command -v xdpyinfo || echo /opt/homebrew/bin/xdpyinfo)
+xwin=$(command -v xwininfo || echo /opt/homebrew/bin/xwininfo)
+if ! DISPLAY=:2 "$xdpy" >/dev/null 2>&1 || [ ! -x "$xwin" ]; then
+    echo "  skip  Weston on X11 (no X server on :2: scripts/run-x11-native.sh start)"
+else
+    local before after id shot="$wroot/tmp/wltest-$$.xwd" clog cpid who=aarch64
+    before=$(DISPLAY=:2 "$xwin" -root -tree | awk '/"Weston Compositor/ {print $1}' | sort)
+    if out=$(scripts/run-weston.sh start 2>&1); then
+        after=$(DISPLAY=:2 "$xwin" -root -tree | awk '/"Weston Compositor/ {print $1}' | sort)
+        id=$(comm -13 <(echo "$before") <(echo "$after") | head -1)
+        clog=$(mktemp -t wlclient)
+        if [ "$have_x86" = 1 ]; then
+            who=x86-64
+            x86c 90 /data/local/tmp/wl_shm_client -n 60 -H 6000 >"$clog" &
+        else
+            wc_ 90 /tmp/wl_shm_client -n 60 -H 6000 >"$clog" &
+        fi
+        cpid=$!
+        for n in $(seq 1 80); do grep -q '^connected' "$clog" && break; sleep 0.25; done
+        sleep 2.5
+        wc_ 30 /usr/bin/xwd -id "$id" -silent -out "/tmp/wltest-$$.xwd" >/dev/null
+        out=$(python3 tests/android/xwd_colors.py "$shot" --expect 2080c0 c04020 20c040 e0e0e0 --min-frac 0.05); rc=$?
+        wait "$cpid"
+        if [ "$rc" -eq 0 ] && grep -q '== wl_shm_client: 60 frames' "$clog"; then
+            ok "Weston's X window $id on :2 (a macOS window) shows the $who client's four colours:$(grep -o 'expect [0-9a-f]*: [0-9]* pixels' <<<"$out" | sed 's/expect //' | tr '\n' ' ')"
+        else bad "Weston on X11, pixels" "window '$id' rc=$rc $(tr '\n' ' ' <<<"$out") $(tail -1 "$clog")"; fi
+        rm -f "$shot" "$clog"
+        # 3. SurfaceFlinger's boot animation, through hwcomposer.waydroid.
+        if [ "$have_x86" = 1 ] && [ "${ANDROID_DISPLAY_SF:-1}" = 1 ]; then
+            local ddir teal=0 f0 f1 t0 t1
+            ddir=$(mktemp -d /tmp/lxrt-android-display.XXXXXX)
+            out=$(ANDROID_X86_ROOT="$X86_ROOT" ANDROID_DISPLAY_DIR="$ddir" scripts/run-android-display.sh start 2>&1)
+            for n in $(seq 1 40); do
+                wc_ 30 /usr/bin/xwd -id "$id" -silent -out "/tmp/wltest-$$.xwd" >/dev/null
+                python3 tests/android/xwd_colors.py "$shot" --expect 167c80 --min-frac 0.002 >/dev/null && { teal=1; break; }
+                sleep 1
+            done
+            flips() {   # SurfaceFlinger's page-flip count (transaction 1013; AID_SYSTEM may ask)
+                ANDROID_X86_ROOT="$X86_ROOT" LXRUN="$LXRUN" \
+                ANDROID_X86_GENV="LXRT_BINDER_DIR=$ddir/binder LXRT_PROPERTY_DIR=$ddir/props LXRT_BINDER_UID=1000" \
+                    perl -e 'alarm 30; exec @ARGV' scripts/run-android-x86.sh /system/bin/service call SurfaceFlinger 1013 2>/dev/null |
+                    sed -n 's/.*Parcel(\([0-9a-f]*\) .*/\1/p'
+            }
+            f0=$(flips); t0=$(date +%s); sleep 5; f1=$(flips); t1=$(date +%s)
+            if [ "$teal" = 1 ] && [ -n "$f0" ] && [ -n "$f1" ] && [ "$t1" -gt "$t0" ]; then
+                ok "Android SurfaceFlinger (x86_64, FEX) presents the LineageOS boot animation in Weston's window: $(( (16#$f1 - 16#$f0) / (t1 - t0) )) page flips/s (SwiftShader GLES, gralloc default, wl_shm)"
+            else bad "SurfaceFlinger boot animation" "teal=$teal flips '$f0' '$f1' $(tail -3 <<<"$out" | tr '\n' ' ')"; fi
+            ANDROID_X86_ROOT="$X86_ROOT" ANDROID_DISPLAY_DIR="$ddir" scripts/run-android-display.sh stop >/dev/null
+            sleep 2
+            rm -f "$shot"
+            rm -rf "$ddir"
+        fi
+        scripts/run-weston.sh stop >/dev/null
+    else bad "Weston on X11" "$out"; fi
+fi
+rm -f "$wroot/tmp/wl_shm_client"
+[ "$have_x86" = 1 ] && rm -f "$X86_ROOT/data/local/tmp/wl_shm_client"
+rm -rf "/tmp/lxrt-shm-$(id -u)/${xdg#/dev/shm/}"
+unset WESTON_XDG WESTON_SOCKET
+}
+
 run_arm64
 run_x86_64
 
@@ -627,6 +773,13 @@ if [ -n "$ready" ] && [ -f "$STAGE/usr/include/linux/android/binder.h" ] && [ -n
     out=$(GENV="$BENV" DL=20 g /system/bin/service call steamarm.test 1 i32 41)
     grep -q 'Result: Parcel(00000000 0000002a' <<<"$out" && ok "service call steamarm.test 1 i32 41 -> 42" \
         || bad "service call i32" "$out"
+    # LXRT_BINDER_UID: the uid binder peers see (getCallingUid), as init's
+    # `user` line gives a service; without it, the Mac's (runtime/binder.c).
+    out=$(GENV="$BENV LXRT_BINDER_UID=1003" DL=20 g /system/bin/service call steamarm.test 1 i32 7)
+    if grep -q 'Result: Parcel(00000000 00000008' <<<"$out" && grep -q 'call 1: 7 -> 8 (from pid [0-9]* uid 1003)' "$svclog" &&
+       grep -q "call 1: 41 -> 42 (from pid [0-9]* uid $(id -u))" "$svclog"; then
+        ok "LXRT_BINDER_UID=1003: the service sees sender_euid 1003 (the Mac's $(id -u) without it)"
+    else bad "LXRT_BINDER_UID" "$out / $(grep 'call 1' "$svclog" | tr '\n' ' ')"; fi
     want=$(python3 -c "import sys; d=open(sys.argv[1],'rb').read(); print('%08x %08x' % (len(d), sum(d)))" "$ROOT/system/etc/hosts")
     out=$(GENV="$BENV" DL=20 g /system/bin/service call steamarm.test 2 fd /system/etc/hosts)
     grep -q "Result: Parcel(00000000 $want" <<<"$out" && ok "service call ... fd /system/etc/hosts: the service read it through the passed descriptor ($want)" \
@@ -735,6 +888,8 @@ for d in "$pdir" "$pdir2"; do
 done
 [ -e "$pdir/service.pid" ] || [ -e "$pdir2/service.pid" ] && bad "property services still running" "$pdir $pdir2"
 rm -rf "$pdir" "$pdir2"
+
+run_display
 
 echo
 summary="== $PASS passed, $FAIL failed"

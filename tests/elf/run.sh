@@ -1242,6 +1242,36 @@ else
     echo "  skip  BINDER_IPC (no $STAGE with linux/android/binder.h)"
 fi
 
+# SIMD_SYSCALL: a syscall preserves v0-v31, FPSR and NZCV, as on Linux
+# (runtime/trampoline.S). Compilers keep values in vector registers and the
+# flags across an inline `svc`; the dispatcher is Darwin C code that clobbers
+# both. Freestanding: needs only Homebrew's llvm clang and lld.
+if err=$(/opt/homebrew/opt/llvm/bin/clang --target=aarch64-linux-gnu -O2 -ffreestanding -fno-stack-protector \
+             -fno-builtin -nostdlib -static-pie -fPIE -fuse-ld=lld --ld-path=$CROSS_LD \
+             -o build/simd_syscall tests/elf/simd_syscall.c 2>&1); then
+    out=$(deadline 60 ./build/lxrun build/simd_syscall 2>&1); rc=$?
+    if [ "$rc" -eq 0 ] && grep -q '== simd_syscall: 3 ok, 0 mal' <<<"$out"; then
+        ok "SIMD_SYSCALL: v0-v31 over 2000 syscall rounds, FPSR, all 16 NZCV values survive a syscall ($(grep -o 'getpid: .*' <<<"$out"))"
+    else bad "SIMD_SYSCALL" "rc=$rc $(grep -E 'MAL|round|==' <<<"$out" | tr '\n' ' ')"; fi
+else bad "build simd_syscall" "$err"; fi
+
+# SHM_MREMAP: growing a MAP_SHARED file mapping maps more of the file
+# (runtime/mremap.c, remap_shared_file): a Wayland compositor's wl_shm pool
+# grown with MREMAP_MAYMOVE sees what the client writes past the old end.
+# At 16 KiB and 4 KiB guest pages.
+if [ -f "$STAGE/usr/lib64/libc.a" ] && [ -n "$GCCDIR" ]; then
+    if err=$(glibc_cc -static-pie -O2 -o build/shm_mremap tests/elf/shm_mremap.c); then
+        out16=$(deadline 60 ./build/lxrun "$PWD/build/shm_mremap" 2>&1); rc16=$?
+        out4=$(LXRT_GUEST_PAGE=4096 deadline 60 ./build/lxrun "$PWD/build/shm_mremap" 2>&1); rc4=$?
+        if [ "$rc16" -eq 0 ] && [ "$rc4" -eq 0 ] &&
+           grep -q '== shm mremap: ok' <<<"$out16" && grep -q '== shm mremap: ok' <<<"$out4"; then
+            ok "SHM_MREMAP: $(grep -c '^  ok ' <<<"$out16") checks at 16 and 4 KiB pages (MAYMOVE grow, file-backed past the old end, another process's stores, in place, shrink, FIXED)"
+        else bad "SHM_MREMAP" "rc=$rc16/$rc4 $(grep -E 'MAL|lxrt\] mremap' <<<"$out16$out4" | head -4 | tr '\n' ' ')"; fi
+    else bad "build shm_mremap" "$err"; fi
+else
+    echo "  skip  SHM_MREMAP (no $STAGE)"
+fi
+
 echo
 summary="== $PASS passed, $FAIL failed"
 [ "$XFAIL" -eq 0 ] || summary="$summary ($XFAIL expected failures)"

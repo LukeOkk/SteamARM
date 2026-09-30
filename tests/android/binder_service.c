@@ -13,7 +13,7 @@
 //
 // Registers as "steamarm.test" (IServiceManager::addService, code 3) and
 // serves, as interface "steamarm.test.IEcho":
-//   1  i32 N           -> N + 1
+//   1  i32 N           -> N + 1 (logs the caller's pid and uid: sender_euid)
 //   2  fd F            -> the number of bytes read from F, and their sum
 //   3                  -> replies, then exits (servicemanager sees it die)
 // plus INTERFACE_TRANSACTION and PING_TRANSACTION, as BBinder would.
@@ -201,7 +201,7 @@ static int handle(const uint8_t *rb, size_t got, int *reply_status, bool *quit)
                 int32_t v = r_i32(&r);
                 p_i32(&rep, 0);
                 p_i32(&rep, v + 1);
-                printf("call 1: %d -> %d (from pid %d)\n", v, v + 1, t.sender_pid);
+                printf("call 1: %d -> %d (from pid %d uid %u)\n", v, v + 1, t.sender_pid, t.sender_euid);
                 put_reply(&out, &rep, false, 0);
             } else if (t.code == FIRST_CALL_TRANSACTION + 1 && t.offsets_size >= 8) {
                 struct flat_binder_object o;

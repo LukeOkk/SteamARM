@@ -63,7 +63,7 @@ intercept either, and leaving either alone fails *silently*.
 
 | instruction | problem | replacement | cost |
 |---|---|---|---|
-| `svc #0` | Darwin ignores the SVC immediate and dispatches on `x16`, so a Linux syscall runs an arbitrary Darwin one | branch to a trampoline that saves x0–x30 and calls the dispatcher | 68 ns |
+| `svc #0` | Darwin ignores the SVC immediate and dispatches on `x16`, so a Linux syscall runs an arbitrary Darwin one | branch to a trampoline that saves x0–x30, v0–v31, FPSR and NZCV (Linux preserves them all across a syscall; the dispatcher is Darwin C code) and calls the dispatcher | 68 ns (stage 1); 23.5 ns per getpid on an M4, 18.8 before the vector/flag save (stage 27) |
 | `mrs Xt, CTR_EL0` | Darwin traps it at EL0, for its own code too; every icache flush reads it | branch to two instructions that materialise a synthesised value | — |
 | `mrs Xt, TPIDR_EL0` | Darwin clobbers `TPIDR_EL0` on every context switch, so the guest loses its thread pointer | branch to a 3-instruction read of a Darwin TSD slot | 2.34 ns |
 | `msr TPIDR_EL0, Xt` | same | branch to a store into that slot | — |

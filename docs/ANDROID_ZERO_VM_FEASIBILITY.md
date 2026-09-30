@@ -579,6 +579,15 @@ Animation context id is shown inside the X window through CALayerHost, with
 no copy (MEASURED, `benchmarks/stage12-native-present.txt`). SysV shared
 memory for MIT-SHM works (`runtime/sysv_ipc.c`, stage 24 Heroic).
 
+**Stage 27 (MEASURED, `benchmarks/stage27-android-display.txt`,
+`docs/ANDROID_RUNTIME_ARCHITECTURE.md` "Display"):** Waydroid's own
+composer works unchanged against Weston running under lxrun: the x86_64
+image's SurfaceFlinger (under FEX, SwiftShader, gralloc "default", memfd
+buffers) presents its boot animation through `hwcomposer.waydroid` as
+`wl_shm` buffers to Weston, whose X11 window on :2 is a macOS window, at 57
+frames/s. So the list below is now an optimisation (fewer processes and
+copies), not a prerequisite; the GPU path (3.11) still is one.
+
 **What SteamARM needs.** HYPOTHESIS:
 
 1. A composer HAL ("hwcomposer.steamarm") that is an X11 client: a CPU
