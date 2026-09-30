@@ -1,5 +1,6 @@
 #include "timerfd_signalfd.h"
 #include "lxrt.h"
+#include "android_ids.h"
 #include <sys/event.h>
 #include <errno.h>
 #include <fcntl.h>
@@ -101,9 +102,14 @@ static int create(int kind, int flags, clockid_t clock)
 // absolute deadline the guest computed from ITS clock is only meaningful
 // against that clock. Darwin's CLOCK_MONOTONIC is a different base (measured
 // 3.8 s apart here) and ABSTIME never fired.
+// `clock` is the guest's own clock id (0 REALTIME, 1 MONOTONIC, 7 BOOTTIME,
+// 8/9 their _ALARM forms): BOOTTIME is not MONOTONIC here, it counts the
+// Mac's sleep (lxrt_guest_clock_ns), and AlarmManagerService arms its
+// elapsed-realtime timers with BOOTTIME deadlines -- measured against
+// MONOTONIC they came due as much later as the Mac had slept since boot.
 static ticks now(clockid_t clock)
 {
-    return (ticks)lxrt_guest_clock_ns(clock == CLOCK_REALTIME ? 0 : 1);
+    return (ticks)lxrt_guest_clock_ns((long)clock);
 }
 static ticks to_ticks(struct ltime t) { return (ticks)t.sec * NS + t.nsec; }
 static struct ltime to_time(ticks t)
@@ -130,15 +136,29 @@ static int arm(int fd, struct state *s)
 }
 long lxrt_timerfd_create(int clockid, int flags)
 {
-    if ((flags & ~(NONBLOCK | CLOEXEC)) || (clockid != 0 && clockid != 1 && clockid != 7))
+    // CLOCK_REALTIME 0, MONOTONIC 1, BOOTTIME 7, REALTIME_ALARM 8,
+    // BOOTTIME_ALARM 9. The alarm clocks are their base clocks that would
+    // also wake a suspended machine; a Mac guest cannot suspend anything, so
+    // they are the base clocks here. Linux wants CAP_WAKE_ALARM (35) for
+    // them (fs/timerfd.c): Android's AlarmManagerService makes one of each
+    // in system_server, which has it, and dies without them ("kernel does
+    // not support timerfd_create() with alarm timers", MEASURED at stage 28).
+    if ((flags & ~(NONBLOCK | CLOEXEC)) ||
+        (clockid != 0 && clockid != 1 && clockid != 7 && clockid != 8 && clockid != 9))
         return LERR(EINVAL);
+    if ((clockid == 8 || clockid == 9) && !lxrt_aids_capable(35))
+        return LERR(EPERM);
     pthread_mutex_lock(&lock);
-    int fd = create(1, flags, clockid == 0 ? CLOCK_REALTIME : CLOCK_MONOTONIC);
+    int fd = create(1, flags, (clockid_t)clockid);
     pthread_mutex_unlock(&lock); return fd;
 }
 long lxrt_timerfd_settime(int fd, int flags, const void *in, void *out)
 {
-    if (flags & ~1) return LERR(EINVAL);
+    // TFD_TIMER_ABSTIME 1, TFD_TIMER_CANCEL_ON_SET 2 (Linux's
+    // TFD_SETTIME_FLAGS). CANCEL_ON_SET asks for ECANCELED when the wall
+    // clock is set; it is accepted and never fires: the runtime sees no
+    // clock change (AlarmManagerService arms one and dies if the call fails).
+    if (flags & ~3) return LERR(EINVAL);
     if (!in) return LERR(EFAULT);
     struct lspec spec; memcpy(&spec, in, sizeof(spec));
     if (!valid(spec.interval) || !valid(spec.value)) return LERR(EINVAL);
@@ -264,7 +284,7 @@ long lxrt_signalfd4(int fd, const uint64_t *mask, size_t size, int flags)
     m &= ~((UINT64_C(1) << 8) | (UINT64_C(1) << 18));
     pthread_mutex_lock(&lock);
     bool fresh = fd == -1;
-    if (fresh) fd = create(2, flags, CLOCK_MONOTONIC);
+    if (fresh) fd = create(2, flags, (clockid_t)1);
     if (fd < 0 && fresh) { pthread_mutex_unlock(&lock); return fd; }
     struct state *s = lookup(fd, 2);
     if (!s) { pthread_mutex_unlock(&lock); return badfd(fd); }

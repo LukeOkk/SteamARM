@@ -319,6 +319,45 @@ static void plan_writes_sp(struct x18_plan *p, uint32_t j, uint64_t site, bool s
     p->verdict = X18_OK;
 }
 
+/* `br x18` without touching any general register. Up to 7492467 it went through
+ * x16 like blr: V8's TurboFan keeps w16 live across a jump table dispatched
+ * with `adr x18; add x18, x18, x0, lsl #2; br x18`, read it back as the
+ * target address and built broken graphs (Heroic, the Node reproducer:
+ * CHECK failure in CFGBuilder::ConnectBlocks, benchmarks/stage28-keep-x18.txt).
+ * The branch now goes through the hardware x18 itself, loaded from the
+ * virtual one as the last thing before the branch; x18.h says how the
+ * runtime recovers when the kernel zeroes it in between (signal.c). */
+static void plan_br(struct x18_plan *p, unsigned slot_off) {
+    unsigned imm = slot_off / 8;
+    emit(p, 0xa9bf47f0);                          /* 0 stp x16, x17, [sp, #-16]! */
+    emit(p, 0xd53bd071);                          /* 1 mrs x17, tpidrro_el0 */
+    emit(p, 0x927df231);                          /* 2 and x17, x17, #~7 */
+    emit(p, 0xf9400000 | (imm << 10) | (17 << 5) | 16); /* 3 ldr x16, [x17, #slot]: target */
+    emit(p, 0x10000000 | (8u << 5) | 17);         /* 4 adr x17, D (+32) */
+    emit(p, 0xa9bf43f1);                          /* 5 stp x17, x16, [sp, #-16]!: {D, target} */
+    emit(p, 0x910043f1);                          /* 6 add x17, sp, #16 */
+    emit(p, 0xa9404630);                          /* 7 ldp x16, x17, [x17]: guest x16, x17 */
+    emit(p, 0x910083ff);                          /* 8 add sp, sp, #32: the mark is below sp */
+    emit(p, 0xd53bd072);                          /* 9  A mrs x18, tpidrro_el0 */
+    emit(p, 0x927df252);                          /* 10 B and x18, x18, #~7 */
+    emit(p, 0xf9400252 | (imm << 10));            /* 11 C ldr x18, [x18, #slot] */
+    emit(p, 0xd61f0240);                          /* 12 D br x18 */
+    p->terminal = true;
+    p->verdict = X18_OK;
+}
+
+bool lxrt_x18_br_tail(const uint32_t w[4]) {
+    return w[0] == 0xd53bd072 && w[1] == 0x927df252 &&
+           (w[2] & 0xffc003ffu) == 0xf9400252 && w[3] == 0xd61f0240;
+}
+
+unsigned lxrt_x18_br_restart(const uint32_t w[7]) {
+    for (unsigned k = 0; k < 4; ++k)             /* pc = A + 4k */
+        if (lxrt_x18_br_tail(w + 3 - k))
+            return 36 + 4 * k;                   /* A is word 9 */
+    return 0;
+}
+
 void lxrt_x18_plan(uint32_t i, uint64_t site, uint64_t tramp,
                    unsigned slot_off, unsigned tls_off, struct x18_plan *p) {
     memset(p, 0, sizeof(*p));
@@ -337,10 +376,16 @@ void lxrt_x18_plan(uint32_t i, uint64_t site, uint64_t tramp,
     }
     if ((slot_off & 7) || slot_off >= 32768 || (tls_off & 7) || tls_off >= 32768 ||
         (site & 3) || (tramp & 3)) { reject(p, "imm overflow"); return; }
+    if (i == 0xd61f0240) { /* br x18 */
+        plan_br(p, slot_off);
+        return;
+    }
     if (cls == X18_CLS_BR) {
-        /* x18 belongs to Darwin. Use the ABI's intra-procedure-call scratch
-         * x16 for the guest target, leaving the host's physical x18 intact.
-         * A BLR must expose the original guest return PC in x30. */
+        /* blr x18 / ret x18: a call or a return, where x16 (IP0) is dead by
+         * the procedure call standard, so it carries the guest target. A BLR
+         * must expose the original guest return PC in x30. A plain `br x18`
+         * is not a call (a jump table inside a function) and keeps x16:
+         * plan_br. */
         emit(p, 0xa9bf47f0); /* stp x16, x17, [sp, #-16]! */
         emit(p, 0xd53bd071); /* mrs x17, tpidrro_el0 */
         emit(p, 0x927df231); /* and x17, x17, #~7 */
@@ -494,6 +539,7 @@ size_t lxrt_x18_tramp_bytes(uint32_t i) {
     int cls;
     (void)lxrt_x18_gpr_fields(i, &sb, &sd, &cls);
     if (sd && reg_at(i, 0) == 31) return 108; /* plan_writes_sp: 27 words */
+    if (i == 0xd61f0240) return 4 * X18_BR_TRAMP_WORDS; /* plan_br */
     if (cls == X18_CLS_BR) return 44; /* stack, TSD, four MOVs, branch */
     if (cls == X18_CLS_LDST_LITERAL) return 48; /* four MOVs + load + seven */
     if (cls == X18_CLS_ADR || cls == X18_CLS_CBZ || cls == X18_CLS_TBZ) return 44;

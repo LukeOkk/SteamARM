@@ -357,7 +357,7 @@ struct ApplicationCoreTests {
                                                 environmentID: HeroicARM64.root.id)
         check(heroicPlan.runner == .native && !heroicPlan.usesVirtualMachine, "Heroic ARM64 runs natively")
         check(HeroicARM64.root.guestRoot == "/tmp/lxrt-armroot", "Heroic lives in the Fedora ARM64 root")
-        check(HeroicARM64.command() == ["/opt/apps/heroic/Heroic-2.22.3-linux-arm64/heroic", "--no-sandbox", "--disable-gpu", "--js-flags=--no-opt"],
+        check(HeroicARM64.command() == ["/opt/apps/heroic/Heroic-2.22.3-linux-arm64/heroic", "--no-sandbox", "--disable-gpu"],
               "Heroic command line")
         check(HeroicARM64.env["HOME_IN_GUEST"] == "/tmp/heroichome" && HeroicARM64.env["LXRT_X18_ALL_TEXT"] == "/opt/apps/heroic/",
               "Heroic environment")
@@ -461,13 +461,30 @@ struct ApplicationCoreTests {
         check(AndroidApps.card(result: failed, info: apk) == nil, "no card for a refused install")
         check(AndroidApps.errorMessage(code: "different-signer", detail: nil).contains("otro certificado"), "signer error in Spanish")
         check(AndroidApps.errorMessage(code: "downgrade", detail: "x").hasSuffix("(x)."), "error detail")
-        let reason = AndroidApps.launchUnavailableReason
-        check(reason.prefix(1).uppercased() + reason.dropFirst()
-              == "El entorno Android de SteamARM todavía no ejecuta apps (docs/ANDROID_ZERO_VM_FEASIBILITY.md)",
-              "the card's reason, as shown")
-        check(AndroidApps.unavailableReason(card?.info) == reason, "an ARM64 app: the runtime is the only reason")
-        check(AndroidApps.unavailableReason(AndroidAppInfo(abis: ["armeabi-v7a"])).hasPrefix(reason)
-              && AndroidApps.unavailableReason(AndroidAppInfo(abis: ["armeabi-v7a"])).contains("32 bits"), "32-bit ARM adds why")
+        // Opening (benchmarks/stage28-android-apk.txt): the session runs dex-only
+        // apps and apps with x86_64 code; arm64-v8a-only code meets the ART heap
+        // wall, 32-bit ARM has no AArch32, 32-bit x86 is not run by the session.
+        check(AndroidApps.unavailableReason(card?.info) == nil && AndroidApps.runsInSession(card?.info),
+              "F-Droid (arm64-v8a and x86_64): opens in the session")
+        func info(_ abis: [String], minSdk: String? = "21") -> AndroidAppInfo {
+            AndroidAppInfo(package: "org.example.app", minSdk: minSdk, abis: abis)
+        }
+        check(AndroidApps.unavailableReason(info([])) == nil, "dex only: opens")
+        check(AndroidApps.unavailableReason(info(["x86_64"])) == nil, "x86_64 only: opens")
+        let arm64Only = AndroidApps.unavailableReason(info(["arm64-v8a"])) ?? ""
+        check(arm64Only.contains("ARM64") && arm64Only.contains("4 GiB") && arm64Only.contains("ANDROID_RUNTIME_ARCHITECTURE"),
+              "arm64-v8a only: disabled with the ART heap wall")
+        check(AndroidApps.unavailableReason(info(["arm64-v8a", "armeabi-v7a"]))?.contains("ARM64") == true,
+              "arm64-v8a and 32-bit ARM: still the heap wall")
+        check(AndroidApps.unavailableReason(info(["armeabi-v7a"]))?.contains("32 bits") == true, "32-bit ARM says why")
+        check(AndroidApps.unavailableReason(info(["x86"]))?.contains("x86 de 32 bits") == true, "32-bit x86 says why")
+        check(AndroidApps.unavailableReason(info(["mips"]))?.contains("no admitida") == true, "other ABIs")
+        check(AndroidApps.unavailableReason(info([], minSdk: "33"))?.contains("API 33") == true, "minSdk above Android 11")
+        check(AndroidApps.unavailableReason(info([], minSdk: "Baklava"))?.contains("preliminar") == true, "a preview minSdk")
+        check(AndroidApps.unavailableReason(AndroidAppInfo(abis: [])) != nil, "no package: disabled")
+        check(AndroidApps.unavailableReason(nil) != nil, "no Android info: disabled")
+        check(AndroidABI.arm64.label(abis: ["arm64-v8a", "x86_64"]).contains("FEX")
+              && AndroidABI.arm64.label(abis: ["arm64-v8a"]).contains("no puede"), "ABI labels say what the session does")
         // AppEntry.android: every field optional, so a partial object decodes.
         let partialInfo = try JSONDecoder().decode(AndroidAppInfo.self, from: Data(#"{"package": "a.b"}"#.utf8))
         check(partialInfo.package == "a.b" && partialInfo.verdict == AndroidABI.none, "partial Android info decodes")

@@ -1,0 +1,274 @@
+Stage 28 -- an APK on the Mac's screen: the x86_64 Android root boots to sys.boot_completed=1 with its display, pm install, am start, the app's window in a macOS window, zero VM (2026-09-30)
+===================================================================================================================================================================================================
+
+ZERO-VM. No virtual machine, no guest kernel. Host: Mac mini M4, 16 GB,
+macOS 27.0. Every Android program below is an unmodified x86-64 file of
+Waydroid's LineageOS 18.1 x86_64 image run by SteamARM's FEX under lxrun,
+as an ordinary macOS process; Weston is Fedora's aarch64 build under lxrun;
+its X11 window on SteamARM's X server (:2) is a macOS window. No account
+was signed in to, no Google component fetched, no Steam client started,
+scripts/run-app.sh was not called with an app id nor with --stop. Other
+agents ran guests on this Mac at the same time; experiments that wrote to an
+Android root used APFS clones (/Volumes/SteamARMAndroid/x86apk, then the
+session root /Volumes/SteamARMAndroid/session), never root-x86_64 itself,
+and private binder/property/Weston/input directories. Home paths are ~.
+Labels: MEASURED, VERIFIED IN SOURCE, HYPOTHESIS, UNKNOWN.
+
+The APK: Simple Solitaire Collection 3.13 (de.tobiasbielefeld.solitaire,
+versionCode 71, minSdk 11, targetSdk 25, no native code: dex only; F-Droid,
+GPL-3.0; ~/SteamARM-roots/android/apk-samples, stage 25), picked with
+scripts/apk-inspect.py as the sample that fits this root (API 30, x86_64):
+of the others, F-Droid, Termux and Shattered Pixel Dungeon also carry x86_64
+code (and arm64-v8a) and would run in the session too (not run here);
+meritous and the fcitx5 plugins are 32-bit ARM, arm64-only or x86-only, or
+have no launcher activity.
+
+Result
+------
+MEASURED:
+1. The display profile of scripts/android-boot.py (headless's services plus
+   Waydroid's composer HAL, its task HAL, bootanim, mediametrics, stand-ins
+   for netd and vold) reaches sys.boot_completed=1: 122.6 s on the first
+   boot of a fresh clone (first-boot dexopt), then 17-27 s warm; SurfaceFlinger
+   "Boot is finished", LOCKED_BOOT_COMPLETED and BOOT_COMPLETED broadcast,
+   Trebuchet (com.android.launcher3) and SystemUI running.
+2. `pm install` of the APK: "Success" in 5.2-6.4 s (the image's own pm and
+   installd; dexopt by dex2oat64 under FEX).
+3. `am start -W -n de.tobiasbielefeld.solitaire/.ui.GameSelector`: "Status:
+   ok", TotalTime 2482-2939 ms; `dumpsys window`: mCurrentFocus is the app's
+   window.
+4. The window is in the macOS window: `xwd -id` of Weston's X window
+   (1024x768, the Weston root's xwd under lxrun; never a desktop capture)
+   shows the app's game list (5d80f0 22.4 %, its title bar 3f51b5 8.1 %:
+   tests/android/xwd_colors.py --expect); after Android's own `input tap` on
+   "Klondike" the dump shows a Klondike deal.
+5. Input from the Mac's side reaches Android: InputFlinger opened the
+   composer's /dev/input/wl_keyboard_events and wl_pointer_events
+   (wayland_keyboard, wayland_pointer in `dumpsys input`); 40 synthetic
+   pointer motions sent to Weston's X window (tests/android/xsend_motion.py)
+   are in InputDispatcher's RecentQueue as mouse MotionEvents at the same
+   coordinates (450,340), (455,343), ... Clicks: not sent (SteamARM's X
+   server has no XTEST and Weston aborts on a synthetic button event,
+   stage28-android-reliability.txt); that a real click takes the same path is
+   a HYPOTHESIS.
+6. scripts/android-session.py does all of it: `launch <package>` from the
+   launcher's library ($STATE/android/packages/<pkg>/base.apk, put there by
+   scripts/android-pm.py) with the default settings -- a fresh APFS clone of
+   /Volumes/SteamARMAndroid/root-x86_64 as the session root, that root's own
+   FEX (stage 27's, sha256 6d4aaa58...), Weston on :2:
+     clone 0.6 s; sys.boot_completed=1 25.3 s after start; 14 unneeded apps
+     disabled 9.4 s; pm install Success 6.4 s; am start ok (TotalTime 2482
+     ms); focused 3.2 s after am start; 60 lxrun processes on the Mac.
+   Warm (`run`, as the launcher's run-app.sh starts it): 18.7 s to
+   boot_completed, "is installed (versionCode 71)", focused window 23 s after
+   start; `session.py stop` (the launcher's Detener): the session's status
+   0, nothing of it left (one idle FEXServer, which leaves by itself).
+7. The launcher's Android cards open in that session when it can run their
+   code (dex only or x86_64), and stay disabled with the reason otherwise:
+   arm64-v8a-only (the ART heap wall), 32-bit ARM, 32-bit x86, other ABIs,
+   minSdk above 30.
+
+Part 1: the two merged branches, reviewed and tested
+----------------------------------------------------
+worktree-wf_f2c065ea-b4f-1 (this stage's APK work, one untested WIP commit)
+and worktree-wf_f2c065ea-b4f-2 (reliability, stage28-android-reliability.txt)
+were merged (90a26c7, b35745f). Conflicts: both fixed the empty SCM_RIGHTS,
+SO_DOMAIN/SO_PROTOCOL and MSG_TRUNC in runtime/socket.c (the netlink-aware
+version kept; MSG_TRUNC/CTRUNC dropped in one place), and zygote_secondary
+in android-boot.py (started when the root's FEX runs i386 bionic; otherwise
+no 32-bit ABI declared). The WIP, read and then run:
+- runtime/android_ids.c: virtual file ownership. installd refused an app's
+  existing data directory whose stat did not show the app's uid ("Expected
+  path /data/data/<pkg> with owner 1000:1000 but found 501:20", the WIP's
+  note); a chown Linux allows now records the owner in the Darwin xattr
+  org.steamarm.lxrt.owner and stat/fstat/fstatat/statx report it to guests
+  with Android ids. tests/elf ANDROID_IDS (android_ids.c, extended by the
+  WIP): ok.
+- dispatch.c: "user." xattrs (UserDataPreparer's user.serial; without them
+  /data/user_de/0 was destroyed every boot, the WIP's note);
+  process_vm_readv/writev on itself (ART's SafeCopy in its fault handler:
+  without it every NullPointerException from compiled code was a SIGSEGV,
+  system_server's included). tests/android/x86_segv_ctx.c (9 ok: si_addr,
+  RIP, RSP and [RSP] as ART's handler reads them, from file, anonymous and
+  dual-mapped code and a second thread) and NullCheck.java (2000 of 2000
+  NPEs caught, -Xint and JIT) now run in tests/android/run.sh (MEASURED).
+- /proc/self/status regenerated per lookup and /proc/<pid>/status with the
+  virtual ids (Process.getUidForPid: with the Mac's 501, ActivityManager saw
+  every provider in a dying process -- the and3a clone's dropbox holds the
+  "IContentProvider.call ... on a null object reference" crashes of that).
+- propsvc.c LXRT_PROPERTY_HOST (a host .prop file loaded last, as
+  Waydroid's waydroid.prop); thread.c: a futex deadline past 64-bit
+  nanoseconds is forever (audioserver's TimeCheck aborted); timerfd
+  REALTIME_ALARM/BOOTTIME_ALARM (CAP_WAKE_ALARM) and TFD_TIMER_CANCEL_ON_SET
+  (AlarmManagerService). tests/elf/android_boot_rt.c: 25 checks with Android
+  ids, 23 without (ANDROID_BOOT_RT in tests/elf/run.sh, wired here).
+- android-boot.py: the display profile; binder stand-ins
+  (scripts/android/java/.../BinderStandIn.java: netd and dnsresolver, vold
+  and storaged, the image's own AIDL interfaces, success and empty values:
+  no network, no block devices); the audio HAL made passthrough for
+  hwservicemanager; init_user0 (user 0's DE/CE directories as vold makes
+  them); waydroid.stub_sensors_hal=1; persist.zygote.app_data_isolation=false
+  (no tmpfs here); debug.sf.nobootanimation; HOST_ABI_PROPS (x86_64 only).
+Found by running it, fixed here (each MEASURED):
+- Services ran with the Mac's "/" as working directory: pm install failed
+  with "INSUFFICIENT_STORAGE: Failed rename"
+  (PackageManagerServiceUtils.makeDirRecursive walks "data", "data/app", ...
+  relative, found none, tried mkdir "/data"). Now cwd is the root.
+- sendfile and splice were ENOSYS: "failed to write; sendfile failed:
+  ENOSYS" (PackageInstallerSession's staging copy, FileUtils.copy). Now a
+  read/write loop with Linux's offset rules (runtime/dispatch.c;
+  android_boot_rt: sendfile with and without an offset, splice file->pipe,
+  splice with no pipe EINVAL).
+- lmkd: without its socket, every oom_adj change waited 3 s for it with
+  ActivityManager's lock held (ProcessList.writeLmkd); 56 "SLOW OOM ADJ:
+  3000ms" and 3,100 "Failed to connect to lmkd" lines in the first boot, then
+  ANRs of SystemUI and the network stack and "Lost network stack" took
+  system_server down. A socket with a reader (commands dropped) makes the
+  boot 22-26 s. The one command that waits for an answer, LMK_GETKILLCNT,
+  comes only from dumps (VERIFIED IN SOURCE, the image's services.jar:
+  ActivityManagerService.reportLmkKillAtOrBelow and dumpLmkLocked).
+- AlarmManager "Too many (100000) false wakeups": BOOTTIME timerfds were
+  measured against MONOTONIC, and here guest BOOTTIME runs 4.3 s behind
+  guest MONOTONIC (MEASURED), so its elapsed alarms fired 4.3 s early, were
+  re-armed and fired again. The timerfd now uses the guest's own clock id
+  (android_boot_rt: an ABSTIME BOOTTIME deadline 80 ms ahead fires after
+  83-86 ms).
+- "Bad file descriptor" from BinderProxy.transactNative killed system_server
+  0-5 times per boot (5 sessions: system_server started 2, 1, 2, 5, 1
+  times; 4-141 failed binder calls logged per session) and apps more often.
+  With diagnostics added (<binder dir>/client.log; the hub's log), the
+  failing threads' channels "arrived closed at the other end" at the hub:
+  the runtime passed the hub's end of a new thread's socketpair by
+  SCM_RIGHTS and closed its own copy at once, leaving the message in flight
+  as the only reference; XNU's unix-socket garbage collection (unp_gc, run
+  by any close of a descriptor-carrying socket on the Mac) can flush such a
+  socket (HYPOTHESIS for the mechanism, from the symptom). The runtime now
+  keeps its copy until the hub has answered, and the hub keeps descriptors it
+  passes on until the receiving thread's next request. After: 3 of 3
+  sessions with no failed binder call and system_server started once each
+  (MEASURED). But the hub still received a few channels "arrived closed"
+  per boot (17 in one), and a thread whose channel that was then waited
+  forever instead of failing: the first run of tests/android/run.sh's new
+  session check had `am start -W` hang for its 300 s (MEASURED). So now the
+  hub acknowledges every thread channel it registers (BH_THREAD_ACK,
+  protocol version 2) and refuses one that arrives closed; the runtime waits
+  up to 5 s for the acknowledgement and otherwise makes a new channel (4
+  attempts, then EBADF). After: 3 sessions, no channel refused, no failed
+  call, system_server started once each (MEASURED). UNKNOWN: why a channel
+  arrived closed with the sender's copy still open (the XNU garbage
+  collection is the HYPOTHESIS that the first fix was built on; the second
+  does not depend on it).
+- The Mac's safeguard (scripts/safeguard.sh) stops every lxrun guest past 80
+  processes; Android is one per service and per app (60-80 after boot), and
+  it did so three times during this stage's runs (00:53 in the interrupted
+  session, 05:02 and 05:17 in this one), stopping the other agents' guests
+  running then too. Now it allows SAFEGUARD_ANDROID_PROCS (100) more while an
+  Android session runs (tests/launcher/safeguard.sh: 2 new checks; the
+  running safeguard, another session's, keeps the old limit until it
+  restarts), and the session disables 14 of the image's apps on its first
+  boot (camera, gallery, music, clock, contacts, backup, print, sms push,
+  DSU, deviceconfig, calendar, recorder, browser): 60 lxrun processes with
+  the app open, 55 warm (MEASURED).
+
+Part 2: the boot with a display, wall by wall (MEASURED, clone x86apk)
+----------------------------------------------------------------------
+x86apk: an APFS clone of root-x86_64 (1.2 s) with a FEX built from all of
+patches/ (scripts/build-fex-host.sh, STEAMARM_BUILD in the session's
+scratch, Release only, 43 s of ninja; FEX-emu sha256 731ec126b4cecd53...,
+byte-identical to the one the reliability session had installed in its own
+clone). Weston headless (kiosk), then with its X11 backend on :2.
+b1 (the WIP as merged): boot_completed after 122.6 s (first boot: package
+   scan, dexopt of every system app), then "Lost network stack" (TetheringService
+   start timed out under the lmkd stalls; the network stack's second instance
+   died of "Bad file descriptor"), zygote restart, "No IHealth service
+   instance" (a binder call that failed), start_count 3.
+b2 (lmkd socket, timerfd): boot_completed after 22.1 s.
+b3: pm install -> "sendfile failed: ENOSYS"; then "Failed rename" (cwd).
+b4 (sendfile, cwd): pm install Success 5.2 s, am start ok TotalTime 2849 ms,
+   the window in Weston's X window (xwd), Klondike after `input tap`.
+Loops of headless sessions, 90 s after boot each (android-session.py start
+--headless): before the binder fix 43/25/44 s and 26/24 s to boot, 1-5
+system_server starts; after it 20/23/24 s, 1 start each, no failed call.
+
+Part 3: scripts/android-session.py
+----------------------------------
+start/stop/status/install/launch/run/shell/xwd (its docstring has the
+rules). The session root /Volumes/SteamARMAndroid/session is made once
+(cp -c -R of $ANDROID_X86_ROOT, 0.6 s) and keeps the session's /data:
+installed apps and their data (not $STATE/android/data/<pkg>, which is not
+bound into it). Host state /tmp/lxrt-android-session-<uid> (sockets: short
+paths); log $STATE/logs/android-<date>.log (this program and android-boot's
+output). One session at a time: $STATE/android/session.json and a lock;
+android-boot runs in a session of its own, with --exit-with the `run`
+process, so a killed wrapper takes the boot with it. `run` ends on
+SIGTERM/SIGINT/SIGHUP, when Weston is gone (the window closed) or when the
+boot is.
+
+Part 4: the launcher
+--------------------
+AndroidApps.unavailableReason is nil for a card the session runs: dex only,
+or x86_64 native code (F-Droid-style multi-ABI APKs use their x86_64 code
+under FEX). Otherwise the reason, in Spanish, on the card, its help, the
+Información sheet and the alert; scripts/run-app.sh refuses the same cases
+(exit 2) and otherwise runs `scripts/android-session.py run <package>`
+under scripts/session.py, native windows always (a VNC setting falls back),
+no audio.sh/input.sh (the session has its own /dev/input and no sound).
+The review screen of an APK says whether it will open. Tests:
+ApplicationCoreTests (13 Android checks), run_app_dispatch.sh (49 passed),
+safeguard.sh (12 passed). The launcher itself was built (make launcher) but
+not clicked; its Abrir path is run-app.sh's, whose dry runs are tested and
+whose session part is the `run` measured above.
+
+Not done, and why
+-----------------
+- arm64-v8a-only apps: Android's arm64 ART needs its heap below 4 GiB and
+  macOS maps nothing there in an arm64 process (docs/ANDROID_RUNTIME_ARCHITECTURE.md,
+  "The ART heap wall"). Disabled with that reason.
+- 32-bit x86 apps: the display profile declares no 32-bit ABI (one zygote
+  fewer); --abi32 starts zygote_secondary with a FEX that has
+  patches/fex-lxrt-i386-bionic.patch, not measured end to end.
+- Sound (no audio in the session: the audio HAL is passthrough without a
+  PulseAudio socket unless --pulse), network (netd is a stand-in: none),
+  camera, GPU (SwiftShader on the CPU).
+- Clicks and keys from the Mac: the path is open to InputDispatcher for
+  pointer motion (MEASURED); buttons and keys were not sent (see 5 above).
+- Android's clock shows UTC (no persist.sys.timezone from the host).
+- Uninstalling a card (android-pm.py) does not uninstall it inside the
+  session root.
+- The stand-in lmkd never answers LMK_GETKILLCNT: `dumpsys activity lmk`
+  would wait (HYPOTHESIS from the source above).
+
+Final checks (MEASURED, at f9e7dff -- the code of this record; default
+lxrun build; other agents' guests running; the root-x86_64 FEX is stage
+27's, without the i386 patch, hence the i386 expected failures)
+------------------------------------------------------------------------
+make lxrt launcher: rc 0 (up to date).
+make test-launcher-core: rc 0, 64 s -- application core: all checks passed;
+  app entry: all checks passed; python unittest OK (docs records, APK
+  inspector, package manager, settings, compat); run_app_dispatch 49/0;
+  session 32/0; safeguard 12/0; guest_env 26/0; mkarmroot 25/0;
+  run_steam_arm64 10/0; 35/0.
+tests/elf/run.sh: 84 passed, 0 failed, 30 s (ANDROID_BOOT_RT: 25 checks with
+  Android ids, 23 without; ANDROID_IDS 56 checks; BINDER_IPC, BINDER_POOL,
+  SIG_STRANDED ok).
+tests/elf/run_i386.sh: 18 passed, 0 failed, 66 s.
+tests/android/run.sh (both roots): 72 passed, 0 failed, 6 expected failures
+  (arm64 dalvikvm64's heap; i386 bionic, dalvikvm32, dex2oat32 and the i386
+  binder service, the root's FEX predating patches/fex-lxrt-i386-bionic.patch;
+  the headless profile's SurfaceFlinger wall), 220 s. The session check:
+  boot_completed 19.6 s, "is installed", am start ok TotalTime 3080 ms, the
+  window focused, 24 s in all; stop left nothing.
+The run before it (at 5bd5fb4) failed the session check once: its first
+version called the shell function `deadline` through env (rc 127); the next
+(at 5bd5fb4 plus that fix) had `am start -W` hang 300 s in a fresh clone's
+first boot -- the binder channel that arrived closed, fixed by the
+acknowledgement (Part 1). A first boot of another fresh clone, headless,
+before that fix: 43 s to the focused window (MEASURED).
+
+State left on this Mac: ~/SteamARM-roots/android/packages is as it was (the
+sample installed there for the measured run was uninstalled again with
+android-pm.py); /Volumes/SteamARMAndroid/session (the session root, the
+sample installed inside Android) and /Volumes/SteamARMAndroid/sesstest
+(tests/android/run.sh's) are kept; the experiment clones x86apk and sessfb
+were deleted; logs in ~/SteamARM-roots/logs/android-*.log; SteamARM's X
+server on :2, which the first session started, left running.

@@ -27,6 +27,7 @@
 // and the dispatcher restarts under SA_RESTART with the consumed counts
 // advanced, as Linux's restart does.
 #include <errno.h>
+#include <stdarg.h>
 #include <fcntl.h>
 #include <limits.h>
 #include <mach/mach.h>
@@ -81,6 +82,7 @@ struct bfile {
 struct tchan {
     struct bfile *f;
     int fd;
+    int hub_end;        // our copy of the hub's end, until the hub has answered (tchan_get)
     bool polled;
     bool busy;
     uint64_t seq;
@@ -97,8 +99,10 @@ LXRT_FORK_SAFE(binder_g_lock, g_lock)
 static _Thread_local struct tchan t_chans[MAX_TCHAN];
 static _Thread_local int t_nchans;
 
-// Every thread channel of this process, so a fork child can close the
-// parent's (their threads do not exist in the child).
+// Every channel of this process to the hub -- each binder file's process
+// channel and each thread's -- so a fork child can close the parent's (their
+// threads do not exist in the child) and a guest close() cannot cut one
+// (lxrt_binder_owns).
 static int g_chan_fds[1024];
 static int g_nchan_fds;
 
@@ -132,6 +136,24 @@ static bool gcopy(void *dst, const void *src, size_t n)
     return kr == KERN_SUCCESS && out == n;
 }
 
+// A 32-bit guest (i386 Android under FEX's 32-bit mode) lives at host =
+// guest base + guest address, and the addresses inside binder's structures
+// -- binder_write_read's buffers, a transaction's data and offsets, a PTR
+// object's buffer -- are its own, 32 bits in 64-bit fields (Android's binder
+// ABI on a 64-bit kernel). Below 4 GiB an address is always a guest one on
+// this host (gbase.c's rule), so the base is added where this file reads or
+// writes through such an address. The other way, the hub is told the
+// receive buffer's guest address (lxrt_binder_mmap), so every address it
+// hands back (BR_TRANSACTION's data, PTR buffers in the target) is the
+// guest's. Before: "Binder ioctl to obtain version failed: Bad address"
+// and the 32-bit audio HAL ended there (benchmarks/stage28-android-
+// reliability.txt).
+static uint64_t gp(uint64_t a)
+{
+    uint64_t b = lxrt_gbase();
+    return (b && a && a < (1ull << 32)) ? a + b : a;
+}
+
 // ------------------------------------------------------------ files
 
 static struct bfile *file_get(int fd)
@@ -150,7 +172,7 @@ static void file_put(struct bfile *f)
     bool last = --f->refs == 0;
     pthread_mutex_unlock(&g_lock);
     if (!last) return;
-    if (f->chan >= 0) close(f->chan);
+    if (f->chan >= 0) { chan_unregister(f->chan); close(f->chan); }
     pthread_mutex_destroy(&f->lock);
     pthread_mutex_destroy(&f->map_lock);
     free(f);
@@ -214,6 +236,37 @@ static int hide_fd(int fd)
     }
     fcntl(fd, F_SETFD, FD_CLOEXEC);
     return fd;
+}
+
+static const char *binder_dir(void);
+
+// Why a binder call failed in a way the guest cannot explain ("Bad file
+// descriptor" from BinderProxy.transactNative with a driver that is there):
+// one line per event in <binder dir>/client.log. Guests' stderr is often
+// /dev/null (the zygote's children), so it goes to a file of the hub's
+// directory. Costs nothing on the success paths.
+static void binder_diag(const char *fmt, ...)
+{
+    const char *dir = binder_dir();
+    if (!dir) return;
+    char path[300], line[400];
+    snprintf(path, sizeof path, "%s/client.log", dir);
+    struct timespec ts;
+    clock_gettime(CLOCK_REALTIME, &ts);
+    va_list ap;
+    va_start(ap, fmt);
+    int n = snprintf(line, sizeof line, "[%ld.%03ld pid %d tid %ld] ", (long)ts.tv_sec, ts.tv_nsec / 1000000,
+                     getpid(), (long)lxrt_gettid());
+    if (n > 0 && n < (int)sizeof line) vsnprintf(line + n, sizeof line - (size_t)n, fmt, ap);
+    va_end(ap);
+    size_t l = strnlen(line, sizeof line - 2);
+    line[l++] = '\n';
+    int fd = open(path, O_WRONLY | O_APPEND | O_CREAT | O_CLOEXEC, 0600);
+    if (fd >= 0) {
+        ssize_t w = write(fd, line, l);
+        (void)w;
+        close(fd);
+    }
 }
 
 // The hub's directory. In /tmp by default, so it must be this user's own
@@ -362,9 +415,14 @@ static int send_msg(int fd, const struct bh_hdr *h, const void *pl, size_t plen,
 // Receive one message. *interrupted is set when a signal cut the wait short
 // (the caller decides what that means); fds get FD_CLOEXEC, as binder
 // installs them.
+static _Thread_local const char *t_recv_fail;
+static _Thread_local int t_recv_errno;
+
 static int recv_msg(int fd, struct bh_hdr *h, uint8_t **pl, int *fds, int *nfds,
                     bool *interrupted)
 {
+    t_recv_fail = "";
+    t_recv_errno = 0;
     *pl = NULL;
     *nfds = 0;
     union { struct cmsghdr c; char b[CMSG_SPACE(sizeof(int) * BH_MAX_FDS)]; } cm;
@@ -379,7 +437,13 @@ static int recv_msg(int fd, struct bh_hdr *h, uint8_t **pl, int *fds, int *nfds,
             if (got == 0 && interrupted) return -EINTR;
             continue;
         }
-        if (n <= 0) goto fail;
+        if (n <= 0) {
+            t_recv_errno = n < 0 ? errno : 0;
+            t_recv_fail = n < 0 ? "header recvmsg failed" : got ? "end of file in the header" : "end of file";
+            goto fail;
+        }
+        if (m.msg_flags & (MSG_CTRUNC | MSG_TRUNC))
+            binder_diag("channel %d: message flags 0x%x (truncated control data: descriptors lost)", fd, m.msg_flags);
         for (struct cmsghdr *c = CMSG_FIRSTHDR(&m); c; c = CMSG_NXTHDR(&m, c)) {
             if (c->cmsg_level != SOL_SOCKET || c->cmsg_type != SCM_RIGHTS) continue;
             int k = (int)((c->cmsg_len - CMSG_LEN(0)) / sizeof(int));
@@ -393,15 +457,19 @@ static int recv_msg(int fd, struct bh_hdr *h, uint8_t **pl, int *fds, int *nfds,
         }
         got += (size_t)n;
     }
-    if (h->len > BH_MAX_MSG) goto fail;
+    if (h->len > BH_MAX_MSG) { t_recv_fail = "message too large"; goto fail; }
     if (h->len) {
         *pl = malloc(h->len);
-        if (!*pl) goto fail;
+        if (!*pl) { t_recv_fail = "out of memory"; goto fail; }
         size_t g2 = 0;
         while (g2 < h->len) {
             ssize_t n = recv(fd, *pl + g2, h->len - g2, 0);
             if (n < 0 && errno == EINTR) continue;
-            if (n <= 0) goto fail;
+            if (n <= 0) {
+                t_recv_errno = n < 0 ? errno : 0;
+                t_recv_fail = n < 0 ? "payload recv failed" : "end of file in the payload";
+                goto fail;
+            }
             g2 += (size_t)n;
         }
     }
@@ -479,11 +547,14 @@ long lxrt_binder_open(int context, int lflags)
         struct bh_hdr ah;
         uint8_t *pl = NULL;
         int fds[BH_MAX_FDS], nfds = 0;      // recv_msg may store up to BH_MAX_FDS
-        int rr = send_msg(s, &h, &hello, sizeof hello, NULL, 0) != 0 ? -1
-                 : recv_msg(s, &ah, &pl, fds, &nfds, NULL);
+        int hs = send_msg(s, &h, &hello, sizeof hello, NULL, 0);
+        int hr = hs ? 0 : recv_msg(s, &ah, &pl, fds, &nfds, NULL);
         for (int i = 0; i < nfds; i++)      // an ack carries none
             close(fds[i]);
-        if (rr != 0 || ah.type != BH_HELLO_ACK || ah.len < sizeof(struct bh_hello_ack)) {
+        if (hs != 0 || hr != 0 || ah.type != BH_HELLO_ACK ||
+            ah.len < sizeof(struct bh_hello_ack)) {
+            binder_diag("open, attempt %d: hello %s (errno %d)", attempt + 1,
+                        hs ? "not sent" : hr ? "not answered" : "answered wrongly", errno);
             free(pl);
             close(s);
             s = -1;
@@ -499,8 +570,10 @@ long lxrt_binder_open(int context, int lflags)
         struct timeval zero = { 0, 0 };
         setsockopt(s, SOL_SOCKET, SO_RCVTIMEO, &zero, sizeof zero);
     }
-    if (s < 0)
+    if (s < 0) {
+        binder_diag("open: no hub in %s after 4 attempts", dir);
         return LERR(ENOENT);        // no driver: what an absent /dev/binder says
+    }
     if (s >= B_FDS) {
         close(s);
         return LERR(EMFILE);
@@ -510,6 +583,7 @@ long lxrt_binder_open(int context, int lflags)
     int d = dup(s);
     if (d < 0) { free(f); close(s); return LERR(errno); }
     f->chan = hide_fd(d);
+    chan_register(f->chan);
     f->context = context;
     f->naliases = 1;
     f->refs = 1;
@@ -543,6 +617,7 @@ static void tchan_drop(struct tchan *tc)
 {
     chan_unregister(tc->fd);
     close(tc->fd);
+    if (tc->hub_end >= 0) { chan_unregister(tc->hub_end); close(tc->hub_end); }
     struct bfile *f = tc->f;
     *tc = t_chans[--t_nchans];
     memset(&t_chans[t_nchans], 0, sizeof t_chans[0]);
@@ -560,30 +635,75 @@ static struct tchan *tchan_get(struct bfile *f, long *err)
         if (t_chans[i].f->closed) tchan_drop(&t_chans[i]);
         else i++;
     if (t_nchans >= MAX_TCHAN) { *err = LERR(ENOMEM); return NULL; }
-    int sv[2];
-    if (socketpair(AF_UNIX, SOCK_STREAM, 0, sv) != 0) { *err = LERR(errno); return NULL; }
-    int mine = hide_fd(sv[0]);
-    int hubs = sv[1];
-    int sz = 1 << 20;
-    setsockopt(mine, SOL_SOCKET, SO_SNDBUF, &sz, sizeof sz);
-    setsockopt(mine, SOL_SOCKET, SO_RCVBUF, &sz, sizeof sz);
-    struct bh_thread bt = { .tid = lxrt_gettid() };
-    struct bh_hdr h = { .type = BH_THREAD, .nfds = 1, .len = sizeof bt };
-    pthread_mutex_lock(&f->lock);
-    int r = send_msg(f->chan, &h, &bt, sizeof bt, &hubs, 1);
-    pthread_mutex_unlock(&f->lock);
-    close(hubs);
-    if (r != 0) {
+    int mine = -1, hubs = -1;
+    for (int attempt = 1; ; attempt++) {
+        int sv[2];
+        if (socketpair(AF_UNIX, SOCK_STREAM, 0, sv) != 0) { *err = LERR(errno); return NULL; }
+        mine = hide_fd(sv[0]);
+        // The hub's end goes to the hub by SCM_RIGHTS, and this process keeps
+        // a copy of it until the hub has acknowledged the channel. Closed at
+        // once, the end in flight had no reference but the message, and
+        // XNU's unix-socket garbage collection (unp_gc) can flush such a
+        // socket (HYPOTHESIS for the mechanism): the hub received a channel
+        // already at end of file, dropped the thread, and the guest's call
+        // failed with EBADF ("Bad file descriptor" from
+        // BinderProxy.transactNative; system_server died of it several times
+        // a boot, MEASURED at stage 28).
+        hubs = hide_fd(sv[1]);
+        int sz = 1 << 20;
+        setsockopt(mine, SOL_SOCKET, SO_SNDBUF, &sz, sizeof sz);
+        setsockopt(mine, SOL_SOCKET, SO_RCVBUF, &sz, sizeof sz);
+        struct bh_thread bt = { .tid = lxrt_gettid() };
+        struct bh_hdr h = { .type = BH_THREAD, .nfds = 1, .len = sizeof bt };
+        pthread_mutex_lock(&f->lock);
+        int r = send_msg(f->chan, &h, &bt, sizeof bt, &hubs, 1);
+        pthread_mutex_unlock(&f->lock);
+        if (r != 0) {
+            binder_diag("new thread channel: send on the file's channel %d failed: %s", f->chan, strerror(-r));
+            close(hubs);
+            close(mine);
+            *err = LERR(EBADF);
+            return NULL;
+        }
+        // The hub acknowledges the channel on it, and refuses one that reaches
+        // it already at end of file: a few per boot even with our copy held
+        // (cause UNKNOWN, benchmarks/stage28-android-apk.txt); the thread's
+        // first call then waited forever (am start -W for 300 s, MEASURED).
+        // A new channel instead, a few times at most.
+        bool acked = false;
+        for (int waited = 0; waited < 5000 && !acked; ) {
+            struct pollfd pfd = { mine, POLLIN, 0 };
+            int pr = poll(&pfd, 1, 100);
+            if (pr < 0 && errno == EINTR) continue;
+            waited += 100;
+            if (pr <= 0) continue;
+            struct bh_hdr ah;
+            uint8_t *apl = NULL;
+            int afds[BH_MAX_FDS], anfds = 0;
+            if (recv_msg(mine, &ah, &apl, afds, &anfds, NULL) != 0) break;
+            free(apl);
+            for (int i = 0; i < anfds; i++) close(afds[i]);
+            acked = ah.type == BH_THREAD_ACK;
+            if (!acked) break;
+        }
+        if (acked) break;
+        close(hubs);
         close(mine);
-        *err = LERR(EBADF);
-        return NULL;
+        if (attempt >= 4) {
+            binder_diag("new thread channel: not acknowledged by the hub after %d attempts", attempt);
+            *err = LERR(EBADF);
+            return NULL;
+        }
+        binder_diag("new thread channel: not acknowledged by the hub (attempt %d); another one", attempt);
     }
+    close(hubs);                        // acknowledged: the hub has its end
+    hubs = -1;
     chan_register(mine);
     pthread_mutex_lock(&g_lock);
     f->refs++;
     pthread_mutex_unlock(&g_lock);
     struct tchan *tc = &t_chans[t_nchans++];
-    *tc = (struct tchan){ .f = f, .fd = mine };
+    *tc = (struct tchan){ .f = f, .fd = mine, .hub_end = hubs };
     return tc;
 }
 
@@ -620,8 +740,11 @@ static long roundtrip(struct tchan *tc, uint32_t type, const void *pl, size_t pl
     struct bfile *f = tc->f;
     uint64_t seq = ++tc->seq;
     struct bh_hdr h = { .type = type, .nfds = (uint32_t)nfds, .len = plen, .seq = seq };
-    if (send_msg(tc->fd, &h, pl, plen, fds, nfds) != 0)
+    int sr = send_msg(tc->fd, &h, pl, plen, fds, nfds);
+    if (sr != 0) {
+        binder_diag("request type %u on thread channel %d: send failed: %s", type, tc->fd, strerror(-sr));
         return LERR(EBADF);
+    }
     bool cancelled = false;
     while (1) {
         struct bh_hdr rh;
@@ -635,8 +758,11 @@ static long roundtrip(struct tchan *tc, uint32_t type, const void *pl, size_t pl
             }
             continue;
         }
-        if (r != 0)
+        if (r != 0) {
+            binder_diag("request type %u on thread channel %d: no answer: %s%s%s", type, tc->fd, t_recv_fail,
+                        t_recv_errno ? ", " : "", t_recv_errno ? strerror(t_recv_errno) : "");
             return LERR(EBADF);             // the hub is gone: no driver any more
+        }
         if (rh.type != BH_RESULT || rh.seq != seq || rh.len < sizeof(struct bh_result)) {
             free(out->pl);
             for (int i = 0; i < out->nfds; i++) close(out->fds[i]);
@@ -644,6 +770,11 @@ static long roundtrip(struct tchan *tc, uint32_t type, const void *pl, size_t pl
             out->nfds = 0;
             if (rh.seq != seq) continue;    // a stale answer: keep waiting
             return LERR(EIO);
+        }
+        if (tc->hub_end >= 0) {         // the hub has its end: ours can go
+            chan_unregister(tc->hub_end);
+            close(tc->hub_end);
+            tc->hub_end = -1;
         }
         memcpy(&out->r, out->pl, sizeof out->r);
         uint64_t need = sizeof out->r + out->r.read_len + 8ull * out->r.nfixups + 4ull * out->r.ncloses;
@@ -672,6 +803,13 @@ static void result_done(struct result *res)
         for (uint32_t i = 0; i < res->r.ncloses; i++) {
             int32_t fd;
             memcpy(&fd, res->closes + i, 4);
+            if (fd >= 0 && fd < B_FDS && g_files[fd])
+                binder_diag("FDA buffer freed: descriptor %d to close is a binder descriptor now", fd);
+            struct stat cst;
+            if (fd >= 0 && fstat(fd, &cst) == 0 && S_ISSOCK(cst.st_mode))
+                binder_diag("FDA buffer freed: descriptor %d to close is a socket", fd);
+            else if (fd >= 0 && fcntl(fd, F_GETFD) < 0)
+                binder_diag("FDA buffer freed: descriptor %d to close is not open", fd);
             if (fd >= 0) lxrt_guest_close_fd(fd);
         }
     free(res->pl);
@@ -724,7 +862,7 @@ static void gather_txn(struct gbuf *b, const struct binder_transaction_data *tr,
     uint8_t *d = gb_grow(b, (size_t)ALIGN8(tr->data_size));
     if (!d) { a.fault = 12; goto out; }
     memset(d + tr->data_size, 0, ALIGN8(tr->data_size) - tr->data_size);
-    if (!gcopy(d, (const void *)(uintptr_t)tr->data.ptr.buffer, tr->data_size)) {
+    if (!gcopy(d, (const void *)(uintptr_t)gp(tr->data.ptr.buffer), tr->data_size)) {
         a.fault = 14;               // EFAULT
         b->len = dat;
         goto out;
@@ -733,7 +871,7 @@ static void gather_txn(struct gbuf *b, const struct binder_transaction_data *tr,
     uint8_t *o = gb_grow(b, (size_t)ALIGN8(tr->offsets_size));
     if (!o) { a.fault = 12; goto out; }
     memset(o + tr->offsets_size, 0, ALIGN8(tr->offsets_size) - tr->offsets_size);
-    if (!gcopy(o, (const void *)(uintptr_t)tr->data.ptr.offsets, tr->offsets_size)) {
+    if (!gcopy(o, (const void *)(uintptr_t)gp(tr->data.ptr.offsets), tr->offsets_size)) {
         a.fault = 14;
         b->len = dat;
         goto out;
@@ -771,7 +909,7 @@ static void gather_txn(struct gbuf *b, const struct binder_transaction_data *tr,
             uint8_t *s = gb_grow(b, (size_t)ALIGN8(bp.length));
             if (!s) { a.fault = 12; break; }
             memset(s + bp.length, 0, ALIGN8(bp.length) - bp.length);
-            if (!gcopy(s, (const void *)(uintptr_t)bp.buffer, bp.length)) { a.fault = 14; break; }
+            if (!gcopy(s, (const void *)(uintptr_t)gp(bp.buffer), bp.length)) { a.fault = 14; break; }
             objs[i].ptr = true;
             objs[i].sg = at;
             objs[i].len = bp.length;
@@ -833,7 +971,7 @@ static long write_read(struct tchan *tc, uint64_t ubwr, int guest_fd)
     size_t wat = b.len;
     uint8_t *w = gb_grow(&b, (size_t)wlen);
     if (wlen && !w) { free(b.p); return LERR(ENOMEM); }
-    if (!gcopy(w, (const void *)(uintptr_t)(bwr.write_buffer + bwr.write_consumed), wlen)) {
+    if (!gcopy(w, (const void *)(uintptr_t)(gp(bwr.write_buffer) + bwr.write_consumed), wlen)) {
         free(b.p);
         return LERR(EFAULT);
     }
@@ -880,13 +1018,13 @@ static long write_read(struct tchan *tc, uint64_t ubwr, int guest_fd)
     }
     pthread_mutex_unlock(&f->map_lock);
     if (res.r.read_len)
-        if (!gcopy((void *)(uintptr_t)(bwr.read_buffer + bwr.read_consumed), res.rd, res.r.read_len)) {
+        if (!gcopy((void *)(uintptr_t)(gp(bwr.read_buffer) + bwr.read_consumed), res.rd, res.r.read_len)) {
             result_done(&res);
             return LERR(EFAULT);
         }
     if (res.r.spawn_looper) {
         uint32_t sl = BR_SPAWN_LOOPER;
-        gcopy((void *)(uintptr_t)bwr.read_buffer, &sl, 4);
+        gcopy((void *)(uintptr_t)gp(bwr.read_buffer), &sl, 4);
     }
     bwr.write_consumed += res.r.write_consumed;
     if (res.r.arg[0] == 1)          // the write failed: Linux zeroes read_consumed
@@ -905,7 +1043,10 @@ static long write_read(struct tchan *tc, uint64_t ubwr, int guest_fd)
 long lxrt_binder_ioctl(int fd, unsigned long lreq, uint64_t arg)
 {
     struct bfile *f = file_get(fd);
-    if (!f) return LERR(EBADF);
+    if (!f) {
+        binder_diag("ioctl 0x%lx on descriptor %d, which is not a binder file (any more)", lreq, fd);
+        return LERR(EBADF);
+    }
     long ret;
     if (f->forked || f->closed) { ret = LERR(EINVAL); goto out; }
     uint32_t req = (uint32_t)lreq;
@@ -955,6 +1096,28 @@ long lxrt_binder_ioctl(int fd, unsigned long lreq, uint64_t arg)
 out:
     file_put(f);
     return ret;
+}
+
+bool lxrt_binder_owns(int fd)
+{
+    // The channels sit at 64 and above (hide_fd); every close() comes here.
+    if (fd < 64 || atomic_load(&g_nopened) == 0) return false;
+    bool mine = false;
+    pthread_mutex_lock(&g_lock);
+    for (int i = 0; i < g_nchan_fds && !mine; i++) mine = g_chan_fds[i] == fd;
+    pthread_mutex_unlock(&g_lock);
+    if (mine) binder_diag("close of descriptor %d refused: it is the runtime's channel to the binder hub", fd);
+    return mine;
+}
+
+void lxrt_binder_note_stray_ioctl(int fd, unsigned long req)
+{
+    if (atomic_load(&g_nopened) == 0 || ((req >> 8) & 0xff) != 'b') return;
+    char path[PATH_MAX] = "";
+    int fl = fcntl(fd, F_GETFD);
+    if (fl >= 0) fcntl(fd, F_GETPATH, path);
+    binder_diag("binder ioctl 0x%lx on descriptor %d, which is not a binder file: %s%s", req, fd,
+                fl < 0 ? "closed" : "open", path[0] ? path : "");
 }
 
 void lxrt_binder_polled(int fd)
@@ -1031,7 +1194,12 @@ long lxrt_binder_mmap(uint64_t addr, uint64_t len, int prot, int lflags, int fd,
         goto unreserve;
     }
     tc->busy = true;
-    struct bh_mmap mm = { .base = (uint64_t)(uintptr_t)view, .size = size };
+    // The hub computes the addresses it hands this process from the buffer's
+    // base: give it the guest's view of it (a 32-bit guest's is below 4 GiB).
+    uint64_t ubase = (uint64_t)(uintptr_t)view, gb = lxrt_gbase();
+    if (gb && ubase >= gb && ubase - gb < (1ull << 32))
+        ubase -= gb;
+    struct bh_mmap mm = { .base = ubase, .size = size };
     struct result res = { 0 };
     ret = roundtrip(tc, BH_MMAP, &mm, sizeof mm, &bfd, 1, &res);
     tc->busy = false;
@@ -1155,6 +1323,7 @@ void lxrt_binder_close(int fd)
     if (last) f->closed = true;
     pthread_mutex_unlock(&g_lock);
     if (!f) return;
+    binder_diag("binder descriptor %d closed%s", fd, last ? " (its last alias)" : "");
     if (last && !f->map_base)
         file_release_proc(f);
     file_put(f);
@@ -1173,7 +1342,7 @@ static void file_release_proc(struct bfile *f)
         if (t_chans[i].f == f) tchan_drop(&t_chans[i]);
         else i++;
     pthread_mutex_lock(&f->lock);
-    if (f->chan >= 0) { shutdown(f->chan, SHUT_RDWR); close(f->chan); f->chan = -1; }
+    if (f->chan >= 0) { chan_unregister(f->chan); shutdown(f->chan, SHUT_RDWR); close(f->chan); f->chan = -1; }
     pthread_mutex_unlock(&f->lock);
 }
 
@@ -1221,7 +1390,7 @@ static void binder_after_fork_child(void)
         f->map_pending = false;
         pthread_mutex_init(&f->lock, NULL);
         pthread_mutex_init(&f->map_lock, NULL);
-        if (f->chan >= 0) { close(f->chan); f->chan = -1; }
+        f->chan = -1;                   // closed above with the other channels
         f->map_base = 0;
         f->alias = NULL;
     }

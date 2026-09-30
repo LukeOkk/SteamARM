@@ -29,7 +29,8 @@ static struct x18_plan plan(uint32_t i) {
     if (p.verdict == X18_OK) {
         if (p.terminal) {
             CHECK(p.back_idx == -1 && p.alt_idx == -1);
-            CHECK(p.words[p.nwords - 1] == 0xd61f0200);
+            /* br x18 branches through the hardware x18; blr/ret through x16 */
+            CHECK(p.words[p.nwords - 1] == (i == 0xd61f0240 ? 0xd61f0240 : 0xd61f0200));
         } else {
             CHECK(p.back_idx >= 0 && p.back_idx < p.nwords);
             CHECK(p.words[p.back_idx] == 0);
@@ -79,7 +80,27 @@ static void selftest(void) {
     unsupported(0xc8127c20, "exclusive");
     unsupported(0x4872fc20, "casp pair");
     struct x18_plan branch = plan(0xd61f0240);
-    CHECK(branch.verdict == X18_OK && branch.terminal && branch.nwords == 7);
+    /* br x18 keeps x16 and x17 (a jump table's live registers): no word
+     * writes either except the saves and restores, and it ends on the
+     * hardware x18 loaded from the slot (0x1f8 / 8 = 63). */
+    CHECK(branch.verdict == X18_OK && branch.terminal && branch.nwords == X18_BR_TRAMP_WORDS);
+    CHECK(branch.words[0] == 0xa9bf47f0 && branch.words[3] == (0xf9400230u | (63u << 10)));
+    CHECK(branch.words[4] == 0x10000111); /* adr x17, D */
+    CHECK(branch.words[5] == 0xa9bf43f1 && branch.words[7] == 0xa9404630 && branch.words[8] == 0x910083ff);
+    CHECK(lxrt_x18_br_tail(branch.words + 9));
+    CHECK(branch.words[11] == (0xf9400252u | (63u << 10)));
+    {
+        uint32_t w[7 + X18_BR_TRAMP_WORDS + 6];
+        memset(w, 0, sizeof w);
+        memcpy(w + 6, branch.words, sizeof branch.words[0] * X18_BR_TRAMP_WORDS);
+        /* pc on words 0..12 of the trampoline at w + 6 */
+        for (int k = 0; k < X18_BR_TRAMP_WORDS; ++k) {
+            unsigned back = lxrt_x18_br_restart(w + 6 + k - 3);
+            CHECK(back == (k >= 9 ? 4u * (unsigned)k : 0u));
+        }
+        uint32_t other[7] = {0xd53bd072, 0x927df252, 0xf9400252, 0xd61f0200, 0, 0, 0};
+        CHECK(lxrt_x18_br_restart(other) == 0); /* br x16 is not the tail */
+    }
     branch = plan(0xd63f0240);
     CHECK(branch.verdict == X18_OK && branch.terminal && branch.nwords == 9);
     CHECK(branch.words[6] == (0xd2800000u | (4u << 5) | 30u));

@@ -120,6 +120,7 @@ void lxrt_rewrite_totals(struct lxrt_rewrite_report *out);
 // spans and fills them in, so a pool placed inside such a span gets mapped over
 // -- a failure mode that otherwise looks like random corruption.
 bool lxrt_pool_contains(uint64_t addr);
+bool lxrt_pool_maybe(uint64_t addr);
 bool lxrt_pool_overlaps(uint64_t start, uint64_t end);
 void lxrt_pool_offer_elf_gap(uint64_t start, uint64_t end);
 
@@ -411,6 +412,14 @@ void lxrt_thread_exit(int code) __attribute__((noreturn));
 bool lxrt_thread_lookup(int tid, pthread_t *out);
 int  lxrt_thread_list(int *tids, int max);
 bool lxrt_main_guest_thread(pthread_t *out);
+// A process-directed signal that no guest thread accepted when it was posted
+// lands on the host main thread (XNU binds it to a thread then); signal.c
+// hands it on to a guest thread chosen by the masks noted here.
+bool lxrt_thread_is_guest(void);
+void lxrt_thread_note_mask(uint64_t lmask);
+uint64_t lxrt_thread_noted_mask(void);
+bool lxrt_thread_signal_target(int lsig, pthread_t *out);
+void lxrt_signal_rescue_stranded(void);
 bool lxrt_rt_enqueue(int tid, int lsig);
 int  lxrt_rt_dequeue_self(void);
 int  lxrt_rt_dequeue_self_mask(uint64_t blocked);

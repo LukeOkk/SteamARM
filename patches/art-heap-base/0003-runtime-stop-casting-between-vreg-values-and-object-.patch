@@ -1,0 +1,266 @@
+From 6d1ea4cbe2e09187e37e83f16eb7237b0c9ede89 Mon Sep 17 00:00:00 2001
+From: LukeOkk <85941941+LukeOkk@users.noreply.github.com>
+Date: Wed, 30 Sep 2026 02:07:50 -0300
+Subject: [PATCH 3/9] runtime: stop casting between vreg values and object
+ pointers (SteamARM, HYPOTHESIS)
+
+HYPOTHESIS, UNTESTED: not compiled, not run.
+
+A dex register, an argument slot and the low half of a compiled frame's
+register hold a compressed reference. These places turned one into an
+object pointer with a plain cast (zero extension, which drops the heap
+reference base) or back with a checked 32-bit cast (which refuses an
+address above 4 GiB in debug builds):
+
+- stack.cc: GetThisObject() and GetVReg()'s read barrier, whose
+  DCHECK_LT(ptr_out, UINT32_MAX) is a below-4 GiB check;
+- quick_exception_handler.cc: deoptimization's reference vregs;
+- monitor.cc: the lock owner reported for a compiled frame;
+- interpreter_common.cc, unstarted_runtime.cc (9 sites),
+  string_builder_append.cc, dex2oat.cc: interpreter argument arrays.
+
+They now use ReferenceFromVRegValue()/VRegValueFromReference().
+
+Heap::IsBootImageAddress() subtracted a 32-bit boot image start from a
+64-bit pointer; it decompresses the start first.
+
+App images are not loaded while the base is non-zero: their relocation
+(ImageSpace::Loader::RelocateInPlace) compares full addresses with 32-bit
+range bounds and is not ported. The app keeps running from its
+oat/vdex/dex files.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01L6ANQQienC2qRCeZBzUfuS
+---
+ dex2oat/dex2oat.cc                        |  2 +-
+ runtime/gc/heap.h                         |  4 +++-
+ runtime/interpreter/interpreter_common.cc |  6 +++---
+ runtime/interpreter/unstarted_runtime.cc  | 18 +++++++++---------
+ runtime/monitor.cc                        |  2 +-
+ runtime/oat_file_manager.cc               |  6 +++++-
+ runtime/quick_exception_handler.cc        |  2 +-
+ runtime/stack.cc                          | 10 +++++-----
+ runtime/string_builder_append.cc          |  2 +-
+ 9 files changed, 29 insertions(+), 23 deletions(-)
+
+diff --git a/dex2oat/dex2oat.cc b/dex2oat/dex2oat.cc
+index abb0bd1..21d7281 100644
+--- a/dex2oat/dex2oat.cc
++++ b/dex2oat/dex2oat.cc
+@@ -739,7 +739,7 @@ class ThreadLocalHashOverride {
+       ArtMethod* constructor = old_field_value_->GetClass()->FindConstructor("(I)V", pointer_size);
+       CHECK(constructor != nullptr);
+       uint32_t args[] = {
+-          reinterpret_cast32<uint32_t>(new_field_value.Get()),
++          mirror::VRegValueFromReference(new_field_value.Get()),
+           static_cast<uint32_t>(initial_value)
+       };
+       JValue result;
+diff --git a/runtime/gc/heap.h b/runtime/gc/heap.h
+index ebbb843..fcfbe57 100644
+--- a/runtime/gc/heap.h
++++ b/runtime/gc/heap.h
+@@ -712,7 +712,9 @@ class Heap {
+ 
+   // Check if a pointer points to a boot image.
+   bool IsBootImageAddress(const void* p) const {
+-    return reinterpret_cast<uintptr_t>(p) - boot_images_start_address_ < boot_images_size_;
++    // SteamARM: boot_images_start_address_ is compressed (PointerToLowMemUInt32()).
++    return reinterpret_cast<uintptr_t>(p) - DecompressHeapAddress(boot_images_start_address_) <
++           boot_images_size_;
+   }
+ 
+   space::DlMallocSpace* GetDlMallocSpace() const {
+diff --git a/runtime/interpreter/interpreter_common.cc b/runtime/interpreter/interpreter_common.cc
+index 4d964f1..095ac33 100644
+--- a/runtime/interpreter/interpreter_common.cc
++++ b/runtime/interpreter/interpreter_common.cc
+@@ -316,10 +316,10 @@ void SetStringInitValueToAllAliases(ShadowFrame* shadow_frame,
+   for (uint32_t i = 0, e = shadow_frame->NumberOfVRegs(); i < e; ++i) {
+     if (shadow_frame->GetVRegReference(i) == existing) {
+       DCHECK_EQ(shadow_frame->GetVRegReference(i),
+-                reinterpret_cast32<mirror::Object*>(shadow_frame->GetVReg(i)));
++                mirror::ReferenceFromVRegValue(shadow_frame->GetVReg(i)));
+       shadow_frame->SetVRegReference(i, result.GetL());
+       DCHECK_EQ(shadow_frame->GetVRegReference(i),
+-                reinterpret_cast32<mirror::Object*>(shadow_frame->GetVReg(i)));
++                mirror::ReferenceFromVRegValue(shadow_frame->GetVReg(i)));
+     }
+   }
+ }
+@@ -1175,7 +1175,7 @@ static inline void AssignRegister(ShadowFrame* new_shadow_frame, const ShadowFra
+   // If both register locations contains the same value, the register probably holds a reference.
+   // Note: As an optimization, non-moving collectors leave a stale reference value
+   // in the references array even after the original vreg was overwritten to a non-reference.
+-  if (src_value == reinterpret_cast32<uint32_t>(o.Ptr())) {
++  if (src_value == mirror::VRegValueFromReference(o.Ptr())) {
+     new_shadow_frame->SetVRegReference(dest_reg, o);
+   } else {
+     new_shadow_frame->SetVReg(dest_reg, src_value);
+diff --git a/runtime/interpreter/unstarted_runtime.cc b/runtime/interpreter/unstarted_runtime.cc
+index 5986982..d2f399c 100644
+--- a/runtime/interpreter/unstarted_runtime.cc
++++ b/runtime/interpreter/unstarted_runtime.cc
+@@ -648,7 +648,7 @@ static void GetResourceAsStream(Thread* self,
+   }
+ 
+   uint32_t args[1];
+-  args[0] = reinterpret_cast32<uint32_t>(h_array.Get());
++  args[0] = mirror::VRegValueFromReference(h_array.Get());
+   EnterInterpreterFromInvoke(self, constructor, h_obj.Get(), args, nullptr);
+ 
+   if (self->IsExceptionPending()) {
+@@ -1734,7 +1734,7 @@ void UnstartedRuntime::UnstartedJNIVMRuntimeNewUnpaddedArray(
+     JValue* result) {
+   int32_t length = args[1];
+   DCHECK_GE(length, 0);
+-  ObjPtr<mirror::Object> element_class = reinterpret_cast32<mirror::Object*>(args[0])->AsClass();
++  ObjPtr<mirror::Object> element_class = mirror::ReferenceFromVRegValue(args[0])->AsClass();
+   if (element_class == nullptr) {
+     AbortTransactionOrFail(self, "VMRuntime.newUnpaddedArray with null element_class.");
+     return;
+@@ -1836,7 +1836,7 @@ void UnstartedRuntime::UnstartedJNIStringCompareTo(Thread* self,
+                                                    mirror::Object* receiver,
+                                                    uint32_t* args,
+                                                    JValue* result) {
+-  ObjPtr<mirror::Object> rhs = reinterpret_cast32<mirror::Object*>(args[0]);
++  ObjPtr<mirror::Object> rhs = mirror::ReferenceFromVRegValue(args[0]);
+   if (rhs == nullptr) {
+     AbortTransactionOrFail(self, "String.compareTo with null object.");
+     return;
+@@ -1904,7 +1904,7 @@ void UnstartedRuntime::UnstartedJNIUnsafeCompareAndSwapInt(
+     mirror::Object* receiver ATTRIBUTE_UNUSED,
+     uint32_t* args,
+     JValue* result) {
+-  ObjPtr<mirror::Object> obj = reinterpret_cast32<mirror::Object*>(args[0]);
++  ObjPtr<mirror::Object> obj = mirror::ReferenceFromVRegValue(args[0]);
+   if (obj == nullptr) {
+     AbortTransactionOrFail(self, "Unsafe.compareAndSwapInt with null object.");
+     return;
+@@ -1938,7 +1938,7 @@ void UnstartedRuntime::UnstartedJNIUnsafeGetIntVolatile(Thread* self,
+                                                         mirror::Object* receiver ATTRIBUTE_UNUSED,
+                                                         uint32_t* args,
+                                                         JValue* result) {
+-  ObjPtr<mirror::Object> obj = reinterpret_cast32<mirror::Object*>(args[0]);
++  ObjPtr<mirror::Object> obj = mirror::ReferenceFromVRegValue(args[0]);
+   if (obj == nullptr) {
+     AbortTransactionOrFail(self, "Unsafe.compareAndSwapIntVolatile with null object.");
+     return;
+@@ -1953,13 +1953,13 @@ void UnstartedRuntime::UnstartedJNIUnsafePutObject(Thread* self,
+                                                    mirror::Object* receiver ATTRIBUTE_UNUSED,
+                                                    uint32_t* args,
+                                                    JValue* result ATTRIBUTE_UNUSED) {
+-  ObjPtr<mirror::Object> obj = reinterpret_cast32<mirror::Object*>(args[0]);
++  ObjPtr<mirror::Object> obj = mirror::ReferenceFromVRegValue(args[0]);
+   if (obj == nullptr) {
+     AbortTransactionOrFail(self, "Unsafe.putObject with null object.");
+     return;
+   }
+   jlong offset = (static_cast<uint64_t>(args[2]) << 32) | args[1];
+-  ObjPtr<mirror::Object> new_value = reinterpret_cast32<mirror::Object*>(args[3]);
++  ObjPtr<mirror::Object> new_value = mirror::ReferenceFromVRegValue(args[3]);
+   if (Runtime::Current()->IsActiveTransaction()) {
+     if (!CheckWriteConstraint(self, obj) || !CheckWriteValueConstraint(self, new_value)) {
+       DCHECK(self->IsExceptionPending());
+@@ -1977,7 +1977,7 @@ void UnstartedRuntime::UnstartedJNIUnsafeGetArrayBaseOffsetForComponentType(
+     mirror::Object* receiver ATTRIBUTE_UNUSED,
+     uint32_t* args,
+     JValue* result) {
+-  ObjPtr<mirror::Object> component = reinterpret_cast32<mirror::Object*>(args[0]);
++  ObjPtr<mirror::Object> component = mirror::ReferenceFromVRegValue(args[0]);
+   if (component == nullptr) {
+     AbortTransactionOrFail(self, "Unsafe.getArrayBaseOffsetForComponentType with null component.");
+     return;
+@@ -1992,7 +1992,7 @@ void UnstartedRuntime::UnstartedJNIUnsafeGetArrayIndexScaleForComponentType(
+     mirror::Object* receiver ATTRIBUTE_UNUSED,
+     uint32_t* args,
+     JValue* result) {
+-  ObjPtr<mirror::Object> component = reinterpret_cast32<mirror::Object*>(args[0]);
++  ObjPtr<mirror::Object> component = mirror::ReferenceFromVRegValue(args[0]);
+   if (component == nullptr) {
+     AbortTransactionOrFail(self, "Unsafe.getArrayIndexScaleForComponentType with null component.");
+     return;
+diff --git a/runtime/monitor.cc b/runtime/monitor.cc
+index 8190960..e1f43af 100644
+--- a/runtime/monitor.cc
++++ b/runtime/monitor.cc
+@@ -1519,7 +1519,7 @@ void Monitor::VisitLocks(StackVisitor* stack_visitor,
+       // not be optimized out.
+       success = stack_visitor->GetVReg(m, dex_reg, kReferenceVReg, &value);
+       if (success) {
+-        ObjPtr<mirror::Object> o = reinterpret_cast<mirror::Object*>(value);
++        ObjPtr<mirror::Object> o = mirror::ReferenceFromVRegValue(value);
+         callback(o, callback_context);
+         break;
+       }
+diff --git a/runtime/oat_file_manager.cc b/runtime/oat_file_manager.cc
+index 118dd01..cf78c10 100644
+--- a/runtime/oat_file_manager.cc
++++ b/runtime/oat_file_manager.cc
+@@ -62,7 +62,11 @@ namespace art {
+ using android::base::StringPrintf;
+ 
+ // If true, we attempt to load the application image if it exists.
+-static constexpr bool kEnableAppImage = true;
++// SteamARM: app image relocation compares full object addresses with 32-bit
++// range bounds (image_space.cc, RelocateInPlace); not ported to a heap
++// reference base yet, so app images are ignored there (the app still runs
++// from its oat/vdex/dex files).
++static constexpr bool kEnableAppImage = (kHeapReferenceBase == 0u);
+ 
+ const OatFile* OatFileManager::RegisterOatFile(std::unique_ptr<const OatFile> oat_file) {
+   WriterMutexLock mu(Thread::Current(), *Locks::oat_file_manager_lock_);
+diff --git a/runtime/quick_exception_handler.cc b/runtime/quick_exception_handler.cc
+index 90732e1..75f25f0 100644
+--- a/runtime/quick_exception_handler.cc
++++ b/runtime/quick_exception_handler.cc
+@@ -523,7 +523,7 @@ class DeoptimizeStackVisitor final : public StackVisitor {
+         }
+       }
+       if (is_reference) {
+-        new_frame->SetVRegReference(vreg, reinterpret_cast<mirror::Object*>(value));
++        new_frame->SetVRegReference(vreg, mirror::ReferenceFromVRegValue(value));
+       } else {
+         new_frame->SetVReg(vreg, value);
+       }
+diff --git a/runtime/stack.cc b/runtime/stack.cc
+index 58a73cc..9db66d9 100644
+--- a/runtime/stack.cc
++++ b/runtime/stack.cc
+@@ -183,7 +183,7 @@ ObjPtr<mirror::Object> StackVisitor::GetThisObject() const {
+       if (!GetVReg(m, reg, kReferenceVReg, &value)) {
+         return nullptr;
+       }
+-      return reinterpret_cast<mirror::Object*>(value);
++      return mirror::ReferenceFromVRegValue(value);
+     }
+   }
+ }
+@@ -250,10 +250,10 @@ bool StackVisitor::GetVReg(ArtMethod* m,
+     }
+     if (kind == kReferenceVReg) {
+       // Perform a read barrier in case we are in a different thread and GC is ongoing.
+-      mirror::Object* out = reinterpret_cast<mirror::Object*>(static_cast<uintptr_t>(*val));
+-      uintptr_t ptr_out = reinterpret_cast<uintptr_t>(GcRoot<mirror::Object>(out).Read());
+-      DCHECK_LT(ptr_out, std::numeric_limits<uint32_t>::max());
+-      *val = static_cast<uint32_t>(ptr_out);
++      // SteamARM: *val is a compressed reference (the low half of a register or
++      // of a 32-bit stack slot).
++      mirror::Object* out = mirror::ReferenceFromVRegValue(*val);
++      *val = mirror::VRegValueFromReference(GcRoot<mirror::Object>(out).Read());
+     }
+     return result;
+   } else {
+diff --git a/runtime/string_builder_append.cc b/runtime/string_builder_append.cc
+index 85b70eb..a50918c 100644
+--- a/runtime/string_builder_append.cc
++++ b/runtime/string_builder_append.cc
+@@ -214,7 +214,7 @@ inline int32_t StringBuilderAppend::Builder::CalculateLengthWithFlag() {
+     switch (static_cast<Argument>(f & kArgMask)) {
+       case Argument::kString: {
+         Handle<mirror::String> str =
+-            hs_.NewHandle(reinterpret_cast32<mirror::String*>(*current_arg));
++            hs_.NewHandle(mirror::ReferenceFromVRegValue<mirror::String>(*current_arg));
+         if (str != nullptr) {
+           length += str->GetLength();
+           compressible = compressible && str->IsCompressed();

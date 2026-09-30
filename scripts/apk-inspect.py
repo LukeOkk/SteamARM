@@ -1051,19 +1051,24 @@ def abi_verdict(abis):
     abis = set(abis)
     if "arm64-v8a" in abis:
         return {"id": "arm64", "abi": "arm64-v8a",
-                "summary": "arm64-v8a native code (preferred): Apple Silicon runs it directly"}
+                "summary": "arm64-v8a native code (preferred)" + (
+                    "; Android's arm64 ART does not start on macOS (the ART heap wall), so SteamARM's "
+                    "Android session runs its x86_64 code under FEX" if "x86_64" in abis else
+                    "; arm64-v8a only: Android's arm64 ART does not start on macOS (the ART heap "
+                    "wall), so it cannot run yet")}
     if abis & {"armeabi-v7a", "armeabi"}:
         return {"id": "arm32-only", "abi": "armeabi-v7a" if "armeabi-v7a" in abis else "armeabi",
                 "summary": "32-bit ARM only: Apple Silicon has no AArch32 execution state, "
                            "so this code cannot run natively"}
     if abis & {"x86_64", "x86"}:
         return {"id": "x86-only", "abi": "x86_64" if "x86_64" in abis else "x86",
-                "summary": "x86 only: it would need FEX; not supported for Android apps yet"}
+                "summary": "x86 only: SteamARM's Android session runs x86_64 code under FEX" if "x86_64" in abis
+                           else "32-bit x86 only: SteamARM's Android session (x86_64 under FEX) does not run it yet"}
     if abis:
         return {"id": "unsupported", "abi": sorted(abis)[0],
                 "summary": "native code only for %s: not supported" % ", ".join(sorted(abis))}
     return {"id": "none", "abi": None,
-            "summary": "no native code (ART only): runs on any ABI the Android runtime has"}
+            "summary": "no native code (ART only): runs in SteamARM's Android session (x86_64 ART under FEX)"}
 
 
 def native_libs(zf, names):

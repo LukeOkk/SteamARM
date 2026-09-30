@@ -244,9 +244,13 @@ struct AddAppView: View {
                 if let blocker = info.installBlocker {
                     Text(blocker).font(.callout).foregroundStyle(.red)
                 }
-                Text("Se instala en SteamARM y aparece en la biblioteca, pero todavía no se puede abrir: "
-                     + "el entorno Android de SteamARM aún no ejecuta apps (docs/ANDROID_ZERO_VM_FEASIBILITY.md).")
-                    .font(.caption).foregroundStyle(.secondary)
+                let preview = AndroidAppInfo(package: info.package, minSdk: info.minSdk, abis: info.abis ?? [])
+                if let reason = AndroidApps.unavailableReason(preview) {
+                    Text("Se instala en SteamARM y aparece en la biblioteca, pero no se puede abrir: \(reason).")
+                        .font(.caption).foregroundStyle(.secondary)
+                } else {
+                    Text(AndroidApps.sessionNote).font(.caption).foregroundStyle(.secondary)
+                }
             }
         }
         .formStyle(.grouped)

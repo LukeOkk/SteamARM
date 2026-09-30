@@ -20,7 +20,13 @@
 #   - fseventsd resident size above SAFEGUARD_FSEVENTS_MB (1500)
 #   - guests' total resident size above the launcher's DRAM setting
 #     ($STATE/launcher/limits.env) or SAFEGUARD_GUEST_MB (8192 without either)
-#   - more than SAFEGUARD_MAX_PROCS (80) lxrun processes
+#   - more than SAFEGUARD_MAX_PROCS (80) lxrun processes, plus
+#     SAFEGUARD_ANDROID_PROCS (100) while an Android session runs
+#     ($STATE/android/session.json names a live boot, scripts/android-session.py):
+#     Android is one lxrun process per service and per app, 60-80 of them
+#     after its boot (MEASURED, benchmarks/stage28-android-apk.txt), and the
+#     old limit stopped the session, and every other guest, during its first
+#     pm install; the kernel-object and memory rules still apply to it
 #   - kernel VM objects above SAFEGUARD_MAX_VMOBJ (1500000, ~380 MB of kernel
 #     zone) or VM map entries above SAFEGUARD_MAX_MAPENT (1500000): kernel
 #     memory no RSS figure shows, and what the panicking kernel had run out of
@@ -44,6 +50,7 @@ GRACE_SECS="${SAFEGUARD_GRACE_SECS:-5}"
 FSE_MB="${SAFEGUARD_FSEVENTS_MB:-1500}"
 GUEST_MB="${SAFEGUARD_GUEST_MB:-8192}"
 MAX_PROCS="${SAFEGUARD_MAX_PROCS:-80}"
+ANDROID_PROCS="${SAFEGUARD_ANDROID_PROCS:-100}"
 MAX_VMOBJ="${SAFEGUARD_MAX_VMOBJ:-1500000}"
 MAX_MAPENT="${SAFEGUARD_MAX_MAPENT:-1500000}"
 mkdir -p "$STATE/logs"
@@ -158,6 +165,9 @@ while true; do
     level=$(sysctl -n kern.memorystatus_level 2>/dev/null || echo 100)
     pressure=$(sysctl -n kern.memorystatus_vm_pressure_level 2>/dev/null || echo 1)
     read -r gcount grss <<<"$(ps -Ao rss=,comm= | awk -v n="$GUEST_NAME" '$NF == n || $NF ~ ("/" n "$") {c++; s+=$1} END {print c+0, int((s+0)/1024)}')"
+    maxp=$MAX_PROCS
+    apid=$(sed -n 's/.*"bootPid": *\([0-9][0-9]*\).*/\1/p' "$STATE/android/session.json" 2>/dev/null | head -1)
+    if [ -n "$apid" ] && kill -0 "$apid" 2>/dev/null; then maxp=$((MAX_PROCS + ANDROID_PROCS)); fi
     # No early exit in awk: ps would die of SIGPIPE ("ps: stdout: Broken pipe").
     fse=$(ps -Ao rss,comm | awk '/fseventsd$/ && !f {print int($1/1024); f = 1}')
     fse=${fse:-0}
@@ -179,7 +189,7 @@ while true; do
     # SAFEGUARD_GRACE_SECS while memory stayed short).
     if [ "$fse" -gt "$FSE_MB" ]; then kill_guests "fseventsd ${fse} MB > ${FSE_MB} MB"
     elif [ "$grss" -gt "$GUEST_MB" ]; then kill_guests "guests ${grss} MB > ${GUEST_MB} MB"
-    elif [ "$gcount" -gt "$MAX_PROCS" ]; then kill_guests "${gcount} lxrun processes > ${MAX_PROCS}"
+    elif [ "$gcount" -gt "$maxp" ]; then kill_guests "${gcount} lxrun processes > ${maxp}"
     elif [ "$vmobj" -gt "$MAX_VMOBJ" ]; then kill_guests "kernel vm.objects ${vmobj} > ${MAX_VMOBJ}"
     elif [ "$mapent" -gt "$MAX_MAPENT" ]; then kill_guests "kernel VM.map.entries ${mapent} > ${MAX_MAPENT}"
     elif [ "$gcount" -gt 0 ] && [ "$crit" -ge "$CRIT_SECS" ]; then

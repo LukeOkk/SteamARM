@@ -113,6 +113,16 @@ void lxrt_pool_offer_elf_gap(uint64_t start, uint64_t end)
     }
 }
 
+// Set when a pool could not be recorded (more than MAX_POOLS).
+static bool g_pools_overflow;
+
+// Could addr be inside a pool? lxrt_pool_contains, or true once the list
+// overflowed: signal.c's br x18 recovery must not miss a trampoline.
+bool lxrt_pool_maybe(uint64_t addr)
+{
+    return g_pools_overflow || lxrt_pool_contains(addr);
+}
+
 bool lxrt_pool_contains(uint64_t addr)
 {
     for (int i = 0; i < g_npools; i++)
@@ -176,6 +186,8 @@ static uint8_t *reserve_pool_at(uint64_t candidate, uint64_t range_start,
         g_pools[g_npools].start = at;
         g_pools[g_npools].end = at + need;
         g_npools++;
+    } else {
+        g_pools_overflow = true;
     }
     *got = need;
     return (uint8_t *)at;
@@ -277,6 +289,8 @@ static uint8_t *alloc_pool_near(uint64_t range_start, uint64_t range_end,
         g_pools[g_npools].start = (uint64_t)p;
         g_pools[g_npools].end = (uint64_t)p + need;
         g_npools++;
+    } else {
+        g_pools_overflow = true;
     }
     *got = need;
     return p;

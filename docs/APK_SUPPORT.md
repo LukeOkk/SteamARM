@@ -1,15 +1,18 @@
-# APK support: install, list, update and uninstall (no runtime yet)
+# APK support: install, list, update, uninstall, and open in the Android session
 
-Status, 2026-09-29 (stage 25, `benchmarks/stage25-apk-install.txt`).
+Status, 2026-09-30 (stage 25, `benchmarks/stage25-apk-install.txt`; stage 28,
+`benchmarks/stage28-android-apk.txt`).
 SteamARM reads Android APKs, installs them into its state directory, keeps
 their data across updates, uninstalls them and shows them in the launcher's
-library. **It does not run them.** There is no Android runtime in SteamARM
-yet: no binder, no ART, no Android userspace under lxrun. What such a
-runtime needs with zero VM is the subject of
-`docs/ANDROID_ZERO_VM_FEASIBILITY.md`, and
-`docs/LEPTON_REUSE_ANALYSIS.md` covers what Valve's Lepton layer relies on.
-Until a runtime exists, every Android card is disabled and says why. No
-button pretends to open an app.
+library. Since stage 28 it also **runs** the ones its Android session can
+run: `scripts/android-session.py` boots Waydroid's LineageOS 18.1 x86_64
+image under FEX with zero VM (`docs/ANDROID_RUNTIME_ARCHITECTURE.md`,
+"Session"), installs the APK with Android's own `pm install`, starts it with
+`am start`, and its window is a macOS window. That covers apps with no
+native code (dex only) and apps with x86_64 native code. Apps whose native
+code is arm64-v8a only stay disabled, with the reason: Android's arm64 ART
+does not start on macOS (the ART heap wall). No button pretends to open an
+app it cannot run.
 
 Labels: MEASURED (run on the owner's Mac mini M4, macOS 27, recorded in
 stage 25), VERIFIED IN SOURCE (file and line, or a URL at a commit),
@@ -22,8 +25,8 @@ UPSTREAM DOCUMENTED, HYPOTHESIS, UNKNOWN.
 | APK reader: manifest, label, icon, ABIs, splits, signing, bundles | `scripts/apk-inspect.py` (Python 3.9+, standard library only) | done | MEASURED: 10 real F-Droid APKs agree with F-Droid's `index-v2.json` on the 9 compared fields; 42 unit tests on synthetic APKs; 3,000 mutated APKs raised only its own error type |
 | Package manager | `scripts/android-pm.py` | done | MEASURED on real APKs in a scratch state: install, update with data kept, downgrade refused, uninstall with and without data; 18 unit tests |
 | Library card, filter, context menu, disabled launch | `launcher/AddAppView.swift`, `HomeView.swift`, `LauncherModel.swift`, `ApplicationCore.swift` (`AndroidApps`, `AndroidABI`) | built; the model path was driven with real APKs; the sheet itself was not clicked | MEASURED (a harness that calls `LauncherModel`, stage 25 section E); core tests |
-| `run-app.sh` refuses Android entries | `scripts/run-app.sh` | done | `tests/launcher/run_app_dispatch.sh` (2 new checks) |
-| Running an app | none | **missing** | `docs/ANDROID_ZERO_VM_FEASIBILITY.md` |
+| `run-app.sh` runs Android entries in the session, or refuses them with the reason | `scripts/run-app.sh` | done | `tests/launcher/run_app_dispatch.sh` (12 Android checks) |
+| Running an app | `scripts/android-session.py` (x86_64 Android under FEX) | dex-only and x86_64 apps | MEASURED: an F-Droid APK installed (`pm install` Success) and started (`am start` ok), its window focused and in the macOS window (`benchmarks/stage28-android-apk.txt`); `tests/android/run.sh` does it headless |
 
 ## Reading an APK (`scripts/apk-inspect.py`)
 
@@ -250,20 +253,26 @@ android/kept/<package>.json             the signer of data kept by uninstall --k
 **Where it differs from Android:**
 
 - It installs an APK whose native code cannot run here (32-bit ARM only,
-  x86 only). Android would refuse it with `INSTALL_FAILED_NO_MATCHING_ABIS`.
-  Here the card shows why the app cannot run.
-- There is no dexopt, no per-app uid, and no granting of runtime
-  permissions: nothing runs.
+  32-bit x86 only, arm64-v8a only). Android would refuse the first two with
+  `INSTALL_FAILED_NO_MATCHING_ABIS`. Here the card shows why the app cannot
+  run.
+- This is SteamARM's copy of the APK. The Android session installs it again,
+  inside Android, with `pm install` (dexopt, a uid, permissions: Android's
+  own), the first time the card is opened and whenever its versionCode
+  changes. The app's data then lives in the session root's `/data`, not in
+  `android/data/<package>/`; uninstalling the card does not uninstall it
+  inside the session root (`scripts/android-session.py shell
+  /system/bin/pm uninstall <package>` does).
 
 ## ABI policy (ARM64-first)
 
 | APK's native code | verdict (`abiVerdict.id`) | card architecture | what it means |
 |---|---|---|---|
-| has `arm64-v8a` | `arm64` | `aarch64` | preferred: Apple Silicon executes it directly (lxrun already runs aarch64 Linux code; an Android runtime does not exist yet) |
+| has `arm64-v8a` | `arm64` | `aarch64` | preferred by the policy, but Android's arm64 ART does not start on macOS (the ART heap wall): with `x86_64` code too the session runs that under FEX; `arm64-v8a` only is disabled |
 | only `armeabi-v7a` / `armeabi` | `arm32-only` | `armv7` | cannot run natively: Apple Silicon has no AArch32 execution state. UPSTREAM DOCUMENTED for the M1 by the box86 project ("it only supports 64bits operations. No ARM32 there", https://box86.org/2022/03/box64-running-on-m1-with-asahi/); for this M4, HYPOTHESIS by extension. SteamARM runs no AArch32 code anywhere (`ELFInspector` rejects e_machine 40, `launcher/ApplicationCore.swift`) |
-| only `x86_64` / `x86` | `x86-only` | `x86_64` / `i386` | would need FEX inside the Android runtime; not supported for now (analysis only) |
+| only `x86_64` / `x86` | `x86-only` | `x86_64` / `i386` | `x86_64`: runs in the session under FEX; `x86` (32-bit) only: disabled, the session declares no 32-bit ABI |
 | other ABIs only (mips, riscv64) | `unsupported` | that ABI | not supported |
-| none (dex only) | `none` | `aarch64` | ART only: it would run on the ARM64 Android runtime |
+| none (dex only) | `none` | `aarch64` | ART only: runs in the session (x86_64 ART under FEX) |
 
 `abi_verdict` in `scripts/apk-inspect.py` and `AndroidABI.verdict` in
 `launcher/ApplicationCore.swift` implement the same table; both are tested
@@ -311,23 +320,29 @@ on the same cases.
   - favourites;
   - **Desinstalar…**, whose dialog offers **Desinstalar y borrar sus datos**
     and **Desinstalar y conservar sus datos**.
-- **Opening is disabled.** The reason is "El entorno Android de SteamARM
-  todavía no ejecuta apps (docs/ANDROID_ZERO_VM_FEASIBILITY.md)", plus a
-  second sentence for 32-bit ARM or x86-only code. It is shown on the card,
-  as the card's help and in the alert of a launch attempt
-  (`LauncherModel.unavailableReason`). `scripts/run-app.sh` refuses any
-  `kind: "android"` entry as well, exit 2, before anything starts.
+- **Abrir** runs `scripts/run-app.sh`, which runs
+  `scripts/android-session.py run <package>` in the launcher's session
+  wrapper: SteamARM's X server on :2, Weston on it (its window is Android's
+  screen), the x86_64 root booted to `sys.boot_completed=1` (about 20-30 s,
+  longer the first time), the APK installed if needed and its launcher
+  activity started. **Detener** stops the whole session (closing Weston's
+  window should end it too: `run` ends when Weston does; not measured).
+  Always native windows, whatever the display setting.
+- **Opening is disabled**, with the reason (`AndroidApps.unavailableReason`,
+  on the card, as its help, in the Información sheet and in the alert of a
+  launch attempt), when the session cannot run the app: arm64-v8a-only code
+  (the ART heap wall), 32-bit ARM, 32-bit x86, another ABI, a minSdk above
+  30 (the session is Android 11) or a preview one. `scripts/run-app.sh`
+  refuses the same entries, exit 2, before anything starts.
 
 ## What is missing
 
-1. **The runtime.** Everything that makes an app run is missing:
-   - binder (no binderfs, and no userspace broker in lxrun yet);
-   - an Android userspace (init, servicemanager, zygote, ART) under lxrun;
-   - graphics (EGL/GLES and Vulkan over MoltenVK), input and audio;
-   - the display path to macOS windows.
-
-   See `docs/ANDROID_ZERO_VM_FEASIBILITY.md`. The launch stays disabled
-   until an app really starts; no fake launch in the meantime.
+1. **The rest of the runtime.** The session runs dex-only and x86_64 apps
+   (stage 28). Missing: arm64-v8a-only apps (Android's arm64 ART, the heap
+   wall), 32-bit x86 apps in the session, sound, network (netd is a
+   stand-in), camera, a GPU path (SwiftShader draws on the CPU), clicks and
+   keys from the Mac measured end to end (pointer motion reaches Android;
+   `benchmarks/stage28-android-apk.txt`).
 2. **Split APKs, XAPK, APKS, APKM and OBB data.** The formats are
    recognised and refused. Installing a base with its configuration splits
    is the next piece a Play Store-delivered app needs.
@@ -343,12 +358,13 @@ on the same cases.
 5. **Google Play and Google Mobile Services.** These are policy, not code
    yet:
    - Google's proprietary components (GMS, the Play Store) are never
-     committed or bundled.
-   - SteamARM may download them only on the owner's Mac, from their
-     official source, and only where that is legal, as it does with Steam.
+     committed, bundled or downloaded by SteamARM: no source licenses them
+     for this use (`docs/PLAY_STORE_RESEARCH.md`, rules 1-2). The owner
+     supplies a GApps package; `scripts/android-gapps.py` checks it and
+     layers it onto a clone of the root (`docs/PLAY_STORE_SETUP.md`).
    - Device certification is never falsified, and Play Integrity and
      SafetyNet are never bypassed.
-   - None of this exists today.
+   - Nothing of it runs yet: the framework does not boot.
 
 ## Tests
 

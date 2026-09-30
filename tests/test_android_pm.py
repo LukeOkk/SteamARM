@@ -259,8 +259,7 @@ class PMTests(unittest.TestCase):
 
     def test_webp_icon_is_converted_or_kept(self):
         # Without sips (Linux, or conversion failing) the WebP is kept as it is.
-        with mock.patch.object(pm.shutil, "which", return_value=None), \
-                mock.patch.object(pm.os.path, "exists", side_effect=lambda p: False if p == "/usr/bin/sips" else True):
+        with mock.patch.object(pm, "find_sips", return_value=None):
             out = pm.install(self.layout, self.apk(res=RES_WEBP))
         self.assertTrue(out["icon"].endswith("icon.webp"))
         self.assertEqual(Path(out["icon"]).read_bytes(), fx.webp_lossy(144, 144))

@@ -11,8 +11,9 @@
  * normal register instead of rewriting every x18 instruction (runtime/x18.c),
  * and the ARM64 Windows ABI (TEB in x18) would have its register.
  *
- * Nothing here needs the guest runtime. Exit 0: preserved everywhere;
- * 1: zeroed or changed somewhere.
+ * Nothing here needs the guest runtime. Exit 0: preserved everywhere in
+ * this process; 1: zeroed or changed somewhere. The last check, a forked
+ * child, is reported but does not change the exit status.
  */
 #include <pthread.h>
 #include <signal.h>
@@ -20,6 +21,7 @@
 #include <stdio.h>
 #include <string.h>
 #include <sys/time.h>
+#include <sys/wait.h>
 #include <unistd.h>
 
 #define MAGIC UINT64_C(0x5A18C0DE12345678)
@@ -92,5 +94,25 @@ int main(void) {
     usleep(300000);
     ok &= check("after usleep(300 ms)", get_x18());
     printf("  => %s\n", ok ? "x18 is preserved for this binary" : "x18 is NOT preserved for this binary");
+    /* 4. a child of fork() without exec: the flag is set at exec from the
+     * binary's LC_BUILD_VERSION (machine_task_process_signature); whether a
+     * forked task inherits it is measured here (stage 28: it does not). */
+    fflush(stdout);
+    pid_t pid = fork();
+    if (pid == 0) {
+        int cok = 1;
+        set_x18(MAGIC);
+        for (int i = 0; i < 1000; i++) sched_yield();
+        cok &= check("fork child, after 1000 sched_yield", get_x18());
+        set_x18(MAGIC);
+        usleep(100000);
+        cok &= check("fork child, after usleep(100 ms)", get_x18());
+        fflush(stdout);
+        _exit(cok ? 0 : 1);
+    }
+    int st = 0;
+    waitpid(pid, &st, 0);
+    printf("  => %s\n", WIFEXITED(st) && WEXITSTATUS(st) == 0 ? "x18 is preserved in a fork child too"
+                                                            : "x18 is NOT preserved in a fork child");
     return ok ? 0 : 1;
 }

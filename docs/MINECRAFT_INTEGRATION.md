@@ -5,6 +5,14 @@
 > eventfd across fork, the opt-in `LXRT_KEEP_X18=1` build) are merged; the Prism launcher
 > integration described below (the aarch64 installer, entry and tests) is **not** merged and
 > the launcher still offers the x86_64 Prism AppImage under FEX. The measurements stay valid as a record.
+>
+> **Stage 28 (2026-09-30):** the SDK-12.3 lxrun is the **default** now (`make lxrt`;
+> `LXRT_KEEP_X18=0` opts out), after the whole test matrix passed with it. Two things this page
+> did not know: a guest signal handler used to overwrite a JIT's live x18 on return (HotSpot takes
+> SIGSEGV in compiled code; fixed in `cc54e05`), and a **forked** child loses the kernel's x18 on
+> either build, so a JVM started by fork without exec would still compute wrong results
+> (`benchmarks/stage28-keep-x18.txt`, `docs/X18_VIRTUALIZATION.md`). Below, "opt-in" and
+> `make lxrt LXRT_KEEP_X18=1` are as of stage 24.
 
 **Status, 2026-09-29 (stage 24).** Prism Launcher's native aarch64 build and
 an aarch64 Java 21 run under lxrun in the Fedora armroot, with no FEX and no

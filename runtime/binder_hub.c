@@ -184,6 +184,7 @@ struct thread {
     // FDA descriptors to close in this thread's process (buffers it freed),
     // carried by its next result.
     int *closes; int ncloses, ccloses;
+    int *held; int nheld, cheld;    // descriptors sent with the last result (send_result)
 };
 
 struct proc {
@@ -1739,6 +1740,8 @@ static void thread_release(struct thread *th)
     // FDA descriptors still owed to a gone thread stay open in its process
     // (they were installed there); nothing here can close them.
     free(th->closes);
+    for (int i = 0; i < th->nheld; i++) close(th->held[i]);
+    free(th->held);
     if (th->fd >= 0) close(th->fd);
     debug("%d:%d thread released", p->pid, th->tid);
     free(th);
@@ -1772,9 +1775,13 @@ static void node_release(struct node *n)
     debug("%d node %u now dead", p ? p->pid : 0, n->debug_id);
 }
 
+static const char *g_read_fail;     // read_msg's last failure (below)
+
 // binder_deferred_release
 static void proc_release(struct proc *p)
 {
+    if (p->hello)
+        hub_log("proc %u (pid %d) released%s%s", p->id, p->pid, g_read_fail[0] ? ": " : "", g_read_fail);
     list_del_init(&p->entry);
     if (g_ctx_mgr[p->context] && g_ctx_mgr[p->context]->proc == p)
         g_ctx_mgr[p->context] = NULL;
@@ -1838,13 +1845,21 @@ static int send_all(int fd, const struct iovec *iov0, int niov, const int *fds, 
     return 0;
 }
 
+// Why the last read_msg failed, for the log line of whoever drops the peer.
+static const char *g_read_fail = "";
+static int g_read_errno;
+
 static int read_full(int fd, void *buf, size_t len)
 {
     size_t got = 0;
     while (got < len) {
         ssize_t n = recv(fd, (char *)buf + got, len - got, 0);
         if (n < 0 && errno == EINTR) continue;
-        if (n <= 0) return -1;
+        if (n <= 0) {
+            g_read_fail = n == 0 ? "end of file in the payload" : "payload read failed";
+            g_read_errno = n == 0 ? 0 : errno;
+            return -1;
+        }
         got += (size_t)n;
     }
     return 0;
@@ -1867,7 +1882,11 @@ static int read_msg(int fd, struct bh_hdr *h, uint8_t **payload, int *fds, int *
         m.msg_controllen = sizeof cm.b;
         ssize_t n = recvmsg(fd, &m, 0);
         if (n < 0 && errno == EINTR) continue;
-        if (n <= 0) goto fail;
+        if (n <= 0) {
+            g_read_fail = n == 0 ? (got ? "end of file in the header" : "end of file") : "header read failed";
+            g_read_errno = n == 0 ? 0 : errno;
+            goto fail;
+        }
         for (struct cmsghdr *c = CMSG_FIRSTHDR(&m); c; c = CMSG_NXTHDR(&m, c)) {
             if (c->cmsg_level == SOL_SOCKET && c->cmsg_type == SCM_RIGHTS) {
                 int k = (int)((c->cmsg_len - CMSG_LEN(0)) / sizeof(int));
@@ -1881,10 +1900,10 @@ static int read_msg(int fd, struct bh_hdr *h, uint8_t **payload, int *fds, int *
         }
         got += (size_t)n;
     }
-    if (h->len > BH_MAX_MSG) goto fail;
+    if (h->len > BH_MAX_MSG) { g_read_fail = "message too large"; g_read_errno = 0; goto fail; }
     if (h->len) {
         *payload = malloc(h->len);
-        if (!*payload) goto fail;
+        if (!*payload) { g_read_fail = "out of memory"; g_read_errno = ENOMEM; goto fail; }
         if (read_full(fd, *payload, h->len) != 0) goto fail;
     }
     if ((int)h->nfds != *nfds) {
@@ -1940,9 +1959,19 @@ static void send_result(struct thread *th, uint64_t seq, struct bh_result *res,
         { th->closes, 4ull * (size_t)th->ncloses },
     };
     if (send_all(th->fd, iov, 5, fds, (int)res->nfixups) != 0)
-        debug("%d:%d result not delivered: %s", p->pid, th->tid, strerror(errno));
-    for (uint32_t i = 0; i < res->nfixups; i++)
-        close(fds[i]);
+        hub_log("%d:%d result not delivered: %s", p->pid, th->tid, strerror(errno));
+    // Not closed yet: a descriptor whose only reference is the message in
+    // flight can be flushed by XNU's unix socket garbage collection before
+    // the thread reads it (see runtime/binder.c tchan_get). The thread's
+    // next message proves it has them (held_release).
+    for (uint32_t i = 0; i < res->nfixups; i++) {
+        if (th->nheld == th->cheld) {
+            th->cheld = th->cheld ? th->cheld * 2 : 8;
+            th->held = realloc(th->held, (size_t)th->cheld * sizeof(int));
+            if (!th->held) { hub_log("out of memory"); _exit(70); }
+        }
+        th->held[th->nheld++] = fds[i];
+    }
     th->ncloses = 0;
 }
 
@@ -2242,12 +2271,41 @@ static void proc_message(struct proc *p)
     if (h.type == BH_THREAD && nfds == 1 && h.len >= sizeof(struct bh_thread)) {
         struct bh_thread bt;
         memcpy(&bt, pl, sizeof bt);
-        new_thread(p, fds[0], bt.tid);
+        char c;
+        ssize_t pk = recv(fds[0], &c, 1, MSG_PEEK | MSG_DONTWAIT);
+        int pe = errno;
+        struct stat fst;
+        bool sock = fstat(fds[0], &fst) == 0 && S_ISSOCK(fst.st_mode);
+        pid_t peer = 0;
+        socklen_t pl2 = sizeof peer;
+        int gp = getsockopt(fds[0], SOL_LOCAL, LOCAL_PEERPID, &peer, &pl2);
+        if (pk == 0 || !sock || (gp == 0 && peer != p->pid)) {
+            // The runtime waits for BH_THREAD_ACK and makes a new channel
+            // when it does not come (runtime/binder.c tchan_get).
+            hub_log("%d:%d thread channel arrived %s (socket %d, peer pid %d%s); refused", p->pid, bt.tid,
+                    pk == 0 ? "closed at the other end" : "odd", sock, gp == 0 ? peer : -1,
+                    pk < 0 && pe != EAGAIN ? ", peek failed" : "");
+            close(fds[0]);
+        } else {
+            struct thread *nt = new_thread(p, fds[0], bt.tid);
+            struct bh_hdr ack = { .type = BH_THREAD_ACK };
+            struct iovec iov = { &ack, sizeof ack };
+            if (send_all(nt->fd, &iov, 1, NULL, 0) != 0) {
+                hub_log("%d:%d thread channel: acknowledgement not sent: %s; dropped", p->pid, bt.tid, strerror(errno));
+                thread_release(nt);
+            }
+        }
     } else {
         hub_log("proc %d: unexpected message %u", p->pid, h.type);
         for (int i = 0; i < nfds; i++) close(fds[i]);
     }
     free(pl);
+}
+
+static void held_release(struct thread *th)
+{
+    for (int i = 0; i < th->nheld; i++) close(th->held[i]);
+    th->nheld = 0;
 }
 
 static void thread_message(struct thread *th)
@@ -2256,9 +2314,21 @@ static void thread_message(struct thread *th)
     uint8_t *pl;
     int fds[BH_MAX_FDS], nfds;
     if (read_msg(th->fd, &h, &pl, fds, &nfds) != 0) {
+        // A thread's channel ends when its thread or process does (end of
+        // file, logged only when it was in the middle of something); any
+        // other failure drops a live thread, whose next call then fails with
+        // EBADF ("Bad file descriptor" in Java): always logged.
+        if (strcmp(g_read_fail, "end of file") != 0 || th->parked || th->transaction_stack)
+            hub_log("%d:%d thread dropped: %s%s%s%s", th->proc->pid, th->tid, g_read_fail,
+                    g_read_errno ? " (" : "", g_read_errno ? strerror(g_read_errno) : "", g_read_errno ? ")" : "");
         thread_release(th);
         return;
     }
+    // A request (not a cancel, which can cross the result) is sent after
+    // the last result was read: the descriptors that came with it are the
+    // thread's now.
+    if (h.type != BH_CANCEL)
+        held_release(th);
     if (th->parked && h.type != BH_CANCEL) {
         hub_log("%d:%d request while blocked; dropping the thread", th->proc->pid, th->tid);
         for (int i = 0; i < nfds; i++) close(fds[i]);

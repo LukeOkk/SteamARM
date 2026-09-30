@@ -1,0 +1,71 @@
+From d26f84d1e8ae469814f624863d2120c335d881b5 Mon Sep 17 00:00:00 2001
+From: LukeOkk <85941941+LukeOkk@users.noreply.github.com>
+Date: Wed, 30 Sep 2026 05:04:10 -0300
+Subject: [PATCH 9/9] compiler: arm64 JNI stubs with a heap reference base
+ (SteamARM, HYPOTHESIS)
+
+HYPOTHESIS, UNTESTED: not compiled, not run.
+
+JNI stubs hand native code handles, not references: a reference argument
+is stored into the handle scope with a 32-bit store (the compression) and
+the jobject is the address of its slot; a returned reference comes back
+from artJniMethodEndWithReference() as a full pointer. So the stubs need
+almost nothing:
+
+- LoadRef() from the frame, and from an ArtMethod (the declaring class of
+  a static native method, a GC root that is never poisoned), decompress so
+  that the register invariant of the code generator holds;
+- LoadReferenceFromHandleScope() (no caller in the arm64 JNI compiler)
+  read 64 bits from a 32-bit slot; it reads 32 and decompresses.
+
+The native side of JNI is unchanged: jobject, jclass and the arrays and
+strings returned by Get*Critical are opaque or point into objects, which
+now lie above 4 GiB like any heap memory.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01L6ANQQienC2qRCeZBzUfuS
+---
+ .../utils/arm64/jni_macro_assembler_arm64.cc     | 16 ++++++++++++++--
+ 1 file changed, 14 insertions(+), 2 deletions(-)
+
+diff --git a/compiler/utils/arm64/jni_macro_assembler_arm64.cc b/compiler/utils/arm64/jni_macro_assembler_arm64.cc
+index 5b46971..eff4c7b 100644
+--- a/compiler/utils/arm64/jni_macro_assembler_arm64.cc
++++ b/compiler/utils/arm64/jni_macro_assembler_arm64.cc
+@@ -300,6 +300,8 @@ void Arm64JNIMacroAssembler::LoadRef(ManagedRegister m_dst, FrameOffset offs) {
+   Arm64ManagedRegister dst = m_dst.AsArm64();
+   CHECK(dst.IsXRegister()) << dst;
+   LoadWFromOffset(kLoadWord, dst.AsOverlappingWRegister(), SP, offs.Int32Value());
++  // SteamARM: a register holds a full pointer (docs/ART_HEAP_ABOVE_4GB.md).
++  asm_.DecompressHeapReference(reg_w(dst.AsOverlappingWRegister()));
+ }
+ 
+ void Arm64JNIMacroAssembler::LoadRef(ManagedRegister m_dst,
+@@ -313,7 +315,10 @@ void Arm64JNIMacroAssembler::LoadRef(ManagedRegister m_dst,
+                   offs.Int32Value());
+   if (unpoison_reference) {
+     WRegister ref_reg = dst.AsOverlappingWRegister();
+-    asm_.MaybeUnpoisonHeapReference(reg_w(ref_reg));
++    asm_.MaybeUnpoisonHeapReference(reg_w(ref_reg));  // SteamARM: also decompresses.
++  } else {
++    // SteamARM: a GC root (the declaring class) is never poisoned but is compressed.
++    asm_.DecompressHeapReference(reg_w(dst.AsOverlappingWRegister()));
+   }
+ }
+ 
+@@ -632,7 +637,14 @@ void Arm64JNIMacroAssembler::LoadReferenceFromHandleScope(ManagedRegister m_out_
+     LoadImmediate(out_reg.AsXRegister(), 0, eq);
+   }
+   ___ Cbz(reg_x(in_reg.AsXRegister()), &exit);
+-  LoadFromOffset(out_reg.AsXRegister(), in_reg.AsXRegister(), 0);
++  if (kTargetHeapReferenceBase != 0u) {
++    // SteamARM: a handle scope slot is a 32-bit compressed reference; the
++    // 64-bit load above upstream only works when the next slot is zero.
++    LoadWFromOffset(kLoadWord, out_reg.AsOverlappingWRegister(), in_reg.AsXRegister(), 0);
++    asm_.DecompressHeapReference(reg_w(out_reg.AsOverlappingWRegister()));
++  } else {
++    LoadFromOffset(out_reg.AsXRegister(), in_reg.AsXRegister(), 0);
++  }
+   ___ Bind(&exit);
+ }
+ 

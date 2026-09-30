@@ -63,3 +63,23 @@ void lxrt_x18_plan(uint32_t insn, uint64_t site, uint64_t tramp,
                    unsigned slot_off, unsigned tls_off, struct x18_plan *out);
 /* Conservative allocation bound, including both branch placeholders. */
 size_t lxrt_x18_tramp_bytes(uint32_t insn);
+
+/* The `br x18` trampoline keeps every general register: it ends with
+ *   A  mrs x18, tpidrro_el0
+ *   B  and x18, x18, #~7
+ *   C  ldr x18, [x18, #slot]
+ *   D  br  x18
+ * which uses the hardware x18 for the last few instructions. Where the kernel
+ * zeroes x18 on an exception return, an exception between A and D leaves
+ * x18 = 0: C then faults on a page-zero address, or D branches to 0. The
+ * trampoline's first 9 words leave {D, target} just below the guest sp for
+ * that case, and restarting it from its first word is always safe once pc
+ * is on A..D (x16, x17 and sp are the guest's again).
+ *
+ * w[0..6] are the words at pc-12 .. pc+12. Returns how many bytes before pc
+ * the trampoline starts when pc is on A..D of one, else 0. */
+unsigned lxrt_x18_br_restart(const uint32_t w[7]);
+/* w[0..3] are the words at d-12 .. d: true when d is a trampoline's D. */
+bool lxrt_x18_br_tail(const uint32_t w[4]);
+#define X18_BR_TRAMP_WORDS 13
+#define X18_BR_MARK_BELOW_SP 32   /* {D, target} at sp-32, sp-24 when D runs */

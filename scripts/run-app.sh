@@ -26,6 +26,11 @@
 # Settings ($STATE/launcher/settings.json): "display" as above; "resolution"
 # is the Xvnc geometry (vnc only), applied when Xvnc is (re)started with no app
 # running; "metalHud" exports MTL_HUD_ENABLED=1; "extraEnv" goes to every app.
+# An Android card ("kind": "android") runs scripts/android-session.py run
+# <package> in that session: Weston on :2, the x86_64 Android root booted under
+# FEX, the APK installed with pm and started with am (docs/APK_SUPPORT.md);
+# what the session cannot run (arm64-v8a-only code, 32-bit ARM or x86, a minSdk
+# above 30) is refused with the reason, exit 2.
 # Every app runs in a process group of its own (scripts/session.py): the PID
 # of that group's leader goes to $STATE/launcher/running.pid (its id to
 # running.id, its display mode to running.display, "<arch> <translator>" to
@@ -161,11 +166,50 @@ if app is None:
     sys.stderr.write("run-app: unknown app id %r (not in %s)\n" % (app_id, apps_path))
     sys.exit(2)
 # An Android app (docs/APK_SUPPORT.md): installed by scripts/android-pm.py,
-# but there is no Android runtime to run it yet. Never a fake launch.
+# opened by scripts/android-session.py in SteamARM's Android session -- the
+# x86_64 Android 11 root under FEX, zero VM, its screen a macOS window
+# (benchmarks/stage28-android-apk.txt). What the session cannot run is refused
+# with the reason, as the launcher's card says it (AndroidApps.unavailableReason):
+# arm64-v8a-only code (Android's arm64 ART does not start on macOS: the ART
+# heap wall), 32-bit ARM, 32-bit x86, other ABIs, a minSdk above API 30.
+android_pkg = None
 if app.get("kind") == "android":
-    sys.stderr.write("run-app: app %r is an Android app; SteamARM's Android environment does not run "
-                     "apps yet (docs/ANDROID_ZERO_VM_FEASIBILITY.md)\n" % app_id)
-    sys.exit(2)
+    info = app.get("android") if isinstance(app.get("android"), dict) else {}
+    pkg = str(info.get("package") or "")
+    state = os.environ.get("STEAMARM_STATE") or os.path.expanduser("~/SteamARM-roots")
+    meta = load(os.path.join(state, "android", "packages", pkg, "meta.json"), {}) if pkg else {}
+    if not isinstance(meta, dict):
+        meta = {}
+    abis = info.get("abis") if isinstance(info.get("abis"), list) else meta.get("abis")
+    abis = [str(x) for x in abis] if isinstance(abis, list) else None
+    min_sdk = str(info.get("minSdk") if info.get("minSdk") is not None else meta.get("minSdk") or "")
+    why = None
+    if not re.fullmatch(r"[A-Za-z][A-Za-z0-9_]*(\.[A-Za-z][A-Za-z0-9_]*)+", pkg):
+        why = "it names no valid package"
+    elif abis is None:
+        why = "its ABIs are unknown (reinstall the APK)"
+    elif min_sdk and not min_sdk.isdigit():
+        why = "it needs a preview Android (minSdk %s); the session is Android 11 (API 30)" % min_sdk
+    elif min_sdk.isdigit() and int(min_sdk) > 30:
+        why = "it needs API %s; the session is Android 11 (API 30)" % min_sdk
+    elif "x86_64" in abis or not abis:
+        why = None
+    elif "arm64-v8a" in abis:
+        why = ("its native code is arm64-v8a only: Android's arm64 ART does not start on macOS (its heap "
+               "must be below 4 GiB; docs/ANDROID_RUNTIME_ARCHITECTURE.md), and the session is x86_64 under FEX")
+    elif set(abis) & {"armeabi-v7a", "armeabi"}:
+        why = "its native code is 32-bit ARM only, which Apple silicon does not run"
+    elif "x86" in abis:
+        why = "its native code is 32-bit x86 only; the session runs x86_64 and dex-only apps"
+    else:
+        why = "its native code is for %s only" % ", ".join(sorted(abis))
+    if why:
+        sys.stderr.write("run-app: app %r is an Android app SteamARM's Android session cannot run: %s\n"
+                         % (app_id, why))
+        sys.exit(2)
+    android_pkg = pkg
+    app = dict(app, command=["run", pkg], architecture="x86_64",
+               root=os.environ.get("ANDROID_SESSION_ROOT") or "/Volumes/SteamARMAndroid/session")
 cmd = [str(c) for c in app.get("command") or []]
 # -noverifyfiles on a fresh install also skips downloading the client itself
 # (the bootstrap finds no steamui.so and exits): only for an installed client.
@@ -240,6 +284,7 @@ root = str(app.get("root") or (ARM64_ROOT if arch == "aarch64" else X86_ROOT))
 # runs aarch64 code only, the x86-64 Steam root only x86 code under FEX. An
 # aarch64 program in the x86 root would find no aarch64 loader or libraries.
 same = lambda a, b: os.path.realpath(a) == os.path.realpath(b)
+print("APP_ANDROID=%s" % q(android_pkg or ""))
 if (arch == "aarch64" and same(root, X86_ROOT)) or (arch != "aarch64" and same(root, ARM64_ROOT)):
     want = ARM64_ROOT if arch == "aarch64" else X86_ROOT
     sys.stderr.write("run-app: app %r is %s but its root is %s; %s programs run in %s. "
@@ -349,12 +394,20 @@ SPEC="$(resolve_app "$ID")" || exit 2
 eval "$SPEC"
 # Applied to the settings above; not for the program's environment.
 unset STEAMARM_GRAPHICS_BACKEND STEAMARM_SYNCHRONIZATION
-if [ "$APP_ARCH" = aarch64 ]; then
+if [ -n "$APP_ANDROID" ]; then
+    # The Android session: Weston on the native X server, the x86_64 root
+    # under FEX (scripts/android-session.py run <package>).
+    RUNNER=scripts/android-session.py; TRANSLATOR=FEX
+elif [ "$APP_ARCH" = aarch64 ]; then
     RUNNER=scripts/run-native.sh; TRANSLATOR=none
 else
     RUNNER=scripts/run-fex.sh; TRANSLATOR=FEX
 fi
 MODE="${STEAMARM_DISPLAY:-$DMODE}"
+if [ -n "$APP_ANDROID" ] && [ "$MODE" = vnc ]; then
+    echo "run-app: $APP_NAME is an Android app; its screen is a Weston window on the native X server, using native windows" >&2
+    MODE=native
+fi
 # Xvnc runs inside the x86 Steam root and binds its socket there; lxrun's
 # connect fallback reaches only the host's /tmp/.X11-unix (runtime/socket.c),
 # so a program in another root would find no display :1. Native windows instead.
@@ -372,7 +425,8 @@ if [ "$DRY" = 1 ]; then
     echo "app:      $ID ($APP_NAME)"
     echo "display:  $MODE (DISPLAY=$DISP)"
     echo "arch:     $APP_ARCH (translator: $TRANSLATOR, session: ZERO-VM)"
-    if [ "$APP_ARCH" = aarch64 ]; then echo "root:     LXRT_ROOT=$APP_ROOT DISPLAY=$DISP"
+    if [ -n "$APP_ANDROID" ]; then echo "android:  $APP_ANDROID in the Android session (root $APP_ROOT, Weston on $DISP)"
+    elif [ "$APP_ARCH" = aarch64 ]; then echo "root:     LXRT_ROOT=$APP_ROOT DISPLAY=$DISP"
     else echo "root:     LXRT_ROOT=$APP_ROOT FEX_ROOTFS=$APP_FEXROOTFS DISPLAY=$DISP"; fi
     echo "env:      ${APP_ENV[*]+${APP_ENV[*]}}"
     echo "command:  $RUNNER ${APP_CMD[*]}"
@@ -428,15 +482,25 @@ if [ -n "$(guest_pids)" ]; then
     exit 3
 fi
 
-scripts/env-links.sh "$STATE" >/dev/null || exit 1
+[ -n "$APP_ANDROID" ] || scripts/env-links.sh "$STATE" >/dev/null || exit 1
+# The guest root must be there before anything is made in it: a root on a
+# volume that is not attached (the Steam Frame root's sparsebundle) left
+# /tmp/lxrt-arm64root missing, and scripts/audio.sh then created
+# /tmp/lxrt-arm64root/tmp/pulse as a real directory where the link belongs.
+if [ -z "$APP_ANDROID" ] && [ ! -d "$APP_ROOT/usr" ]; then
+    echo "run-app: the root $APP_ROOT of $APP_NAME is not there (a volume that is not attached?)" >&2
+    exit 2
+fi
 [ -z "$APP_PREFIX" ] || mkdir -p "$APP_ROOT$APP_PREFIX" || exit 1
 if [ "$MODE" = native ]; then ensure_native_x; else ensure_xvnc; fi
 
+if [ -z "$APP_ANDROID" ]; then
 # Sound (scripts/audio.sh) at the launcher's volume, unless it is muted.
 VOL="$(/usr/bin/python3 scripts/settings-env.py --volume "$LDIR/settings.json")"
 [ -n "$VOL" ] && { LXRT_ROOT="$APP_ROOT" scripts/audio.sh start "$VOL" >/dev/null || echo "run-app: no sound (scripts/audio.sh)" >&2; }
 # Controllers (scripts/input.sh): the launcher's Entrada page, as /dev/input.
 scripts/input.sh start >/dev/null || echo "run-app: no controllers for games (scripts/input.sh)" >&2
+fi   # the Android session has its own /dev/input (the composer's) and no sound yet
 
 # The memory guard, before the session exists: started here it stays outside
 # the app's process group, and a stop does not take it down.

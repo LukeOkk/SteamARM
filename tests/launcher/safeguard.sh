@@ -57,5 +57,25 @@ sleep 3
 check "a process-count limit crossed in the grace period stops every guest" \
     '[ "$(count $C $D $E $F)" -eq 0 ]'
 check "its KILL line names the process count" 'grep -q "KILL: 3 lxrun processes > 2" "$T/sg2.log"'
+kill "$SG2" 2>/dev/null; wait "$SG2" 2>/dev/null; SG2=""
+
+# 6. An Android session (scripts/android-session.py's session.json naming a
+# live boot) raises the process limit by SAFEGUARD_ANDROID_PROCS: 4 guests
+# under 2 + 3 stay; a sixth crosses it.
+mkdir -p "$T/state3/android"
+sleep 60 & BOOT=$!
+echo "{\"bootPid\": $BOOT, \"root\": \"/x\"}" > "$T/state3/android/session.json"
+G1=""; for _ in 1 2 3 4; do "$T/bin/$NAME" 60 & G1="$G1 $!"; done
+STEAMARM_STATE="$T/state3" SAFEGUARD_GUEST_NAME="$NAME" SAFEGUARD_MAX_PROCS=2 SAFEGUARD_ANDROID_PROCS=3 \
+    scripts/safeguard.sh run >"$T/sg3.log" 2>&1 & SG3=$!
+sleep 2.5
+# shellcheck disable=SC2086
+check "an Android session: 4 guests under 2 + 3 keep running" '[ "$(count $G1)" -eq 4 ]'
+"$T/bin/$NAME" 60 & G5=$!
+"$T/bin/$NAME" 60 & G6=$!
+sleep 2.5
+# shellcheck disable=SC2086
+check "... and a sixth crosses the raised limit" '[ "$(count $G1 $G5 $G6)" -eq 0 ] && grep -q "KILL: 6 lxrun processes > 5" "$T/sg3.log"'
+kill "$SG3" "$BOOT" 2>/dev/null; wait "$SG3" "$BOOT" 2>/dev/null
 echo "$pass passed, $fail failed"
 [ $fail -eq 0 ]
