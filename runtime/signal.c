@@ -1544,6 +1544,26 @@ static uint64_t darwin_mask_to_linux(const sigset_t *in)
     return m;
 }
 
+// rt_sigpending: what Darwin holds pending for this thread and the process,
+// plus the realtime signals queued for this thread (which never reach
+// Darwin's pending set: they travel as the carrier). It was ENOSYS, so
+// sigpending() failed and reported nothing.
+long lxrt_rt_sigpending(uint64_t *uset, size_t sigsetsize)
+{
+    if (sigsetsize != 8)
+        return LERR(EINVAL);
+    if (!uset)
+        return LERR(EFAULT);
+    sigset_t p;
+    if (sigpending(&p) != 0)
+        return LERR(errno);
+    uint64_t m = darwin_mask_to_linux(&p) | lxrt_rt_queued_self();
+    // Synchronous faults blocked by the guest are pending here, not on the
+    // host (SYNC_BITS); nothing is ever left pending for them either way.
+    *uset = m;
+    return 0;
+}
+
 long lxrt_rt_sigprocmask(int how, const uint64_t *uset, uint64_t *uoldset,
                          size_t sigsetsize)
 {

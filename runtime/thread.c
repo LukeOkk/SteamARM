@@ -433,29 +433,45 @@ long lxrt_futex(uint32_t *uaddr, int op, uint32_t val, uint64_t timeout_or_val2,
         if (ts && ts->tv_sec >= 0 && ts->tv_sec >= INT64_MAX / 1000000000LL &&
             ts->tv_nsec >= 0 && ts->tv_nsec < 1000000000LL)
             ts = NULL;
+        // The wait runs to a deadline on the guest's own clock, so that a
+        // wait cut short by a signal that ran no guest handler can go on for
+        // what is left of it (lxrt_interrupted_internally).
+        long clk = (op & FUTEX_CLOCK_REALTIME) && base == FUTEX_WAIT_BITSET ? 0 : 1;
+        int64_t deadline = 0;
         if (ts) {
-            int64_t ns;
+            int64_t ns = ts->tv_sec * 1000000000LL + ts->tv_nsec;
             if (base == FUTEX_WAIT_BITSET) {
                 // The deadline is on the guest's clock: compare against the
                 // same counter it read (Darwin's CLOCK_MONOTONIC is another
                 // base -- seconds apart here, hours on a laptop that slept).
-                int64_t now = (int64_t)lxrt_guest_clock_ns((op & FUTEX_CLOCK_REALTIME) ? 0 : 1);
-                ns = ts->tv_sec * 1000000000LL + ts->tv_nsec - now;
+                deadline = ns;
             } else {
-                ns = ts->tv_sec * 1000000000LL + ts->tv_nsec;
+                int64_t now = (int64_t)lxrt_guest_clock_ns(clk);
+                if (ns > INT64_MAX - now)
+                    ts = NULL;          // past what the clock can hold: forever
+                else
+                    deadline = now + ns;
             }
-            if (ns <= 0)
-                return LERR(ETIMEDOUT);
-            // Clamp rather than overflow: a wait longer than ~71 minutes
-            // becomes an untimed wait, which is closer to the intent than a
-            // wrapped short one.
-            int64_t clamped = ns / 1000;
-            us = clamped > 0 && clamped < UINT32_MAX ? (uint32_t)clamped : 0;
-            if (us == 0)
-                us = 1;
         }
-
-        int r = __ulock_wait(UL_COMPARE_AND_WAIT | ULF_NO_ERRNO, uaddr, val, us);
+        int r;
+        for (;;) {
+            if (ts) {
+                int64_t ns = deadline - (int64_t)lxrt_guest_clock_ns(clk);
+                if (ns <= 0)
+                    return LERR(ETIMEDOUT);
+                // Clamp rather than overflow: a wait longer than ~71 minutes
+                // becomes an untimed wait, which is closer to the intent than a
+                // wrapped short one.
+                int64_t clamped = ns / 1000;
+                us = clamped > 0 && clamped < UINT32_MAX ? (uint32_t)clamped : 0;
+                if (us == 0)
+                    us = 1;
+            }
+            r = __ulock_wait(UL_COMPARE_AND_WAIT | ULF_NO_ERRNO, uaddr, val, us);
+            if (r == -EINTR && lxrt_interrupted_internally())
+                continue;
+            break;
+        }
         // A successful __ulock_wait returns the number of waiters STILL parked
         // on the address, not 0 -- measured 3, 2, 1, 0 across four threads
         // released by one ULF_WAKE_ALL. Linux's FUTEX_WAIT returns 0 on a
@@ -805,6 +821,27 @@ bool lxrt_rt_pending_unblocked(uint64_t blocked)
     }
     threads_unlock();
     return any;
+}
+
+// The realtime signals queued for the CALLING thread, as Linux mask bits.
+uint64_t lxrt_rt_queued_self(void)
+{
+    int tid = lxrt_gettid();
+    uint64_t m = 0;
+    threads_lock();
+    for (int i = 0; i < MAX_GUEST_THREADS; i++) {
+        if (!g_threads[i].used || g_threads[i].tid != tid)
+            continue;
+        for (uint8_t k = g_threads[i].rt_head; k != g_threads[i].rt_tail;
+             k = (uint8_t)((k + 1) % RT_QUEUE_DEPTH)) {
+            int s = g_threads[i].rt[k];
+            if (s >= 1 && s <= 64)
+                m |= 1ull << (s - 1);
+        }
+        break;
+    }
+    threads_unlock();
+    return m;
 }
 
 // Pops the next realtime signal queued for the CALLING thread, or 0.

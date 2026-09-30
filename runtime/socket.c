@@ -933,6 +933,28 @@ long lxrt_sendto(int fd, const void *buf, size_t len, int lflags, const void *la
     return r < 0 ? LERR(errno) : (long)r;
 }
 
+// read() and readv() on a seqpacket socket: the same slices and the same end
+// of file as a blocking recvmsg. Steam's web helper waits for each zygote's
+// hello with read(); a zygote that died before sending it left the browser
+// blocked for good (MEASURED, no window), where Linux returns 0 and the
+// browser gives up and is restarted. false: not a seqpacket socket.
+bool lxrt_seqpkt_readv(int fd, const struct iovec *iov, int cnt, long *ret)
+{
+    if (!lxrt_is_seqpacket(fd))
+        return false;
+    long w = seqpkt_before_recv(fd, 0);
+    if (w < 0) {
+        *ret = w;
+        return true;
+    }
+    ssize_t r = readv(fd, iov, cnt);
+    if (r < 0 && errno == ECONNRESET)
+        *ret = 0;               // the peer is gone: end of file (see above)
+    else
+        *ret = r < 0 ? LERR(errno) : (long)r;
+    return true;
+}
+
 long lxrt_recvfrom(int fd, void *buf, size_t len, int lflags, void *laddr, uint32_t *lalen)
 {
     int df = lxrt_msgflags_to_darwin(lflags);

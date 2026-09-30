@@ -37,6 +37,7 @@
 
 #include <dlfcn.h>
 #include <pthread.h>
+#include <signal.h>
 #include <stdatomic.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -284,13 +285,30 @@ long lxrt_jit_set_write(int enable, uint64_t addr, uint64_t len)
         }
         if (enable == 2)
             return 0;           // inner scope: scanned, still writable
-        pthread_jit_write_protect_np(1);
+        lxrt_jit_protect(1);
         g_writable = false;
     } else {
-        pthread_jit_write_protect_np(0);
+        lxrt_jit_protect(0);
         g_writable = true;
     }
     return 0;
+}
+
+// pthread_jit_write_protect_np writes the thread's JIT permission register
+// (S3_6_C15_C1_5), reads it back and traps (brk #1) when the two differ
+// (disassembled on macOS 27: msr, isb, mrs, cmp, b.ne to a brk). A signal
+// taken between the write and the read whose handler changes the thread's
+// JIT mode -- the runtime's own fault handlers below do -- made them differ:
+// the intermittent SIGTRAP at pthread_jit_write_protect_np+388 that ended
+// one x86 Steam start in a few (MEASURED: lxrt_jit_set_write, called from a
+// guest's JitWriteScope syscall). Every call runs with signals blocked.
+void lxrt_jit_protect(int enable)
+{
+    sigset_t all, old;
+    sigfillset(&all);
+    pthread_sigmask(SIG_BLOCK, &all, &old);
+    pthread_jit_write_protect_np(enable);
+    pthread_sigmask(SIG_SETMASK, &old, NULL);
 }
 
 // Execute-mode stub (trampoline.S): the fetch-fault handler parks the faulting
@@ -404,7 +422,7 @@ bool lxrt_jit_handle_fault(uint64_t pc, uint64_t fault_addr, void *uap)
             rescan(idx);
         if (redirect_to_exec_stub(uap))
             return true;
-        pthread_jit_write_protect_np(1);   // no context to redirect: best effort
+        lxrt_jit_protect(1);   // no context to redirect: best effort
         g_writable = false;
         return true;
     }
@@ -412,7 +430,7 @@ bool lxrt_jit_handle_fault(uint64_t pc, uint64_t fault_addr, void *uap)
     // A store into a JIT page while the thread can execute it.
     if (g_writable)
         return false;           // writable already: a genuine fault
-    pthread_jit_write_protect_np(0);
+    lxrt_jit_protect(0);
     g_writable = true;
     note_written(idx, fault_addr);
     return true;

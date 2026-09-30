@@ -727,6 +727,42 @@ if [ -f "$STAGE/usr/lib64/libc.a" ] && [ -n "$GCCDIR" ]; then
     fi
 fi
 
+# 19e. A signal that runs no handler interrupts nothing: a realtime signal
+# from another process that the target has blocked still arrives as the
+# carrier, and Darwin's sleeps and waits came back EINTR (the Steam client's
+# ThreadSleep then slept zero). Each call must run its whole 300 ms, and the
+# signal must stay pending (rt_sigpending, which was ENOSYS).
+if [ -f "$STAGE/usr/lib64/libc.a" ] && [ -n "$GCCDIR" ]; then
+    if err=$(glibc_cc -static-pie -O2 -o build/quiet_interrupt tests/elf/quiet_interrupt.c 2>&1); then
+        out=$(deadline 60 ./build/lxrun "$PWD/build/quiet_interrupt" 2>&1); rc=$?
+        n_ok=$(grep -c "^  OK  " <<<"$out")
+        if [ "$rc" -eq 0 ] && [ "$n_ok" -eq 6 ]; then
+            ok "a blocked signal from another process cuts no wait short: nanosleep, clock_nanosleep, three futex waits ran 300 ms; still pending"
+        else
+            bad "waits a blocked signal must not cut short" "rc=$rc, $n_ok/6: $(grep MAL <<<"$out" | head -3 | tr '\n' ' ')"
+        fi
+    else
+        bad "build quiet_interrupt" "$err"
+    fi
+fi
+
+# 19f. readv, preadv, pwritev, preadv2 and pwritev2 (all ENOSYS before), and
+# read() on a seqpacket pair whose peer died without writing: end of file,
+# not a read that never returns (Steam's web helper and its zygotes).
+if [ -f "$STAGE/usr/lib64/libc.a" ] && [ -n "$GCCDIR" ]; then
+    if err=$(glibc_cc -static-pie -O2 -o build/vector_io tests/elf/vector_io.c 2>&1); then
+        out=$(deadline 60 ./build/lxrun "$PWD/build/vector_io" 2>&1); rc=$?
+        n_ok=$(grep -c "^  OK  " <<<"$out")
+        if [ "$rc" -eq 0 ] && [ "$n_ok" -eq 10 ]; then
+            ok "vector I/O: readv, preadv, pwritev, preadv2, pwritev2; read() on a seqpacket pair ends at its dead peer"
+        else
+            bad "vector I/O and seqpacket end of file" "rc=$rc, $n_ok/10: $(grep MAL <<<"$out" | head -3 | tr '\n' ' ')"
+        fi
+    else
+        bad "build vector_io" "$err"
+    fi
+fi
+
 # 19c. 32-bit bionic needs process and thread IDs below 65536. Exercise the
 # opt-in namespace with native aarch64 first, leaving the normal run untouched.
 if [ -f "$STAGE/usr/lib64/libc.a" ] && [ -n "$GCCDIR" ]; then

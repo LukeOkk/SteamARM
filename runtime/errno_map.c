@@ -87,6 +87,9 @@ int lxrt_errno_to_linux(int e)
     case EPROTONOSUPPORT: return 93;
     case ESOCKTNOSUPPORT: return 94;
     case ENOTSUP:         return 95;   // Linux EOPNOTSUPP; Darwin aliases them
+#if defined(EOPNOTSUPP) && EOPNOTSUPP != ENOTSUP
+    case EOPNOTSUPP:      return 95;   // Darwin's socket flavour, 102: it read as EIO
+#endif
     case EPFNOSUPPORT:    return 96;
     case EAFNOSUPPORT:    return 97;
     case EADDRINUSE:      return 98;

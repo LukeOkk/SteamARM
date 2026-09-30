@@ -133,6 +133,16 @@ void lxrt_dispatch_set_trace(bool on);
 // The guest's clocks (Linux clockid), nanoseconds. Compare guest-supplied
 // absolute times against THIS, never against Darwin's clock_gettime.
 uint64_t lxrt_guest_clock_ns(long clk);
+// A blocking call Darwin cut short with EINTR although no guest handler ran
+// during it (lxrt_sig_during_syscall still 0, see dispatch.c): the realtime
+// carrier landing on a thread with nothing queued for it, for one. Linux
+// never interrupts a call for a signal that runs no handler, so the call goes
+// on -- with the time it has left.
+static inline int lxrt_interrupted_internally(void)
+{
+    extern _Thread_local int lxrt_sig_during_syscall;
+    return lxrt_sig_during_syscall == 0;
+}
 // Number of syscalls that hit the ENOSYS path, and the last one seen, so a run
 // that dies reports *which* call it lacked rather than just failing.
 uint64_t lxrt_dispatch_unimplemented_count(void);
@@ -199,6 +209,7 @@ bool lxrt_jit_handle_fault(uint64_t pc, uint64_t fault_addr, void *uap);
 // brk from the execute-mode stub: restore the parked context (jit.c).
 bool lxrt_jit_stub_trap(void *uap);
 long lxrt_jit_set_write(int enable, uint64_t addr, uint64_t len);
+void lxrt_jit_protect(int enable);   // pthread_jit_write_protect_np with signals blocked
 bool lxrt_jit_thread_writable(void);
 
 // wxsplit.c -- read-write-execute ranges of NATIVE aarch64 guests (V8's code
@@ -431,6 +442,10 @@ bool lxrt_rt_enqueue(int tid, int lsig);
 int  lxrt_rt_dequeue_self(void);
 int  lxrt_rt_dequeue_self_mask(uint64_t blocked);
 bool lxrt_rt_pending_unblocked(uint64_t blocked);
+uint64_t lxrt_rt_queued_self(void);
+struct iovec;
+bool lxrt_seqpkt_readv(int fd, const struct iovec *iov, int cnt, long *ret);
+long lxrt_rt_sigpending(uint64_t *uset, size_t sigsetsize);
 uint64_t lxrt_rt_mask_get(void);
 void lxrt_rt_mask_set(uint64_t m);
 

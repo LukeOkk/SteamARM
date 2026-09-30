@@ -459,7 +459,7 @@ _lxrt_sysreg_br_off: .quad Lsysreg_br - _lxrt_sysreg_template
     .globl _lxrt_jit_exec_stub
 _lxrt_jit_exec_stub:
     mov     x0, #1
-    bl      _pthread_jit_write_protect_np
+    bl      _lxrt_jit_protect           // signals blocked around the flip (runtime/jit.c)
     .globl _lxrt_jit_exec_stub_trap
 _lxrt_jit_exec_stub_trap:
     brk     #0x4c58

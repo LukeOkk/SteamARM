@@ -2018,7 +2018,18 @@ static long do_nanosleep(uint64_t req, uint64_t rem)
         return LERR(EFAULT);
     struct timespec ts = { (time_t)r->tv_sec, (long)r->tv_nsec };
     struct timespec left = { 0, 0 };
-    if (nanosleep(&ts, &left) != 0) {
+    for (;;) {
+        if (nanosleep(&ts, &left) == 0)
+            return 0;
+        // Cut short by a signal that ran no guest handler: sleep the rest.
+        // The Steam client's ThreadSleep is one nanosleep with no retry, and
+        // its wait for the web helper (2400 x ThreadSleep(50), two minutes)
+        // ended in under a second: "Timed out waiting for webhelper init",
+        // and no window (MEASURED, about one x86 start in five).
+        if (errno == EINTR && lxrt_interrupted_internally()) {
+            ts = left;
+            continue;
+        }
         // Linux writes the remaining time back on EINTR; leaving it stale makes
         // a retry loop sleep for the full interval again.
         if (errno == EINTR && rem) {
@@ -2028,7 +2039,6 @@ static long do_nanosleep(uint64_t req, uint64_t rem)
         }
         return LERR(errno);
     }
-    return 0;
 }
 
 static long do_nanosleep_abs(long clk, uint64_t req)
@@ -2038,13 +2048,19 @@ static long do_nanosleep_abs(long clk, uint64_t req)
         return LERR(EFAULT);
     // Darwin has no absolute clock_nanosleep; convert to a relative wait,
     // against the clock the guest itself reads (lxrt_guest_clock_ns).
-    int64_t now = (int64_t)lxrt_guest_clock_ns(clk);
-    int64_t delta = r->tv_sec * 1000000000LL + r->tv_nsec - now;
-    if (delta <= 0)
-        return 0;
-    struct timespec ts = { (time_t)(delta / 1000000000LL),
-                           (long)(delta % 1000000000LL) };
-    return nanosleep(&ts, NULL) != 0 ? LERR(errno) : 0;
+    for (;;) {
+        int64_t now = (int64_t)lxrt_guest_clock_ns(clk);
+        int64_t delta = r->tv_sec * 1000000000LL + r->tv_nsec - now;
+        if (delta <= 0)
+            return 0;
+        struct timespec ts = { (time_t)(delta / 1000000000LL),
+                               (long)(delta % 1000000000LL) };
+        if (nanosleep(&ts, NULL) == 0)
+            return 0;
+        if (errno != EINTR || !lxrt_interrupted_internally())
+            return LERR(errno);
+        // no guest handler ran: the deadline stands (lxrt_interrupted_internally)
+    }
 }
 
 // ---------------------------------------------------------------- stat
@@ -2546,6 +2562,13 @@ void lxrt_dispatch(struct lxrt_regs *r)
                 (unsigned long long)a2);
 
     extern _Thread_local int lxrt_sig_during_syscall;
+    // A guest handler runs on top of the call it interrupted, and its own
+    // syscalls come through here: the mark belongs to the interrupted call
+    // and is put back on the way out. Cleared, it read as "no handler ran",
+    // and the interrupted call restarted instead of reporting EINTR
+    // (tests/elf binder_ipc.c's pool test: a handler that closes a
+    // descriptor during a blocked BINDER_WRITE_READ).
+    const int outer_sig_during_syscall = lxrt_sig_during_syscall;
     // Android ids (runtime/android_ids.h): the credential, capability and
     // namespace calls of a guest started with LXRT_ANDROID_IDS.
     if (lxrt_aids_on() && lxrt_aids_syscall(nr, a0, a1, a2, a3, a4, &ret))
@@ -2689,8 +2712,71 @@ restart:
             ret = lxrt_inotify_read((int)a0, (void *)a1, (size_t)a2);
             break;
         }
+        {
+            struct iovec one = { (void *)a1, (size_t)a2 };
+            if (lxrt_seqpkt_readv((int)a0, &one, 1, &ret))
+                break;
+        }
         ret = ret_of((long)read((int)a0, (void *)a1, (size_t)a2));
         break;
+    case 65:                                            // readv
+    case 69:                                            // preadv
+    case 286: {                                         // preadv2
+        // All three were ENOSYS. struct iovec has one layout on both systems.
+        // preadv2's offset -1 is "the file position", as readv; its flags
+        // are hints Darwin has no use for, except RWF_NOWAIT, which it
+        // cannot honour (EOPNOTSUPP, as Linux answers where it cannot).
+        const struct iovec *iov = (const struct iovec *)a1;
+        int cnt = (int)a2;
+        if (cnt < 0 || cnt > 1024) { ret = LERR(EINVAL); break; }
+        if (nr == 286 && (a5 & ~0x7ull)) { ret = LERR(EOPNOTSUPP); break; }
+        bool positional = nr == 69 || (nr == 286 && (int64_t)a3 != -1);
+        if (positional && (int64_t)a3 < 0) { ret = LERR(EINVAL); break; }
+        if (!positional) {
+            // A descriptor the runtime synthesizes has its own record
+            // format: read it through read()'s path, into the first buffer.
+            int fd = (int)a0;
+            if (lxrt_eventfd_is(fd) || lxrt_evdev_is(fd) || lxrt_timerfd_is(fd) ||
+                lxrt_signalfd_is(fd) || lxrt_inotify_is(fd) || lxrt_binder_is(fd)) {
+                int k = 0;
+                while (k < cnt && iov[k].iov_len == 0) k++;
+                if (k == cnt) { ret = 0; break; }
+                ret = lxrt_eventfd_is(fd)   ? lxrt_eventfd_read(fd, iov[k].iov_base, iov[k].iov_len)
+                    : lxrt_evdev_is(fd)     ? lxrt_evdev_read(fd, iov[k].iov_base, iov[k].iov_len)
+                    : lxrt_timerfd_is(fd)   ? lxrt_timerfd_read(fd, iov[k].iov_base, iov[k].iov_len)
+                    : lxrt_signalfd_is(fd)  ? lxrt_signalfd_read(fd, iov[k].iov_base, iov[k].iov_len)
+                    : lxrt_inotify_is(fd)   ? lxrt_inotify_read(fd, iov[k].iov_base, iov[k].iov_len)
+                    : LERR(EINVAL);
+                break;
+            }
+            if (lxrt_seqpkt_readv(fd, iov, cnt, &ret))
+                break;
+            ret = ret_of((long)readv(fd, iov, cnt));
+        } else {
+            ret = ret_of((long)preadv((int)a0, iov, cnt, (off_t)a3));
+        }
+        break;
+    }
+    case 70:                                            // pwritev
+    case 287: {                                         // pwritev2
+        const struct iovec *iov = (const struct iovec *)a1;
+        int cnt = (int)a2;
+        if (cnt < 0 || cnt > 1024) { ret = LERR(EINVAL); break; }
+        // RWF_HIPRI 1, RWF_DSYNC 2, RWF_SYNC 4; RWF_NOWAIT and RWF_APPEND
+        // are not offered.
+        if (nr == 287 && (a5 & ~0x7ull)) { ret = LERR(EOPNOTSUPP); break; }
+        bool positional = nr == 70 || (int64_t)a3 != -1;
+        if (positional && (int64_t)a3 < 0) { ret = LERR(EINVAL); break; }
+        uint64_t total = 0;
+        for (int i = 0; iov && i < cnt; i++) total += iov[i].iov_len;
+        long seal = lxrt_memfd_check_write((int)a0, positional ? (int64_t)a3 : -1, total);
+        if (seal < 0) { ret = seal; break; }
+        ret = ret_of(positional ? (long)pwritev((int)a0, iov, cnt, (off_t)a3)
+                                : (long)writev((int)a0, iov, cnt));
+        if (ret >= 0 && nr == 287 && (a5 & 0x6) && fsync((int)a0) != 0)
+            ret = LERR(errno);          // RWF_DSYNC / RWF_SYNC: this write, durable
+        break;
+    }
     case LNR_writev: {
         // struct iovec has the same layout on both systems. F_SEAL_WRITE has
         // to stop this path too, so the gate sums the vector first.
@@ -4285,6 +4371,9 @@ restart:
         // guest issued the syscall by hand.
         ret = LERR(ENOSYS);
         break;
+    case 136:                                           // rt_sigpending
+        ret = lxrt_rt_sigpending((uint64_t *)a0, (size_t)a1);
+        break;
     case LNR_rt_sigprocmask:
         ret = lxrt_rt_sigprocmask((int)a0, (const uint64_t *)a1,
                                   (uint64_t *)a2, (size_t)a3);
@@ -4334,7 +4423,12 @@ restart:
     // locking shared memory file") after one such interruption. Only the
     // calls Linux restarts: never poll/select/epoll_wait/nanosleep/sigsuspend
     // and friends, which report EINTR whatever the handler asked for.
-    if (ret == LERR(EINTR) && lxrt_sig_during_syscall == 1) {
+    // A signal that ran no guest handler at all (lxrt_sig_during_syscall 0:
+    // the realtime carrier landing on a thread with nothing queued for it)
+    // interrupts nothing on Linux, so the same calls go on as if SA_RESTART
+    // were set. The timed waits continue inside their own implementations
+    // (nanosleep, futex), with what is left of their time.
+    if (ret == LERR(EINTR) && lxrt_sig_during_syscall <= 1) {
         bool restartable = false;
         switch (nr) {
         case 63: case 64: case 65: case 66: case 67: case 68:   // read/write/v, pread/pwrite
@@ -4350,8 +4444,8 @@ restart:
         }
         if (restartable) {
             if (g_trace)
-                fprintf(lxrt_trace_stream(), "[lxrt] %d syscall %ld interrupted, restarting (SA_RESTART)\n",
-                        (int)getpid(), nr);
+                fprintf(lxrt_trace_stream(), "[lxrt] %d syscall %ld interrupted, restarting (%s)\n",
+                        (int)getpid(), nr, lxrt_sig_during_syscall ? "SA_RESTART" : "no guest handler ran");
             goto restart;
         }
     }
@@ -4360,5 +4454,6 @@ aids_done:
     if (g_trace && nr != LNR_clock_gettime)
         fprintf(lxrt_trace_stream(), "[lxrt] %d/%d syscall %ld -> %ld\n", (int)getpid(), lxrt_gettid(), nr, ret);
 
+    lxrt_sig_during_syscall = outer_sig_during_syscall;
     r->x[0] = (uint64_t)ret;
 }

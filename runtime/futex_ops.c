@@ -502,6 +502,10 @@ static long shared_wait(uint32_t *uaddr, uint32_t val, uint64_t utime,
         // the timeout entirely and wait forever.
         if (-r == ETIMEDOUT && timed && us == ULOCK_MAX_US)
             continue;
+        // Interrupted by a signal that ran no guest handler: Linux would
+        // still be waiting. The loop re-derives what is left of the deadline.
+        if (-r == EINTR && lxrt_interrupted_internally())
+            continue;
         // __ulock_wait with ULF_NO_ERRNO returns a negative DARWIN errno.
         return LERR(-r);
     }
