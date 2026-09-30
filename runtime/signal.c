@@ -18,6 +18,7 @@
 // guest stack.
 
 #include "lxrt.h"
+#include "x18.h"
 
 #include <dirent.h>
 #include <errno.h>
@@ -365,10 +366,17 @@ static void sigstats_print(const char *when)
     snprintf(buf + n, sizeof buf - n, "\n");
     fputs(buf, lxrt_trace_stream());
 }
+static _Atomic uint64_t g_x18br_restarts, g_x18br_zero, g_x18br_signal;   // br x18, below
+static int x18_stats_on(void);
 // exit_group: whatever the last 5 s window collected.
 void lxrt_sigstats_flush(void)
 {
     lxrt_wx_stats_flush();
+    if (x18_stats_on())
+        fprintf(lxrt_trace_stream(), "[lxrt] pid %d x18 br at exit: %llu restarts after a fault, %llu branches "
+                "to 0 recovered, %llu restarts at signal delivery\n", (int)getpid(),
+                (unsigned long long)atomic_load(&g_x18br_restarts), (unsigned long long)atomic_load(&g_x18br_zero),
+                (unsigned long long)atomic_load(&g_x18br_signal));
     if (sigstats_on())
         sigstats_print(" at exit");
 }
@@ -418,6 +426,66 @@ static bool raised_by_instruction(int dsig, const siginfo_t *dinfo, void *uap)
     }
 }
 
+// ---------------------------------------------------------------- br x18
+//
+// The `br x18` trampoline (runtime/x18.c plan_br, x18.h) branches through the
+// hardware x18, loaded from the virtual one in its last three instructions.
+// Where the kernel zeroes x18 on an exception return (every process of the
+// default build, and every forked child of the keep-x18 build: stage 28), an
+// exception between those instructions leaves x18 = 0. Two outcomes, both
+// recovered here, and one precaution at signal delivery:
+//   * the `ldr x18, [x18, #slot]` faults on a page-zero address: restart the
+//     trampoline from its first word (x16, x17 and sp are the guest's again
+//     by then, so it is idempotent);
+//   * the `br x18` jumps to 0: the trampoline left {its D, the target} at
+//     sp-32 just before; when that D is a trampoline's and the target is
+//     still the virtual x18, resume at the target;
+//   * a guest signal handler interrupting A..D would build its frame over
+//     that mark: the trampoline is restarted instead (host_handler).
+// Every case has pc inside a trampoline pool (or 0) and the hardware x18 = 0,
+// so the words are read only then: this chain also sees every W^X flip.
+// (counters declared above lxrt_sigstats_flush)
+
+static bool read_words(uint64_t a, void *out, unsigned bytes)
+{
+    mach_vm_size_t got = 0;
+    return a >= 0x1000 && mach_vm_read_overwrite(mach_task_self(), (mach_vm_address_t)a, bytes,
+                                                 (mach_vm_address_t)(uintptr_t)out, &got) == KERN_SUCCESS &&
+           got == bytes;
+}
+
+// pc on A..D of a br x18 trampoline: the trampoline's first word; else 0.
+static uint64_t x18_br_restart_pc(uint64_t pc)
+{
+    uint32_t w[7] = {0};
+    if (pc < 0x100000000ull || (pc & 3) || !lxrt_pool_maybe(pc) || !read_words(pc - 12, w, 16))
+        return 0;
+    (void)read_words(pc + 4, w + 4, 12);        // D may end a mapping: then zeros
+    unsigned back = lxrt_x18_br_restart(w);
+    return back ? pc - back : 0;
+}
+
+// The branch to 0: resume at the target the trampoline marked, or 0.
+static uint64_t x18_br_zero_target(uint64_t sp)
+{
+    uint64_t m[2];
+    uint32_t w[4];
+    if (!read_words(sp - X18_BR_MARK_BELOW_SP, m, sizeof m) || m[0] < 0x100000000ull ||
+        !read_words(m[0] - 12, w, sizeof w) || !lxrt_x18_br_tail(w) || m[1] != lxrt_x18_get())
+        return 0;
+    uint64_t zero = 0;   // used once: a later jump to 0 is the guest's own
+    (void)mach_vm_write(mach_task_self(), (mach_vm_address_t)(sp - X18_BR_MARK_BELOW_SP),
+                        (vm_offset_t)(uintptr_t)&zero, sizeof zero);
+    return m[1];
+}
+
+static int x18_stats_on(void)
+{
+    static int on = -1;
+    if (on < 0) on = getenv("LXRT_X18_STATS") ? 1 : 0;
+    return on;
+}
+
 // The runtime's own synchronous faults, absorbed before anything is reported
 // or delivered: the x18 trampolines' sp-alignment faults, MAP_JIT and W^X
 // flips (jit.c, wxsplit.c, subpage.c), copy-on-write of private shared
@@ -430,6 +498,16 @@ static bool raised_by_instruction(int dsig, const siginfo_t *dinfo, void *uap)
 // (stage 23 review; tests/elf/wx_owner.c, "misaligned").
 bool lxrt_absorb_runtime_fault(int dsig, siginfo_t *dinfo, void *uap)
 {
+    if ((dsig == SIGSEGV || dsig == SIGBUS) && uap &&
+        ((ucontext_t *)uap)->uc_mcontext->__ss.__x[18] == 0) {
+        _STRUCT_ARM_THREAD_STATE64 *ts = &((ucontext_t *)uap)->uc_mcontext->__ss;
+        uint64_t to = ts->__pc ? x18_br_restart_pc(ts->__pc) : x18_br_zero_target(ts->__sp);
+        if (to) {
+            atomic_fetch_add(ts->__pc ? &g_x18br_restarts : &g_x18br_zero, 1);
+            ts->__pc = to;
+            return true;
+        }
+    }
     // A thread pointer read the rewriter left in place (tls.c, kept ranges:
     // BoringSSL's FIPS module) returned Darwin's TPIDR_EL0 and the load
     // through it faulted: substitute the guest's and retry.
@@ -723,6 +801,15 @@ static void host_handler(int dsig, siginfo_t *dinfo, void *uap)
 
     ucontext_t *duc = (ucontext_t *)uap;
     _STRUCT_ARM_THREAD_STATE64 *ss = &duc->uc_mcontext->__ss;
+    // A br x18 trampoline between its A and D keeps its mark just below sp,
+    // where the guest frame is about to go: resume it from its first word.
+    {
+        uint64_t to = x18_br_restart_pc(ss->__pc);
+        if (to) {
+            ss->__pc = to;
+            atomic_fetch_add(&g_x18br_signal, 1);
+        }
+    }
 
     // Snapshot the interrupted state BEFORE touching the stack. Darwin builds
     // its own signal frame -- this ucontext, the mcontext it points at and the
@@ -813,7 +900,11 @@ static void host_handler(int dsig, siginfo_t *dinfo, void *uap)
     memcpy(mc->regs, saved_regs, sizeof(saved_regs));
     // The guest's x18 is the virtual one (runtime/x18.c), not the register the
     // kernel just zeroed; the handler may change it and sigreturn restores it.
-    mc->regs[18] = lxrt_x18_get();
+    // Without the x18 pass (LXRT_NO_X18) the hardware register is the only
+    // x18 there is, and the frame carries it as it was.
+    uint64_t hw_x18 = saved_regs[18];
+    uint64_t virt_x18 = lxrt_x18_enabled() ? lxrt_x18_get() : hw_x18;
+    mc->regs[18] = virt_x18;
     mc->sp = saved_sp;
     mc->pc = saved_pc;
     mc->pstate = saved_cpsr;
@@ -1086,6 +1177,13 @@ static void host_handler(int dsig, siginfo_t *dinfo, void *uap)
     lxrt_x18_set(mc->regs[18]);
     for (int i = 0; i < 29; i++)
         ss->__x[i] = mc->regs[i];
+    // An x18 the handler left alone goes back into the hardware register as
+    // it was, not as the virtual one: where the kernel keeps x18 (the keep-x18
+    // build), code the runtime never rewrote -- a JIT's -- may hold a live
+    // value there, and HotSpot's safepoint polls and implicit null checks
+    // take SIGSEGV in exactly such code (stage 28, x18_jit_signal).
+    if (mc->regs[18] == virt_x18)
+        ss->__x[18] = hw_x18;
     ss->__fp = mc->regs[29];
     ss->__lr = mc->regs[30];
     ss->__sp = mc->sp;

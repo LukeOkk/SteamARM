@@ -22,8 +22,12 @@ done
 cat <<'EOF'
 
 Expected from the public xnu source: "cur" ZEROED, "sdk12" PRESERVED.
-If sdk12 is PRESERVED, lxrun linked the same way would keep a guest's x18,
-and runtime/x18.c's rewriting could become optional. Record the result in
-benchmarks/ with the macOS build above.
+MEASURED on macOS 27 (benchmarks/stage28-keep-x18.txt): a fork child of
+the sdk12 build is ZEROED as well -- the flag is set at exec and not
+inherited. lxrun linked the same way (make lxrt LXRT_KEEP_X18=1) keeps a
+guest's x18 for code it never rewrote (a JIT's) in the process it exec'd,
+but not in a guest's forked children (zygotes, shells), so runtime/x18.c's
+rewriting stays. Record a new result in benchmarks/ with the macOS build
+above.
 EOF
 exit 0
