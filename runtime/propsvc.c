@@ -1965,12 +1965,20 @@ int lxrt_property_service_main(int argc, char **argv)
     const char *idle_env = getenv("LXRT_PROPERTY_IDLE");
     int idle_s = idle_env && *idle_env ? atoi(idle_env) : 60;   // 0: never leave
     const char *pe = getenv("LXRT_PROPERTY_PERSIST");
+    bool persist_fallback = false;
     if (pe && *pe) snprintf(g_persist, sizeof g_persist, "%s", pe);
     else {
+        // The root's /data is the guests' to change: a path that does not
+        // resolve (a link loop, one too long) must not leave `d` unset. The
+        // file then lives in the service's own directory, and the log says so.
         char d[PATH_MAX];
-        root_path("/data/property", d, sizeof d);
-        mkdir(d, 0700);
-        snprintf(g_persist, sizeof g_persist, "%s/persistent_properties", d);
+        if (root_path("/data/property", d, sizeof d)) {
+            mkdir(d, 0700);
+            snprintf(g_persist, sizeof g_persist, "%s/persistent_properties", d);
+        } else {
+            snprintf(g_persist, sizeof g_persist, "%s/persistent_properties", g_dir);
+            persist_fallback = true;
+        }
     }
     signal(SIGPIPE, SIG_IGN);
     signal(SIGTERM, on_term);
@@ -1987,6 +1995,8 @@ int lxrt_property_service_main(int argc, char **argv)
         if (lfd >= 0) { dup2(lfd, 2); close(lfd); }
     }
     setvbuf(stderr, NULL, _IOLBF, 0);
+    if (persist_fallback)
+        plog("the root's /data/property does not resolve; persistent properties in %s", g_persist);
 
     // One service per directory: the lock is held for the service's life. A
     // service that is leaving still holds it for a moment: wait a little.

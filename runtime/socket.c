@@ -804,7 +804,9 @@ static long cmsg_to_darwin(const void *lbuf, size_t llen, void *dst, size_t dcap
 
     while (in_off + sizeof(struct linux_cmsghdr) <= llen) {
         const struct linux_cmsghdr *lc = (const void *)(p + in_off);
-        if (lc->cmsg_len < sizeof(*lc) || in_off + lc->cmsg_len > llen)
+        // cmsg_len is the guest's 64-bit number: `in_off + cmsg_len` could
+        // wrap past the check and send a huge payload into the copy below.
+        if (lc->cmsg_len < sizeof(*lc) || lc->cmsg_len > llen - in_off)
             break;
         size_t payload = (size_t)lc->cmsg_len - sizeof(*lc);
         // SCM_CREDENTIALS has no Darwin form: its type (2) is Darwin's
