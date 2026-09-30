@@ -696,6 +696,20 @@ else
     echo "  skip  timerfd/signalfd test (run scripts/mkroot-rpm.sh first)"
 fi
 
+# 19b. Linux per-process POSIX timers, including thread-directed delivery.
+POSIX_TIMER_SAMPLE=$SAMPLES/posix_timer_test
+if [ -f "$POSIX_TIMER_SAMPLE" ]; then
+    out=$(./build/lxrun "$POSIX_TIMER_SAMPLE" 2>/dev/null); rc=$?
+    n_ok=$(grep -c "^  OK  " <<<"$out"); n_bad=$(grep -c "MAL" <<<"$out")
+    if [ "$rc" -eq 0 ] && [ "$n_ok" -eq 43 ] && [ "$n_bad" -eq 0 ]; then
+        ok "POSIX timers: 43/43 (thread ID, periodic, ABSTIME, delete, fork)"
+    else
+        bad "POSIX timers 43/43" "rc=$rc, $n_ok ok, $n_bad bad"
+    fi
+else
+    echo "  skip  POSIX timer test (run scripts/mkroot-rpm.sh first)"
+fi
+
 # 20. inotify over kqueue EVFILT_VNODE. CEF, SDL3 and pressure-vessel import it.
 # IN_OPEN/IN_ACCESS/IN_CLOSE_* cannot be observed on Darwin and the test does
 # not depend on them. Linux scores 41/41.

@@ -235,6 +235,13 @@ size_t lxrt_rewrite_count(uint64_t start, uint64_t end);
 #include "sysv_ipc.h"
 #include "timerfd_signalfd.h"
 
+// posixtimer.c -- Linux per-process timer IDs, independent of file descriptors.
+long lxrt_posix_timer_create(int clockid, const void *event, int *id_out);
+long lxrt_posix_timer_gettime(int id, void *out);
+long lxrt_posix_timer_getoverrun(int id);
+long lxrt_posix_timer_settime(int id, int flags, const void *in, void *old);
+long lxrt_posix_timer_delete(int id);
+
 // fork() safety for the runtime's own locks. A fork on one guest thread while
 // another holds one of these left the child blocked forever on its first use
 // (measured: tests/elf/jit_fork_mt.c, the i386 Steam client). Each module

@@ -125,7 +125,9 @@ enum {
     // large realloc (benchmarks/stage6-steam-gap.txt, P2).
     LNR_inotify_init1 = 26, LNR_inotify_add_watch = 27, LNR_inotify_rm_watch = 28,
     LNR_signalfd4 = 74, LNR_timerfd_create = 85, LNR_timerfd_settime = 86,
-    LNR_timerfd_gettime = 87, LNR_mremap = 216,
+    LNR_timerfd_gettime = 87, LNR_timer_create = 107, LNR_timer_gettime = 108,
+    LNR_timer_getoverrun = 109, LNR_timer_settime = 110, LNR_timer_delete = 111,
+    LNR_mremap = 216,
     LNR_execve = 221, LNR_wait4 = 260,
     LNR_clone = 220, LNR_clone3 = 435, LNR_futex = 98, LNR_tgkill = 131,
     LNR_madvise = 233, LNR_mincore = 232, LNR_dup = 23, LNR_dup3 = 24,
@@ -3731,6 +3733,21 @@ restart:
         break;
     case LNR_timerfd_gettime:
         ret = lxrt_timerfd_gettime((int)a0, (void *)a1);
+        break;
+    case LNR_timer_create:
+        ret = lxrt_posix_timer_create((int)a0, (const void *)a1, (int *)a2);
+        break;
+    case LNR_timer_gettime:
+        ret = lxrt_posix_timer_gettime((int)a0, (void *)a1);
+        break;
+    case LNR_timer_getoverrun:
+        ret = lxrt_posix_timer_getoverrun((int)a0);
+        break;
+    case LNR_timer_settime:
+        ret = lxrt_posix_timer_settime((int)a0, (int)a1, (const void *)a2, (void *)a3);
+        break;
+    case LNR_timer_delete:
+        ret = lxrt_posix_timer_delete((int)a0);
         break;
     case LNR_signalfd4:
         ret = lxrt_signalfd4((int)a0, (const uint64_t *)a1, (size_t)a2, (int)a3);

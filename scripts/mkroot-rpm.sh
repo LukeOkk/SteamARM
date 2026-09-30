@@ -738,6 +738,7 @@ do_samples() {
     build x18_test     -static-pie -O1 -pthread "$t/x18_test.c"
     build mremap_test  -static-pie -O2 "$t/mremap_test.c"
     build tfd_sfd_test -static-pie -O2 "$t/tfd_sfd_test.c"
+    build posix_timer_test -static-pie -O2 "$t/posix_timer_test.c"
     build inotify_test -static-pie -O2 "$t/inotify_test.c"
     build bwrap_test   -static-pie -O2 "$t/bwrap_test.c"
     build sig_test     -static-pie -O2 "$src/lxrt_sig.c"

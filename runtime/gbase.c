@@ -74,7 +74,7 @@ static const struct { unsigned short nr; unsigned char mask; } k_ptr_args[] = {
     {95, A2 | A4}, {96, A0},                                     // waitid, set_tid_address
     {99, A0}, {100, A1 | A2}, {101, A0 | A1},                    // set/get_robust_list, nanosleep
     {102, A1}, {103, A1 | A2},                                   // getitimer, setitimer
-    {106, A1 | A2}, {107, A1}, {109, A2 | A3},                   // timer_create/gettime/settime
+    {107, A1 | A2}, {108, A1}, {110, A2 | A3},                   // timer_create/gettime/settime
     {111, A1}, {112, A1}, {113, A1}, {114, A1}, {115, A2 | A3},  // clock_settime/gettime/getres/nanosleep
     {116, A1},                                                   // syslog
     {118, A1}, {119, A2}, {121, A1}, {122, A2}, {123, A2}, {127, A1},  // sched_*
