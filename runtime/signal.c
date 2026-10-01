@@ -1021,22 +1021,55 @@ static void host_handler(int dsig, siginfo_t *dinfo, void *uap)
         // when its own on-alt-stack flag is set (a nested delivery), and that
         // flag is per thread and not always in step with sp. So stay clear of
         // everything Darwin handed us and of our own frames, every time.
+        //
+        // Which case it is comes from where this function runs, not from a
+        // distance. This used to take Darwin's addresses and our sp only
+        // when they lay within 1 MiB below the interrupted sp: with the host
+        // alt stack mapped just below a guest stack, about 1 MiB under sp,
+        // Darwin's ucontext could fall inside that window and our own sp,
+        // a few KiB lower, outside it -- and the guest frame was written over
+        // this function's frame (__stack_chk_fail in host_handler, MEASURED in
+        // Wine's winedevice.exe and rpcss.exe under FEX).
         {
             uint64_t theirs[] = { (uint64_t)(uintptr_t)uap,
                                   (uint64_t)(uintptr_t)dinfo,
                                   (uint64_t)(uintptr_t)duc->uc_mcontext };
-            for (size_t i = 0; i < sizeof(theirs) / sizeof(theirs[0]); i++)
-                if (theirs[i] && theirs[i] < base && theirs[i] > saved_sp - (1u << 20))
-                    base = theirs[i];
             uint64_t cur_sp;
             __asm__ volatile("mov %0, sp" : "=r"(cur_sp));
-            if (cur_sp < base && cur_sp > saved_sp - (1u << 20))
-                base = cur_sp;
+            uint64_t ha = (uint64_t)(uintptr_t)g_host_altstack, he = ha + HOST_ALTSTACK_SIZE;
+            bool here_on_host_alt = ha && cur_sp >= ha && cur_sp < he;
+            bool interrupted_on_host_alt = ha && saved_sp >= ha && saved_sp < he;
+            if (!here_on_host_alt || interrupted_on_host_alt) {
+                // One stack: below all of it.
+                for (size_t i = 0; i < sizeof(theirs) / sizeof(theirs[0]); i++)
+                    if (theirs[i] && theirs[i] < base)
+                        base = theirs[i];
+                if (cur_sp < base)
+                    base = cur_sp;
+            }
             base -= 256;
         }
     }
 
     uint64_t frame_addr = (base - sizeof(struct rt_sigframe)) & ~15ull;
+    // Last line of defence: never over this function's own frame and what
+    // Darwin put above it (sp up to its ucontext and mcontext).
+    {
+        uint64_t lo, hi = (uint64_t)(uintptr_t)uap;
+        __asm__ volatile("mov %0, sp" : "=r"(lo));
+        uint64_t mc = (uint64_t)(uintptr_t)duc->uc_mcontext;
+        if (mc > hi) hi = mc;
+        hi += 2048;                     // the ucontext and mcontext themselves
+        if (frame_addr < hi && frame_addr + sizeof(struct rt_sigframe) > lo - 256) {
+            static _Atomic int said;
+            if (atomic_fetch_add(&said, 1) < 4)
+                fprintf(lxrt_trace_stream(), "[lxrt] pid %d: signal %d frame at 0x%llx would cover the host "
+                        "handler (sp 0x%llx, ucontext 0x%llx): placed below it\n", (int)getpid(), lsig,
+                        (unsigned long long)frame_addr, (unsigned long long)lo,
+                        (unsigned long long)(uintptr_t)uap);
+            frame_addr = (lo - 256 - sizeof(struct rt_sigframe)) & ~15ull;
+        }
+    }
     struct rt_sigframe *f = (struct rt_sigframe *)frame_addr;
     memset(f, 0, sizeof(*f));
 
