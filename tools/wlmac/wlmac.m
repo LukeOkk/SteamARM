@@ -141,6 +141,26 @@ static void layoutSurface(Obj *s) {
     NSSize z=surfaceSize(s); s.layer.frame=CGRectMake(s.subX,s.subY,z.width,z.height);
     for (Obj *c in s.children) layoutSurface(c);
 }
+// Waydroid's composer makes each window with wl_display_roundtrip() on the
+// default queue while its own wayland thread runs wl_display_dispatch() on
+// that same queue. When the wayland thread dispatches the sync's done first,
+// the roundtrip's thread is left in poll() with nothing more coming: the
+// composer hangs inside SurfaceFlinger's call, SurfaceFlinger with it, and the
+// app never gets a Mac window (MEASURED: about one launch in five; the client
+// had sent its acks and nothing after, the socket empty both ways). Any
+// later event wakes that poll and the roundtrip sees its flag set. So a few
+// harmless xdg_wm_base pings follow every sync -- the client answers pong.
+static void nudgeAfterSync(Client *c) {
+    for (NSNumber *ms in @[@50, @250, @1000]) {
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, ms.longLongValue * NSEC_PER_MSEC), dispatch_get_main_queue(), ^{
+            if (c.dead) return;
+            for (Obj *o in [c.objects.allValues copy]) if ([o.kind isEqual:@"xdg_wm_base"]) {
+                [c event:o.oid opcode:0 body:u32(serialNext()) fd:-1];
+                break;
+            }
+        });
+    }
+}
 static void configureTop(Obj *top, int w, int h) {
     Client *c=top.client; if (!c || !top.xdgID || !top.topID) return;
     NSMutableData *b=[NSMutableData data]; append32(b,MAX(0,w)); append32(b,MAX(0,h));
@@ -548,7 +568,7 @@ static void readSelection(Client *c, Obj *src) {
     if(!o) { [self error:id text:@"unknown object"]; return; }
     NSString *k=o.kind;
     if([k isEqual:@"wl_display"]) {
-        if(op==0 && n>=4) { uint32_t cb=word(p); [self create:cb kind:@"wl_callback" version:1]; [self event:cb opcode:0 body:u32(eventTime()) fd:-1]; [self remove:cb]; }
+        if(op==0 && n>=4) { uint32_t cb=word(p); [self create:cb kind:@"wl_callback" version:1]; [self event:cb opcode:0 body:u32(eventTime()) fd:-1]; [self remove:cb]; nudgeAfterSync(self); }
         else if(op==1 && n>=4) { uint32_t reg=word(p); [self create:reg kind:@"wl_registry" version:1]; for(NSDictionary *g in globals()) {
             NSMutableData *b=[NSMutableData data]; append32(b,[g[@"name"] unsignedIntValue]); appendString(b,g[@"iface"]); append32(b,[g[@"version"] unsignedIntValue]);
             [self event:reg opcode:0 body:b fd:-1]; } }

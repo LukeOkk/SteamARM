@@ -1,0 +1,75 @@
+Stage 35: an app sweep, and the Mac window that did not come one launch in five
+Mac mini M4, macOS 27; x86_64 LineageOS 18.1 root under FEX (sesstest
+clone); per-app Mac windows (steamarm-wlmac). APKs from F-Droid only, each
+checked against the sha256 in F-Droid's index: VLC 13070108, Organic Maps
+26082718, NewPipe 1015, KeePassDX 45500, Wikipedia 50606, Element
+40106624 (x86_64 native code in all; Element and VLC x86_64 only).
+
+== The sweep: each app in a fresh session (scratchpad apptry.sh)
+  VLC         installed 7.3 s; focused (OnboardingActivity) 5.9 s after am start
+  Organic Maps installed 5.7 s; the location permission dialog took the focus
+  NewPipe     installed 3.9 s; focused (MainActivity) 8.9 s
+  KeePassDX   installed 5.0 s; focused (FileDatabaseSelectActivity) 4.3 s
+  Wikipedia   installed 4.6 s; focused (InitialOnboardingActivity) 7.7 s
+  Element     installed 6.9 s; focused (OnboardingActivity) 6.6 s
+No UnsatisfiedLinkError, dlopen failure or native signal from any of them.
+The one crash in every session was com.android.traceur (below).
+
+== Playback
+An H.264 + AAC MP4 (20 s, 320x240, made with AVFoundation) in /sdcard/Movies:
+- Android's MediaPlayer (app_process64): "position 944 ... 5961" over 6 s
+  of wall time, playing true; pactl list sink-inputs during it:
+  media.name = "ALSA Playback".
+- AudioTrack (MODE_STREAM, 44.1 kHz mono), blocking and WRITE_NON_BLOCKING:
+  the playback head advances ~44100 frames per second in both.
+- VLC (x86_64 libvlc under FEX): demuxes, decodes ("Received first
+  picture"), opens AudioTrack and its EGL video output, then its player
+  stays paused (AudioTrack started, paused 48 ms later; media session
+  state 2, position 0; a media key toggles it and it pauses again). NOT
+  EXPLAINED: Android's own media path plays the same file in real time.
+
+== Traceur
+com.android.traceur crashed at every boot: its receiver runs `perfetto
+--is_detached`, which failed without perfetto's service ("Perfetto error"
+248 while apps could not exec at all, stage 34; 1 after). traced is now
+started after the boot ("Started traced, listening on
+/dev/socket/traced_producer /dev/socket/traced_consumer"); boots since
+had no crash. (tombstoned was tried too and left out: its listening
+SEQPACKET sockets are datagram sockets here, runtime/socket.c, and it
+aborts with "failed to create evconnlistener".)
+
+== No Mac window, one launch in five
+Solitaire launched over and over in fresh sessions: the app had the focus
+and the compositor log no window -- 5 of 28 launches. `dumpsys
+SurfaceFlinger` timed out (10 s) in such a session; the binder hub's new
+state dump (SIGUSR1, <dir>/hub-state.txt) showed SurfaceFlinger's main
+thread inside a call to the composer (hwbinder, code 0x17), handled by the
+composer's main thread, which had not replied. steamarm-wlmac --verbose
+(WLMAC_EXTRA_ARGS, scripts/run-wlmac.sh): the composer had made the app's
+toplevel, committed, sent wl_display.sync, acked both configures -- and
+sent nothing after (a good launch goes on with wl_shm_pool.create_buffer).
+The socket was empty both ways. lldb on the composer: two threads in
+poll(), one in __ulock_wait on a word holding exactly its expected value
+(0xfffffffe: a bionic semaphore with a waiter -- the EGL worker idling on
+egl_go, not the hang).
+Waydroid's composer (hwcomposer/wayland-hwc.cpp, create_window) waits for
+the first configure with `do wl_display_roundtrip(); while (!configured)`
+on the default queue, while its hwc_wayland_thread runs
+wl_display_dispatch() on that same queue. When the wayland thread
+dispatches the sync's done first, the roundtrip's thread stays in poll()
+with nothing more to come; SurfaceFlinger's call never returns, and with
+SurfaceFlinger the window manager's lock and system_server's watchdog
+(stage 34's "Not explained" hang after Termux's window appeared).
+steamarm-wlmac now follows every wl_display.sync with xdg_wm_base pings at
+50, 250 and 1000 ms (the client answers pong): any event wakes the poll and
+the roundtrip finds its flag set. After: 12 launches of 12 with a window.
+
+== Also
+android-session.py waits for the package manager before it checks or
+installs (right after sys.boot_completed=1 `pm install` failed once in half
+a second, rc 20, and the launch gave up with "was not installed").
+
+== Matrix
+tests/android 87 passed, 0 failed, 2 expected failures (the per-app window,
+clipboard and WebView checks included); tests/wlmac 4/0; tests/elf 99/0;
+Python OK.

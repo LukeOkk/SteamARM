@@ -368,7 +368,10 @@ on the same cases.
    (`/dev/ptmx`, `/dev/pts/N`), and shared storage (`/sdcard`,
    `/storage/emulated/0`, each app's external directory). MEASURED with
    Termux: its bootstrap installs, its shell runs, `apt update` and
-   `apt install` work.
+   `apt install` work. Stage 35 (`benchmarks/stage35-android-apps-windows.txt`):
+   VLC, Organic Maps, NewPipe, KeePassDX, Wikipedia and Element install and
+   open; Android's MediaPlayer plays H.264/AAC in real time; each app gets its
+   Mac window every time (12 of 12, from about four in five).
 2. **Real-session bundle validation.** Synthetic unit tests MEASURE the
    selection and local package storage of XAPK, APKS, APKM, plain APK bags
    and OBB data. `scripts/android-session.py` stages chosen APKs into one

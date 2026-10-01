@@ -21,7 +21,8 @@ start)
     if p=$(pid); then echo "run-wlmac: already running pid $p"; exit 0; fi
     tools/wlmac/build.sh >/dev/null
     mkdir -p "$HOSTXDG"; chmod 700 "$HOSTXDG"
-    build/steamarm-wlmac --socket "$HOSTXDG/$SOCKET" "${@:2}" >"$LOG" 2>&1 </dev/null &
+    # WLMAC_EXTRA_ARGS: more compositor options (--verbose, --dump-dir DIR) for debugging.
+    build/steamarm-wlmac --socket "$HOSTXDG/$SOCKET" "${@:2}" ${WLMAC_EXTRA_ARGS:-} >"$LOG" 2>&1 </dev/null &
     echo $! >"$PIDFILE"
     for ((i=0;i<100;i++)); do
         if [ -S "$HOSTXDG/$SOCKET" ] && pid >/dev/null; then

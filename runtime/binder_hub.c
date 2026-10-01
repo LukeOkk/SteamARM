@@ -2399,6 +2399,49 @@ static void settle(void)
 static volatile sig_atomic_t g_stop;
 static void on_term(int s) { (void)s; g_stop = 1; }
 
+// SIGUSR1: the driver's state, as /sys/kernel/debug/binder/state shows it on
+// Linux, written to <dir>/hub-state.txt. A process stuck in a transaction
+// (SurfaceFlinger's main thread waiting for a reply, every Android window
+// gone with it) shows who it waits for and what that thread is doing.
+static volatile sig_atomic_t g_dump;
+static void on_dump(int s) { (void)s; g_dump = 1; }
+
+static int list_len(struct list *l)
+{
+    int n = 0;
+    for (struct list *e = l->next; e != l; e = e->next) n++;
+    return n;
+}
+
+static void dump_state(void)
+{
+    char path[1024];
+    snprintf(path, sizeof path, "%s/hub-state.txt", g_dir);
+    FILE *f = fopen(path, "w");
+    if (!f)
+        return;
+    for (struct list *pe = g_procs.next; pe != &g_procs; pe = pe->next) {
+        struct proc *p = (struct proc *)((char *)pe - offsetof(struct proc, entry));
+        fprintf(f, "proc %d host %d ctx %d euid %u%s todo %d waiting %d threads %d/%d started %d\n",
+                p->pid, p->host_pid, p->context, p->euid, p->is_dead ? " DEAD" : "",
+                list_len(&p->todo), list_len(&p->waiting_threads), list_len(&p->threads),
+                p->max_threads, p->requested_threads_started);
+        for (struct list *te = p->threads.next; te != &p->threads; te = te->next) {
+            struct thread *t = (struct thread *)((char *)te - offsetof(struct thread, proc_entry));
+            fprintf(f, "  thread %d looper 0x%x%s%s todo %d\n", t->tid, t->looper,
+                    t->parked ? " parked" : "", t->is_dead ? " DEAD" : "", list_len(&t->todo));
+            for (struct transaction *x = t->transaction_stack; x; ) {
+                fprintf(f, "    txn %u code 0x%x flags 0x%x%s from %d:%d to %d:%d\n", x->debug_id, x->code,
+                        x->flags, x->need_reply ? " need_reply" : "",
+                        x->from ? x->from->proc->pid : -1, x->from ? x->from->tid : -1,
+                        x->to_proc ? x->to_proc->pid : -1, x->to_thread ? x->to_thread->tid : -1);
+                x = x->from == t ? x->from_parent : x->to_parent;
+            }
+        }
+    }
+    fclose(f);
+}
+
 int lxrt_binder_hub_main(int argc, char **argv)
 {
     // argv: <lxrun> --binder-hub <dir> [--daemon]
@@ -2414,6 +2457,7 @@ int lxrt_binder_hub_main(int argc, char **argv)
     signal(SIGPIPE, SIG_IGN);
     signal(SIGTERM, on_term);
     signal(SIGINT, on_term);
+    signal(SIGUSR1, on_dump);
     struct rlimit rl;
     if (getrlimit(RLIMIT_NOFILE, &rl) == 0) {
         rlim_t want = rl.rlim_max < 10240 ? rl.rlim_max : 10240;
@@ -2513,7 +2557,10 @@ int lxrt_binder_hub_main(int argc, char **argv)
         int timeout = empty ? 1000 : -1;
         int r = poll(pfd, (nfds_t)k, timeout);
         if (r < 0) {
-            if (errno == EINTR) continue;
+            if (errno == EINTR) {
+                if (g_dump) { g_dump = 0; dump_state(); }
+                continue;
+            }
             hub_log("poll: %s", strerror(errno));
             break;
         }

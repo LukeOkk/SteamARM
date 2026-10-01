@@ -627,7 +627,24 @@ def meta_field(m, key):
 PKG_RE = re.compile(r"[A-Za-z][A-Za-z0-9_]*(\.[A-Za-z][A-Za-z0-9_]*)+")
 
 
+def wait_package_service(s, seconds=60):
+    """Until the package manager answers. Right after sys.boot_completed=1
+    `pm install` could fail in half a second (rc 20) and the check before it
+    find nothing installed, and the launch gave up with "was not installed"
+    (MEASURED, about one session in ten on a fast boot)."""
+    end = time.time() + seconds
+    while True:
+        rc, out = guest(s, ["/system/bin/cmd", "package", "path", "android"], timeout=60)
+        if rc == 0 and "package:" in out:
+            return True
+        if time.time() > end:
+            log("the package manager did not answer in %d s (last: rc %d %s)" % (seconds, rc, out.strip()[-80:]))
+            return False
+        time.sleep(2)
+
+
 def installed_version(s, pkg):
+    wait_package_service(s)
     rc, out = guest(s, ["/system/bin/cmd", "package", "list", "packages", "--show-versioncode", pkg], timeout=120)
     for line in out.splitlines():
         m = re.match(r"package:(\S+) versionCode:(\d+)", line.strip())

@@ -195,13 +195,17 @@ PROFILES["display"] = {
                                    # (runtime/posixtimer.c)
         "media",                   # mediaserver (media.player) and the OMX store, which
         "vendor.media.omx",        # MediaCodecList asks first; both i386 (runtime/ids.c)
+        "traced",                  # perfetto's service: Traceur asks `perfetto --is_detached`
+                                   # at every boot and crashed without it ("Perfetto error: 1").
+                                   # (Not tombstoned: its listening SEQPACKET sockets are
+                                   # datagram sockets here, runtime/socket.c, and it aborts.)
     },
     # Started after sys.boot_completed=1: started with the boot they slowed it
     # enough that an app process attached to ActivityManager before its pid
     # was recorded ("No pending application record ... dropping process"),
     # the network stack was killed with it and system_server went down with
     # the zygote, again and again (MEASURED).
-    "after_boot": {"media", "vendor.media.omx"},
+    "after_boot": {"media", "vendor.media.omx", "traced"},
     # 32-bit vendor daemons: their own linker configuration (the legacy
     # /linkerconfig has no namespace for them: the OMX store could not link
     # libminijail.so, MEASURED) and image libraries replaced by stand-ins
