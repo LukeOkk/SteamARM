@@ -82,6 +82,12 @@ Date: 2026-10-01. Apple M4, macOS 27. Zero VM. No game was launched.
   with GALLIUM_DRIVER=zink in its environment reaches its main window
   (63 s), where it faulted before. The launch-option advice above stays:
   Zink for all of Steam is still untried beyond that start.
+  x86 Steam on Xvnc afterwards (no Zink): main window 8 of 8 (60-100 s),
+  no thunk link error; 16 of 16 since the stop fix of 0.3.14. The old
+  intermittent client fault ("NoExec instruction in entry block" at
+  0x14xxxxxx/0x15xxxxxx, last seen 2026-10-01 05:31) has not recurred;
+  which change ended it is NOT established. Native ARM64 Steam: sign-in
+  window 3 of 3 at 15 s.
 
 NOT DONE
   No game. Why Wine's caps context needs 3.3 after the X server restart,
