@@ -27,6 +27,19 @@ An H.264 + AAC MP4 (20 s, 320x240, made with AVFoundation) in /sdcard/Movies:
   stays paused (AudioTrack started, paused 48 ms later; media session
   state 2, position 0; a media key toggles it and it pauses again). NOT
   EXPLAINED: Android's own media path plays the same file in real time.
+  LATER (2026-10-01, a per-app window session): reproduced, state 2 and
+  position 0 after 12 s. Not audio focus: VLC holds it, "loss: none".
+  AudioFlinger's output thread has "Timestamp stats: n=0 ... err=440":
+  Waydroid's audio HAL (audio.primary.waydroid, alsa-lib to PulseAudio)
+  never reports a presentation position (it calls neither
+  snd_pcm_htimestamp nor snd_pcm_delay), so AudioTrack.getTimestamp()
+  has nothing and the track reports "Latency unavail". VLC's track was
+  consumed for 929 frames (19 ms), underran ("disabled due to previous
+  underrun, restarting"), and VLC paused it 1.8 s after starting it;
+  its video output reports pictures 267-650 ms late. VLC 3.6 no longer
+  offers OpenSL ES (its "aout" preference is ignored). Still NOT
+  EXPLAINED; the missing HAL timestamps are the lead (MediaPlayer copes
+  without them).
 
 == Traceur
 com.android.traceur crashed at every boot: its receiver runs `perfetto
