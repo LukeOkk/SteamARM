@@ -28,9 +28,14 @@ external directories (wall 1). Termux: "Bootstrap Error", nothing usable.
 3. "Couldn't connect to FEXServer socket ... 22": Termux sets TMPDIR to its
    prefix, a guest path, and the abstract-socket directory and the
    runtime's /proc followed it ("lxrun: open /proc/self/exe: No such file
-   or directory"). Abstract sockets are always /tmp/lxrt-abstract-<uid>; the
-   runtime's own files (/proc, memfds, sandboxes) use the host temporary
-   directory fixed once per process tree (LXRT_HOST_TMPDIR).
+   or directory"). The runtime's own files (/proc, memfds, sandboxes) and
+   the abstract-socket directory use the host temporary directory fixed once
+   per process tree (LXRT_HOST_TMPDIR), whatever the guest sets later. (A
+   first version put every tree's abstract sockets in /tmp: an Android-root
+   FEXServer started from a shell met Steam's under FEX's default name,
+   501.FEXServer.Socket, and Steam's x86 client got no window 7 times in a
+   row until the stray servers were stopped. The trees are separate
+   namespaces again, as network namespaces are on Linux.)
 4. "'10144' returned by 'id -u' command is not valid": the second stage
    captures `id -u 2>&1`, and got the runtime's start-up lines and FEX's
    linker's complaint that it could not preload the guest's x86
@@ -92,8 +97,9 @@ Twice in 9 Termux runs, right after Termux's window appeared and before the
 typed command ran, system_server's watchdog killed it
 (WindowManagerGlobalLock held, its holder not in the dump; the ANR traces
 are empty without debuggerd), and every following system_server hung at
-start until the session was stopped. Not seen in 6 more runs (3 with the
-held pty slave, 3 without) nor in the full Android suite.
+start until the session was stopped. Not seen in 7 more runs (3 with the
+held pty slave, 3 without, 1 on the final runtime) nor in the full Android
+suite.
 
 == Matrix on this runtime
 tests/elf 99/0 (exec_env and pty new; ANDROID_IDS checks a socket's fchown);
@@ -103,4 +109,8 @@ failed, 2 expected failures ("exec under a seccomp filter (FEX)" and
 "shared storage" new). After the last runtime change (FEX's per-exec
 descriptors no longer carried across exec): tests/elf 99/0, Python OK,
 x86_seccomp_exec PASS, Termux 6 of 6 runs with a working shell.
-Steam was not run on this runtime.
+On the final runtime (abstract sockets per process tree): tests/elf 99/0;
+Termux 1 of 1; Steam from scripts/run-app.sh, ARM64 sign-in window 8 of 8
+(15-16 s), x86 main window 5 of 6 (100-101 s; once the i386 client jumped to
+0x15400c82 from the same stack as before -- esp 0xd222da4c -- and its crash
+handler ended it).

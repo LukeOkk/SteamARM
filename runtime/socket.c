@@ -70,13 +70,15 @@ static const char *abstract_dir(void)
     if (tried)
         return ready ? dir : NULL;
     tried = true;
-    // Always /tmp, never $TMPDIR: the abstract namespace is one per machine
-    // (per user here), and TMPDIR is the guest's to set -- Termux points it
-    // into its own prefix, the directory could not be made there, and FEX
-    // could not reach its server ("Couldn't connect to FEXServer socket ...
-    // 22", MEASURED); two processes with different TMPDIRs would not even
-    // have met.
-    snprintf(dir, sizeof dir, "/tmp/lxrt-abstract-%u", (unsigned)getuid());
+    // The host temporary directory of this process tree (lxrt_host_tmpdir),
+    // not the guest's TMPDIR: Termux points TMPDIR into its own prefix, the
+    // directory could not be made there, and FEX could not reach its server
+    // ("Couldn't connect to FEXServer socket ... 22", MEASURED). Nor one
+    // directory for every tree: the trees are separate namespaces, as network
+    // namespaces are on Linux -- with all of them in /tmp, the Android root's
+    // FEXServer and Steam's met under FEX's default name (501.FEXServer.Socket),
+    // and Steam's FEX ran against the Android root: no Steam window (MEASURED).
+    snprintf(dir, sizeof dir, "%s/lxrt-abstract-%u", lxrt_host_tmpdir(), (unsigned)getuid());
     if (mkdir(dir, 0700) != 0 && errno != EEXIST)
         return NULL;
     ready = true;
