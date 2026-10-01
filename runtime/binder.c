@@ -356,8 +356,10 @@ static int spawn_hub(const char *dir)
     posix_spawn_file_actions_addopen(&fa, 2, "/dev/null", O_WRONLY, 0);
     char *env[8];
     int ne = 0;
+    // LXRT_SESSION too: the hub belongs to the session that started it
+    // (scripts/run-app.sh and run-steam.sh leave an Android session's alone).
     for (char **e = environ; *e && ne < 6; e++)
-        if (!strncmp(*e, "LXRT_BINDER", 11)) env[ne++] = *e;
+        if (!strncmp(*e, "LXRT_BINDER", 11) || !strncmp(*e, "LXRT_SESSION=", 13)) env[ne++] = *e;
     env[ne] = NULL;
     char *argv[] = { (char *)exe, "--binder-hub", (char *)dir, "--daemon", NULL };
     pid_t pid;

@@ -81,6 +81,24 @@ WHY
   STEAMARM_VK_ICD: MoltenVK). Launcher and python tests cover detection
   and the environment.
 
+5. STEAM CHECK, AND STOPS THAT ENDED THE ANDROID SESSION
+  x86 Steam on Xvnc (:1, never shown on the Mac: Screen Sharing not
+  opened), 150-200 s per start, alternating runtimes:
+    lxrun 198ac88 (before stage 37)   main window 3 of 4 (61-96 s)
+    lxrun with stages 37-38           main window 4 of 4 (60 s each)
+  CEF's GPU process failed to launch 9 times in one run of each ("GPU
+  process isn't usable. Goodbye.", the webhelper restarts): not new.
+  An Android suite run during those starts lost its session: run-steam.sh
+  (start and --stop) and run-app.sh --stop killed every build/lxrun
+  process. Now run-steam.sh stops only processes whose environment names
+  LXRT_ROOT=/tmp/lxrt-steamroot, and run-app.sh skips the Android
+  session's: android-session.py, android-boot.py, run-weston.sh and the
+  binder hub (runtime/binder.c) carry LXRT_SESSION=android, which the
+  runtime keeps through guest execs. Measured: an Android session with
+  55 runtime processes, then both stops: 60 processes after, Android still
+  answering; android-session.py stop then removes it (before the fix: 57
+  before, 11-16 after).
+
 NOT DONE
   No game was run with WineD3D. KosmicKrisp through Zink is broken
   upstream. The 32-bit WineD3D exit abort is open. Zink's OpenGL 3.2 limits

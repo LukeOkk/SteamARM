@@ -69,11 +69,15 @@ usage() { awk 'NR > 1 { if ($0 !~ /^#/) exit; print }' "$0" | sed 's/^# \{0,1\}/
 # Runtime processes that are guest programs: everything but Xvnc and FEXServer.
 # (The pattern must name build/lxrun: a bare word would match this shell. The
 # native X server is a host process, not an lxrun one, so it never shows up.)
+# The Android session's processes (LXRT_SESSION=android, set by
+# scripts/android-session.py and carried through guest execs) are not the
+# launched app's: stopping a game must not end the Android session.
 guest_pids() {
     for p in $(pgrep -f "build/lxrun"); do
         case "$(ps -o command= -p "$p")" in
             *Xvnc*|*FEXServer*) ;;
-            *) echo "$p" ;;
+            *) ps -E -o command= -p "$p" 2>/dev/null | tr ' ' '\n' | grep -qx "LXRT_SESSION=android" ||
+                   echo "$p" ;;
         esac
     done
 }

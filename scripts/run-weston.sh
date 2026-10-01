@@ -40,8 +40,11 @@ PIDFILE="$HOSTXDG/$SOCKET.weston-pid"
 LOG="$HOSTXDG/$SOCKET.weston.log"
 
 guest_env() {   # the environment every guest of the Weston root gets
+    # LXRT_SESSION (scripts/android-session.py sets it): an Android session's
+    # Weston is the session's, and scripts/run-app.sh leaves it alone.
     echo LXRT_ROOT="$ROOT" TMPDIR=/tmp HOME=/tmp OBJC_DISABLE_INITIALIZE_FORK_SAFETY=YES \
-        PATH=/usr/bin:/bin LANG=C.UTF-8 DISPLAY="$DISP" XDG_RUNTIME_DIR="$XDG" WAYLAND_DISPLAY="$SOCKET"
+        PATH=/usr/bin:/bin LANG=C.UTF-8 DISPLAY="$DISP" XDG_RUNTIME_DIR="$XDG" WAYLAND_DISPLAY="$SOCKET" \
+        ${LXRT_SESSION:+LXRT_SESSION=$LXRT_SESSION}
 }
 weston_pid() {
     local p
