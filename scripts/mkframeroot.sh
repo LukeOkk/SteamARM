@@ -43,6 +43,11 @@
 #                      LIBGL_ALWAYS_INDIRECT=1  skip the direct attempt.
 #                    (MEASURED with a GLX probe: GL 1.4 "Apple M4" through
 #                    the X server's +iglx.)
+#   usr/lib/libvulkan_steamarm.so, usr/share/vulkan/icd.d/steamarm_icd.aarch64.json
+#                    SteamARM's Vulkan shim as an ICD for the image's own
+#                    loader; the Qualcomm ICD moved to icd.d.lxrt-off
+#                    (scripts/install-frameroot-vulkan.sh, which setup.sh
+#                    runs again after an update).
 #   .lxrt-frameroot  this script's marker: the image's BUILD_ID and the
 #                    list above.
 # What the image already has that the Fedora root needed seeds for (stage 22):
@@ -139,10 +144,17 @@ __GLX_VENDOR_LIBRARY_NAME=mesa
 MESA_LOADER_DRIVER_OVERRIDE=swrast
 LIBGL_ALWAYS_INDIRECT=1
 EOF
+# Vulkan for the client (steamsysinfo's GPU topology, the webhelper): the
+# shim as an ICD, the image's Qualcomm ICD set aside.
+if [ -f build/libvulkan.so.1 ]; then
+    scripts/install-frameroot-vulkan.sh "$NEW"
+else
+    echo "note: no build/libvulkan.so.1 (make shim): no Vulkan device in this root"
+fi
 {
     echo "made by scripts/mkframeroot.sh on $(date -u +%Y-%m-%dT%H:%M:%SZ)"
     echo "from: SteamOS $version_id BUILD_ID=$build_id"
-    echo "overlay: etc/resolv.conf etc/localtime(${host_zone:-unchanged}) .lxrt-guest-env"
+    echo "overlay: etc/resolv.conf etc/localtime(${host_zone:-unchanged}) .lxrt-guest-env vulkan-icd"
 } > "$NEW/.lxrt-frameroot"
 
 # Swap in, carrying the runtime state (tmp/, opt/apps) over; the old tree

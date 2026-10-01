@@ -115,6 +115,16 @@ step_steam() {
     scripts/install-steamroot-gfx.sh
 }
 
+step_frameroot() {
+    # The Steam Frame root is made by hand (scripts/mkframeroot.sh, from the
+    # user's recovery image); when it exists, its Vulkan shim follows this
+    # source. Reported, not fatal.
+    if [ -d "$STATE/arm64root/usr/share/vulkan" ]; then
+        log "Vulkan in the Steam Frame root (scripts/install-frameroot-vulkan.sh)"
+        scripts/install-frameroot-vulkan.sh "$STATE/arm64root" || log "Steam Frame root: Vulkan not installed (setup goes on)"
+    fi
+}
+
 step_test() {
     log "smoke tests"
     # Reported, not fatal: everything is installed by now, and a failure here
@@ -142,7 +152,7 @@ step_done() {
     echo "The first Steam start updates the client (several minutes)."
 }
 
-STEPS=(check brew make fex thunks xquartz roots steam test done)
+STEPS=(check brew make fex thunks xquartz roots steam frameroot test done)
 if [ "${1:-}" = --list ]; then
     printf '%s\n' "${STEPS[@]}"
     exit 0

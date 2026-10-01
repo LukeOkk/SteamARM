@@ -1,0 +1,37 @@
+Stage 41 -- A Vulkan device for the native client on the Steam Frame root
+Date: 2026-10-01. Apple M4, macOS 27. Zero VM. No sign-in, no game.
+
+BEFORE (stage 23)
+  The Steam Frame root (scripts/mkframeroot.sh) has the image's Khronos
+  loader and only Qualcomm's freedreno ICD: vulkaninfo "Failed to detect
+  any valid GPUs"; the client's steamsysinfo "CVulkanTopology: failed to
+  get physical device count" (every Frame run since 2026-09-29). The shim
+  worked only through LD_LIBRARY_PATH (V1).
+
+CHANGE
+  scripts/install-frameroot-vulkan.sh: build/libvulkan.so.1 (the shim; it
+  exports vk_icdGetInstanceProcAddr, vk_icdGetPhysicalDeviceProcAddr and
+  vk_icdNegotiateLoaderICDInterfaceVersion) as usr/lib/libvulkan_steamarm.so
+  with usr/share/vulkan/icd.d/steamarm_icd.aarch64.json; freedreno's
+  manifest moved to usr/share/vulkan/icd.d.lxrt-off. The image's loader
+  stays. Run by mkframeroot.sh, and by setup.sh ("frameroot" step) when
+  the root exists, so the shim follows each update.
+
+MEASURED
+  vulkaninfo --summary in the root, its own loader, no environment:
+    deviceName Apple M4, DRIVER_ID_MOLTENVK, driverInfo 1.4.2
+  (first with VK_DRIVER_FILES pointing at a copy in tmp/: the same.)
+  The client (scripts/run-steam-arm64.sh, Frame root, 90 s runs):
+    steamsysinfo  Running query: 1 - GpuTopology ... name: "Apple M4"
+    sign-in window, with the ICD:    10 of 12 (20-21 s)
+    sign-in window, without it:       4 of 4  (20 s)
+  The two misses came in the first 6 runs; the next 6 all had the window
+  at 20 s. Stage 23 measured 9 of 10 without a Vulkan device: no
+  difference shown. Every Frame run, with or without the ICD, has four
+  SIGSEGVs at addr 0x8 in atomupd-manager (SteamOS's updater; the Fedora
+  root has none); the window comes anyway. Also in every Frame run since
+  2026-09-29: SteamUpdateUI's "GLXBadCurrentWindow" (indirect GLX).
+
+NOT DONE
+  Sign-in and the main window (needs the user's account). Whether the
+  webhelper uses the device (it composites in software, indirect GLX).
