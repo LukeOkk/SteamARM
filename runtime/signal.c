@@ -1791,7 +1791,7 @@ static void xsig_child(void)
 // one process start in 16 sweeps the ones whose pid is gone.
 static void xsig_sweep(void)
 {
-    DIR *d = opendir(XSIG_DIR);
+    DIR *d = lxrt_opendir_private(XSIG_DIR);     // not in the guest's fd table
     if (!d)
         return;
     struct dirent *e;
@@ -1806,7 +1806,7 @@ static void xsig_sweep(void)
             unlink(p);
         }
     }
-    closedir(d);
+    lxrt_closedir_private(d);
 }
 
 __attribute__((constructor(202))) static void xsig_init(void)

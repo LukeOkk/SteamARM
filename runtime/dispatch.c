@@ -3337,9 +3337,19 @@ restart:
         if (lxrt_at_is_removedir((int)a2))
             ret = ret_of(unlinkat(lxrt_dirfd_to_darwin((int)a0),
                                   translate((const char *)a1), AT_REMOVEDIR));
-        else
-            ret = ret_of(unlinkat(lxrt_dirfd_to_darwin((int)a0),
-                                  translate((const char *)a1), 0));
+        else {
+            int dfd = lxrt_dirfd_to_darwin((int)a0);
+            const char *hp = translate((const char *)a1);
+            ret = ret_of(unlinkat(dfd, hp, 0));
+            // Linux answers unlink of a directory with EISDIR, Darwin with
+            // EPERM. bionic's and glibc's remove() try unlink first and
+            // rmdir only on EISDIR, so with EPERM no Java File.delete() of a
+            // directory ever succeeded: Organic Maps could not remove its
+            // own test directory and called its storage unusable (MEASURED).
+            struct stat st;
+            if (ret == LERR(EPERM) && fstatat(dfd, hp, &st, AT_SYMLINK_NOFOLLOW) == 0 && S_ISDIR(st.st_mode))
+                ret = LERR(EISDIR);
+        }
         break;
     case LNR_renameat:
     case LNR_renameat2: {

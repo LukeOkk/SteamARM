@@ -1,0 +1,44 @@
+Stage 36: files apps make -- deleting directories, owning them, and the
+zygote's descriptor check
+Mac mini M4, macOS 27; x86_64 LineageOS 18.1 root under FEX (sesstest).
+
+== Deleting a directory
+Organic Maps (F-Droid 26082718) logged "External storage checks failed"
+and "Failed to delete the test dir: /data/data/app.organicmaps/files/
+om_test_dir" for internal storage too. From a shell, as the app's uid,
+mkdir/rmdir worked; Java's File.delete() goes through remove(), which
+tries unlink() and falls back to rmdir() only on EISDIR -- Darwin answers
+unlink of a directory with EPERM. The runtime now gives EISDIR there
+(tests/elf/unlink_dir.c: 5 of 5; before, unlink and unlinkat EPERM and
+remove() failing). After: "Accepted /data/data/app.organicmaps/files/ -
+currently configured, internal", the app picks its storage.
+
+== Who owns what an app makes
+ls -ln as root in /data/data/app.organicmaps: cache and code_cache
+10146:20146 (installd chowned them), databases, files, no_backup and
+shared_prefs 501:20 -- the Mac user, for every file an app had made.
+With Android ids, a file no one chowned already counts as the caller's in
+the permission checks; stat now says so too (an unrecorded, Mac-owned file
+stats as the caller's fsuid:fsgid). tests/elf ANDROID_IDS: "a directory
+made as 1000 stats as 1000:1000" (MAL before).
+Termux, typed into its terminal: apt install -y git, git init, add, commit,
+status ("nothing to commit, working tree clean"), log ("96c0614 one");
+stat of the repository 10144, id -u 10144.
+
+== The zygote's descriptor check, once more
+2 of 39 saved boot logs had "(zygote) Unsupported st_mode for FD 39/40:
+DIR" and the framework restarting (one of them looked like a pm failure
+from the launch's side). Left in the runtime: a guest thread that exits
+removed its /proc/self/task entry with nftw(), which opens each directory
+at the lowest free descriptor while the other threads run -- and the
+zygote stops its daemon threads right before it checks every descriptor
+for a fork. Removal now uses the runtime's private descriptors (high,
+hidden, under the listing's lock), as do the signal-mailbox and SysV
+sweeps. tests/elf/fd_scan_threads.c (3 s of /proc/self/fd scans while
+threads come and go, no directory but the listing's own) passes on both
+runtimes: the window is a few microseconds and was not reproduced in
+isolation; the record will tell over the next boots.
+
+== Matrix
+tests/elf 101/0 (unlink_dir, fd_scan_threads new); tests/android 87
+passed, 0 failed, 2 expected failures; Python OK.

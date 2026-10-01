@@ -662,6 +662,17 @@ void lxrt_aids_fix_stat(const char *host, int fd, bool nofollow, struct stat *st
     if (owner_read(host, fd, nofollow, &u, &gg)) {
         st->st_uid = u;
         st->st_gid = gg;
+    } else if (st->st_uid == getuid()) {
+        // A file nobody chowned is the Mac user's, i.e. every guest's: the
+        // permission checks already count the caller as its owner
+        // (lxrt_aids_chown_file), and stat now says so too. It said 501, so a
+        // directory an app had just made was not the app's: git's
+        // safe.directory check, OpenSSH's key-file check and the like refuse
+        // that ("dubious ownership"); Linux reports the creator.
+        pthread_mutex_lock(&g_mu);
+        st->st_uid = g.fs;
+        st->st_gid = g.fsg;
+        pthread_mutex_unlock(&g_mu);
     }
 }
 

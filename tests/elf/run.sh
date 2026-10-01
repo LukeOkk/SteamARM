@@ -824,7 +824,7 @@ fi
 # keeps the runtime's settings and /proc; pseudo-terminals the Linux way
 # (Termux's terminal).
 if [ -f "$STAGE/usr/lib64/libc.a" ] && [ -n "$GCCDIR" ]; then
-    for t in memfd_seal_xproc readonly_efault exec_env pty; do
+    for t in memfd_seal_xproc readonly_efault exec_env pty unlink_dir fd_scan_threads; do
         if err=$(glibc_cc -static-pie -O2 -o build/$t tests/elf/$t.c 2>&1); then
             env=""
             if [ "$t" = readonly_efault ]; then

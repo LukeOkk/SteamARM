@@ -1506,7 +1506,7 @@ static void kdefer_release(int id)
 // reused id is left alone; a record whose pid is alive (or was reused) waits.
 static void kdefer_sweep(void)
 {
-    DIR *d = opendir(RMID_DIR);
+    DIR *d = lxrt_opendir_private(RMID_DIR);     // not in the guest's fd table
     if (!d)
         return;
     struct dirent *e;
@@ -1533,7 +1533,7 @@ static void kdefer_sweep(void)
             shmctl((int)id, IPC_RMID, NULL);
         unlink(p);
     }
-    closedir(d);
+    lxrt_closedir_private(d);
 }
 
 // This process is exiting or exec'ing: every deferred IPC_RMID happens now.

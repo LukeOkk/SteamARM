@@ -282,6 +282,16 @@ int main(int argc, char **argv)
               status_line(self_by_pid, "Uid:", l2, sizeof l2) && !strcmp(l2, l1),
               "/proc/self/status and /proc/<own pid>/status Uid: 1000 (the current virtual ids)");
     }
+    {
+        // A directory this uid makes is its own in stat, as Linux reports the
+        // creator (git's and OpenSSH's ownership checks depend on it).
+        char nd[96];
+        snprintf(nd, sizeof nd, "/tmp/lxrt-aids-newdir-%d", (int)getpid());
+        struct stat ns;
+        check(mkdir(nd, 0700) == 0 && stat(nd, &ns) == 0 && ns.st_uid == 1000 && ns.st_gid == 1000,
+              "a directory made as 1000 stats as 1000:1000");
+        rmdir(nd);
+    }
     caps(&e, &p, &i);
     check(e == 0 && p == ALL, "keepcaps: permitted kept, effective cleared (euid left 0)");
     check(sc(SYS_setresuid, 0, 0, 0) == -EPERM, "no CAP_SETUID effective: setresuid(0) EPERM");

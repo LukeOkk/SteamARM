@@ -19,7 +19,6 @@
 #include <errno.h>
 #include <dirent.h>
 #include <fcntl.h>
-#include <ftw.h>
 #include <libproc.h>
 #include <signal.h>
 #include <time.h>
@@ -382,17 +381,35 @@ static void regenerate_one_fd(int fd)
     lxrt_link_set(target, link);
 }
 
-static int rm_entry(const char *path, const struct stat *st, int flag, struct FTW *ftw)
-{
-    (void)st; (void)ftw;
-    if (flag == FTW_DP) rmdir(path);
-    else unlink(path);
-    return 0;
-}
-
+// Not nftw(): it opens each directory at the lowest free descriptor, and a
+// guest thread that exits removes its /proc/self/task entry while the others
+// run -- Android's zygote stops its daemon threads before a fork and then
+// checks every descriptor, and one exiting thread's directory was there:
+// "Unsupported st_mode for FD 39: DIR", the zygote aborted (MEASURED, about one
+// boot in twenty). Private descriptors only (lxrt_opendir_private).
 static void remove_tree(const char *dir)
 {
-    nftw(dir, rm_entry, 16, FTW_DEPTH | FTW_PHYS);
+    DIR *d = lxrt_opendir_private(dir);
+    if (d) {
+        struct dirent *e;
+        while ((e = readdir(d))) {
+            if (!strcmp(e->d_name, ".") || !strcmp(e->d_name, ".."))
+                continue;
+            char p[1200];
+            snprintf(p, sizeof p, "%s/%s", dir, e->d_name);
+            bool isdir = e->d_type == DT_DIR;
+            if (e->d_type == DT_UNKNOWN) {
+                struct stat st;
+                isdir = lstat(p, &st) == 0 && S_ISDIR(st.st_mode);
+            }
+            if (isdir)
+                remove_tree(p);
+            else
+                unlink(p);
+        }
+        lxrt_closedir_private(d);
+    }
+    rmdir(dir);
 }
 
 // A process that exits removes its directory (lxrt_proc_cleanup); one that is
