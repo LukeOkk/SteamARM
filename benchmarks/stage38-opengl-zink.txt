@@ -99,6 +99,27 @@ WHY
   answering; android-session.py stop then removes it (before the fix: 57
   before, 11-16 after).
 
+6. AFTER 0.3.13: TWO RUNTIME FIXES AND A STOP REGRESSION
+  - A guest signal frame could be written over host_handler's own frame
+    when the host alt stack lay about 1 MiB below a guest stack (Darwin's
+    ucontext inside the 1 MiB window, host_handler's sp just outside):
+    __stack_chk_fail in host_handler, seen five times in Wine helper
+    processes under FEX (winedevice.exe, rpcss.exe; crash reports
+    2026-09-30 21:28 and 23:53, 2026-10-01 06:07). The placement now
+    follows where host_handler runs (commit 9bb7f59). tests/elf 103/0,
+    i386 18/0, arm64 4/0, win 14/0, Android 88/0.
+  - 0.3.13's run-steam.sh stop killed only processes with
+    LXRT_ROOT=/tmp/lxrt-steamroot; pressure-vessel's container processes
+    name their own root (/tmp/lxrt-sandbox-*), stayed alive, and the next
+    start never showed a window (MEASURED: 0 of 4 windows, leftover
+    pv-adverb). Now everything but Xvnc, FEXServer and the Android
+    session's processes (LXRT_SESSION=android) is stopped: x86 Steam on
+    Xvnc 6 of 6 windows (60-100 s), no CEF GPU launch failure in them; an
+    Android session of 54 processes survives both stops.
+  - A failed fork now says why on stderr (once per process): CEF's GPU
+    launch reports only "error_code=1002" (its success code) and gives up
+    after nine. No failed fork was seen in the six runs above.
+
 NOT DONE
   No game was run with WineD3D. KosmicKrisp through Zink is broken
   upstream. The 32-bit WineD3D exit abort is open. Zink's OpenGL 3.2 limits

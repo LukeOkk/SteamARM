@@ -21,19 +21,21 @@ STATE="${STEAMARM_STATE:-$HOME/SteamARM-roots}"
 LOGS="$STATE/logs"
 mkdir -p "$LOGS"
 
-# A runtime process of Steam's root: its environment names LXRT_ROOT=$ROOT
-# (the runtime carries LXRT_* variables through every guest exec). Other
-# roots' programs -- the Android session, the arm64 client, other apps --
-# are not Steam's to stop; this used to kill every lxrun process.
-in_steam_root() {
-    ps -E -o command= -p "$1" 2>/dev/null | tr ' ' '\n' | grep -qx "LXRT_ROOT=$ROOT"
+# The Android session's processes are not Steam's to stop: they carry
+# LXRT_SESSION=android (scripts/android-session.py; the runtime keeps LXRT_*
+# variables through guest execs). Everything else is stopped, as before --
+# including pressure-vessel's container, whose processes name their own
+# root (LXRT_ROOT=/tmp/lxrt-sandbox-*), not Steam's: a stop limited to
+# LXRT_ROOT=$ROOT left them running and the next start never got a window.
+android_session() {
+    ps -E -o command= -p "$1" 2>/dev/null | tr ' ' '\n' | grep -qx "LXRT_SESSION=android"
 }
 
 stop_steam() {
     for p in $(pgrep -f "build/lxrun"); do
         case "$(ps -o command= -p "$p")" in
             *Xvnc*|*FEXServer*) ;;
-            *) in_steam_root "$p" && kill -9 "$p" 2>/dev/null ;;
+            *) android_session "$p" || kill -9 "$p" 2>/dev/null ;;
         esac
     done
     rm -f "$ROOT/tmp/fexhome/.steam/steam.pid"

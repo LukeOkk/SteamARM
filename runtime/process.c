@@ -33,6 +33,7 @@ bool lxrt_trace_on(void);
 
 #include <errno.h>
 #include <mach-o/dyld.h>
+#include <stdatomic.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -68,8 +69,19 @@ long lxrt_fork(void)
         return LERR(EAGAIN);
     pid_t pid = fork();
     if (pid < 0) {
+        int e = errno;
         lxrt_ids_cancel_child(child_id);
-        return LERR(errno);
+        // Said once per process: a failed fork is otherwise silent in most
+        // guests (Chromium's GPU process launch reports only "error_code=1002",
+        // its success code, and gives up after nine).
+        static _Atomic int said;
+        if (atomic_fetch_add(&said, 1) < 3) {
+            char b[160];
+            int n = snprintf(b, sizeof b, "[lxrt] pid %d: fork failed: %s (errno %d)\n",
+                             (int)getpid(), strerror(e), e);
+            write(2, b, (size_t)n);
+        }
+        return LERR(e);
     }
     if (pid == 0) {
         lxrt_ids_child_after_fork(child_id);
