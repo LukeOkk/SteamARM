@@ -1,0 +1,56 @@
+Stage 39 -- WineD3D on Zink: OpenGL 4.5, and why 3.2 stopped working
+Date: 2026-10-01. Apple M4, macOS 27. Zero VM. No game was launched.
+
+1. WHAT HAPPENED
+  After 0.3.14 was installed (setup.sh at 10:49), every WineD3D probe on
+  Zink failed: "wined3d_caps_gl_ctx_create Failed to make caps GL context
+  current" (d3d9, d3d11; 5 of 5). The same probes had passed all day
+  (tests/win 14/14 at 09:30). llvmpipe still worked (197.9 fps). +wgl
+  shows Wine choosing pixel format 9 (fbconfig 0x96: double-buffered,
+  depth 24, accelerated) and failing right after x11drv_make_current.
+  NOT the cause (each checked):
+    - Proton Experimental (unchanged since 2026-09-26, build 25502719);
+    - the Vulkan shim (identical to the repo build);
+    - leftover Wine processes from earlier probes (killed: same failure);
+    - GLX itself: a minimal GLX client (glxprobe: an unmapped window per
+      double-buffered RGBA fbconfig, glXCreateContextAttribsARB with the
+      compatibility profile as Wine asks, glXMakeContextCurrent) works on
+      all 12 it tried, 0x96 included; glxgears with and without 4x MSAA
+      runs (2269-3155 fps).
+  What changed between the passing and failing runs: the native X server
+  was restarted, and its GLX visual list came back in another order (the
+  accelerated renderer's configs first: 256 fbconfigs, 0x80-0x9f "None";
+  earlier the software renderer's "Slow" configs came first). Why that
+  makes Wine's caps context fail at 3.2: NOT EXPLAINED.
+
+2. WHAT FIXES IT: OPENGL 3.3 OR LATER
+    MESA_GL_VERSION_OVERRIDE=3.3COMPAT         d3d9 ok, 1327.0 fps
+    MESA_EXTENSION_OVERRIDE=+..._2_10_10_10_rev  d3d9 ok, 1528.8 fps (3.3)
+  Zink on MoltenVK stops at 3.2 for want of exactly one 3.3 requirement,
+  GL_ARB_vertex_type_2_10_10_10_rev (Metal has no non-normalized
+  10:10:10:2 vertex formats), and at 3.3 for want of one 4.0 requirement,
+  GL_ARB_texture_buffer_object_rgb32 (no RGB32 texel buffers); every
+  other extension of 3.3, 4.0 and 4.1 is there. Announcing the two:
+    eglinfo, surfaceless       OpenGL 4.5 core, GLSL 4.50
+  Only a program that uses those two formats sees a difference (its draw
+  can fail); D3D games under WineD3D almost never do (D3DDECLTYPE_UDEC3).
+
+3. ADOPTED
+  scripts/settings-env.py sets, for "OpenGL (WineD3D)":
+    PROTON_USE_WINED3D=1 GALLIUM_DRIVER=zink
+    MESA_EXTENSION_OVERRIDE="+GL_ARB_vertex_type_2_10_10_10_rev
+                             +GL_ARB_texture_buffer_object_rgb32"
+  The tests use the same:
+    tests/elf/gl_zink.c (now asks 4.5, then 3.3, then 3.2 core):
+      x86_64  OpenGL 4.5, GLSL 450 program, pixels right, 0.74 ms
+      i386    OpenGL 4.5, pixels right, 0.77 ms
+    tests/win/run.sh:
+      d3d9_wined3d     ok 1328.4 fps
+      d3d11_wined3d    ok feature level 11_0, 1547.7 fps
+      d3d9_32_wined3d  ok 1465.4 fps
+      d3d11 (DXVK)     ok 158.1 fps
+  The launcher's reason for WineD3D says OpenGL 4.5.
+
+NOT DONE
+  No game. Why Wine's caps context needs 3.3 after the X server restart,
+  and did not before, is not explained.

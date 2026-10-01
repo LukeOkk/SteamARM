@@ -23,6 +23,9 @@ ICD_MARKER = b"STEAMARM_VK_ICD"
 OVERRIDABLE = ("display", "vsync", "synchronization", "graphicsBackend")
 
 
+ZINK_GL45_OVERRIDE = "+GL_ARB_vertex_type_2_10_10_10_rev +GL_ARB_texture_buffer_object_rgb32"
+
+
 def effective_synchronization(value):
     """The backend Proton actually gets. Mirrors RuntimeCapabilities.effectiveSynchronization
     (launcher/ApplicationCore.swift): esync and fsync (futex_waitv, runtime/futex_waitv.c)
@@ -164,11 +167,18 @@ def env_from_settings(s, total=None):
     # the launcher only offers it where Zink and direct GLX exist
     # (benchmarks/stage38-opengl-zink.txt).
     gfx = s.get("graphicsBackend") or "auto"
+    # Zink on MoltenVK stops at OpenGL 3.2 for want of two vertex/texel
+    # formats Metal does not have (10:10:10:2 non-normalized vertex
+    # attributes, RGB32 texel buffers); announcing the two extensions gives
+    # OpenGL 4.5, and WineD3D cannot make its context current below 3.3
+    # (MEASURED, benchmarks/stage39-wined3d-gl45.txt). Only programs that
+    # use those two formats see a difference.
     if gfx == "vulkanKosmicKrisp" and shim_selects_icd():
         env["STEAMARM_VK_ICD"] = "kosmickrisp"
     elif gfx == "openGLWineD3D":
         env["PROTON_USE_WINED3D"] = "1"
         env["GALLIUM_DRIVER"] = "zink"
+        env["MESA_EXTENSION_OVERRIDE"] = ZINK_GL45_OVERRIDE
     if s.get("shaderCache") is False:
         env["DXVK_SHADER_CACHE"] = "0"
         env["VKD3D_SHADER_CACHE_PATH"] = "0"

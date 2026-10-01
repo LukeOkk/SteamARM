@@ -95,7 +95,9 @@ for t in ${@:-tick tick_32 tone tone_32 regwin d3d11 d3d12 d3d9 d3d9_32 d3d11_32
     fi
     log="$LOGS/win-$t.log"
     if [ $wined3d = 1 ]; then
-        dll=(WINEDLLOVERRIDES="d3d9,d3d11,dxgi,d3d10core=b" GALLIUM_DRIVER=zink)
+        # As scripts/settings-env.py sets it: OpenGL 4.5 (stage 39).
+        dll=(WINEDLLOVERRIDES="d3d9,d3d11,dxgi,d3d10core=b" GALLIUM_DRIVER=zink
+             "MESA_EXTENSION_OVERRIDE=+GL_ARB_vertex_type_2_10_10_10_rev +GL_ARB_texture_buffer_object_rgb32")
     else
         dll=(WINEDLLOVERRIDES="d3d9,d3d11,d3d12,d3d12core,dxgi,d3d10core=n")
     fi

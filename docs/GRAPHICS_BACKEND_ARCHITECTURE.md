@@ -133,7 +133,8 @@ Mesa's Vulkan-on-Metal driver.
   needed: Mesa's **Zink** (`GALLIUM_DRIVER=zink`) turns OpenGL into Vulkan
   inside the guest, and that Vulkan goes through the existing thunk to
   MoltenVK (MEASURED, `benchmarks/stage38-opengl-zink.txt`):
-  OpenGL 3.2 core/compatibility, OpenGL ES 3.1, renderer
+  OpenGL 3.2 core/compatibility as it is, **4.5** with the two format
+  extensions Metal lacks announced (stage 39, below), OpenGL ES 3.1, renderer
   `zink Vulkan 1.4(Apple M4 (MOLTENVK))`, x86-64 and i386 guests
   (`tests/elf/gl_zink.c` in `tests/elf/run_vk_device.sh`).
 - KosmicKrisp 26.2.3 gives OpenGL 3.3 through Zink but fails to compile
@@ -154,12 +155,19 @@ Mesa's Vulkan-on-Metal driver.
   (`tests/win/run.sh d3d9_wined3d d3d11_wined3d d3d9_32_wined3d`) render and
   present; D3D11 reaches feature level 11_0. The 32-bit probe aborts when it
   exits (after its frames; no message).
+- OpenGL 4.5 for WineD3D (`benchmarks/stage39-wined3d-gl45.txt`): Zink on
+  MoltenVK misses only `GL_ARB_vertex_type_2_10_10_10_rev` (no
+  non-normalized 10:10:10:2 vertex formats in Metal) for 3.3 and
+  `GL_ARB_texture_buffer_object_rgb32` for 4.0. `scripts/settings-env.py`
+  announces both (`MESA_EXTENSION_OVERRIDE`) for the WineD3D choice:
+  OpenGL 4.5, and WineD3D's context, which failed at 3.2 after an X server
+  restart, works. Only programs using those two formats can misdraw.
 - Launcher state: unavailable until detected; experimental when Zink is in
   the x86 root, the native X server was built with the GLX patch
   (`scripts/compat-status.py` reads the patch list `scripts/build-xquartz.sh`
   records), and MoltenVK and the shim are installed. AUTO never picks it.
-  `scripts/settings-env.py` sets `PROTON_USE_WINED3D=1` and
-  `GALLIUM_DRIVER=zink` for that choice.
+  `scripts/settings-env.py` sets `PROTON_USE_WINED3D=1`,
+  `GALLIUM_DRIVER=zink` and the extension override for that choice.
 
 ## Present modes and V-Sync
 
@@ -203,7 +211,7 @@ Gráficos** and the read-only **Runtime** page show it
 |---|---|---|
 | Vulkan · MoltenVK | ready | D3D9/11/12 probes (stages 14, 16) |
 | Vulkan · KosmicKrisp | unavailable until detected; experimental when installed, on macOS 26 or later, loadable as an ICD and the installed shim reads `STEAMARM_VK_ICD` | `ApplicationCore.swift:538`, `:554-565` |
-| OpenGL · WineD3D | unavailable until detected; experimental with Zink in the x86 root, the native X server's GLX patch, MoltenVK and the shim | WineD3D on Mesa's Zink on MoltenVK, OpenGL 3.2 (stage 38) |
+| OpenGL · WineD3D | unavailable until detected; experimental with Zink in the x86 root, the native X server's GLX patch, MoltenVK and the shim | WineD3D on Mesa's Zink on MoltenVK, OpenGL 4.5 (stages 38, 39) |
 
 AUTO means MoltenVK. Fallback order (`ApplicationCore.swift:617-623`):
 KosmicKrisp, then MoltenVK, then WineD3D, only among usable backends; never

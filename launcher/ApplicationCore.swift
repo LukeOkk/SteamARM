@@ -747,7 +747,7 @@ struct RuntimeCapabilities {
         } else if probe.moltenvk.path.isEmpty || probe.shim?.installed != true {
             caps.graphics[.openGLWineD3D] = .init(state: .unavailable, reason: "Zink necesita el Vulkan del invitado: MoltenVK y el shim Vulkan instalados")
         } else {
-            caps.graphics[.openGLWineD3D] = .init(state: .experimental, reason: "WineD3D sobre el OpenGL de Mesa Zink, sobre MoltenVK: OpenGL 3.2, GLX directo (tests/elf/gl_zink.c); sin verificar con juegos")
+            caps.graphics[.openGLWineD3D] = .init(state: .experimental, reason: "WineD3D sobre el OpenGL de Mesa Zink, sobre MoltenVK: OpenGL 4.5, GLX directo (tests/elf/gl_zink.c, tests/win); sin verificar con juegos")
         }
 
         if let p = probe.presentation {

@@ -83,6 +83,8 @@ class SettingsEnvironmentTests(unittest.TestCase):
             # WineD3D: OpenGL from Zink on the Vulkan thunk, MoltenVK.
             env = self.env({"graphicsBackend": "openGLWineD3D"})
             self.assertEqual((env.get("PROTON_USE_WINED3D"), env.get("GALLIUM_DRIVER")), ("1", "zink"))
+            self.assertIn("+GL_ARB_vertex_type_2_10_10_10_rev", env.get("MESA_EXTENSION_OVERRIDE", ""))
+            self.assertIn("+GL_ARB_texture_buffer_object_rgb32", env.get("MESA_EXTENSION_OVERRIDE", ""))
             self.assertNotIn("STEAMARM_VK_ICD", env)
         with patch.object(self.settings, "shim_selects_icd", return_value=False):
             self.assertNotIn("STEAMARM_VK_ICD", self.env({

@@ -1,6 +1,6 @@
 // OpenGL through Mesa's Zink on the guest's Vulkan (FEX's Vulkan thunk, then
-// MoltenVK or KosmicKrisp): a surfaceless EGL context, a 3.3 core program
-// (3.2 where the driver stops there) drawing a triangle into a framebuffer object, and the pixels read back --
+// MoltenVK or KosmicKrisp): a surfaceless EGL context, the highest core
+// program of 4.5, 3.3 or 3.2, drawing a triangle into a framebuffer object, and the pixels read back --
 // the centre must be the triangle's colour and a corner the clear colour.
 // Run with GALLIUM_DRIVER=zink and EGL_PLATFORM=surfaceless
 // (tests/elf/run_vk_device.sh). Everything comes from libEGL.so.1 by
@@ -113,21 +113,25 @@ int main(void)
         printf("EGL init failed\n== gl_zink: FAIL\n");
         return 1;
     }
-    // 3.3 core where the driver has it (KosmicKrisp), else 3.2 core
-    // (MoltenVK: Zink stops at 3.2 there, no dual-source blending).
+    // The highest core context the driver gives: 4.5 (Zink on MoltenVK with
+    // the two extensions scripts/settings-env.py announces), 3.3, else 3.2
+    // (Zink on MoltenVK as it is).
+    static const struct { int major, minor; const char *glsl; } want[] = {
+        { 4, 5, "#version 450 core\n" }, { 3, 3, "#version 330 core\n" }, { 3, 2, "#version 150 core\n" },
+    };
     EGLContext ctx = NULL;
-    int minor;
-    for (minor = 3; minor >= 2 && !ctx; minor--) {
-        const EGLint attrs[] = { EGL_CONTEXT_MAJOR_VERSION, 3, EGL_CONTEXT_MINOR_VERSION, minor,
+    unsigned k;
+    for (k = 0; k < 3 && !ctx; k++) {
+        const EGLint attrs[] = { EGL_CONTEXT_MAJOR_VERSION, want[k].major, EGL_CONTEXT_MINOR_VERSION, want[k].minor,
                                  EGL_CONTEXT_OPENGL_PROFILE_MASK, 1, EGL_NONE };
         ctx = createContext(dpy, NULL, NULL, attrs);              // EGL_KHR_no_config_context
     }
-    minor++;
+    k--;
     if (!ctx || !makeCurrent(dpy, NULL, NULL, ctx)) {            // EGL_KHR_surfaceless_context
         printf("no 3.2 core context\n== gl_zink: FAIL\n");
         return 1;
     }
-    const char *glsl = minor == 3 ? "#version 330 core\n" : "#version 150 core\n";
+    const char *glsl = want[k].glsl;
     char vs[256], fs[256];
     snprintf(vs, sizeof vs, "%sin vec2 p;\nvoid main(){gl_Position=vec4(p,0.0,1.0);}\n", glsl);
     snprintf(fs, sizeof fs, "%sout vec4 c;\nvoid main(){c=vec4(1.0,0.0,0.0,1.0);}\n", glsl);
