@@ -282,8 +282,8 @@ This is VERIFIED IN SOURCE; details in `docs/APPLICATION_MANAGER.md`.
 |---|---|---|---|
 | `steamarm-inputd` (SDL, IOKit) + `runtime/evdev.c` + `tools/inputd/PROTOCOL.md` | KEEP | NOT_APPLICABLE | |
 | PulseAudio (Homebrew), socket at `<root>/tmp/pulse/native`; `runtime/pathfd.c` stand-in for O_PATH | KEEP | NOT_APPLICABLE | The socket lives inside the guest root so pressure-vessel can bind it. Until this audit, `run-app.sh` started `audio.sh` without `LXRT_ROOT`, so the socket was always in the Steam root and an aarch64 entry had none. Now there is one server, with a socket in each root that asks for one (`tests/audio/run.sh`). |
-| eventfd, futex WAIT/WAKE/BITSET/REQUEUE | KEEP | NOT_APPLICABLE | The esync substrate. |
-| `futex_waitv` (fsync), ntsync | missing | — | `futex_waitv` (449) is **not implemented**. It appears only in the guest-base pointer table (`runtime/gbase.c:102`); `dispatch.c` has no case for it, so it returns ENOSYS. Wine's fsync needs it: Proton's `do_fsync` probes exactly that call (MEASURED, disassembly of `ntdll.so` in Proton 10.0 and Experimental), so fsync turns itself off and the launcher's fsync toggle (`PROTON_NO_FSYNC`, `settings-env.py:71-74`) changes nothing today. Proton Experimental has no esync compiled in; its effective sync is then wineserver (HYPOTHESIS). ntsync (`/dev/ntsync`) does not exist either. |
+| eventfd, futex WAIT/WAKE/BITSET/REQUEUE | KEEP | NOT_APPLICABLE | The esync substrate. Since 2026-10-01 an eventfd sent over SCM_RIGHTS is the same eventfd in the receiving process (counter, semaphore mode, poll), as wineserver hands them to its clients (`runtime/socket.c`, `tests/elf/eventfd_scm.c`); before, the receiver got a bare pipe. |
+| `futex_waitv` (fsync), ntsync | implemented since 2026-10-01 (fsync); ntsync missing | — | Since 2026-10-01 `futex_waitv` is implemented (`runtime/futex_waitv.c`, `tests/elf/futex_waitv.c`, `tests/android/x86_futex_waitv.c` under FEX); fsync is experimental and only an explicit choice enables it. Before: `futex_waitv` (449) was **not implemented**. It appears only in the guest-base pointer table (`runtime/gbase.c:102`); `dispatch.c` has no case for it, so it returns ENOSYS. Wine's fsync needs it: Proton's `do_fsync` probes exactly that call (MEASURED, disassembly of `ntdll.so` in Proton 10.0 and Experimental), so fsync turns itself off and the launcher's fsync toggle (`PROTON_NO_FSYNC`, `settings-env.py:71-74`) changes nothing today. Proton Experimental has no esync compiled in; its effective sync is then wineserver (HYPOTHESIS). ntsync (`/dev/ntsync`) does not exist either. |
 
 ### 5.6 Launcher (`launcher/`, Mach-O arm64)
 
@@ -479,8 +479,8 @@ Behaviours of the Steam client that the runtime handles specially
 3. Does SLR Arm64's pressure-vessel emit the bwrap plan `mounts.c` handles?
    Does it expect Valve's FEX, or binfmt, for x86 games?
 4. How is x86 Proton offered to an ARM64 client (§7)?
-5. fsync needs `futex_waitv`, which lxrun lacks (§5.5). Implement it (a wait
-   on several futexes at once), or say in the launcher that only esync applies.
+5. fsync needs `futex_waitv` (§5.5): implemented 2026-10-01 (runtime/futex_waitv.c);
+   still to verify with games.
 6. MoltenVK has no version pin: it comes from Homebrew and is measured only on
    1.4.2.
 7. Real games are not verified (`README.md`). Known defects that remain open:

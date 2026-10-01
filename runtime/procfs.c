@@ -131,6 +131,24 @@ DIR *lxrt_fdopendir_private(int fd)
     }
     return d;
 }
+// A file the runtime opens for itself, under the same rule: never at a low
+// number a /proc/self/fd listing could catch.
+int lxrt_open_private(const char *path, int flags, int mode)
+{
+    private_lock();
+    int fd = open(path, flags, mode);
+    if (fd >= 0)
+        fd = lxrt_fd_private(fd);
+    private_unlock();
+    return fd;
+}
+void lxrt_close_private(int fd)
+{
+    if (fd < 0)
+        return;
+    close(fd);
+    lxrt_fd_hide(fd, false);
+}
 DIR *lxrt_opendirat_private(int dirfd, const char *path)
 {
     private_lock();

@@ -360,6 +360,7 @@ long lxrt_set_tid_address(uint32_t *ctid)
 // return; an inflated one is not.
 static int wake_waiters(uint32_t *addr, int32_t budget)
 {
+    lxrt_futex_waitv_notify(addr);      // futex_waitv callers parked on this word
     uint32_t flags = ULF_NO_ERRNO;
     // futex_wake() tests its budget only AFTER releasing a waiter
     // (`if (++ret >= nr_wake) break;`), so val 0 still releases exactly one.

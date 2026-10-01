@@ -222,9 +222,18 @@ struct ApplicationCoreTests {
         }
         check(caps.execution[.appleHypervisorLegacy]?.usable == false, "no VM path in this tree")
         check(caps.execution[.lightningJIT]?.usable == false, "no Lightning JIT in this tree")
-        // Sync: fsync needs futex_waitv, which lxrun lacks; AUTO never picks an unusable one.
-        check(caps.synchronization[.fsync]?.state == .unsupported, "fsync unsupported")
-        check(caps.effectiveSynchronization(.fsync) == .wineserver, "requested fsync falls back to wineserver")
+        check(!ApplicationBackendPreset.lightningJIT.offered(in: caps) && !ApplicationBackendPreset.appleHypervisor.offered(in: caps),
+              "Lightning JIT and Apple Hypervisor are not offered while they do not exist")
+        check(ApplicationBackendPreset.nativeWindows.offered(in: caps) && ApplicationBackendPreset.vncScreenSharing.offered(in: caps),
+              "the presentation presets are always offered")
+        check(ExecutionBackend.allCases.filter { $0.offered(in: caps) } == [.auto], "the status list shows lxrun only")
+        var withJIT = caps
+        withJIT.execution[.lightningJIT] = .init(state: .experimental, reason: "test")
+        check(ApplicationBackendPreset.lightningJIT.offered(in: withJIT), "a usable Lightning JIT would be offered again")
+        // Sync: fsync rides on lxrun's futex_waitv (experimental); AUTO picks only a ready one.
+        check(caps.synchronization[.fsync]?.state == .experimental, "fsync experimental")
+        check(caps.effectiveSynchronization(.fsync) == .fsync, "requested fsync is what runs")
+        check(caps.effectiveSynchronization(.msync) == .wineserver, "requested MSync falls back to wineserver")
         check(caps.effectiveSynchronization(.esync) == .esync, "esync usable (experimental)")
         check(caps.effectiveSynchronization(.auto) == .wineserver, "AUTO picks only a ready fast path: none yet")
         // Graphics: KosmicKrisp and WineD3D are not integrated, so fallback lands on MoltenVK or nothing.
@@ -260,7 +269,8 @@ struct ApplicationCoreTests {
         check(d.graphics[.vulkanKosmicKrisp]?.state == .unavailable && d.graphics[.vulkanKosmicKrisp]?.reason.contains("STEAMARM_VK_ICD") == true,
               "KosmicKrisp installed but the shim cannot select it")
         check(d.synchronization[.esync]?.state == .experimental && d.synchronization[.esync]?.reason.contains("Proton 10.0") == true, "esync: Proton 10.0 only")
-        check(d.synchronization[.fsync]?.state == .unsupported && d.synchronization[.msync]?.state == .unavailable, "fsync/msync unchanged by detection")
+        check(d.synchronization[.fsync]?.state == .experimental && d.synchronization[.fsync]?.reason.contains("Proton 10.0") == true, "fsync: the Protons that have it")
+        check(d.synchronization[.msync]?.state == .unavailable, "msync unchanged by detection")
         check(d.execution[.appleHypervisorLegacy]?.usable == false && d.execution[.lightningJIT]?.usable == false, "detection never enables JIT or a VM")
         check(d.graphics[.openGLWineD3D]?.state == .unsupported, "detection never enables WineD3D")
         check(d.effectiveSynchronization(.auto) == .wineserver, "AUTO still wineserver with esync experimental")
@@ -287,6 +297,10 @@ struct ApplicationCoreTests {
         probe.presentation = .init(nativeX: false, xvnc: true, screenSharing: false)
         d = RuntimeCapabilities.detect(from: probe)
         check(d.synchronization[.esync]?.state == .unavailable, "no esync-capable Proton")
+        check(d.synchronization[.fsync]?.state == .experimental, "fsync with Proton Experimental")
+        var none = probe
+        none.protons = []
+        check(RuntimeCapabilities.detect(from: none).synchronization[.fsync]?.state == .unavailable, "no Proton: no fsync")
         check(d.effectiveSynchronization(.esync) == .wineserver, "unavailable esync -> wineserver")
         check(d.graphics[.vulkanMoltenVK]?.state == .unavailable, "no MoltenVK")
         check(d.presentation[.nativeWindows]?.state == .unavailable && d.presentation[.vncScreenSharing]?.state == .unavailable, "display pieces missing")
@@ -296,8 +310,8 @@ struct ApplicationCoreTests {
         check(caps.issues(display: .vncScreenSharing, synchronization: .esync, graphics: .vulkanMoltenVK, appInX86Root: true).isEmpty, "VNC in the x86 root is fine")
         let vncArm = caps.issues(display: .vncScreenSharing, synchronization: .auto, graphics: .auto, appInX86Root: false)
         check(vncArm.count == 1 && vncArm[0].setting == "display" && vncArm[0].fallback == "native", "VNC outside the x86 root -> native")
-        let bad = caps.issues(display: .nativeWindows, synchronization: .fsync, graphics: .vulkanKosmicKrisp, appInX86Root: true)
-        check(bad.map(\.setting) == ["synchronization", "graphicsBackend"], "fsync and KosmicKrisp both reported")
+        let bad = caps.issues(display: .nativeWindows, synchronization: .msync, graphics: .vulkanKosmicKrisp, appInX86Root: true)
+        check(bad.map(\.setting) == ["synchronization", "graphicsBackend"], "MSync and KosmicKrisp both reported")
         check(bad.first?.fallback == "wineserver" && bad.last?.fallback == "vulkanMoltenVK", "their fallbacks")
         check(bad.allSatisfy { !$0.summary.isEmpty }, "issues say why")
         check(FallbackPolicy.auto.decision(for: bad) == .proceed && FallbackPolicy.strict.decision(for: bad) == .refuse

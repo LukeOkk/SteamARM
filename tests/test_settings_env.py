@@ -50,16 +50,19 @@ class SettingsEnvironmentTests(unittest.TestCase):
             self.assertNotIn("VKD3D_SWAPCHAIN_PRESENT_MODE", self.env(settings))
 
     def test_synchronization(self):
-        for choice in ("auto", "wineserver", "fsync", "msync", "bogus"):
+        for choice in ("auto", "wineserver", "msync", "bogus"):
             with self.subTest(choice=choice):
                 env = self.env({"synchronization": choice})
                 self.assertEqual((env.get("PROTON_NO_ESYNC"), env.get("PROTON_NO_FSYNC")),
                                  ("1", "1"))
         self.assertEqual((self.env({}).get("PROTON_NO_ESYNC"),
                           self.env({}).get("PROTON_NO_FSYNC")), ("1", "1"))
+        # Only an explicit choice gets an experimental fast path; the old
+        # booleans keep what they always ran with (fsync off).
         cases = (({"synchronization": "esync"}, None, "1"),
-                 ({"esync": True, "fsync": True}, None, None),
-                 ({"esync": False, "fsync": True}, "1", None),
+                 ({"synchronization": "fsync"}, "1", None),
+                 ({"esync": True, "fsync": True}, None, "1"),
+                 ({"esync": False, "fsync": True}, "1", "1"),
                  ({"esync": True, "fsync": False}, None, "1"),
                  ({"synchronization": "auto", "esync": True, "fsync": True}, "1", "1"))
         for settings, esync, fsync in cases:

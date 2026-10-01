@@ -130,8 +130,8 @@ rates sit at the 165 Hz display.
   main window, the library, downloads.
 - The launcher's V-Sync setting's effect in a game, and whether IMMEDIATE
   tears or unlocks through the cross-process layer.
-- esync against wineserver sync; fsync does not exist here (no
-  `futex_waitv`).
+- esync and fsync (lxrun's `futex_waitv` since 2026-10-01) against
+  wineserver sync.
 - KosmicKrisp against MoltenVK beyond clear-and-present probes: D3D9,
   32-bit D3D, Steam's launch path, games.
 - FEX's translation cache on disk (a setting exists).

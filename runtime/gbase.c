@@ -102,7 +102,7 @@ static const struct { unsigned short nr; unsigned char mask; } k_ptr_args[] = {
     {285, A1 | A3}, {286, A1}, {287, A1},                        // copy_file_range, preadv2, pwritev2
     {291, A1 | A4},                                              // statx
     {424, A2}, {437, A1 | A2}, {439, A1}, {441, A1 | A2 | A4},   // pidfd_send_signal, openat2, faccessat2, epoll_pwait2
-    {449, A0}, {452, A1}, {454, A0}, {455, A0 | A4}, {456, A0},  // futex_waitv, fchmodat2, futex_wake, futex_wait, futex_requeue
+    {449, A0 | A3}, {452, A1}, {454, A0}, {455, A0 | A4}, {456, A0},  // futex_waitv, fchmodat2, futex_wake, futex_wait, futex_requeue
 };
 
 static inline bool guest_ptr(uint64_t v) { return v && v < (1ull << 32); }

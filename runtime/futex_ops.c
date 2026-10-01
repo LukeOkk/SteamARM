@@ -379,6 +379,7 @@ static int wake_up_to(void *addr, int64_t budget, bool shared)
 {
     if (budget <= 0)
         return 0;
+    lxrt_futex_waitv_notify(addr);      // futex_waitv callers parked on this word
     uint32_t flags = ULF_NO_ERRNO;
     if (budget > 1)
         flags |= ULF_WAKE_ALL;

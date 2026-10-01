@@ -184,7 +184,7 @@ struct SettingsView: View {
                         default: break
                         }
                     })) {
-                    ForEach(ApplicationBackendPreset.allCases, id: \.self) { preset in
+                    ForEach(ApplicationBackendPreset.allCases.filter { $0.offered(in: model.capabilities) }, id: \.self) { preset in
                         let status = model.capabilities.status(of: preset)
                         Text(preset.label + (status.state == .ready ? "" : " · " + status.state.label))
                             .tag(preset).disabled(!status.usable).help(status.reason)
@@ -194,7 +194,7 @@ struct SettingsView: View {
                      ? "Las apps se dibujan en Xvnc y se ven en Compartir Pantalla."
                      : "Cada ventana de la app es una ventana normal de macOS (servidor X nativo).")
                     .font(.caption).foregroundStyle(.secondary)
-                ForEach(ApplicationBackendPreset.allCases.filter { !model.capabilities.status(of: $0).usable }, id: \.self) { preset in
+                ForEach(ApplicationBackendPreset.allCases.filter { $0.offered(in: model.capabilities) && !model.capabilities.status(of: $0).usable }, id: \.self) { preset in
                     let status = model.capabilities.status(of: preset)
                     Text("\(preset.label): \(status.state.label.lowercased()) — \(status.reason).")
                         .font(.caption).foregroundStyle(.secondary)
@@ -381,7 +381,7 @@ struct SettingsView: View {
                 }
             }
             Section("Ejecución") {
-                ForEach(ExecutionBackend.allCases, id: \.self) { backend in
+                ForEach(ExecutionBackend.allCases.filter { $0.offered(in: model.capabilities) }, id: \.self) { backend in
                     capabilityRow(executionName(backend), status: model.capabilities.execution[backend])
                 }
             }

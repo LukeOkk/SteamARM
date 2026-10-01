@@ -520,6 +520,29 @@ enum FallbackPolicy: String, Codable, CaseIterable {
     }
 }
 
+extension ApplicationBackendPreset {
+    /// Whether Settings shows the preset at all. The two presentation presets
+    /// always (disabled, with their reason, when they cannot work here); an
+    /// execution backend only when this tree has it -- Lightning JIT and Apple
+    /// Hypervisor do not exist in it, and an option that can never be chosen
+    /// is a false control (docs/APPLICATION_MANAGER.md). They come back by
+    /// themselves if their capability ever becomes usable.
+    func offered(in caps: RuntimeCapabilities) -> Bool {
+        switch self {
+        case .nativeWindows, .vncScreenSharing: return true
+        case .lightningJIT, .appleHypervisor: return caps.status(of: self).usable
+        }
+    }
+}
+
+extension ExecutionBackend {
+    /// The same rule for the runtime status list: lxrun always, the others
+    /// only when present.
+    func offered(in caps: RuntimeCapabilities) -> Bool {
+        self == .auto || caps.execution[self]?.usable == true
+    }
+}
+
 /// What a capability is today, from this repository and its measurements --
 /// never from what it is meant to become.
 struct CapabilityStatus: Equatable {
@@ -644,8 +667,8 @@ struct RuntimeCapabilities {
         ],
         synchronization: [
             .wineserver: .init(state: .ready, reason: "el camino por defecto de Wine, sin vía rápida"),
-            .esync: .init(state: .experimental, reason: "solo Proton 10.0 lo incluye; lxrun implementa eventfd (runtime/epoll_eventfd.c) pero no entre procesos: sin verificar con juegos"),
-            .fsync: .init(state: .unsupported, reason: "lxrun no implementa futex_waitv (syscall 449): Proton lo prueba, recibe ENOSYS y no lo usa"),
+            .esync: .init(state: .experimental, reason: "solo Proton 10.0 lo incluye; lxrun implementa eventfd también entre procesos, enviado por SCM_RIGHTS como hace wineserver (tests/elf/eventfd_scm.c): sin verificar con juegos"),
+            .fsync: .init(state: .experimental, reason: "lxrun implementa futex_waitv sobre ulocks de Darwin (runtime/futex_waitv.c, tests/elf/futex_waitv.c); sin verificar con juegos"),
             .msync: .init(state: .unavailable, reason: "no hay ningún Wine con MSync integrado (MSync es un parche del Wine de macOS, no del Proton de Linux)"),
         ],
         graphics: [
@@ -664,7 +687,7 @@ struct RuntimeCapabilities {
     }
 
     /// The static table refined with what is installed on this Mac. Nothing
-    /// becomes more than the table allows: fsync, MSync, WineD3D, Lightning
+    /// becomes more than the table allows: MSync, WineD3D, Lightning
     /// JIT and Apple Hypervisor stay what they are whatever is installed.
     static func detect(from probe: RuntimeProbe, base: RuntimeCapabilities = .current) -> RuntimeCapabilities {
         var caps = base
@@ -692,11 +715,18 @@ struct RuntimeCapabilities {
             caps.graphics[.vulkanKosmicKrisp] = .init(state: .experimental, reason: "\(kkName) detectado y el shim admite STEAMARM_VK_ICD; sin medir con juegos")
         }
 
+        let fsync = probe.protons.filter { $0.supported && $0.fsync }.map(\.name)
+        if fsync.isEmpty {
+            caps.synchronization[.fsync] = .init(state: .unavailable, reason: "ningún Proton instalado incluye fsync")
+        } else {
+            caps.synchronization[.fsync] = .init(state: .experimental, reason: "en \(fsync.joined(separator: ", ")); lxrun implementa futex_waitv sobre ulocks de Darwin (tests/elf/futex_waitv.c): sin verificar con juegos")
+        }
+
         let esync = probe.protons.filter { $0.supported && $0.esync }.map(\.name)
         if esync.isEmpty {
             caps.synchronization[.esync] = .init(state: .unavailable, reason: "ningún Proton instalado incluye esync (Proton Experimental y Hotfix no lo compilan)")
         } else {
-            caps.synchronization[.esync] = .init(state: .experimental, reason: "solo en \(esync.joined(separator: ", ")); lxrun implementa eventfd pero no entre procesos: sin verificar con juegos")
+            caps.synchronization[.esync] = .init(state: .experimental, reason: "solo en \(esync.joined(separator: ", ")); lxrun implementa eventfd también entre procesos (SCM_RIGHTS, tests/elf/eventfd_scm.c): sin verificar con juegos")
         }
 
         if let p = probe.presentation {

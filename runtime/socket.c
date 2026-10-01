@@ -17,6 +17,7 @@
 
 #include <arpa/inet.h>
 #include <errno.h>
+#include <pthread.h>
 #include <stdatomic.h>
 #include <fcntl.h>
 #include <netinet/in.h>
@@ -1056,6 +1057,115 @@ long lxrt_recvfrom(int fd, void *buf, size_t len, int lflags, void *laddr, uint3
     return (long)r;
 }
 
+// ------------------------------------------- eventfds across SCM_RIGHTS
+//
+// An eventfd here is a pipe plus a counter the runtime keeps (epoll_eventfd.c);
+// sent as is, the receiving process got a bare pipe: a read of 8 bytes saw a
+// token byte, a write landed nowhere. Wine's esync is exactly that traffic --
+// wineserver makes an eventfd per synchronization object and sends it to each
+// client -- and failed (tests/elf/eventfd_scm.c, MEASURED). So a message that
+// carries eventfds also carries, after the guest's descriptors, a marker
+// descriptor and, per eventfd, the file behind its counter and its token
+// pipe's write end. The receiving runtime takes them off before the guest sees
+// the message and makes each received pipe the same eventfd
+// (lxrt_eventfd_adopt).
+static int scm_marker_fd(void)
+{
+    static int fd = -2;
+    static pthread_mutex_t mu = PTHREAD_MUTEX_INITIALIZER;
+    pthread_mutex_lock(&mu);
+    if (fd == -2) {
+        char path[64];
+        snprintf(path, sizeof path, "/tmp/lxrt-scm-marker-%u", (unsigned)getuid());
+        fd = lxrt_open_private(path, O_RDONLY | O_CREAT | O_CLOEXEC, 0600);
+    }
+    int r = fd;
+    pthread_mutex_unlock(&mu);
+    return r;
+}
+
+static bool is_scm_marker(int fd)
+{
+    char path[64];
+    snprintf(path, sizeof path, "/tmp/lxrt-scm-marker-%u", (unsigned)getuid());
+    struct stat a, b;
+    return fstat(fd, &a) == 0 && S_ISREG(a.st_mode) && stat(path, &b) == 0 &&
+           a.st_dev == b.st_dev && a.st_ino == b.st_ino;
+}
+
+// Sender: append the companions to the (first) SCM_RIGHTS message in `ctrl`.
+static socklen_t scm_add_eventfds(uint8_t *ctrl, socklen_t len, size_t cap)
+{
+    struct cmsghdr *c = (struct cmsghdr *)ctrl;
+    if (len < sizeof *c || c->cmsg_level != SOL_SOCKET || c->cmsg_type != SCM_RIGHTS)
+        return len;
+    int n = (int)((c->cmsg_len - CMSG_LEN(0)) / sizeof(int));
+    int *fds = (int *)CMSG_DATA(c);
+    int extra[2 * 64 + 1], ne = 0;
+    for (int i = 0; i < n && ne < 2 * 64; i++) {
+        int sfd, wfd;
+        if (lxrt_eventfd_companions(fds[i], &sfd, &wfd)) {
+            extra[1 + ne++] = sfd;
+            extra[1 + ne++] = wfd;
+        }
+    }
+    if (!ne)
+        return len;
+    int marker = scm_marker_fd();
+    if (marker < 0)
+        return len;
+    extra[0] = marker;
+    ne++;
+    // Only when it is the sole control message, and it fits.
+    if ((socklen_t)CMSG_SPACE((size_t)n * sizeof(int)) != len && ((c->cmsg_len + 3u) & ~3u) != len)
+        return len;
+    size_t newlen = CMSG_SPACE((size_t)(n + ne) * sizeof(int));
+    if (newlen > cap)
+        return len;
+    memcpy(fds + n, extra, (size_t)ne * sizeof(int));
+    c->cmsg_len = (socklen_t)CMSG_LEN((size_t)(n + ne) * sizeof(int));
+    return (socklen_t)newlen;
+}
+
+// Receiver: take the companions off and adopt; returns the new length.
+static socklen_t scm_take_eventfds(uint8_t *ctrl, socklen_t len)
+{
+    struct cmsghdr *c = (struct cmsghdr *)ctrl;
+    if (len < sizeof *c || c->cmsg_level != SOL_SOCKET || c->cmsg_type != SCM_RIGHTS)
+        return len;
+    int n = (int)((c->cmsg_len - CMSG_LEN(0)) / sizeof(int));
+    int *fds = (int *)CMSG_DATA(c);
+    int m = -1;
+    for (int i = n - 3; i >= 0 && m < 0; i--)       // marker + at least one pair after it
+        if (is_scm_marker(fds[i]) && (n - i - 1) % 2 == 0)
+            m = i;
+    if (m < 0)
+        return len;
+    close(fds[m]);
+    for (int k = m + 1; k + 1 < n; k += 2) {
+        int sfd = fds[k], wfd = fds[k + 1];
+        bool done = false;
+        for (int g = 0; g < m && !done; g++) {
+            struct stat gs;
+            if (fstat(fds[g], &gs) != 0 || !S_ISFIFO(gs.st_mode) || lxrt_eventfd_is(fds[g]))
+                continue;
+            int s2 = dup(sfd), w2 = dup(wfd);
+            if (s2 < 0 || w2 < 0) {
+                if (s2 >= 0) close(s2);
+                if (w2 >= 0) close(w2);
+                continue;
+            }
+            done = lxrt_eventfd_adopt(fds[g], s2, w2);   // takes s2 and w2
+        }
+        close(sfd);
+        close(wfd);
+    }
+    socklen_t keep = (socklen_t)CMSG_SPACE((size_t)m * sizeof(int));
+    c->cmsg_len = (socklen_t)CMSG_LEN((size_t)m * sizeof(int));
+    // A message with nothing after its SCM_RIGHTS (all this ever adds to).
+    return keep < len ? keep : len;
+}
+
 long lxrt_sendmsg(int fd, const void *lmsg, int flags)
 {
     if (!lmsg)
@@ -1085,7 +1195,7 @@ long lxrt_sendmsg(int fd, const void *lmsg, int flags)
             return LERR(EINVAL);
         if (n > 0) {            // nothing left (only credentials): no control at all
             dm.msg_control = ctrl;
-            dm.msg_controllen = (socklen_t)n;
+            dm.msg_controllen = scm_add_eventfds(ctrl, (socklen_t)n, sizeof ctrl);
         }
     }
     dm.msg_flags = lm->msg_flags;
@@ -1134,6 +1244,8 @@ long lxrt_recvmsg(int fd, void *lmsg, int flags)
                       (void *)(uintptr_t)lm->msg_name, &cap);
         lm->msg_namelen = cap;
     }
+    if (dm.msg_control && dm.msg_controllen)
+        dm.msg_controllen = scm_take_eventfds(ctrl, dm.msg_controllen);
     if (lm->msg_control) {
         long n = cmsg_to_linux(ctrl, dm.msg_controllen,
                                (void *)(uintptr_t)lm->msg_control,

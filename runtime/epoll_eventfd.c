@@ -346,7 +346,13 @@ struct ev_shared {
     bool        armed;       // exactly one token byte is sitting in the pipe.
                              // Invariant: armed == (count > 0).
     atomic_int  procs;
+    // For a process that receives the eventfd over SCM_RIGHTS (socket.c):
+    // what it is and which pipe is its token channel.
+    uint32_t    magic;
+    bool        semaphore;
+    uint64_t    pipe_dev, pipe_ino;
 };
+#define EV_MAGIC 0x65766664u     // "evfd"
 #define EV_SHARED_BYTES 16384   // one host page per eventfd
 
 static void ev_sh_lock(struct ev_shared *s)
@@ -379,6 +385,9 @@ struct ev_obj {
                          // waiting on EPOLLOUT.
     int      fds[EV_MAX_ALIAS];   // guest-visible descriptors for this eventfd
     int      nfds;
+    int      shm_fd;     // the file behind `sh` (private), -1 if anonymous: it is
+                         // what another process needs, with `wfd`, to share the
+                         // eventfd it receives over SCM_RIGHTS (Wine's esync)
     struct ev_shared *sh; // count and armed, shared with forked children (above).
                          // armed == (count > 0) is what makes the descriptor
                          // readable to kqueue, poll and select without them
@@ -479,6 +488,9 @@ static void ev_release(struct ev_obj *o)
             close(o->wfd);
         }
         o->pr = o->wfd = -1;
+        if (o->shm_fd >= 0)
+            lxrt_close_private(o->shm_fd);
+        o->shm_fd = -1;
         if (o->sh)
             munmap(o->sh, EV_SHARED_BYTES);   // this process's view only
         o->sh = NULL;
@@ -572,10 +584,31 @@ long lxrt_eventfd2(unsigned initval, int lflags)
             fcntl(p[1], F_SETFL, fl | O_NONBLOCK);
     }
 
-    // Zero-filled: an unlocked lock, count 0, not armed.
-    struct ev_shared *sh = mmap(NULL, EV_SHARED_BYTES, PROT_READ | PROT_WRITE,
-                                MAP_SHARED | MAP_ANON, -1, 0);
+    // Zero-filled: an unlocked lock, count 0, not armed. Behind an unlinked
+    // file, so another process can map it too (lxrt_eventfd_adopt); behind
+    // anonymous memory, shared with forked children only, if no file can be
+    // made.
+    int shm_fd = -1;
+    {
+        static atomic_uint seq;
+        char path[600];
+        snprintf(path, sizeof path, "%s/lxrt-ev-%d-%u", lxrt_host_tmpdir(), (int)getpid(),
+                 atomic_fetch_add(&seq, 1));
+        shm_fd = lxrt_open_private(path, O_RDWR | O_CREAT | O_EXCL | O_CLOEXEC, 0600);
+        if (shm_fd >= 0) {
+            unlink(path);
+            if (ftruncate(shm_fd, EV_SHARED_BYTES) != 0) {
+                lxrt_close_private(shm_fd);
+                shm_fd = -1;
+            }
+        }
+    }
+    struct ev_shared *sh = shm_fd >= 0
+        ? mmap(NULL, EV_SHARED_BYTES, PROT_READ | PROT_WRITE, MAP_SHARED, shm_fd, 0)
+        : mmap(NULL, EV_SHARED_BYTES, PROT_READ | PROT_WRITE, MAP_SHARED | MAP_ANON, -1, 0);
     if (sh == MAP_FAILED) {
+        if (shm_fd >= 0)
+            lxrt_close_private(shm_fd);
         int e = errno;
         close(g);
         close(p[0]);
@@ -583,6 +616,15 @@ long lxrt_eventfd2(unsigned initval, int lflags)
         return LERR(e);
     }
     atomic_init(&sh->procs, 1);
+    {
+        struct stat ps;
+        if (fstat(p[0], &ps) == 0) {
+            sh->pipe_dev = (uint64_t)ps.st_dev;
+            sh->pipe_ino = (uint64_t)ps.st_ino;
+        }
+        sh->semaphore = (lflags & L_EFD_SEMAPHORE) != 0;
+        sh->magic = EV_MAGIC;
+    }
 
     pthread_mutex_lock(&g_ev_lock);
     struct ev_obj *o = NULL;
@@ -595,6 +637,8 @@ long lxrt_eventfd2(unsigned initval, int lflags)
     if (!o) {
         pthread_mutex_unlock(&g_ev_lock);
         munmap(sh, EV_SHARED_BYTES);
+        if (shm_fd >= 0)
+            lxrt_close_private(shm_fd);
         close(g);
         close(p[0]);
         close(p[1]);
@@ -608,6 +652,7 @@ long lxrt_eventfd2(unsigned initval, int lflags)
     lxrt_fd_hide(p[1], true);
     o->fds[0] = g;
     o->nfds = 1;
+    o->shm_fd = shm_fd;
     o->sh = sh;
     sh->count = initval;
     o->semaphore = (lflags & L_EFD_SEMAPHORE) != 0;
@@ -649,6 +694,78 @@ void lxrt_eventfd_dup(int oldfd, int newfd)
     // silently swallowed failure, and 16 aliases of one eventfd is already far
     // outside anything the Steam census showed.
     pthread_mutex_unlock(&g_ev_lock);
+}
+
+// What travels with an eventfd sent over SCM_RIGHTS (socket.c): the file
+// behind its counter and the write end of its token pipe, both private
+// descriptors of this process. 0 if `fd` is not an eventfd that can be shared.
+int lxrt_eventfd_companions(int fd, int *shm_fd, int *wfd)
+{
+    if (!lxrt_eventfd_is(fd))
+        return 0;
+    pthread_mutex_lock(&g_ev_lock);
+    struct ev_obj *o = ev_find(fd);
+    int ok = o && o->shm_fd >= 0 && o->wfd >= 0;
+    if (ok) {
+        *shm_fd = o->shm_fd;
+        *wfd = o->wfd;
+    }
+    pthread_mutex_unlock(&g_ev_lock);
+    return ok;
+}
+
+// An eventfd received over SCM_RIGHTS with its companions: `guest_fd` is the
+// token pipe's read end the guest got, `shm_fd` and `wfd` the sender's
+// companions (now this process's). Makes `guest_fd` this process's view of
+// the same eventfd -- the same counter, the same pipe -- so read, write and
+// poll on it behave as on Linux, where it simply is the same eventfd. Takes
+// `shm_fd` and `wfd` either way. Wine's esync: wineserver makes the eventfd
+// of every synchronization object and sends it to each client.
+bool lxrt_eventfd_adopt(int guest_fd, int shm_fd, int wfd)
+{
+    struct ev_shared *sh = mmap(NULL, EV_SHARED_BYTES, PROT_READ | PROT_WRITE, MAP_SHARED, shm_fd, 0);
+    struct stat gs;
+    if (sh == MAP_FAILED || sh->magic != EV_MAGIC || fstat(guest_fd, &gs) != 0 ||
+        (uint64_t)gs.st_dev != sh->pipe_dev || (uint64_t)gs.st_ino != sh->pipe_ino) {
+        if (sh != MAP_FAILED)
+            munmap(sh, EV_SHARED_BYTES);
+        close(shm_fd);
+        close(wfd);
+        return false;
+    }
+    int pr = lxrt_fd_dup_private(guest_fd);     // the drain path the guest cannot close
+    int w = lxrt_fd_private(wfd);
+    int m = lxrt_fd_private(shm_fd);
+    pthread_mutex_lock(&g_ev_lock);
+    struct ev_obj *o = NULL;
+    for (int i = 0; i < MAX_EVENTFD && !o; i++)
+        if (!g_ev[i].used)
+            o = &g_ev[i];
+    if (!o || pr < 0) {
+        pthread_mutex_unlock(&g_ev_lock);
+        munmap(sh, EV_SHARED_BYTES);
+        if (pr >= 0) lxrt_close_private(pr);
+        lxrt_close_private(w);
+        lxrt_close_private(m);
+        return false;
+    }
+    o->used = true;
+    o->pr = pr;
+    o->wfd = w;
+    o->shm_fd = m;
+    o->sh = sh;
+    o->fds[0] = guest_fd;
+    o->nfds = 1;
+    o->semaphore = sh->semaphore;
+    int fl = fcntl(guest_fd, F_GETFL, 0);
+    o->nonblock = fl >= 0 && (fl & O_NONBLOCK);
+    o->dead = false;
+    o->refs = 0;
+    atomic_fetch_add_explicit(&sh->procs, 1, memory_order_relaxed);
+    evmap_set(guest_fd, true);
+    atomic_fetch_add_explicit(&g_ev_live, 1, memory_order_relaxed);
+    pthread_mutex_unlock(&g_ev_lock);
+    return true;
 }
 
 // Caller holds g_ev_lock and o->sh's lock. Restores the invariant armed ==

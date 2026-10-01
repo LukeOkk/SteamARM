@@ -25,10 +25,10 @@ OVERRIDABLE = ("display", "vsync", "synchronization", "graphicsBackend")
 
 def effective_synchronization(value):
     """The backend Proton actually gets. Mirrors RuntimeCapabilities.effectiveSynchronization
-    (launcher/ApplicationCore.swift): fsync needs futex_waitv, which lxrun lacks (ENOSYS);
-    no MSync-capable Wine exists here; esync is experimental (Proton 10.0 only) so AUTO does
-    not pick it. Anything else is Wine's default, wineserver."""
-    return "esync" if value == "esync" else "wineserver"
+    (launcher/ApplicationCore.swift): esync and fsync (futex_waitv, runtime/futex_waitv.c)
+    are experimental, so only an explicit choice gets them and AUTO does not; no
+    MSync-capable Wine exists here. Anything else is Wine's default, wineserver."""
+    return value if value in ("esync", "fsync") else "wineserver"
 
 
 def file_contains(path, needle):
@@ -129,12 +129,15 @@ def env_from_settings(s, total=None):
         # settings.json written before the selector: the two booleans, exactly as before.
         if s.get("esync") is False:
             env["PROTON_NO_ESYNC"] = "1"
-        if s.get("fsync") is False:
-            env["PROTON_NO_FSYNC"] = "1"
+        env["PROTON_NO_FSYNC"] = "1"   # what these settings always ran with: fsync never worked then
     else:
-        if effective_synchronization(sync) != "esync":
+        eff = effective_synchronization(sync)
+        if eff != "esync":
             env["PROTON_NO_ESYNC"] = "1"
-        env["PROTON_NO_FSYNC"] = "1"   # fsync cannot work under lxrun
+        # Proton turns fsync on by itself once futex_waitv answers: only an
+        # explicit choice may get it while it is experimental.
+        if eff != "fsync":
+            env["PROTON_NO_FSYNC"] = "1"
 
     # Procesador (FEX reads FEX_<OPTION>)
     if s.get("fexDiskCache"):

@@ -767,6 +767,19 @@ if clang --target=x86_64-linux-gnu -O1 -ffreestanding -fno-stack-protector -nost
 else
     echo "  skip  x86_seccomp_exec (no clang for x86_64-linux-gnu)"
 fi
+# futex_waitv from x86-64 under FEX, the way Proton's fsync reaches it
+# (runtime/futex_waitv.c; tests/android/x86_futex_waitv.c).
+if clang --target=x86_64-linux-gnu -O1 -ffreestanding -fno-stack-protector -nostdlib -static-pie -fPIE \
+         -fuse-ld=lld -o "$X86_ROOT/data/local/tmp/x86_futex_waitv" tests/android/x86_futex_waitv.c 2>/dev/null; then
+    out=$(ANDROID_X86_ROOT="$X86_ROOT" LXRUN="$LXRUN" \
+          perl -e 'alarm shift; exec @ARGV' 90 scripts/run-android-x86.sh /data/local/tmp/x86_futex_waitv 2>&1 | grep -v '^\[lxrt')
+    if grep -q '== x86_futex_waitv: PASS' <<<"$out"; then
+        ok "futex_waitv under FEX (Proton's fsync): probe, EAGAIN, timeout, a waiter in another process woken"
+    else bad "futex_waitv under FEX" "$(grep -E 'MAL|==' <<<"$out" | tr '\n' ' ')"; fi
+    rm -f "$X86_ROOT/data/local/tmp/x86_futex_waitv"
+else
+    echo "  skip  x86_futex_waitv (no clang for x86_64-linux-gnu)"
+fi
 for _ in $(seq 1 80); do [ -e "$xp/service.pid" ] || break; sleep 0.1; done
 rm -rf "$xp" "$xb"
 

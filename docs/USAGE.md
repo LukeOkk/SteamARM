@@ -64,9 +64,9 @@ affects games (the settings window reminds you).
 
 | Section | What it controls |
 |---|---|
-| **Interfaz** | Start Steam when the launcher opens; ask before stopping; the application backend: native windows or a VNC desktop, and its resolution (Lightning JIT and Apple Hypervisor are listed disabled, with the reason; no choice uses a virtual machine); the source folder the launcher runs scripts from |
+| **Interfaz** | Start Steam when the launcher opens; ask before stopping; the application backend: native windows or a VNC desktop, and its resolution (Lightning JIT and Apple Hypervisor are not listed: neither exists in this tree, and an option that can never be chosen is not shown; they would appear by themselves if they ever became usable. No choice uses a virtual machine); the source folder the launcher runs scripts from |
 | **Entrada** | Controllers, one page per player (below) |
-| **Sistema** | Language and time zone of Linux programs; V-Sync (AUTO / ON / OFF); **DRAM** and **VRAM** limits; Proton synchronization (AUTO / default / MSync / fsync / esync: fsync and MSync are disabled, esync is experimental and needs a Proton that has it); what to do when a setting cannot work for an app (AUTO, ESTRICTO, PREGUNTAR) |
+| **Sistema** | Language and time zone of Linux programs; V-Sync (AUTO / ON / OFF); **DRAM** and **VRAM** limits; Proton synchronization (AUTO / default / MSync / fsync / esync: MSync is disabled; fsync and esync are experimental, only an explicit choice turns them on, and each needs a Proton that has it); what to do when a setting cannot work for an app (AUTO, ESTRICTO, PREGUNTAR) |
 | **Procesador** | FEX options: on-disk translation cache (experimental), x86 memory-ordering emulation (TSO full/fast/off), multiblock, self-modifying code detection, reduced-precision x87; the Proton and runtime tools installed |
 | **Gráficos** | The graphics engine: AUTO (MoltenVK), Vulkan (MoltenVK), Vulkan (KosmicKrisp: experimental, offered only when Homebrew's Mesa is installed and the installed Vulkan shim can load it) or OpenGL (WineD3D: disabled). Shader cache, anisotropic filtering, frame-rate limit, DXVK HUD, Metal HUD |
 | **Runtime** | Read-only: every backend and capability, its state and reason, and what was detected on this Mac |

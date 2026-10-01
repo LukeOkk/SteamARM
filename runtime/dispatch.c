@@ -3396,6 +3396,9 @@ restart:
         ret = ret_of(fchmodat(lxrt_dirfd_to_darwin((int)a0),
                               translate((const char *)a1), (mode_t)a2, 0));
         break;
+    case 449:   // futex_waitv(waiters, nr, flags, timeout, clockid): futex_waitv.c
+        ret = lxrt_futex_waitv(a0, (uint32_t)a1, (uint32_t)a2, a3, (int32_t)a4);
+        break;
     case 452:   // fchmodat2(dirfd, path, mode, flags)
         ret = ret_of(fchmodat(lxrt_dirfd_to_darwin((int)a0),
                               translate((const char *)a1), (mode_t)a2,

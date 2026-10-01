@@ -308,7 +308,15 @@ void lxrt_proc_set_cmdline(const char *args, size_t len);
 // (procfs.c). A guest close or dup2 onto the number makes it the guest's.
 void lxrt_fd_hide(int fd, bool hide);
 bool lxrt_fd_hidden(int fd);
-int lxrt_fd_dup_private(int fd);       // a hidden high duplicate, no low number in between (procfs.c)
+int lxrt_fd_dup_private(int fd);
+int lxrt_open_private(const char *path, int flags, int mode);   // procfs.c: high, hidden
+void lxrt_close_private(int fd);
+// futex_waitv.c: futex_waitv(2), and the note every FUTEX_WAKE leaves for it
+long lxrt_futex_waitv(uint64_t waiters, uint32_t nr, uint32_t flags, uint64_t timeout, int32_t clockid);
+void lxrt_futex_waitv_notify(const void *addr);
+// epoll_eventfd.c: an eventfd that crosses SCM_RIGHTS (socket.c)
+int lxrt_eventfd_companions(int fd, int *shm_fd, int *wfd);
+bool lxrt_eventfd_adopt(int guest_fd, int shm_fd, int wfd);       // a hidden high duplicate, no low number in between (procfs.c)
 const char *lxrt_host_tmpdir(void);   // the host temp dir for the runtime's own files (procfs.c)
 // The runtime's own descriptors in the guest's table: high numbers, hidden
 // from /proc/self/fd (procfs.c).

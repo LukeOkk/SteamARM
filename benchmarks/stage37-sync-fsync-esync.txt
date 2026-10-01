@@ -1,0 +1,105 @@
+Stage 37 -- fsync and esync in lxrun: futex_waitv, eventfds across processes
+Date: 2026-10-01. Apple M4, macOS 27. Zero VM. No game was launched (the
+user tests games at the end).
+
+WHY
+  Settings offered Proton's sync backends with these states: fsync
+  unavailable (lxrun answered futex_waitv with ENOSYS, so Proton turned fsync
+  off by itself), esync experimental ("lxrun implements eventfd but not across
+  processes"), MSync unavailable (macOS-only Wine feature, not in Proton).
+  This stage makes fsync and esync work in lxrun and tests both. Both stay
+  "Experimental" until the user's game round.
+
+1. FSYNC: futex_waitv (syscall 449)
+  What Proton needs (MEASURED earlier, ntdll.so disassembly, Proton 10.0
+  and Experimental): futex_waitv(NULL, 0, ...) as a probe (EINVAL means
+  present, ENOSYS turns fsync off); one futex_waitv over up to 128 32-bit
+  words for each multi-object wait; FUTEX_WAKE on one word for each signal;
+  the words live in a shared memory region that every process maps at its
+  own address.
+
+  Darwin parks a thread on one ulock at a time, so runtime/futex_waitv.c
+  builds the multi-word wait from a board shared by every process of the
+  user (a 16 KiB file in the tree's host temporary directory, mapped
+  MAP_SHARED: its words are shared-flavour ulocks keyed by the file's page,
+  whatever address each process maps it at):
+    gen[1024]     a generation counter per bucket of futex words
+    single[1024]  waiters whose words all fall in one bucket
+    multi[1024]   waiters with words in several buckets
+    multigen      the generation those park on
+  A word's bucket is its offset in its 4 KiB page, in words: the same in
+  every process that maps the page, and under FEX's page-aligned guest base.
+  Every FUTEX_WAKE in the runtime (thread.c wake_waiters, futex_ops.c
+  wake_up_to) bumps and wakes a bucket only if a futex_waitv caller is
+  registered there: one relaxed load per wake when nobody uses it.
+  A wake that changed no word is not reported (the caller parks again);
+  fsync always stores before it wakes and re-checks after any return.
+  Linux's validation order and errors are kept: flags, count (1..128),
+  clock (REALTIME/MONOTONIC, absolute), per entry size U32 only, PRIVATE the
+  only other flag, reserved 0, the value fits 32 bits, address aligned.
+  The timeout pointer and low-window addresses go through the guest base
+  (gbase.c {449, A0|A3}).
+
+  tests/elf/futex_waitv.c (aarch64, in tests/elf/run.sh): 9 of 9
+    probe futex_waitv(NULL, 0): EINVAL                       OK
+    a word already different: EAGAIN                          OK
+    a 16-bit futex: EINVAL; 129 futexes: EINVAL               OK
+    absolute CLOCK_MONOTONIC timeout                          OK (52.0 ms for 50)
+    three buckets, the third woken: returns 2                 OK
+    one word woken: returns 0                                 OK
+    another process, a memfd mapped at another address,
+      woken by a shared FUTEX_WAKE: returns 1                 OK (2.1 ms after the wake)
+    2000 round trips, futex_waitv one side                    OK (1.3-1.5 us each)
+  tests/android/x86_futex_waitv.c (freestanding x86-64 under FEX, in
+  tests/android/run.sh): probe, EAGAIN, timeout, a forked waiter: 4 of 4.
+
+  Launcher: fsync is "Experimental" when an installed Proton has fsync
+  (detection names them), else unavailable ("no installed Proton includes
+  fsync"). AUTO still chooses only ready backends. scripts/settings-env.py
+  sets PROTON_NO_FSYNC=1 unless fsync is the effective choice: Proton turns
+  fsync on by itself as soon as the probe answers, which it now does.
+
+2. ESYNC: an eventfd sent to another process
+  Wine's esync makes one eventfd per synchronization object in wineserver
+  and sends it to every client over SCM_RIGHTS; clients read, write and
+  poll it with 8-byte values. An eventfd in lxrun is a pipe (for poll and
+  kqueue) plus a counter the runtime keeps (runtime/epoll_eventfd.c). The
+  counter was shared with forked children only (anonymous MAP_SHARED), so a
+  process that received the descriptor got a bare pipe.
+  tests/elf/eventfd_scm.c, before the change (MEASURED):
+    parent writes 3, sends the eventfd to an exec'd child
+    child read(8)                       FAIL (the pipe's token byte)
+    child's posts on a semaphore eventfd FAIL
+  The change: the counter page is an unlinked file (private descriptor),
+  and its header records the semaphore flag and the pipe's dev/ino. A
+  message carrying eventfds also carries, after the guest's descriptors, a
+  marker descriptor and per eventfd the counter file and the pipe's write
+  end (runtime/socket.c scm_add_eventfds). The receiving runtime takes them
+  off before the guest sees the message, checks that the pipe is the one the
+  page names, and makes the received descriptor the same eventfd
+  (lxrt_eventfd_adopt): same counter, same pipe, same semaphore mode.
+  After: 3 of 3 (child reads 3, polls empty, is woken, reads 7; the parent
+  reads two 1s and then EAGAIN from the child's semaphore posts).
+
+  Launcher: esync stays "Experimental", reason updated (eventfd works across
+  processes, tested); only Proton 10.0 includes esync.
+
+3. SETTINGS: no false controls
+  Lightning JIT and Apple Hypervisor do not exist in this tree. Settings
+  listed them disabled; they are now not listed at all
+  (ApplicationBackendPreset.offered(in:), ExecutionBackend.offered(in:)),
+  in the backend picker and in the Runtime page, and would reappear by
+  themselves if their capability ever became usable (launcher test).
+
+4. REGRESSION (all on the change)
+  tests/elf 103/0, i386 18/0, win 11/0, vk_device 2/0, arm64 4/0,
+  wlmac 4/0, launcher core and python tests pass. Android suite 85/1 (2
+  expected failures): "one Mac window per app" timed out once waiting for
+  sys.boot_completed (steamarm-wlmac got 2 frames: SurfaceFlinger never
+  presented; the logs were in the suite's temporary state and are gone).
+  The same launch reproduced alone, logs kept: 6 of 6 (32-88 s). Not
+  explained; watched.
+
+NOT DONE
+  No game was run with fsync or esync: both stay "Experimental" until the
+  user's game round. Proton Experimental has no esync compiled in.
