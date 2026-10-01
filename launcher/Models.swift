@@ -161,6 +161,7 @@ struct LauncherSettings: Codable, Equatable {
     var extraEnv: [String: String] = [:]
 
     var launchSteamOnStart: Bool = false
+    var primarySteam: String = "steam-arm64-frame"   // PrimarySteam
     var confirmStop: Bool = true
     var guestLanguage: String = "auto"
     var timezone: String = "auto"
@@ -212,6 +213,7 @@ struct LauncherSettings: Codable, Equatable {
             fsync: try legacy.decodeIfPresent(Bool.self, forKey: .fsync))
         fallbackPolicy = SettingsMigration.fallbackPolicy(stored: try c.decodeIfPresent(String.self, forKey: .fallbackPolicy))
         launchSteamOnStart = try c.decodeIfPresent(Bool.self, forKey: .launchSteamOnStart) ?? false
+        primarySteam = try c.decodeIfPresent(String.self, forKey: .primarySteam) ?? "steam-arm64-frame"
         confirmStop = try c.decodeIfPresent(Bool.self, forKey: .confirmStop) ?? true
         guestLanguage = try c.decodeIfPresent(String.self, forKey: .guestLanguage) ?? "auto"
         timezone = try c.decodeIfPresent(String.self, forKey: .timezone) ?? "auto"

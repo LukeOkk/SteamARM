@@ -250,6 +250,16 @@ final class LauncherModel: ObservableObject {
         return id
     }
 
+    /// The Steam the launcher starts as "Steam" (PrimarySteam): the one chosen
+    /// in Settings, else the next one that can start here; nil if none can.
+    func primarySteamApp(choice: String? = nil) -> AppEntry? {
+        let id = PrimarySteam.pick(choice ?? settings.primarySteam) { id in
+            guard let app = allApps.first(where: { $0.id == id }) else { return false }
+            return unavailableReason(app) == nil
+        }
+        return id.flatMap { id in allApps.first { $0.id == id } }
+    }
+
     func isFavorite(_ app: AppEntry) -> Bool { stats[app.id]?.favorite == true }
 
     func toggleFavorite(_ app: AppEntry) {

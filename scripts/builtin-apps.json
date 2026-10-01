@@ -1,18 +1,21 @@
 [
   {
-    "id": "steam",
-    "name": "Steam",
+    "id": "steam-arm64-frame",
+    "name": "Steam ARM64 · Steam Frame (experimental)",
     "kind": "steam",
     "builtIn": true,
+    "readiness": "experimental",
     "command": [
-      "/bin/bash",
-      "/tmp/fexhome/.local/share/Steam/steam.sh",
-      "-noverifyfiles"
+      "/tmp/armhome/.local/share/Steam/steamrtarm64/steam"
     ],
-    "root": "/tmp/lxrt-steamroot",
-    "fexRootfs": "/",
-    "env": {},
-    "architecture": "x86_64"
+    "root": "/tmp/lxrt-arm64root",
+    "fexRootfs": null,
+    "env": {
+      "HOME_IN_GUEST": "/tmp/armhome",
+      "LXRT_GUEST_PAGE": "4096",
+      "LXRT_X18_ALL_TEXT": "libcef.so"
+    },
+    "architecture": "aarch64"
   },
   {
     "id": "steam-arm64",
@@ -33,21 +36,18 @@
     "architecture": "aarch64"
   },
   {
-    "id": "steam-arm64-frame",
-    "name": "Steam ARM64 · Steam Frame (experimental)",
+    "id": "steam",
+    "name": "Steam",
     "kind": "steam",
     "builtIn": true,
-    "readiness": "experimental",
     "command": [
-      "/tmp/armhome/.local/share/Steam/steamrtarm64/steam"
+      "/bin/bash",
+      "/tmp/fexhome/.local/share/Steam/steam.sh",
+      "-noverifyfiles"
     ],
-    "root": "/tmp/lxrt-arm64root",
-    "fexRootfs": null,
-    "env": {
-      "HOME_IN_GUEST": "/tmp/armhome",
-      "LXRT_GUEST_PAGE": "4096",
-      "LXRT_X18_ALL_TEXT": "libcef.so"
-    },
-    "architecture": "aarch64"
+    "root": "/tmp/lxrt-steamroot",
+    "fexRootfs": "/",
+    "env": {},
+    "architecture": "x86_64"
   }
 ]

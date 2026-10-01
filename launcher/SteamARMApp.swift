@@ -33,8 +33,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationDidFinishLaunching(_ notification: Notification) {
         HotkeyManager.shared.start()
         let model = LauncherModel.shared
-        if model.settings.launchSteamOnStart && model.canLaunch {
-            model.launch(model.allApps.first { $0.id == "steam" } ?? .steam)
+        // The primary Steam (Ajustes → Interfaz), or the next one that can start.
+        if model.settings.launchSteamOnStart && model.canLaunch, let steam = model.primarySteamApp() {
+            model.launch(steam)
         }
     }
 

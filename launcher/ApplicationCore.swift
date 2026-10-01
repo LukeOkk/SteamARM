@@ -543,6 +543,29 @@ extension ExecutionBackend {
     }
 }
 
+/// Which Steam the launcher means by "Steam" (Ajustes → Interfaz → Steam
+/// principal, and "Iniciar Steam al abrir el launcher"): the chosen one, or
+/// the next usable one in SteamARM's order -- the native client on the Steam
+/// Frame root, the native client on the Fedora root, then the x86 client
+/// under FEX.
+enum PrimarySteam {
+    static let order = ["steam-arm64-frame", "steam-arm64", "steam"]
+
+    static func label(_ id: String) -> String {
+        switch id {
+        case "steam-arm64-frame": return "Steam ARM64 · Steam Frame"
+        case "steam-arm64": return "Steam ARM64 (Fedora)"
+        default: return "Steam x86_64 (FEX)"
+        }
+    }
+
+    /// `usable(id)` says whether that entry can start on this Mac.
+    static func pick(_ chosen: String, usable: (String) -> Bool) -> String? {
+        let tries = [chosen] + order.filter { $0 != chosen }
+        return tries.first(where: usable)
+    }
+}
+
 /// A Steam client started outside the launcher (scripts/run-steam.sh, or
 /// scripts/run-steam-arm64.sh for the native one), which the launcher adopts.
 /// The native client's entry comes from its root: /tmp/lxrt-arm64root is the

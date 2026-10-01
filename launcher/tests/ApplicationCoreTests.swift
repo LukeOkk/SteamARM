@@ -242,6 +242,13 @@ struct ApplicationCoreTests {
         check(caps.graphicsFallback(after: .vulkanMoltenVK) == nil, "no WineD3D fallback yet")
         for (k, v) in caps.graphics { check(!v.reason.isEmpty, "\(k) has a reason") }
         check(caps.graphics[.openGLWineD3D]?.state == .unavailable, "WineD3D: needs detection")
+        // The primary Steam and its fallbacks.
+        check(PrimarySteam.pick("steam-arm64-frame", usable: { _ in true }) == "steam-arm64-frame", "primary: Steam Frame when it can start")
+        check(PrimarySteam.pick("steam-arm64-frame", usable: { $0 != "steam-arm64-frame" }) == "steam-arm64", "Frame missing: ARM64 (Fedora)")
+        check(PrimarySteam.pick("steam-arm64-frame", usable: { $0 == "steam" }) == "steam", "only x86: x86")
+        check(PrimarySteam.pick("steam", usable: { _ in true }) == "steam", "x86 chosen: x86")
+        check(PrimarySteam.pick("steam", usable: { $0 != "steam" }) == "steam-arm64-frame", "x86 chosen but missing: Frame next")
+        check(PrimarySteam.pick("steam-arm64", usable: { _ in false }) == nil, "none can start: nil")
         // Clients started outside the launcher.
         let x86 = [(pid: Int32(10), command: "build/lxrun /tmp/lxrt-root/usr/bin/FEX-gb /tmp/fexhome/.local/share/Steam/ubuntu12_32/steam -noverifyfiles")]
         check(OutsideClient.find(x86, root: { _ in nil })?.id == "steam" && OutsideClient.find(x86, root: { _ in nil })?.arch == nil,
