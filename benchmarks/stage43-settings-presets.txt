@@ -19,6 +19,22 @@ ASKED
     with it                 Windows sees a 1280x720 screen, backbuffer
                             1280x720, its X window 1600x900+0+0, 41 frames:
                             probe ok
+  DXVK on MoltenVK, native XQuartz 1920x1050 (tests/win/run.sh modeset):
+    first run               X window 1920x1050, backbuffer 1280x720, but
+                            4 frames in 2.5 s: every present gave
+                            VK_SUBOPTIMAL_KHR ("Presenter: Got
+                            VK_SUBOPTIMAL_KHR, recreating swapchain")
+    cause                   MoltenVK reports a swapchain smaller than its
+                            layer as suboptimal. Proton's win32u asks for
+                            VkSwapchainPresentScalingCreateInfoEXT STRETCH
+                            only when the instance enabled
+                            VK_EXT_surface_maintenance1; DXVK enables
+                            VK_KHR_surface_maintenance1.
+    shim/present.c          on MoltenVK, a swapchain whose extent differs
+                            from the surface's gets STRETCH
+    then                    one swapchain ("stretched"), 376-378 frames
+                            in 2.5 s; tests/win/run.sh 15/15,
+                            run_vk_device.sh 6/6
   scripts/wine-prefix-options.py sets or removes the value in every game
   prefix (Steam compatdata in the x86 root and both ARM64 roots, the
   launcher's Windows apps), only while no wineserver runs; "off" undoes

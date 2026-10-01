@@ -8,8 +8,10 @@ emulate-modeset  HKCU\\Software\\Wine\\X11 Driver "EmulateModeset": Wine's
                  full-screen resolution gets it virtually: it renders at that
                  size and Wine stretches the picture over the whole screen
                  (the launcher's "Escala de resolución"). MEASURED with
-                 tests/win/modeset.c: 1280x720 drawn in a 1600x900 X window;
-                 without it the real mode change stalled (2 frames).
+                 tests/win/modeset.c: 1280x720 drawn in a 1600x900 X window
+                 (WineD3D) and in a 1920x1050 one (DXVK, with shim/present.c
+                 asking MoltenVK to stretch); without it the real mode change
+                 stalled (2 frames).
                  benchmarks/stage43-settings-presets.txt.
 
 Without USER_REG: every user.reg of the Steam game prefixes (compatdata) in

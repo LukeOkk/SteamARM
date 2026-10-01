@@ -15,6 +15,16 @@
 //
 // "Passed on" is what the driver is asked for. What Metal then does with it
 // (CAMetalLayer.displaySyncEnabled) is not visible from here.
+//
+// Stretching. Wine's display-mode emulation ("Escala de resolución",
+// EmulateModeset) keeps a game's swapchain at the mode it chose while its X
+// window -- and so the layer -- has the screen's size. MoltenVK then answers
+// every present with VK_SUBOPTIMAL_KHR and DXVK recreates the swapchain
+// without end (4 frames in 2.5 s, MEASURED, benchmarks/stage43). Wine's
+// win32u asks for stretching (VkSwapchainPresentScalingCreateInfoEXT) only
+// when the instance enabled VK_EXT_surface_maintenance1, and DXVK enables the
+// KHR one; so on MoltenVK a swapchain whose extent differs from the surface's
+// gets STRETCH here, as Wine would have asked.
 #include <stdint.h>
 #include <stddef.h>
 #define VK_NO_PROTOTYPES
@@ -112,6 +122,24 @@ static int surface_offers(VkPhysicalDevice pd, VkSurfaceKHR surface, VkPresentMo
     return 0;
 }
 
+VkResult lxrt_inner_vkGetPhysicalDeviceSurfaceCapabilitiesKHR(VkPhysicalDevice, VkSurfaceKHR, void *);   // wsi.c
+
+// 1 when the swapchain needs MoltenVK to stretch it over its surface (above).
+static int needs_stretch(VkDevice dev, const VkSwapchainCreateInfoKHR *ci)
+{
+    if (!ci->surface || !s_ieq(lxrt_vk_driver, "moltenvk"))
+        return 0;
+    for (const VkBaseInStructure *p = ci->pNext; p; p = p->pNext)
+        if (p->sType == VK_STRUCTURE_TYPE_SWAPCHAIN_PRESENT_SCALING_CREATE_INFO_EXT)
+            return 0;
+    VkPhysicalDevice pd = device_pd(dev);
+    VkSurfaceCapabilitiesKHR caps;
+    if (!pd || lxrt_inner_vkGetPhysicalDeviceSurfaceCapabilitiesKHR(pd, ci->surface, &caps) != VK_SUCCESS ||
+        caps.currentExtent.width == 0xFFFFFFFFu)
+        return 0;
+    return caps.currentExtent.width != ci->imageExtent.width || caps.currentExtent.height != ci->imageExtent.height;
+}
+
 VkResult lxrt_inner_vkCreateSwapchainKHR(VkDevice dev, const VkSwapchainCreateInfoKHR *ci,
                                          const VkAllocationCallbacks *alloc, VkSwapchainKHR *out)
 {
@@ -119,11 +147,19 @@ VkResult lxrt_inner_vkCreateSwapchainKHR(VkDevice dev, const VkSwapchainCreateIn
     int dbg = d && *d == '1';
     VkPresentModeKHR want = VK_PRESENT_MODE_FIFO_KHR;
     int ov = wanted_mode(&raw, &want);
-    if ((!dbg && !ov) || !ci)
+    int stretch = ci && needs_stretch(dev, ci);
+    if ((!dbg && !ov && !stretch) || !ci)
         return lxrt_mvk_vkCreateSwapchainKHR(dev, ci, alloc, out);
 
     // A copy: the caller's structure is const and stays as it was.
     VkSwapchainCreateInfoKHR c = *ci;
+    VkSwapchainPresentScalingCreateInfoEXT scaling = {
+        .sType = VK_STRUCTURE_TYPE_SWAPCHAIN_PRESENT_SCALING_CREATE_INFO_EXT,
+        .pNext = ci->pNext,
+        .scalingBehavior = VK_PRESENT_SCALING_STRETCH_BIT_EXT,
+    };
+    if (stretch)
+        c.pNext = &scaling;
     const char *note = "";
     if (ov < 0) {
         note = " (LXRT_VK_PRESENT_MODE not understood: FIFO or IMMEDIATE)";
@@ -138,8 +174,8 @@ VkResult lxrt_inner_vkCreateSwapchainKHR(VkDevice dev, const VkSwapchainCreateIn
     }
     VkResult r = lxrt_mvk_vkCreateSwapchainKHR(dev, &c, alloc, out);
     if (dbg || ov < 0 || *note)
-        dprintf(2, "[shim] vkCreateSwapchainKHR driver=%s requested=%s passed=%s%s%s%s -> %d\n", lxrt_vk_driver,
+        dprintf(2, "[shim] vkCreateSwapchainKHR driver=%s requested=%s passed=%s%s%s%s%s -> %d\n", lxrt_vk_driver,
                 mode_name(ci->presentMode), mode_name(c.presentMode), ov ? " LXRT_VK_PRESENT_MODE=" : "",
-                ov ? raw : "", note, (int)r);
+                ov ? raw : "", note, stretch ? " stretched" : "", (int)r);
     return r;
 }
