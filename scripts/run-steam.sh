@@ -64,7 +64,7 @@ if [ "$MODE" != native ] && ! pgrep -f 'lxrun /usr/bin/Xvnc' >/dev/null; then
     # Xvnc compiles its keymap with popen("xkbcomp ...") through /bin/sh, an
     # x86 bash here: it needs FEX's environment and a FEXServer, or the
     # keyboard fails to initialise and the server exits.
-    pgrep -f 'lxrun .*FEXServer' >/dev/null || scripts/run-fex.sh /bin/true >/dev/null 2>&1
+    pgrep -f 'lxrun /tmp/lxrt-root/usr/bin/FEXServer' >/dev/null || scripts/run-fex.sh /bin/true >/dev/null 2>&1
     TMPDIR=/tmp HOME=/tmp/fexhome FEX_ROOTFS=/ FEX_GUESTBASE=1 \
     LXRT_ROOT=$ROOT nohup ./build/lxrun /usr/bin/Xvnc :1 -geometry 1600x900 -depth 24 \
         -SecurityTypes VncAuth -rfbauth /tmp/.vncpasswd -localhost \

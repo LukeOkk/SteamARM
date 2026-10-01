@@ -65,7 +65,13 @@ FEXDIR="${FEXDIR:-/tmp/lxrt-root/usr/bin}"
 # started later cannot bring it back here (it looks for FEXServer on its own
 # PATH): Steam's "Play" then died in 5 s with "Couldn't connect to FEXServer
 # socket" (MEASURED, Schedule I).
-if ! pgrep -f 'lxrun .*FEXServer' >/dev/null 2>&1; then
+# Its own server, by path: Android sessions run FEXServers of their own (the
+# emulator prefix's, under another socket name), and a pattern that matched
+# those too left Steam with none of this kind -- its FEX then started one
+# itself with its own environment and pressure-vessel's web helper never
+# came up ("Timed out waiting for webhelper init", MEASURED).
+SERVER_PAT="lxrun $FEXDIR/FEXServer"
+if ! pgrep -f "$SERVER_PAT" >/dev/null 2>&1; then
     # Darwin materialises FEX's abstract socket here. Remember any stale
     # socket inode left by a crashed server: the new server unlinks and binds
     # it again. Wait for that new socket instead of always sleeping four
@@ -87,7 +93,7 @@ if ! pgrep -f 'lxrun .*FEXServer' >/dev/null 2>&1; then
     for ((i=0; i<80; i++)); do
         socket_inode="$(stat -f %i "$socket" 2>/dev/null || true)"
         if [ -n "$socket_inode" ] && [ "$socket_inode" != "$old_socket_inode" ] &&
-           pgrep -f 'lxrun .*FEXServer' >/dev/null 2>&1; then
+           pgrep -f "$SERVER_PAT" >/dev/null 2>&1; then
             # bind creates the pathname just before listen(2).
             sleep 0.1
             ready=1
@@ -95,7 +101,7 @@ if ! pgrep -f 'lxrun .*FEXServer' >/dev/null 2>&1; then
         fi
         sleep 0.1
     done
-    if [ "$ready" -ne 1 ] || ! pgrep -f 'lxrun .*FEXServer' >/dev/null 2>&1; then
+    if [ "$ready" -ne 1 ] || ! pgrep -f "$SERVER_PAT" >/dev/null 2>&1; then
         echo "run-fex: FEXServer did not start (see $FEXSERVER_LOG); not starting the guest" >&2
         exit 1
     fi

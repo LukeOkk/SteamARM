@@ -203,7 +203,7 @@ while true; do
     # dies in 5 s with "Couldn't connect to FEXServer socket" (MEASURED):
     # bring it back the way run-fex.sh starts it. Only for x86 guests: an
     # aarch64 session otherwise got a FEXServer (and a FEX /bin/true) every 5 s.
-    if [ $((n % 5)) -eq 0 ] && [ "$gcount" -gt 0 ] && ! pgrep -f 'lxrun .*FEXServer' >/dev/null \
+    if [ $((n % 5)) -eq 0 ] && [ "$gcount" -gt 0 ] && ! pgrep -f 'lxrun /tmp/lxrt-root/usr/bin/FEXServer' >/dev/null \
        && has_x86_guest; then
         echo "$(date '+%F %T') FEXServer missing with ${gcount} guests: restarting it"
         (cd "$(dirname "$0")/.." && scripts/run-fex.sh /bin/true >/dev/null 2>&1 &)
