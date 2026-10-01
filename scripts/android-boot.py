@@ -215,6 +215,10 @@ PROFILES["display"] = {
     # the emulation the filter cannot be installed and the store aborts
     # (MEASURED). The stand-in installs no filter.
     "vendor32": {"vendor.media.omx": {"/vendor/lib/libavservices_minijail.so": "avservices_minijail_noop.c"}},
+    # audioserver's audio HAL: Waydroid's, with the presentation position it
+    # lacks (scripts/android/shims/audio_hal_presentation.c), loaded as
+    # audio.primary.default.so (DISPLAY_PROPS: ro.hardware.audio.primary).
+    "shims64": {"audioserver": {"/vendor/lib64/hw/audio.primary.default.so": "audio_hal_presentation.c"}},
     # audioserver loads Waydroid's audio HAL in-process (vintf_passthrough,
     # below), 64-bit, and the HAL opens ALSA's "pulse" device; the image's
     # 64-bit alsa-lib was built with /vendor/lib/hw/ as its plugin
@@ -332,7 +336,10 @@ HOST_PROPS = [
 # and its loss took system_server down ("Lost network stack", MEASURED).
 # debug.sf.nobootanimation is SurfaceFlinger's own switch: it does not start
 # bootanim, and the screen stays black until the first window.
-DISPLAY_PROPS = [("debug.sf.nobootanimation", "1")]
+DISPLAY_PROPS = [("debug.sf.nobootanimation", "1"),
+                 # audioserver's HAL module: "default" is the one bound to
+                 # scripts/android/shims/audio_hal_presentation.c ("shims64").
+                 ("ro.hardware.audio.primary", "default")]
 
 
 # What this host can run, which the image cannot know: the property service
@@ -975,6 +982,12 @@ class Boot:
                 so = self.shim(src, os.path.basename(guest_lib))
                 if so:      # one bind for this process: the image's library path -> the shim
                     env["LXRT_MOUNTS"] = env.get("LXRT_MOUNTS", "") + "%s\x1e%s\x1e1\x1f" % (guest_lib, so)
+        # 64-bit stand-ins (profile "shims64"): an image library path bound to
+        # a library built from scripts/android/shims, for that process only.
+        for guest_lib, src in self.profile.get("shims64", {}).get(name, {}).items():
+            so = self.shim(src, os.path.basename(guest_lib), arch="x86_64")
+            if so:
+                env["LXRT_MOUNTS"] = env.get("LXRT_MOUNTS", "") + "%s\x1e%s\x1e1\x1f" % (guest_lib, so)
         for spec in self.a.svc_env or []:
             who, _, kv = spec.partition(":")
             if who in (name, "all") and "=" in kv:
@@ -1007,20 +1020,32 @@ class Boot:
                                                     " (stand-in)" if stand_in else "", env["LXRT_ANDROID_IDS"]))
         return True
 
-    def shim(self, src, soname):
-        """scripts/android/shims/<src> built for i686 Android with Homebrew
-        clang into build/android/shims (again when the source is newer).
+    def shim(self, src, soname, arch="i686"):
+        """scripts/android/shims/<src> built for i686 (or x86_64) Android with
+        Homebrew clang into build/android/shims (again when the source is
+        newer). An x86_64 one links the image's libc, libdl and liblog.
         Its host path, or None."""
         c = os.path.join(HERE, "android", "shims", src)
         out = os.path.join(REPO, "build", "android", "shims", os.path.splitext(src)[0] + ".so")
+        libs = []
+        if arch == "x86_64":
+            def in_root(guest):     # symbolic links inside the image (libc -> /apex/...)
+                p = self.root + guest
+                for _ in range(8):
+                    if not os.path.islink(p):
+                        break
+                    t = os.readlink(p)
+                    p = self.root + t if t.startswith("/") else os.path.join(os.path.dirname(p), t)
+                return p
+            libs = [in_root("/system/lib64/" + l) for l in ("libc.so", "libdl.so", "liblog.so")]
         try:
             if not os.path.exists(out) or os.path.getmtime(out) < os.path.getmtime(c):
                 os.makedirs(os.path.dirname(out), exist_ok=True)
-                subprocess.run(["/opt/homebrew/opt/llvm/bin/clang", "--target=i686-linux-android30", "-O2",
+                subprocess.run(["/opt/homebrew/opt/llvm/bin/clang", "--target=%s-linux-android30" % arch, "-O2",
                                 "-fPIC", "-shared", "-nostdlib", "-fuse-ld=lld",
                                 "--ld-path=/opt/homebrew/opt/lld/bin/ld.lld",
                                 "-Wl,-soname," + soname, "-Wl,-z,max-page-size=4096",
-                                "-o", out, c], check=True, timeout=120,
+                                "-o", out, c] + libs, check=True, timeout=120,
                                stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
         except (OSError, subprocess.SubprocessError) as e:
             log("shim %s: %s" % (src, e))

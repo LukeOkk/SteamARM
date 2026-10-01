@@ -1236,6 +1236,16 @@ if [ -f "$R8_JAR" ] && javac --release 8 -nowarn -d "$dd/classes" -sourcepath te
 else
     echo "  skip  compressed sound (no $R8_JAR or no javac)"
 fi
+# The audio HAL's presentation position (scripts/android/shims/
+# audio_hal_presentation.c): Waydroid's HAL has none, AudioFlinger then
+# counted only errors ("Timestamp stats: n=0 ... err=440") and
+# AudioTrack.getTimestamp() had nothing (stage 35, VLC).
+local afd
+afd=$(env "${senv[@]}" python3 scripts/android-session.py shell --timeout 60 /system/bin/dumpsys media.audio_flinger 2>/dev/null |
+      tr -d '\r' | grep -m1 'Timestamp stats')
+if grep -aq 'steamarm-audio: output' "$sdir/logcat.txt" 2>/dev/null && grep -q 'err=0' <<<"$afd"; then
+    ok "audio HAL presentation position: $(grep -a -m1 -o 'presentation position from .*' "$sdir/logcat.txt"); AudioFlinger $(grep -o 'n=[0-9]* .*err=0' <<<"$afd" | cut -c1-40)"
+else bad "audio HAL presentation position" "$(grep -a -m1 'steamarm-audio' "$sdir/logcat.txt" 2>/dev/null | cut -c1-120) | $afd"; fi
 env "${senv[@]}" python3 scripts/android-session.py stop >/dev/null 2>&1
 local left
 left=$(ps -axEww -o pid=,command= 2>/dev/null | grep -F "LXRT_PROPERTY_DIR=$sdir/props" | grep -v grep | wc -l | tr -d ' ')

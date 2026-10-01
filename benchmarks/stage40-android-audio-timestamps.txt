@@ -1,0 +1,36 @@
+Stage 40 -- Android audio: a presentation position for AudioFlinger
+Date: 2026-10-01. Apple M4, macOS 27. Zero VM.
+
+WHY
+  VLC pauses itself 1.8 s into every video (stage 35). Its AudioTrack
+  ran 19 ms and underran; AudioFlinger's primary output showed
+  "Timestamp stats: n=0 disc=0 cold=0 nRdy=0 err=440": Waydroid's audio
+  HAL (audio.primary.waydroid, alsa-lib to PulseAudio, loaded in-process by
+  the 64-bit audioserver) never reports a presentation position -- it
+  calls neither snd_pcm_htimestamp nor snd_pcm_delay -- so
+  AudioTrack.getTimestamp() had nothing for any app. Android requires
+  get_presentation_position on a primary output.
+
+CHANGE
+  scripts/android/shims/audio_hal_presentation.c, x86_64 Android,
+  bound for audioserver alone at /vendor/lib64/hw/audio.primary.default.so
+  (scripts/android-boot.py profile "shims64"; DISPLAY_PROPS
+  ro.hardware.audio.primary=default). It opens the image's
+  audio.primary.waydroid.so and changes only its output streams: write()
+  counts the frames the HAL accepts, get_presentation_position() reports
+  them minus the HAL's latency at CLOCK_MONOTONIC (what AOSP's reference
+  HALs do without a hardware counter). Layouts from Android 11's
+  hardware.h/audio.h (hw_module_t 248 bytes on 64-bit).
+
+MEASURED
+  logcat: "steamarm-audio: output 13: presentation position from 4-byte
+  frames at 48000 Hz". AudioFlinger after VLC opened a video:
+    before  Timestamp stats: n=0 ... err=440, "Latency unavail"
+    after   Timestamp stats: n=433 disc=2 cold=5 nRdy=0 err=0 rate=1.00044,
+            jitter ave -0.40 ms
+  Android suite 88/0 (2 expected failures) with it; the suite now checks
+  the HAL line and err=0 (tests/android/run.sh).
+
+NOT FIXED
+  VLC still pauses (state 2, position 0 after 12 s) with timestamps
+  working: the missing timestamps were not its cause. Not explained.
