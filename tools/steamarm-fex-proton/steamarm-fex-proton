@@ -165,6 +165,14 @@ for m in $missing; do
 done
 
 # ------------------------------------------------ the environment
+# The launcher's Processor (FEX) settings: scripts/run-app.sh hands them to
+# an ARM64 client as STEAMARM_FEXOPT_* (FEX_* would mean nothing to it);
+# they are FEX's again here, below the boundary. Set first, so that what
+# this tool needs (FEX_ROOTFS, FEX_GUESTBASE...) wins.
+fexopts=()
+for v in $(compgen -e); do
+    case "$v" in STEAMARM_FEXOPT_*) export "FEX_${v#STEAMARM_FEXOPT_}=${!v}"; unset "$v"; fexopts+=("FEX_${v#STEAMARM_FEXOPT_}") ;; esac
+done
 # What scripts/run-fex.sh gives a Steam-root program, plus the binds.
 export LXRT_ROOT="$X86_ROOT" LXRT_MOUNTS="$mounts"
 export FEX_ROOTFS=/ HOME="$X86_HOME" TMPDIR=/tmp
@@ -202,7 +210,7 @@ first=${1:-}
 say "$verb ${first##*/} (app ${SteamAppId:-${STEAM_COMPAT_APP_ID:-?}}) via x86 $PROTON + $RUNTIME under FEX (root $X86_ROOT); client paths bound from $arm_root: ${binds[*]-none}"
 cmd=("$FEXDIR/$FEXBIN" /bin/bash "$slr_dir/_v2-entry-point" "--verb=$verb" -- "$proton_dir/proton" "$verb" "$@")
 if [ "${STEAMARM_FEX_PROTON_DRYRUN:-}" = 1 ]; then
-    for v in LXRT_ROOT FEX_ROOTFS HOME TMPDIR FEX_GUESTBASE DISPLAY PULSE_SERVER STEAM_COMPAT_TOOL_PATHS; do
+    for v in LXRT_ROOT FEX_ROOTFS HOME TMPDIR FEX_GUESTBASE DISPLAY PULSE_SERVER STEAM_COMPAT_TOOL_PATHS ${fexopts[@]+"${fexopts[@]}"}; do
         echo "env: $v=${!v}"
     done
     echo "env: LXRT_MOUNTS=$(show_table "$LXRT_MOUNTS")"

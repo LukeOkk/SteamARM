@@ -23,6 +23,9 @@ SHIM = os.path.join(STATE, "steamroot", "usr", "lib", "lxrt-emu", "libvulkan.so.
 ICD_MARKER = b"STEAMARM_VK_ICD"
 OVERRIDABLE = ("display", "vsync", "synchronization", "graphicsBackend", "scalingFilter")
 SCALING_FILTERS = ("linear", "nearest", "fsr", "metalfx")
+STEAM_UI_GPU_SWITCHES = ("--use-gl=angle", "--use-angle=vulkan",
+                         "--enable-features=Vulkan,VulkanFromANGLE,DefaultANGLEVulkan",
+                         "--ignore-gpu-blocklist")
 
 
 ZINK_GL45_OVERRIDE = "+GL_ARB_vertex_type_2_10_10_10_rev +GL_ARB_texture_buffer_object_rgb32"
@@ -214,6 +217,13 @@ def env_from_settings(s, total=None):
             except (TypeError, ValueError):
                 sharp = 90
             env["LXRT_VK_FSR_SHARPNESS"] = str(max(0, min(100, sharp)))
+    # The ARM64 clients' web helper (Chromium) on ANGLE over Vulkan: the
+    # Steam Frame root has only indirect GLX, its GPU process could not start
+    # GL ES and Steam fell back to software ("Disabling GPU acceleration").
+    # With these switches the GPU process stays up (MEASURED, stage 46).
+    # runtime/process.c appends them when steamwebhelper is executed.
+    if s.get("steamUIAcceleration"):
+        env["LXRT_EXEC_ARGS"] = ("steamwebhelper:" + " ".join(STEAM_UI_GPU_SWITCHES))
     aniso = int(s.get("anisotropy") or 0)
     if aniso in (2, 4, 8, 16):
         dxvk += ["d3d11.samplerAnisotropy = %d" % aniso, "d3d9.samplerAnisotropy = %d" % aniso]

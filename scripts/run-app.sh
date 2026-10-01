@@ -307,9 +307,11 @@ if app.get("kind") == "windows":
     env.update(proton_env)
 pairs = []
 for k, v in sorted(env.items()):
-    # Translator settings are for x86 payloads only, never a native program.
+    # Translator settings are for x86 payloads only, never a native program:
+    # an ARM64 Steam client carries them as STEAMARM_FEXOPT_* to the games
+    # it starts through FEX (tools/steamarm-fex-proton turns them back).
     if arch == "aarch64" and str(k).startswith("FEX_"):
-        continue
+        k = "STEAMARM_FEXOPT_" + k[4:]
     if re.match(r"^[A-Za-z_][A-Za-z0-9_]*$", str(k)):
         pairs.append("%s=%s" % (k, v))
 
@@ -332,6 +334,7 @@ root = str(app.get("root") or (ARM64_ROOT if arch == "aarch64" else X86_ROOT))
 # aarch64 program in the x86 root would find no aarch64 loader or libraries.
 same = lambda a, b: os.path.realpath(a) == os.path.realpath(b)
 print("APP_ANDROID=%s" % q(android_pkg or ""))
+print("APP_KIND=%s" % q(str(app.get("kind") or "")))
 if (arch == "aarch64" and same(root, X86_ROOT)) or (arch != "aarch64" and same(root, ARM64_ROOT)):
     want = ARM64_ROOT if arch == "aarch64" else X86_ROOT
     sys.stderr.write("run-app: app %r is %s but its root is %s; %s programs run in %s. "
@@ -583,6 +586,13 @@ SESSION=(env PYTHONCOERCECLOCALE=0 STEAMARM_SESSION_PY=1 /usr/bin/python3 script
 # Free space inside the disk images is the Mac's (runtime/fileops2.c).
 LXRT_STATFS_BACKING="$(scripts/image-volume.sh backing 2>/dev/null)"
 export LXRT_STATFS_BACKING
+# An ARM64 Steam client starts x86 games through SteamARM's FEX
+# (tools/steamarm-fex-proton), which needs SteamARM's FEXServer up and will
+# not start one itself (docs/FEX_GAME_BOUNDARY.md): started here, with
+# scripts/run-fex.sh's fixed environment.
+if [ "$APP_ARCH" = aarch64 ] && [ "$APP_KIND" = steam ]; then
+    pgrep -f 'lxrun /tmp/lxrt-root/usr/bin/FEXServer' >/dev/null || scripts/run-fex.sh /bin/true >/dev/null 2>&1
+fi
 if [ "$APP_ARCH" = aarch64 ]; then
     env ${APP_ENV[@]+"${APP_ENV[@]}"} DISPLAY=$DISP LXRT_ROOT="$APP_ROOT" \
         nohup "${SESSION[@]}" "${APP_CMD[@]}" >> "$L" 2>&1 < /dev/null &

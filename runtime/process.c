@@ -145,7 +145,32 @@ long lxrt_execve(const char *path, char *const argv[], char *const envp[])
     // lxrun <guest-binary> <original argv[1..]>. argv[0] of the guest is
     // dropped: the runtime rebuilds it from the path, which is what the guest
     // would see for a normal exec anyway.
-    char **newargv = calloc((size_t)argc + 3, sizeof(char *));
+    //
+    // LXRT_EXEC_ARGS=NAME:ARG ARG...[;NAME:ARG...] appends arguments when a
+    // program named NAME is executed (space-separated, no quoting): the
+    // launcher gives Steam's steamwebhelper Chromium switches this way
+    // (settings-env.py) instead of editing Valve's files, which the client
+    // would check and download again.
+    char *extra[32];
+    int nextra = 0;
+    static char exec_args[2048];
+    const char *ea = getenv("LXRT_EXEC_ARGS");
+    if (ea && *ea && strlen(ea) < sizeof exec_args) {
+        snprintf(exec_args, sizeof exec_args, "%s", ea);
+        char *save = NULL;
+        for (char *ent = strtok_r(exec_args, ";", &save); ent && nextra < 32; ent = strtok_r(NULL, ";", &save)) {
+            char *colon = strchr(ent, ':');
+            if (!colon)
+                continue;
+            *colon = 0;
+            if (strcmp(ent, base) != 0)
+                continue;
+            char *save2 = NULL;
+            for (char *a = strtok_r(colon + 1, " ", &save2); a && nextra < 32; a = strtok_r(NULL, " ", &save2))
+                extra[nextra++] = a;
+        }
+    }
+    char **newargv = calloc((size_t)argc + 3 + nextra, sizeof(char *));
     if (!newargv)
         return LERR(ENOMEM);
     int n = 0;
@@ -153,6 +178,8 @@ long lxrt_execve(const char *path, char *const argv[], char *const envp[])
     newargv[n++] = (char *)path;
     for (int i = 1; i < argc; i++)
         newargv[n++] = argv[i];
+    for (int i = 0; i < nextra; i++)
+        newargv[n++] = extra[i];
     newargv[n] = NULL;
 
     // Carry tracing into the child (see main.c): append LXRT_TRACE=1 to the

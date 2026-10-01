@@ -106,6 +106,9 @@ printf '# comment\n__GLX_VENDOR_LIBRARY_NAME=mesa\nLIBGL_ALWAYS_INDIRECT=1\nNOT_
 out=$(tool STEAMARM_FEX_PROTON_ROOT_ENV="$T/root-env" LIBGL_ALWAYS_INDIRECT=1 __GLX_VENDOR_LIBRARY_NAME=mesa -- run x.exe 2>/dev/null)
 check "the ARM64 root's own guest environment (the Frame root's GLX) is not passed on" \
     'grep -qxF "dropped from the ARM64 root'"'"'s guest environment: __GLX_VENDOR_LIBRARY_NAME LIBGL_ALWAYS_INDIRECT" <<<"$out" && ! grep -q "still set" <<<"$out"'
+out=$(tool STEAMARM_FEXOPT_TSOENABLED=0 STEAMARM_FEXOPT_MULTIBLOCK=1 -- run x.exe 2>/dev/null)
+check "the launcher's Processor settings (STEAMARM_FEXOPT_*) reach FEX as FEX_*" \
+    'grep -qxF "env: FEX_TSOENABLED=0" <<<"$out" && grep -qxF "env: FEX_MULTIBLOCK=1" <<<"$out" && ! grep -q "FEXOPT" <<<"$out"'
 out=$(tool STEAMARM_FEX_KEEP_LD_PRELOAD=1 -- run x.exe 2>/dev/null)
 check "STEAMARM_FEX_KEEP_LD_PRELOAD=1 keeps the overlay's LD_PRELOAD" 'grep -qxF "env: LD_PRELOAD still set" <<<"$out"'
 tool LXRT_ROOT= -- run x.exe >/dev/null 2>&1; rc=$?

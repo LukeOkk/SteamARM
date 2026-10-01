@@ -1,0 +1,40 @@
+Stage 46 -- The ARM64 Steam clients' web helper on ANGLE/Vulkan; FEX
+settings and FEXServer for games started by an ARM64 client
+Date: 2026-10-01. Apple M4, macOS 27, native XQuartz. Zero VM. No game.
+
+1. THE WEB HELPER COMPOSITED IN SOFTWARE
+  Steam Frame root, webhelper.txt of a normal start:
+    "Applying workarounds due to GPU process restarts: browser:0 gpu:3"
+    "Disabling GPU acceleration: Disabled/CrashCount"
+  The root has indirect GLX only (scripts/mkframeroot.sh), and ANGLE
+  cannot create GL ES on it (docs/STEAMWEBHELPER_BRINGUP.md): three GPU
+  process deaths in 2.5 s, then Chromium paints with the CPU.
+
+2. LXRT_EXEC_ARGS (runtime/process.c)
+  NAME:ARG ARG...[;NAME:...] appends arguments when a program named NAME is
+  executed -- Chromium switches for steamwebhelper without editing Valve's
+  files (the client would check and download them again).
+    LXRT_EXEC_ARGS="foo:x;echo:--added two" env echo base
+    -> "base --added two"
+
+3. A/B, Steam Frame client signed in, 45 s after start, then 30 s idle
+  (scripts in the session's scratch space, run when the Mac was idle)
+    baseline        5 webhelper processes, 0 s CPU in 30 s; GPU disabled
+    --use-gl=angle --use-angle=vulkan
+    --enable-features=Vulkan,VulkanFromANGLE,DefaultANGLEVulkan
+    --ignore-gpu-blocklist
+                    13 webhelper processes, 1.9 s CPU in 30 s; the GPU
+                    process starts with --use-angle=vulkan and is not
+                    restarted, no "Disabling GPU acceleration"
+  The picture itself was not looked at (no screen capture): Settings
+  offers it as "Interfaz de Steam ARM64 acelerada por GPU (experimental)",
+  off by default (settings-env.py STEAM_UI_GPU_SWITCHES).
+
+4. GAMES STARTED BY AN ARM64 CLIENT
+  scripts/run-app.sh dropped the Processor (FEX_*) settings for aarch64
+  entries, so games started through tools/steamarm-fex-proton ran with
+  run-fex.sh's defaults. They now travel as STEAMARM_FEXOPT_* and the tool
+  turns them back into FEX_* below the boundary
+  (tests/launcher/fex_proton_tool.sh 36/36, run_app_dispatch.sh 53/53).
+  FEXServer, which the tool needs and will not start, is started when an
+  ARM64 Steam entry opens.

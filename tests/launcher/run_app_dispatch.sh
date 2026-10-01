@@ -51,25 +51,28 @@ expect_in() {  # state id pattern [negative-pattern]
     fi
 }
 expect() { expect_in "$W" "$@"; }
-expect arm   'command:  scripts/run-native.sh /usr/bin/hello' 'FEX_'
+expect arm   'command:  scripts/run-native.sh /usr/bin/hello' ' FEX_'
 expect arm   'LXRT_ROOT=/tmp/lxrt-arm64root'
 expect x86   'command:  scripts/run-fex.sh /opt/apps/x/run'
 expect x86   'FEX_TSOENABLED=1'
 expect i386  'translator: FEX'
 expect steam 'command:  scripts/run-fex.sh /bin/bash /tmp/fexhome/.local/share/Steam/steam.sh'
 expect steam 'LXRT_ROOT=/tmp/lxrt-steamroot FEX_ROOTFS=/ DISPLAY=:2'
-expect steam-arm64 'command:  scripts/run-native.sh /tmp/armhome/.local/share/Steam/steamrtarm64/steam' 'FEX_'
+expect steam-arm64 'command:  scripts/run-native.sh /tmp/armhome/.local/share/Steam/steamrtarm64/steam' ' FEX_'
 expect steam-arm64 'LXRT_ROOT=/tmp/lxrt-armroot DISPLAY=:2'
 expect steam-arm64 'LXRT_GUEST_PAGE=4096'
 expect steam-arm64 'HOME_IN_GUEST=/tmp/armhome'
 expect steam-arm64 'LXRT_X18_ALL_TEXT=libcef.so'
 expect steam-arm64 'translator: none, session: ZERO-VM'
-expect steam-arm64-frame 'command:  scripts/run-native.sh /tmp/armhome/.local/share/Steam/steamrtarm64/steam' 'FEX_'
+expect steam-arm64-frame 'command:  scripts/run-native.sh /tmp/armhome/.local/share/Steam/steamrtarm64/steam' ' FEX_'
+# The games an ARM64 client starts through FEX get the Processor settings
+# (tools/steamarm-fex-proton).
+expect steam-arm64-frame 'STEAMARM_FEXOPT_TSOENABLED=1'
 expect steam-arm64-frame 'LXRT_ROOT=/tmp/lxrt-arm64root DISPLAY=:2'
 expect steam-arm64-frame 'LXRT_GUEST_PAGE=4096'
 # Heroic ARM64 as launcher/Installers.swift writes it (HeroicARM64): native,
 # the Fedora ARM64 root, its own home, x18 over all of the app's text.
-expect heroic 'command:  scripts/run-native.sh /opt/apps/heroic/Heroic-2.22.3-linux-arm64/heroic --no-sandbox --disable-gpu' 'FEX_'
+expect heroic 'command:  scripts/run-native.sh /opt/apps/heroic/Heroic-2.22.3-linux-arm64/heroic --no-sandbox --disable-gpu' ' FEX_'
 expect heroic 'LXRT_ROOT=/tmp/lxrt-armroot DISPLAY=:2'
 expect heroic 'HOME_IN_GUEST=/tmp/heroichome'
 expect heroic 'LXRT_X18_ALL_TEXT=/opt/apps/heroic/'

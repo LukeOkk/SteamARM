@@ -388,6 +388,9 @@ struct SettingsView: View {
                 }
                 Text(ScalingFilterChoice.note(draft.scalingFilter))
                     .font(.caption).foregroundStyle(.secondary)
+                Toggle("Interfaz de Steam ARM64 acelerada por GPU (experimental)", isOn: $draft.steamUIAcceleration)
+                Text("La interfaz de Steam ARM64 y Steam Frame (Chromium) dibuja con Vulkan sobre Metal en lugar de con la CPU. Sin ella, su proceso GPU no puede arrancar en macOS y Steam pinta por software. Se aplica al abrir Steam.")
+                    .font(.caption).foregroundStyle(.secondary)
             }
         }
     }
