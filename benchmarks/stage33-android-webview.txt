@@ -69,3 +69,7 @@ readonly_efault new; ANDROID_IDS now checks the tmpfs); i386 18/0; win 11/0;
 arm64 4/0; vk_device 2/0; wlmac 4/0; launcher core 35/0; Python 135 OK;
 tests/android 85 passed, 0 failed, 2 expected failures ("seccomp RET_TRAP
 under FEX" and "WebView" new).
+Steam on it: ARM64 6 of 6 (15, 16, 16, 15, 15, 15 s); x86 5 of 6 (95, 71,
+101, 95, 96 s; once the i386 client jumped to 0x15400c86 from the same stack
+as before -- esp 0xd222da4c, steamclient.so +0x1098cb8 -- and its crash
+handler ended it).
