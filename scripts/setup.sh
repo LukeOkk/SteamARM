@@ -117,12 +117,16 @@ step_steam() {
 
 step_test() {
     log "smoke tests"
-    tests/elf/run.sh | tail -1
-    tests/elf/run_vk_device.sh | tail -1
+    # Reported, not fatal: everything is installed by now, and a failure here
+    # (a stress test that fails one run in several, say) must not skip the
+    # last step -- without build/.setup-version the launcher keeps offering
+    # setup again (MEASURED with 0.3.15: "102 passed, 1 failed", exit 1).
+    tests/elf/run.sh | tail -1 || log "tests/elf: a test failed (setup goes on; tests/elf/run.sh shows which)"
+    tests/elf/run_vk_device.sh | tail -1 || log "Vulkan/OpenGL probes: a probe failed (setup goes on)"
     # The Windows probes need Proton, which Steam downloads after the first
     # login (Settings > Compatibility, or the first Windows game).
     if [ -x "/tmp/lxrt-steamroot/tmp/fexhome/.local/share/Steam/steamapps/common/Proton - Experimental/files/bin/wine" ]; then
-        tests/win/run.sh | tail -9
+        tests/win/run.sh | tail -9 || log "Windows probes: a probe failed (setup goes on)"
     else
         log "Windows probes skipped: no Proton yet (start Steam, log in, install Proton Experimental; then scripts/setup.sh test)"
     fi
