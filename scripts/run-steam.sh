@@ -94,6 +94,12 @@ if ! pgrep -f 'build/lxrun .*ubuntu12_32/steam ' >/dev/null; then
     [ -f "$ROOT/tmp/fexhome/.local/share/Steam/ubuntu12_32/steamui.so" ] && VERIFY=(-noverifyfiles)
     # The launcher's settings (scripts/settings-env.py): games inherit them.
     eval "$(/usr/bin/python3 scripts/settings-env.py --shell)"
+    # "Escala de resolución": Wine's display-mode emulation in the game
+    # prefixes (scripts/wine-prefix-options.py), while no wineserver runs.
+    if ! pgrep -f "build/lxrun .*wineserver" >/dev/null 2>&1; then
+        /usr/bin/python3 scripts/wine-prefix-options.py emulate-modeset \
+            "$(/usr/bin/python3 scripts/settings-env.py --emulate-modeset)" >/dev/null 2>&1 || true
+    fi
     VOL="$(/usr/bin/python3 scripts/settings-env.py --volume)"
     [ -n "$VOL" ] && { scripts/audio.sh start "$VOL" >/dev/null || echo "run-steam: no sound (scripts/audio.sh)" >&2; }
     scripts/input.sh start >/dev/null || echo "run-steam: no controllers for games (scripts/input.sh)" >&2

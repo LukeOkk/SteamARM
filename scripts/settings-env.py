@@ -6,6 +6,7 @@ with_overrides(); run-steam.sh evaluates --shell.
   scripts/settings-env.py --shell [settings.json]   export lines for a shell
   scripts/settings-env.py --json  [settings.json]   the environment as JSON
   scripts/settings-env.py --volume [settings.json]  output volume, empty when muted
+  scripts/settings-env.py --emulate-modeset [settings.json]  "on" or "off" (Escala de resolución)
 
 Also writes $STATE/launcher/limits.env (the memory ceiling the guard reads).
 Games inherit Steam's environment, so a change reaches them when Steam starts.
@@ -271,6 +272,11 @@ def main(argv):
     mode = argv[1] if len(argv) > 1 else "--shell"
     path = argv[2] if len(argv) > 2 else os.path.join(STATE, "launcher", "settings.json")
     s = load(path)
+    if mode == "--emulate-modeset":
+        # "Escala de resolución" (scripts/wine-prefix-options.py): on or off.
+        # Answers only: no limits file is written for this question.
+        print("on" if s.get("resolutionScaling") else "off")
+        return
     env = env_from_settings(s)
     write_limits(s)
     if mode == "--volume":

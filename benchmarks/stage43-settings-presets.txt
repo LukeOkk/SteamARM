@@ -1,0 +1,49 @@
+Stage 43 -- Settings: resolution scale (Wine's mode emulation); what
+Lightning JIT, MSync and Apple Hypervisor would be
+Date: 2026-10-01. Apple M4, macOS 27. Zero VM. No game.
+
+ASKED
+  Add to SteamARM the options Settings showed unavailable: resolution
+  scale/FSR, MSync, Lightning JIT, Apple Hypervisor.
+
+1. RESOLUTION SCALE -- ADDED (experimental)
+  Proton's win32u (Experimental, 10.0, Hotfix) has Wine's display-mode
+  emulation: HKCU\Software\Wine\X11 Driver "EmulateModeset" (dlls/win32u/
+  sysparams.c). A program that asks for a smaller full-screen mode gets it
+  virtually and Wine stretches its window over the screen.
+  tests/win/modeset.c (ChangeDisplaySettings 1280x720, a borderless D3D11
+  window of the screen size it then sees, 2.5 s of presents), WineD3D on
+  llvmpipe, Xvnc 1600x900 (not shown on the Mac):
+    without EmulateModeset  mode change "succeeded", window 1280x720,
+                            2 frames: probe FAIL
+    with it                 Windows sees a 1280x720 screen, backbuffer
+                            1280x720, its X window 1600x900+0+0, 41 frames:
+                            probe ok
+  scripts/wine-prefix-options.py sets or removes the value in every game
+  prefix (Steam compatdata in the x86 root and both ARM64 roots, the
+  launcher's Windows apps), only while no wineserver runs; "off" undoes
+  only what "on" did (a marker). run-app.sh and run-steam.sh run it from
+  the setting ("Escala de resolución", settings-env.py --emulate-modeset).
+  A new game's prefix gets it from the next start. tests: unit tests for
+  the registry edit; tests/win/run.sh "modeset" (EmulateModeset in the
+  test prefix for that run, DXVK, the native X server).
+  The filter is Wine's (bilinear); AMD's FSR is not offered.
+
+2. LIGHTNING JIT -- NOT ADDED (it would be a placebo)
+  Without a new translator, "Lightning JIT" could only be FEX with speed
+  settings. benchmarks/x86_bench (sieve, FNV, copy), 3 runs each:
+    default               454-480 ms, then 348-360 ms (later runs)
+    fast TSO + x87 reduced  373-504 ms
+    TSO off               342-370 ms
+  No measurable gain (FEX here already runs x86_bench at 1.0x native,
+  stage 5). Not offered as a separate engine.
+
+3. MSYNC -- NOT POSSIBLE
+  MSync is a patch of macOS Wine's ntdll on Mach semaphores; Proton is
+  Linux Wine running under lxrun and cannot call Mach. Its idea -- waits
+  in the host kernel without wineserver round trips -- is what fsync does
+  here (futex_waitv on Darwin ulocks, stage 37). Settings says so.
+
+4. APPLE HYPERVISOR -- NOT DONE
+  A virtual machine; AGENTS.md: "Zero-VM is mandatory". Needs the
+  owner's explicit decision to lift that rule.

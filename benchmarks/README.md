@@ -78,6 +78,7 @@ the Fedora VM that was deleted on 2026-09-27; they are history, and
 | 40 | `stage40-android-audio-timestamps.txt` | 10-01 | Waydroid's audio HAL never reported a presentation position (AudioFlinger timestamp err=440, AudioTrack.getTimestamp() empty for every app); a wrapper HAL for audioserver adds it (n=433, err=0). VLC still pauses itself: not the cause |
 | 41 | `stage41-frame-root-vulkan.txt` | 10-01 | The native client on the Steam Frame root gets a Vulkan device: the shim installed as an ICD for the image's own loader (freedreno set aside), vulkaninfo and the client's steamsysinfo report Apple M4; sign-in window 10 of 12 with it, 4 of 4 without |
 | 42 | `stage42-settings-scale-msaa.txt` | 10-01 | Settings: MSAA 2x/4x/8x for Direct3D 9 games through DXVK (measured on MoltenVK); per-entry settings for the built-in Steams; resolution scale/FSR stays unavailable (no Proton has its upscaler; a smaller reported surface does not survive Wine) |
+| 43 | `stage43-settings-presets.txt` | 10-01 | Resolution scale through Wine's display-mode emulation (EmulateModeset): a 1280x720 program stretched over a 1600x900 screen; Lightning JIT not added (FEX speed settings: no measurable gain), MSync impossible under Linux Proton (fsync already waits on Darwin ulocks), Apple Hypervisor against Zero-VM |
 
 ## After stage 21 (no stage file)
 

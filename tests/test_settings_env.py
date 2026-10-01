@@ -90,6 +90,17 @@ class SettingsEnvironmentTests(unittest.TestCase):
             self.assertNotIn("STEAMARM_VK_ICD", self.env({
                 "graphicsBackend": "vulkanKosmicKrisp"}))
 
+    def test_emulate_modeset_flag(self):
+        import io, contextlib, json, tempfile, os
+        for value, want in ((True, "on"), (False, "off"), (None, "off")):
+            with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as f:
+                json.dump({} if value is None else {"resolutionScaling": value}, f)
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out):
+                self.settings.main(["settings-env.py", "--emulate-modeset", f.name])
+            os.unlink(f.name)
+            self.assertEqual(out.getvalue().strip(), want)
+
     def test_antialiasing(self):
         for value in (2, 4, 8):
             cfg = self.env({"antialiasing": value}).get("DXVK_CONFIG", "")

@@ -375,7 +375,9 @@ struct SettingsView: View {
                 integerChoice("Suavizado de bordes (MSAA)", $draft.antialiasing, [0, 2, 4, 8], zero: "El del juego")
                 Text("Lo fuerza DXVK en los juegos Direct3D 9. Los Direct3D 10, 11 y 12 lo eligen dentro del juego: no hay un ajuste global para ellos.")
                     .font(.caption).foregroundStyle(.secondary)
-                unavailable("Escala de resolución / FSR", "Ningún Proton instalado trae ya el escalado FSR de pantalla completa (WINE_FULLSCREEN_FSR), y gamescope no existe en macOS: elige una resolución menor dentro del juego")
+                Toggle("Escala de resolución (experimental)", isOn: $draft.resolutionScaling)
+                Text("Los juegos ofrecen resoluciones menores que la de la pantalla; al elegir una dentro del juego, se dibuja a ese tamaño (más rápido) y Wine la estira a toda la pantalla (bilineal; el FSR de AMD ya no viene en Proton). Se aplica a los prefijos de los juegos al abrir Steam o una app, con ningún juego abierto; un juego nuevo, desde su segundo arranque.")
+                    .font(.caption).foregroundStyle(.secondary)
             }
         }
     }

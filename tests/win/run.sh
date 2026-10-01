@@ -39,7 +39,7 @@ cp -f "$PROTON"/lib/vkd3d/x86_64-windows/*.dll "$SYS32/"
 cp -f "$PROTON"/lib/vkd3d/i386-windows/*.dll "$SYS32/../syswow64/"
 
 PASS=0 FAIL=0
-for t in ${@:-tick tick_32 tone tone_32 regwin d3d11 d3d12 d3d9 d3d9_32 d3d11_32 d3d12_32 d3d9_wined3d d3d11_wined3d d3d9_32_wined3d}; do
+for t in ${@:-tick tick_32 tone tone_32 regwin d3d11 d3d12 d3d9 d3d9_32 d3d11_32 d3d12_32 d3d9_wined3d d3d11_wined3d d3d9_32_wined3d modeset}; do
     # <api>_wined3d: Wine's builtin D3D on OpenGL from Mesa's Zink, on the same
     # Vulkan thunk (the launcher's "OpenGL (WineD3D)"; stage38-opengl-zink).
     wined3d=0
@@ -60,6 +60,40 @@ for t in ${@:-tick tick_32 tone tone_32 regwin d3d11 d3d12 d3d9 d3d9_32 d3d11_32
             echo "  ok    $t: value written in a session with a window is in user.reg"; PASS=$((PASS + 1))
         else
             echo "  FAIL  $t (log $log)"; FAIL=$((FAIL + 1))
+        fi
+        continue
+    fi
+    if [ "$api" = modeset ]; then
+        # "Escala de resolución": Wine's display-mode emulation (EmulateModeset,
+        # scripts/wine-prefix-options.py) in this prefix for this run. The
+        # program asks 1280x720 full screen; it must draw at 1280x720 while its
+        # X window covers the whole screen (Wine stretches it).
+        $cc -O2 -mconsole -o "$exe" tests/win/modeset.c -ld3d11 -ldxgi -luser32 -lgdi32 -luuid -ldxguid ||
+            { FAIL=$((FAIL + 1)); continue; }
+        reg="$ROOT$PFX_GUEST/user.reg"
+        for _ in $(seq 1 60); do pgrep -f "[b]in/wineserver" >/dev/null || break; sleep 1; done
+        python3 scripts/wine-prefix-options.py emulate-modeset on "$reg" >/dev/null
+        log="$LOGS/win-$t.log"
+        env DISPLAY=:2 WINEPREFIX=$PFX_GUEST WINEDEBUG=-all LXRT_VK_DEBUG=1 \
+            WINEDLLOVERRIDES="d3d9,d3d11,d3d12,d3d12core,dxgi,d3d10core=n" \
+            LXRT_ROOT=$ROOT FEX_ROOTFS=/ scripts/run-fex.sh "$PROTON_GUEST/bin/wine" "Z:\\tmp\\${t}_clear.exe" > "$log" 2>&1 &
+        pid=$!
+        geo=""
+        for _ in $(seq 1 120); do
+            g=$(DISPLAY=:2 xwininfo -root -tree 2>/dev/null | grep '"SteamARM modeset probe"' | grep -oE '[0-9]+x[0-9]+\+' | head -1)
+            [ -n "$g" ] && geo=${g%+}
+            kill -0 $pid 2>/dev/null || break
+            sleep 0.5
+        done
+        wait $pid 2>/dev/null
+        pkill -9 -f wineserver 2>/dev/null
+        for _ in $(seq 1 60); do pgrep -f "[b]in/wineserver" >/dev/null || break; sleep 1; done
+        python3 scripts/wine-prefix-options.py emulate-modeset off "$reg" >/dev/null
+        screen=$(DISPLAY=:2 xdpyinfo 2>/dev/null | awk '/dimensions:/ {print $2}')
+        if grep -q "== modeset probe: ok" "$log" && grep -q "^backbuffer 1280x720" "$log" && [ "$geo" = "$screen" ]; then
+            echo "  ok    $t: 1280x720 drawn, X window $geo (the screen); $(grep -o '[0-9]* frames' "$log" | tail -1)"; PASS=$((PASS + 1))
+        else
+            echo "  FAIL  $t (X window '$geo', screen $screen; log $log)"; FAIL=$((FAIL + 1))
         fi
         continue
     fi

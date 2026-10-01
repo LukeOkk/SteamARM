@@ -718,7 +718,7 @@ struct RuntimeCapabilities {
             .wineserver: .init(state: .ready, reason: "el camino por defecto de Wine, sin vía rápida"),
             .esync: .init(state: .experimental, reason: "solo Proton 10.0 lo incluye; lxrun implementa eventfd también entre procesos, enviado por SCM_RIGHTS como hace wineserver (tests/elf/eventfd_scm.c): sin verificar con juegos"),
             .fsync: .init(state: .experimental, reason: "lxrun implementa futex_waitv sobre ulocks de Darwin (runtime/futex_waitv.c, tests/elf/futex_waitv.c); sin verificar con juegos"),
-            .msync: .init(state: .unavailable, reason: "no hay ningún Wine con MSync integrado (MSync es un parche del Wine de macOS, no del Proton de Linux)"),
+            .msync: .init(state: .unavailable, reason: "MSync es un parche del Wine de macOS (semáforos Mach) y Proton es Wine para Linux: no puede usarlo. Su equivalente aquí es fsync, que lxrun sirve con las esperas del propio kernel de macOS (ulocks): elige fsync"),
         ],
         graphics: [
             .vulkanMoltenVK: .init(state: .ready, reason: "D3D9/11/12 por DXVK/VKD3D-Proton (benchmarks/stage14, stage16)"),

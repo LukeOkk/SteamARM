@@ -84,6 +84,15 @@ outside_client() {
     esac
 }
 
+# "Escala de resolución" (Settings): Wine's display-mode emulation in the game
+# and app prefixes (scripts/wine-prefix-options.py). Only while no wineserver
+# runs: one rewrites its prefix's user.reg when it exits.
+apply_resolution_scaling() {
+    pgrep -f "build/lxrun .*wineserver" >/dev/null 2>&1 && return 0
+    /usr/bin/python3 scripts/wine-prefix-options.py emulate-modeset \
+        "$(/usr/bin/python3 scripts/settings-env.py --emulate-modeset "$1")" >/dev/null 2>&1 || true
+}
+
 usage() { awk 'NR > 1 { if ($0 !~ /^#/) exit; print }' "$0" | sed 's/^# \{0,1\}//'; }
 
 # Runtime processes that are guest programs: everything but Xvnc and FEXServer.
@@ -541,6 +550,7 @@ if [ "$MODE" = native ]; then ensure_native_x; else ensure_xvnc; fi
 
 if [ -z "$APP_ANDROID" ]; then
 # Sound (scripts/audio.sh) at the launcher's volume, unless it is muted.
+apply_resolution_scaling "$LDIR/settings.json"
 VOL="$(/usr/bin/python3 scripts/settings-env.py --volume "$LDIR/settings.json")"
 [ -n "$VOL" ] && { LXRT_ROOT="$APP_ROOT" scripts/audio.sh start "$VOL" >/dev/null || echo "run-app: no sound (scripts/audio.sh)" >&2; }
 # Controllers (scripts/input.sh): the launcher's Entrada page, as /dev/input.
