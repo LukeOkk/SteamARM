@@ -372,8 +372,10 @@ struct SettingsView: View {
                 integerChoice("Límite de FPS", $draft.frameRateLimit, [0, 30, 60, 90, 120, 144], zero: "Sin límite")
                 choice("HUD de DXVK", $draft.dxvkHud, [("off", "Desactivado"), ("fps", "FPS"), ("full", "Completo")])
                 Toggle("Mostrar Metal HUD", isOn: $draft.metalHud)
-                unavailable("Escala de resolución / FSR", "Proton 11 ya no incluye el escalado FSR de pantalla completa")
-                unavailable("Suavizado de bordes", "No hay un ajuste global compatible; configúralo dentro de cada juego")
+                integerChoice("Suavizado de bordes (MSAA)", $draft.antialiasing, [0, 2, 4, 8], zero: "El del juego")
+                Text("Lo fuerza DXVK en los juegos Direct3D 9. Los Direct3D 10, 11 y 12 lo eligen dentro del juego: no hay un ajuste global para ellos.")
+                    .font(.caption).foregroundStyle(.secondary)
+                unavailable("Escala de resolución / FSR", "Ningún Proton instalado trae ya el escalado FSR de pantalla completa (WINE_FULLSCREEN_FSR), y gamescope no existe en macOS: elige una resolución menor dentro del juego")
             }
         }
     }

@@ -60,7 +60,13 @@ final class LauncherModel: ObservableObject {
     /// Built-ins first; an apps.json entry cannot shadow one.
     var allApps: [AppEntry] {
         let ids = Set(builtIns.map(\.id))
-        return builtIns + apps.filter { !ids.contains($0.id) }
+        // A built-in's own settings live in LauncherSettings.builtinOverrides.
+        let builtIn = builtIns.map { b -> AppEntry in
+            var e = b
+            if let o = settings.builtinOverrides[b.id], !o.isEmpty { e.overrides = o }
+            return e
+        }
+        return builtIn + apps.filter { !ids.contains($0.id) }
     }
 
     init() {

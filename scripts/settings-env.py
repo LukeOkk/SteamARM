@@ -182,6 +182,11 @@ def env_from_settings(s, total=None):
     if s.get("shaderCache") is False:
         env["DXVK_SHADER_CACHE"] = "0"
         env["VKD3D_SHADER_CACHE_PATH"] = "0"
+    # MSAA on D3D9 swapchains (DXVK's d3d9.forceSwapchainMSAA): MEASURED on
+    # MoltenVK, the D3D9 probe runs with 4x and 8x (benchmarks/stage42).
+    msaa = int(s.get("antialiasing") or 0)
+    if msaa in (2, 4, 8):
+        dxvk.append("d3d9.forceSwapchainMSAA = %d" % msaa)
     aniso = int(s.get("anisotropy") or 0)
     if aniso in (2, 4, 8, 16):
         dxvk += ["d3d11.samplerAnisotropy = %d" % aniso, "d3d9.samplerAnisotropy = %d" % aniso]

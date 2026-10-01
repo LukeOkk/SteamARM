@@ -90,6 +90,13 @@ class SettingsEnvironmentTests(unittest.TestCase):
             self.assertNotIn("STEAMARM_VK_ICD", self.env({
                 "graphicsBackend": "vulkanKosmicKrisp"}))
 
+    def test_antialiasing(self):
+        for value in (2, 4, 8):
+            cfg = self.env({"antialiasing": value}).get("DXVK_CONFIG", "")
+            self.assertIn("d3d9.forceSwapchainMSAA = %d" % value, cfg)
+        for value in (0, 3, 16):
+            self.assertNotIn("forceSwapchainMSAA", self.env({"antialiasing": value}).get("DXVK_CONFIG", ""))
+
     def test_launcher_fallbacks_win(self):
         """The fallback the launcher announced is the one that runs: its variables
         go over the settings and the app's own choices (run-app.sh resolve_app)."""

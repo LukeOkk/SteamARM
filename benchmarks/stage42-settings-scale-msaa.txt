@@ -1,0 +1,39 @@
+Stage 42 -- Settings: MSAA, per-entry settings for the built-in Steams, FSR
+Date: 2026-10-01. Apple M4, macOS 27. Zero VM. No game.
+
+ASKED
+  Make Settings' unavailable options work where something real exists.
+
+1. EDGE SMOOTHING (MSAA) -- ADDED
+  DXVK forces MSAA on Direct3D 9 swapchains (d3d9.forceSwapchainMSAA).
+  tests/win d3d9 probe (DXVK, MoltenVK), DXVK_CONFIG and DXVK's own log:
+    off  162.6 fps   probe ok
+    4x   163.4 fps   probe ok, "d3d9.forceSwapchainMSAA = 4" read
+    8x   112.1 fps   probe ok, "d3d9.forceSwapchainMSAA = 8" read
+  (the probe only clears and presents; 8x costs, 4x barely). Settings →
+  Gráficos: "Suavizado de bordes (MSAA)": the game's / 2x / 4x / 8x;
+  scripts/settings-env.py adds it to DXVK_CONFIG. Direct3D 10/11/12 have
+  no global switch in DXVK or VKD3D-Proton: chosen in-game.
+
+2. RESOLUTION SCALE / FSR -- STAYS UNAVAILABLE, REASON CORRECTED
+  No installed Proton (Experimental, 10.0, Hotfix, both ARM64) has
+  WINE_FULLSCREEN_FSR any more (searched their Wine libraries); gamescope
+  does not exist on macOS. Tried: the Vulkan shim reporting a smaller
+  surface (currentExtent/maxImageExtent scaled): under Wine the swapchain
+  stayed 792x566 at 50 % -- win32u sets currentExtent from the window --
+  and shrinking the swapchain itself would only shrink DXVK's final blit,
+  not the game's rendering. Reverted. Settings says so.
+
+3. PER-ENTRY SETTINGS FOR THE BUILT-IN STEAMS -- ADDED
+  An added app had "Ajustes de esta app" (display, vsync, synchronization,
+  graphics); the built-in Steam entries said "los ajustes por app no se
+  aplican". Now their info sheet has the same section (one shared view,
+  launcher/HomeView.swift AppOverridesSection), saved in settings.json as
+  builtinOverrides[id]; scripts/run-app.sh applies them as an app's own,
+  so they reach the games that Steam starts. tests/launcher/run_app_dispatch.sh:
+  a vsync override on steam-arm64-frame reaches it and not steam-arm64;
+  the global MSAA reaches both (52/0).
+
+STILL UNAVAILABLE
+  MSync (macOS Wine only). Lightning JIT and Apple Hypervisor are not
+  listed (they do not exist).

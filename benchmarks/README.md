@@ -77,6 +77,7 @@ the Fedora VM that was deleted on 2026-09-27; they are history, and
 | 39 | `stage39-wined3d-gl45.txt` | 10-01 | WineD3D on Zink stopped making its context current at OpenGL 3.2 after an X server restart (cause not explained); Zink on MoltenVK lacks only two format extensions for 3.3 and 4.0, and announcing them gives OpenGL 4.5: WineD3D D3D9/D3D11 (11_0) and the 32-bit probe pass again, and OpenGL 4.5 programs draw correctly. A process that loaded libvulkan.so.1 a second time crashed in FEX's thunk links (Steam's i386 client with Zink): the guest thunks are now never unloaded |
 | 40 | `stage40-android-audio-timestamps.txt` | 10-01 | Waydroid's audio HAL never reported a presentation position (AudioFlinger timestamp err=440, AudioTrack.getTimestamp() empty for every app); a wrapper HAL for audioserver adds it (n=433, err=0). VLC still pauses itself: not the cause |
 | 41 | `stage41-frame-root-vulkan.txt` | 10-01 | The native client on the Steam Frame root gets a Vulkan device: the shim installed as an ICD for the image's own loader (freedreno set aside), vulkaninfo and the client's steamsysinfo report Apple M4; sign-in window 10 of 12 with it, 4 of 4 without |
+| 42 | `stage42-settings-scale-msaa.txt` | 10-01 | Settings: MSAA 2x/4x/8x for Direct3D 9 games through DXVK (measured on MoltenVK); per-entry settings for the built-in Steams; resolution scale/FSR stays unavailable (no Proton has its upscaler; a smaller reported surface does not survive Wine) |
 
 ## After stage 21 (no stage file)
 

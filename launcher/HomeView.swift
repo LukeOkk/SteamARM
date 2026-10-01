@@ -361,8 +361,10 @@ struct BuiltInInfoView: View {
                     Text("El cliente x86 bajo FEX: la ruta que funciona hoy (compatibilidad transicional).")
                         .font(.caption).foregroundStyle(.secondary)
                 }
-                Text("Los ajustes por app no se aplican a las entradas integradas: usan la configuración global.")
-                    .font(.caption).foregroundStyle(.secondary)
+                AppOverridesSection(overrides: Binding(get: { model.settings.builtinOverrides[app.id] },
+                                                       set: { model.settings.builtinOverrides[app.id] = $0 }),
+                                    root: app.root,
+                                    note: "Se aplican a esta entrada de Steam y a los juegos que abre, por encima de la configuración global; se guardan al momento.")
             }
             .formStyle(.grouped)
             HStack {
@@ -481,43 +483,8 @@ struct EditAppView: View {
                         .font(.system(.body, design: .monospaced))
                         .frame(height: 70)
                 }
-                Section("Ajustes de esta app") {
-                    Picker("Pantalla", selection: overrideBinding("display")) {
-                        Text("Global (\(model.settings.display == .vnc ? "VNC" : "Ventanas nativas"))").tag("")
-                        Text("Ventanas nativas").tag("native")
-                        Text("VNC (Compartir Pantalla)").tag("vnc")
-                            .disabled(!Paths.isX86Root(app.root))
-                            .help("VNC solo sirve a programas de la raíz x86 de Steam")
-                    }
-                    Picker("Sincronización vertical", selection: overrideBinding("vsync")) {
-                        Text("Global (\(vsyncLabel(model.settings.vsync)))").tag("")
-                        Text("AUTO (según el juego)").tag("game")
-                        Text("ON (activada)").tag("on")
-                        Text("OFF (desactivada)").tag("off")
-                    }
-                    Picker("Sincronización", selection: overrideBinding("synchronization")) {
-                        Text("Global (\(model.settings.synchronizationBackend.label))").tag("")
-                        ForEach(SynchronizationBackend.allCases, id: \.self) { backend in
-                            let status = model.capabilities.synchronization[backend]
-                            Text(backend.label + (backend == .auto || status?.state == .ready ? "" : " · \(status?.state.label ?? "No disponible")"))
-                                .tag(backend.rawValue)
-                                .disabled(backend != .auto && status?.usable != true)
-                                .help(status?.reason ?? "Sin datos")
-                        }
-                    }
-                    Picker("Gráficos", selection: overrideBinding("graphicsBackend")) {
-                        Text("Global (\(model.settings.graphics.label))").tag("")
-                        ForEach(graphicsOrder, id: \.self) { backend in
-                            let status = model.capabilities.graphics[backend]
-                            Text(backend.label + (backend == .auto || status?.state == .ready ? "" : " · \(status?.state.label ?? "No disponible")"))
-                                .tag(backend.rawValue)
-                                .disabled(backend != .auto && status?.usable != true)
-                                .help(status?.reason ?? "Sin datos")
-                        }
-                    }
-                    Text("Se aplican solo a esta app, por encima de la configuración global. Los juegos que abre Steam usan la de Steam.")
-                        .font(.caption).foregroundStyle(.secondary)
-                }
+                AppOverridesSection(overrides: $app.overrides, root: app.root,
+                                    note: "Se aplican solo a esta app, por encima de la configuración global. Los juegos que abre Steam usan la de Steam.")
             }
             .formStyle(.grouped)
             HStack {
@@ -542,39 +509,6 @@ struct EditAppView: View {
         commandText.split(separator: "\n").map { String($0) }.filter { !$0.isEmpty }
     }
 
-    private var graphicsOrder: [GraphicsBackend] {
-        [.auto, .vulkanMoltenVK, .vulkanKosmicKrisp, .openGLWineD3D]
-    }
-
-    private func vsyncLabel(_ value: String) -> String {
-        switch value {
-        case "on": return "ON (activada)"
-        case "off": return "OFF (desactivada)"
-        default: return "AUTO (según el juego)"
-        }
-    }
-
-    private func overrideBinding(_ key: String) -> Binding<String> {
-        Binding(get: { app.overrides?[key] ?? "" }, set: { value in
-            if key == "display" && value == "vnc" && !Paths.isX86Root(app.root) { return }
-            if key == "synchronization", let backend = SynchronizationBackend(rawValue: value),
-               backend != .auto && model.capabilities.synchronization[backend]?.usable != true { return }
-            if key == "graphicsBackend", let backend = GraphicsBackend(rawValue: value),
-               backend != .auto && model.capabilities.graphics[backend]?.usable != true { return }
-            let valid: Bool
-            switch key {
-            case "display": valid = ["", "native", "vnc"].contains(value)
-            case "vsync": valid = ["", "game", "on", "off"].contains(value)
-            case "synchronization": valid = value.isEmpty || SynchronizationBackend(rawValue: value) != nil
-            case "graphicsBackend": valid = value.isEmpty || GraphicsBackend(rawValue: value) != nil
-            default: valid = false
-            }
-            guard valid else { return }
-            var values = app.overrides ?? [:]
-            if value.isEmpty { values.removeValue(forKey: key) } else { values[key] = value }
-            app.overrides = values.isEmpty ? nil : values
-        })
-    }
 
     private func save() {
         app.command = commandLines
@@ -628,5 +562,89 @@ struct SetupBanner: View {
         .padding(16)
         .background(RoundedRectangle(cornerRadius: 12).fill(Color.white.opacity(0.05)))
         .padding(.horizontal, 24).padding(.top, 16)
+    }
+}
+
+/// "Ajustes de esta app": display, vsync, synchronization and graphics over the
+/// global settings, for an added app (AppEntry.overrides) or a built-in one
+/// (LauncherSettings.builtinOverrides). scripts/run-app.sh applies both
+/// (settings-env.py with_overrides).
+struct AppOverridesSection: View {
+    @EnvironmentObject var model: LauncherModel
+    @Binding var overrides: [String: String]?
+    let root: String
+    let note: String
+
+    var body: some View {
+        Section("Ajustes de esta app") {
+            Picker("Pantalla", selection: binding("display")) {
+                Text("Global (\(model.settings.display == .vnc ? "VNC" : "Ventanas nativas"))").tag("")
+                Text("Ventanas nativas").tag("native")
+                Text("VNC (Compartir Pantalla)").tag("vnc")
+                    .disabled(!Paths.isX86Root(root))
+                    .help("VNC solo sirve a programas de la raíz x86 de Steam")
+            }
+            Picker("Sincronización vertical", selection: binding("vsync")) {
+                Text("Global (\(vsyncLabel(model.settings.vsync)))").tag("")
+                Text("AUTO (según el juego)").tag("game")
+                Text("ON (activada)").tag("on")
+                Text("OFF (desactivada)").tag("off")
+            }
+            Picker("Sincronización", selection: binding("synchronization")) {
+                Text("Global (\(model.settings.synchronizationBackend.label))").tag("")
+                ForEach(SynchronizationBackend.allCases, id: \.self) { backend in
+                    let status = model.capabilities.synchronization[backend]
+                    Text(backend.label + (backend == .auto || status?.state == .ready ? "" : " · \(status?.state.label ?? "No disponible")"))
+                        .tag(backend.rawValue)
+                        .disabled(backend != .auto && status?.usable != true)
+                        .help(status?.reason ?? "Sin datos")
+                }
+            }
+            Picker("Gráficos", selection: binding("graphicsBackend")) {
+                Text("Global (\(model.settings.graphics.label))").tag("")
+                ForEach(graphicsOrder, id: \.self) { backend in
+                    let status = model.capabilities.graphics[backend]
+                    Text(backend.label + (backend == .auto || status?.state == .ready ? "" : " · \(status?.state.label ?? "No disponible")"))
+                        .tag(backend.rawValue)
+                        .disabled(backend != .auto && status?.usable != true)
+                        .help(status?.reason ?? "Sin datos")
+                }
+            }
+            Text(note).font(.caption).foregroundStyle(.secondary)
+        }
+    }
+
+    private func binding(_ key: String) -> Binding<String> {
+        Binding(get: { overrides?[key] ?? "" }, set: { value in
+            if key == "display" && value == "vnc" && !Paths.isX86Root(root) { return }
+            if key == "synchronization", let backend = SynchronizationBackend(rawValue: value),
+               backend != .auto && model.capabilities.synchronization[backend]?.usable != true { return }
+            if key == "graphicsBackend", let backend = GraphicsBackend(rawValue: value),
+               backend != .auto && model.capabilities.graphics[backend]?.usable != true { return }
+            let valid: Bool
+            switch key {
+            case "display": valid = ["", "native", "vnc"].contains(value)
+            case "vsync": valid = ["", "game", "on", "off"].contains(value)
+            case "synchronization": valid = value.isEmpty || SynchronizationBackend(rawValue: value) != nil
+            case "graphicsBackend": valid = value.isEmpty || GraphicsBackend(rawValue: value) != nil
+            default: valid = false
+            }
+            guard valid else { return }
+            var values = overrides ?? [:]
+            if value.isEmpty { values.removeValue(forKey: key) } else { values[key] = value }
+            overrides = values.isEmpty ? nil : values
+        })
+    }
+
+    private var graphicsOrder: [GraphicsBackend] {
+        [.auto, .vulkanMoltenVK, .vulkanKosmicKrisp, .openGLWineD3D]
+    }
+
+    private func vsyncLabel(_ value: String) -> String {
+        switch value {
+        case "on": return "ON (activada)"
+        case "off": return "OFF (desactivada)"
+        default: return "AUTO (según el juego)"
+        }
     }
 }

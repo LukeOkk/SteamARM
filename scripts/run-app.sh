@@ -265,6 +265,12 @@ spec = importlib.util.spec_from_file_location(
     "settings_env", os.path.join(os.getcwd(), "scripts", "settings-env.py"))   # cwd: the checkout
 senv = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(senv)
+# A built-in entry's own settings live in settings.json (the launcher's
+# builtinOverrides): its definition comes from builtin-apps.json.
+_bo = settings.get("builtinOverrides")
+if isinstance(_bo, dict) and isinstance(_bo.get(app_id), dict) and \
+        any(isinstance(b, dict) and b.get("id") == app_id for b in builtins):
+    app = dict(app, overrides=dict(app.get("overrides") or {}, **_bo[app_id]))
 settings = senv.with_overrides(settings, app.get("overrides"))
 # The launcher's fallbacks for this launch go over the app's own choices.
 settings = senv.with_overrides(settings, senv.fallback_overrides(os.environ))

@@ -162,6 +162,9 @@ struct LauncherSettings: Codable, Equatable {
 
     var launchSteamOnStart: Bool = false
     var primarySteam: String = "steam-arm64-frame"   // PrimarySteam
+    /// "Ajustes de esta app" for built-in entries (whose definition comes from
+    /// scripts/builtin-apps.json and is not saved): id -> overrides.
+    var builtinOverrides: [String: [String: String]] = [:]
     var confirmStop: Bool = true
     var guestLanguage: String = "auto"
     var timezone: String = "auto"
@@ -181,6 +184,7 @@ struct LauncherSettings: Codable, Equatable {
     var graphicsBackend: String = "auto"   // GraphicsBackend raw value
     var shaderCache: Bool = true
     var anisotropy: Int = 0
+    var antialiasing: Int = 0          // MSAA samples DXVK forces on D3D9 swapchains; 0 = the game's
     var frameRateLimit: Int = 0
     var dxvkHud: String = "off"
     var audioBackend: String = "coreaudio"
@@ -214,6 +218,7 @@ struct LauncherSettings: Codable, Equatable {
         fallbackPolicy = SettingsMigration.fallbackPolicy(stored: try c.decodeIfPresent(String.self, forKey: .fallbackPolicy))
         launchSteamOnStart = try c.decodeIfPresent(Bool.self, forKey: .launchSteamOnStart) ?? false
         primarySteam = try c.decodeIfPresent(String.self, forKey: .primarySteam) ?? "steam-arm64-frame"
+        builtinOverrides = try c.decodeIfPresent([String: [String: String]].self, forKey: .builtinOverrides) ?? [:]
         confirmStop = try c.decodeIfPresent(Bool.self, forKey: .confirmStop) ?? true
         guestLanguage = try c.decodeIfPresent(String.self, forKey: .guestLanguage) ?? "auto"
         timezone = try c.decodeIfPresent(String.self, forKey: .timezone) ?? "auto"
@@ -228,6 +233,7 @@ struct LauncherSettings: Codable, Equatable {
         graphicsBackend = SettingsMigration.graphicsBackend(stored: try c.decodeIfPresent(String.self, forKey: .graphicsBackend))
         shaderCache = try c.decodeIfPresent(Bool.self, forKey: .shaderCache) ?? true
         anisotropy = try c.decodeIfPresent(Int.self, forKey: .anisotropy) ?? 0
+        antialiasing = try c.decodeIfPresent(Int.self, forKey: .antialiasing) ?? 0
         frameRateLimit = try c.decodeIfPresent(Int.self, forKey: .frameRateLimit) ?? 0
         dxvkHud = try c.decodeIfPresent(String.self, forKey: .dxvkHud) ?? "off"
         audioBackend = try c.decodeIfPresent(String.self, forKey: .audioBackend) ?? "coreaudio"

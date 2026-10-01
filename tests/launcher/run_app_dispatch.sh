@@ -142,5 +142,14 @@ for id in steam hs; do
         || { echo "  FAIL  $id: $(last_line "$id")"; fail=$((fail + 1)); }
 done
 kill "$fake" 2>/dev/null; wait "$fake" 2>/dev/null
+# A built-in entry's own settings (Settings → the entry's "Ajustes de esta
+# app", saved as builtinOverrides) and the global MSAA (antialiasing).
+W3="$(mktemp -d)"; mkdir -p "$W3/launcher"
+echo '[]' > "$W3/launcher/apps.json"
+echo '{"antialiasing":4,"builtinOverrides":{"steam-arm64-frame":{"vsync":"on","bogus":"x"}}}' > "$W3/launcher/settings.json"
+expect_in "$W3" steam-arm64-frame 'VKD3D_SWAPCHAIN_PRESENT_MODE=FIFO'
+expect_in "$W3" steam-arm64-frame 'd3d9.forceSwapchainMSAA = 4'
+expect_in "$W3" steam-arm64 'd3d9.forceSwapchainMSAA = 4' 'VKD3D_SWAPCHAIN_PRESENT_MODE=FIFO'
+rm -rf "$W3"
 echo "$pass passed, $fail failed"
 [ "$fail" -eq 0 ]

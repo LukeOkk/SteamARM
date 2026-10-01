@@ -68,7 +68,7 @@ affects games (the settings window reminds you).
 | **Entrada** | Controllers, one page per player (below) |
 | **Sistema** | Language and time zone of Linux programs; V-Sync (AUTO / ON / OFF); **DRAM** and **VRAM** limits; Proton synchronization (AUTO / default / MSync / fsync / esync: MSync is disabled; fsync and esync are experimental, only an explicit choice turns them on, and each needs a Proton that has it); what to do when a setting cannot work for an app (AUTO, ESTRICTO, PREGUNTAR) |
 | **Procesador** | FEX options: on-disk translation cache (experimental), x86 memory-ordering emulation (TSO full/fast/off), multiblock, self-modifying code detection, reduced-precision x87; the Proton and runtime tools installed |
-| **Gráficos** | The graphics engine: AUTO (MoltenVK), Vulkan (MoltenVK), Vulkan (KosmicKrisp: experimental, offered only when Homebrew's Mesa is installed and the installed Vulkan shim can load it) or OpenGL (WineD3D: experimental, Wine's own Direct3D on OpenGL from Mesa's Zink over MoltenVK; offered when Zink is in the x86 root and the native X server was built with direct GLX by `scripts/setup.sh`). Shader cache, anisotropic filtering, frame-rate limit, DXVK HUD, Metal HUD |
+| **Gráficos** | The graphics engine: AUTO (MoltenVK), Vulkan (MoltenVK), Vulkan (KosmicKrisp: experimental, offered only when Homebrew's Mesa is installed and the installed Vulkan shim can load it) or OpenGL (WineD3D: experimental, Wine's own Direct3D on OpenGL from Mesa's Zink over MoltenVK; offered when Zink is in the x86 root and the native X server was built with direct GLX by `scripts/setup.sh`). Shader cache, anisotropic filtering, **edge smoothing (MSAA 2x/4x/8x, forced by DXVK on Direct3D 9 games; Direct3D 10/11/12 games choose it in-game)**, frame-rate limit, DXVK HUD, Metal HUD |
 | **Runtime** | Read-only: every backend and capability, its state and reason, and what was detected on this Mac |
 | **Sonido** | Sound on/off and volume |
 | **Atajos** | Keyboard shortcuts: screenshot (F8 by default, saved to `~/Pictures/SteamARM`), stop the running program, toggle the Metal HUD. Shortcuts while a game has focus need the Accessibility permission, and screenshots need Screen Recording |
@@ -76,7 +76,14 @@ affects games (the settings window reminds you).
 | **Depuración** | Runtime fault reports, runtime tracing, Vulkan debug, extra environment variables |
 
 Options with no working backend on this stack are greyed out, with the
-reason: FSR scaling, global anti-aliasing.
+reason: FSR scaling (no installed Proton has its full-screen upscaler any
+more, and gamescope does not exist on macOS; a lower in-game resolution is
+the way), and MSync (a patch of macOS Wine, not in Linux Proton).
+
+Each app's **Ajustes…** has its own display, vsync, synchronization and
+graphics choices over the global ones, the built-in Steam entries included
+(their choices are kept in the launcher's settings and also reach the games
+that Steam starts).
 
 Native Linux games that draw with OpenGL use Mesa's software renderer
 unless told otherwise. Untested with games: their **Launch options** in
