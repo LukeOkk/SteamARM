@@ -242,6 +242,16 @@ struct ApplicationCoreTests {
         check(caps.graphicsFallback(after: .vulkanMoltenVK) == nil, "no WineD3D fallback yet")
         for (k, v) in caps.graphics { check(!v.reason.isEmpty, "\(k) has a reason") }
         check(caps.graphics[.openGLWineD3D]?.state == .unavailable, "WineD3D: needs detection")
+        // Clients started outside the launcher.
+        let x86 = [(pid: Int32(10), command: "build/lxrun /tmp/lxrt-root/usr/bin/FEX-gb /tmp/fexhome/.local/share/Steam/ubuntu12_32/steam -noverifyfiles")]
+        check(OutsideClient.find(x86, root: { _ in nil })?.id == "steam" && OutsideClient.find(x86, root: { _ in nil })?.arch == nil,
+              "outside x86 client: steam, architecture unknown")
+        let arm = [(pid: Int32(11), command: "build/lxrun /tmp/armhome/.local/share/Steam/steamrtarm64/steam -srt-logger-opened")]
+        check(OutsideClient.find(arm, root: { _ in "/tmp/lxrt-armroot" })?.id == "steam-arm64", "outside native client, Fedora root")
+        check(OutsideClient.find(arm, root: { _ in "/tmp/lxrt-arm64root" })?.id == "steam-arm64-frame"
+              && OutsideClient.find(arm, root: { _ in "/tmp/lxrt-arm64root" })?.arch == "aarch64 none",
+              "outside native client, Steam Frame root, aarch64")
+        check(OutsideClient.find([(pid: Int32(12), command: "build/lxrun /usr/bin/foo")], root: { _ in nil }) == nil, "no client")
         check(caps.effectiveGraphics(.auto) == .vulkanMoltenVK, "AUTO graphics is MoltenVK")
         check(caps.effectiveGraphics(.vulkanKosmicKrisp) == .vulkanMoltenVK, "undetected KosmicKrisp -> MoltenVK")
         check(caps.effectiveGraphics(.openGLWineD3D) == .vulkanMoltenVK, "WineD3D -> MoltenVK")

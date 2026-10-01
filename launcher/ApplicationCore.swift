@@ -543,6 +543,23 @@ extension ExecutionBackend {
     }
 }
 
+/// A Steam client started outside the launcher (scripts/run-steam.sh, or
+/// scripts/run-steam-arm64.sh for the native one), which the launcher adopts.
+/// The native client's entry comes from its root: /tmp/lxrt-arm64root is the
+/// Steam Frame root, anything else the Fedora one (scripts/builtin-apps.json).
+enum OutsideClient {
+    static func find(_ processes: [(pid: Int32, command: String)],
+                     root: (Int32) -> String?) -> (id: String, arch: String?)? {
+        if processes.contains(where: { $0.command.contains("ubuntu12_32/steam ") }) {
+            return ("steam", nil)
+        }
+        if let p = processes.first(where: { $0.command.contains("steamrtarm64/steam ") }) {
+            return (root(p.pid) == "/tmp/lxrt-arm64root" ? "steam-arm64-frame" : "steam-arm64", "aarch64 none")
+        }
+        return nil
+    }
+}
+
 /// What a capability is today, from this repository and its measurements --
 /// never from what it is meant to become.
 struct CapabilityStatus: Equatable {

@@ -359,6 +359,16 @@ enum Shell {
     }
 
     /// PIDs of runtime processes that are guest programs (not Xvnc/FEXServer).
+    /// One variable of a process's environment (ps -E; the runtime keeps
+    /// LXRT_* variables through guest execs), or nil.
+    static func environmentValue(_ key: String, of pid: Int32) -> String? {
+        let r = runSync("/bin/ps", ["-E", "-o", "command=", "-p", String(pid)])
+        for word in r.output.split(separator: " ") where word.hasPrefix(key + "=") {
+            return String(word.dropFirst(key.count + 1)).trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+        return nil
+    }
+
     static func guestProcesses() -> [(pid: Int32, command: String)] {
         let r = runSync("/bin/ps", ["-axo", "pid=,command="])
         var out: [(Int32, String)] = []

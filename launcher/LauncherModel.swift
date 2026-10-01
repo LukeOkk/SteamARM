@@ -703,13 +703,16 @@ final class LauncherModel: ObservableObject {
             // run-app.sh wrote running.pid when it started the session.
             start = (try? FileManager.default.attributesOfItem(atPath: Paths.pidFile.path))?[.modificationDate] as? Date
             adoptedWithoutWrapper = !wrapped
-        } else if Shell.guestProcesses().contains(where: { $0.command.contains("ubuntu12_32/steam ") }) {
-            id = "steam"   // started by scripts/run-steam.sh
+        } else if let client = OutsideClient.find(Shell.guestProcesses(),
+                                                   root: { Shell.environmentValue("LXRT_ROOT", of: $0) }) {
+            id = client.id   // started by scripts/run-steam.sh or run-steam-arm64.sh
             // No session wrapper: a status, group or architecture on disk is
-            // an earlier session's, not this Steam's.
+            // an earlier session's, not this Steam's...
             for f in [Paths.statusFile, Paths.pgidFile, Paths.archFile] {
                 try? FileManager.default.removeItem(at: f)
             }
+            // ...but the native client's architecture is known.
+            if let arch = client.arch { try? arch.write(to: Paths.archFile, atomically: true, encoding: .utf8) }
             adoptedWithoutWrapper = true
         } else {
             return

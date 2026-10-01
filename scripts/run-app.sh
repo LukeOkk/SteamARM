@@ -63,6 +63,26 @@ PGIDFILE="$LDIR/running.pgid"
 STATUSFILE="$LDIR/running.status"   # read and removed by the launcher, not here
 X11_BUNDLE_ID=org.steamarm.X11
 STEAM_PATTERN='build/lxrun .*ubuntu12_32/steam '
+# The native ARM64 client (scripts/run-steam-arm64.sh); which entry it is
+# comes from its root, in its environment (the runtime keeps LXRT_* through
+# guest execs): /tmp/lxrt-armroot is steam-arm64, /tmp/lxrt-arm64root
+# steam-arm64-frame (scripts/builtin-apps.json).
+ARM64_PATTERN='build/lxrun .*steamrtarm64/steam '
+
+# The client of this entry, started outside this script (run-steam.sh,
+# run-steam-arm64.sh): its pid, or nothing.
+outside_client() {
+    local p want
+    case "$ID" in
+        steam) pgrep -f "$STEAM_PATTERN" | head -1 ;;
+        steam-arm64|steam-arm64-frame)
+            want=/tmp/lxrt-armroot
+            [ "$ID" = steam-arm64-frame ] && want=/tmp/lxrt-arm64root
+            for p in $(pgrep -f "$ARM64_PATTERN"); do
+                ps -E -o command= -p "$p" 2>/dev/null | tr ' ' '\n' | grep -qx "LXRT_ROOT=$want" && { echo "$p"; return; }
+            done ;;
+    esac
+}
 
 usage() { awk 'NR > 1 { if ($0 !~ /^#/) exit; print }' "$0" | sed 's/^# \{0,1\}//'; }
 
@@ -476,8 +496,9 @@ if [ -n "$(guest_pids)" ]; then
         echo "session=reshown"
         exit 0
     fi
-    if [ "$ID" = steam ] && spid="$(pgrep -f "$STEAM_PATTERN" | head -1)" && [ -n "$spid" ]; then
-        # Started elsewhere (e.g. run-steam.sh): its DISPLAY tells the mode.
+    if spid="$(outside_client)" && [ -n "$spid" ]; then
+        # Started elsewhere (run-steam.sh, run-steam-arm64.sh): its DISPLAY
+        # tells the mode.
         case "$(ps -E -o command= -p "$spid" 2>/dev/null)" in
             *" DISPLAY=:1"*) rmode=vnc ;;
             *" DISPLAY=:2"*) rmode=native ;;
@@ -486,8 +507,10 @@ if [ -n "$(guest_pids)" ]; then
         # No wrapper: a status, group or architecture from an earlier
         # session is not this one's.
         rm -f "$STATUSFILE" "$PGIDFILE" "$ARCHFILE"
+        # ...but the architecture of the client found is known.
+        case "$ID" in steam-arm64*) echo "aarch64 none" > "$ARCHFILE" ;; esac
         echo "$spid" > "$PIDFILE"
-        echo steam > "$IDFILE"
+        echo "$ID" > "$IDFILE"
         echo "$rmode" > "$MODEFILE"
         show_display "$rmode"
         echo "Steam is already running."
