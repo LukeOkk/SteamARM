@@ -753,6 +753,20 @@ if clang --target=x86_64-linux-gnu -O1 -ffreestanding -fno-stack-protector -nost
 else
     echo "  skip  x86_seccomp_trap (no clang for x86_64-linux-gnu)"
 fi
+# exec from a process with a seccomp filter, as every app is: a script and an
+# x86 program start (patches/fex-lxrt-execve-no-fd.patch;
+# tests/android/x86_seccomp_exec.c).
+if clang --target=x86_64-linux-gnu -O1 -ffreestanding -fno-stack-protector -nostdlib -static-pie -fPIE \
+         -fuse-ld=lld -o "$X86_ROOT/data/local/tmp/x86_seccomp_exec" tests/android/x86_seccomp_exec.c 2>/dev/null; then
+    out=$(ANDROID_X86_ROOT="$X86_ROOT" LXRUN="$LXRUN" ANDROID_X86_GENV="FEX_NEEDSSECCOMP=1" \
+          perl -e 'alarm shift; exec @ARGV' 90 scripts/run-android-x86.sh /data/local/tmp/x86_seccomp_exec 2>&1 | grep -v '^\[lxrt')
+    if grep -q '== x86_seccomp_exec: PASS' <<<"$out"; then
+        ok "exec under a seccomp filter (FEX): a script and an x86 program start"
+    else bad "exec under a seccomp filter (FEX)" "$(grep -E 'MAL|==|Invalid' <<<"$out" | tr '\n' ' ')"; fi
+    rm -f "$X86_ROOT/data/local/tmp/x86_seccomp_exec"
+else
+    echo "  skip  x86_seccomp_exec (no clang for x86_64-linux-gnu)"
+fi
 for _ in $(seq 1 80); do [ -e "$xp/service.pid" ] || break; sleep 0.1; done
 rm -rf "$xp" "$xb"
 
@@ -1172,6 +1186,19 @@ if grep -q 'Active default network: [0-9]' <<<"$conn" && grep -q 'type: Ethernet
         echo "  skip  network validation and curl (the Mac itself got no 204)"
     fi
 else bad "network: a default network" "$(grep -E 'Active default network|NetworkAgentInfo' <<<"$conn" | head -2 | cut -c1-200 | tr '\n' ' ')"; fi
+# Shared storage (scripts/android-boot.py storage_layout): /sdcard,
+# /storage/emulated/0 and /storage/self/primary are one directory, the
+# primary volume's /data/media/0, and no app's external directory was refused
+# by StorageManagerService's canonical-path check ("Invalid mkdirs", which
+# /storage as a symlink to /data/media gave every app, MEASURED).
+local sto
+sto=$(env "${senv[@]}" python3 scripts/android-session.py shell --timeout 60 /system/bin/sh -c \
+      'echo lxrt-storage > /sdcard/Download/lxrt-storage.txt && cat /storage/emulated/0/Download/lxrt-storage.txt && cat /storage/self/primary/Download/lxrt-storage.txt' 2>/dev/null)
+if [ "$(grep -c '^lxrt-storage' <<<"$sto")" = 2 ] && [ -f "$sroot/data/media/0/Download/lxrt-storage.txt" ] &&
+   ! grep -aq 'Invalid mkdirs' "$sdir/logcat.txt" 2>/dev/null; then
+    ok "shared storage: /sdcard, /storage/emulated/0 and /storage/self/primary are one directory (/data/media/0); no \"Invalid mkdirs\""
+else bad "shared storage" "read back: $(tr '\n' ' ' <<<"$sto") $(grep -a -m1 'Invalid mkdirs' "$sdir/logcat.txt" 2>/dev/null | cut -c1-160)"; fi
+rm -f "$sroot/data/media/0/Download/lxrt-storage.txt"
 # Compressed sound decoded in Android: an .ogg of the image through
 # MediaExtractor and MediaCodec, which pick the OMX store's vorbis decoder
 # (i386 under FEX, started after the boot; tests/android/java/media).

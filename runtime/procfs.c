@@ -70,6 +70,41 @@ bool lxrt_fd_hidden(int fd)
 // checks every descriptor before it forks, found "Unsupported st_mode for FD
 // 40: DIR" and aborted, one boot in about ten (MEASURED: zygote exit status
 // 1 right at sys.boot_completed, the framework restarted).
+//
+// Opening one still passes through a low number for a moment, and a guest
+// thread listing /proc/self/fd right then saw it (the zygote again: "Unable
+// to stat 40" when it was gone by the fstat, "Unsupported st_mode for FD 40:
+// DIR" when it was not, MEASURED). The listing and every open-then-move of
+// a private descriptor take g_private_lock, so a listing sees each one
+// either not yet open or already moved and hidden.
+static pthread_mutex_t g_private_lock = PTHREAD_RECURSIVE_MUTEX_INITIALIZER;
+static pthread_once_t g_private_once = PTHREAD_ONCE_INIT;
+static void private_child(void)
+{
+    // A fork from another thread during a listing: the child's only thread
+    // must not find the lock held.
+    pthread_mutex_t fresh = PTHREAD_RECURSIVE_MUTEX_INITIALIZER;
+    g_private_lock = fresh;
+}
+static void private_once(void) { pthread_atfork(NULL, NULL, private_child); }
+static void private_lock(void) { pthread_once(&g_private_once, private_once); pthread_mutex_lock(&g_private_lock); }
+static void private_unlock(void) { pthread_mutex_unlock(&g_private_lock); }
+
+// A private duplicate of `fd` (which stays the guest's), made at a high
+// number directly: no low number in between.
+int lxrt_fd_dup_private(int fd)
+{
+    static const int bases[] = { 800, 400, 200, 64 };
+    for (size_t i = 0; i < sizeof bases / sizeof bases[0]; i++) {
+        int n = fcntl(fd, F_DUPFD_CLOEXEC, bases[i]);
+        if (n >= 0) {
+            lxrt_fd_hide(n, true);
+            return n;
+        }
+    }
+    return -1;
+}
+
 int lxrt_fd_private(int fd)
 {
     if (fd < 0)
@@ -97,10 +132,17 @@ DIR *lxrt_fdopendir_private(int fd)
     }
     return d;
 }
+DIR *lxrt_opendirat_private(int dirfd, const char *path)
+{
+    private_lock();
+    int fd = openat(dirfd, path, O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+    DIR *d = fd < 0 ? NULL : lxrt_fdopendir_private(fd);
+    private_unlock();
+    return d;
+}
 DIR *lxrt_opendir_private(const char *path)
 {
-    int fd = open(path, O_RDONLY | O_DIRECTORY | O_CLOEXEC);
-    return fd < 0 ? NULL : lxrt_fdopendir_private(fd);
+    return lxrt_opendirat_private(AT_FDCWD, path);
 }
 void lxrt_closedir_private(DIR *d)
 {
@@ -248,6 +290,17 @@ static void regenerate_maps(void)
     free(buf);
 }
 
+// A pseudo-terminal slave by its Linux name: Darwin's /dev/ttysNNN is
+// /dev/pts/N to the guest (dispatch.c maps the name back), so ttyname()'s
+// readlink-then-stat finds the terminal.
+static void pts_name(char *target, size_t n)
+{
+    if (strncmp(target, "/dev/ttys", 9) || target[9] < '0' || target[9] > '9')
+        return;
+    int num = atoi(target + 9);
+    snprintf(target, n, "/dev/pts/%d", num);
+}
+
 // /proc/self/fd, as a directory of symlinks. Rebuilt on every lookup because
 // the fd table changes constantly; F_GETPATH gives the target where Darwin
 // knows one, and sockets and pipes get a descriptive name the way Linux does.
@@ -276,6 +329,7 @@ static void regenerate_fds(void)
         }
         lxrt_closedir_private(existing);
     }
+    private_lock();
     for (int fd = 0; fd < maxfd; fd++) {
         if (fcntl(fd, F_GETFD) < 0)
             continue;
@@ -291,10 +345,12 @@ static void regenerate_fds(void)
         else if (fcntl(fd, F_GETPATH, target) != 0 &&
             !lxrt_procpid_fd_target(getpid(), fd, target, sizeof target))
             snprintf(target, sizeof target, "anon_inode:[fd%d]", fd);
+        pts_name(target, sizeof target);
         char link[1200];
         snprintf(link, sizeof link, "%s/%d", dir, fd);
         lxrt_link_set(target, link);
     }
+    private_unlock();
 }
 
 // /proc/self/fd/<n> alone: refresh that one link. pressure-vessel resolves
@@ -308,7 +364,10 @@ static void regenerate_one_fd(int fd)
     snprintf(dir, sizeof dir, "%s/fd", g_dir);
     char link[1200];
     snprintf(link, sizeof link, "%s/%d", dir, fd);
-    if (fcntl(fd, F_GETFD) < 0 || lxrt_fd_hidden(fd)) {
+    private_lock();
+    bool gone = fcntl(fd, F_GETFD) < 0 || lxrt_fd_hidden(fd);
+    private_unlock();
+    if (gone) {
         unlink(link);                   // closed (or not the guest's): ENOENT
         return;
     }
@@ -319,6 +378,7 @@ static void regenerate_one_fd(int fd)
     else if (fcntl(fd, F_GETPATH, target) != 0 &&
         !lxrt_procpid_fd_target(getpid(), fd, target, sizeof target))
         snprintf(target, sizeof target, "anon_inode:[fd%d]", fd);
+    pts_name(target, sizeof target);
     lxrt_link_set(target, link);
 }
 
@@ -375,11 +435,35 @@ void lxrt_proc_cleanup(void)
         remove_tree(g_dir);
 }
 
+// The host's temporary directory for the runtime's own files (/proc,
+// memfds, sandboxes): fixed once per process tree and handed down in
+// LXRT_HOST_TMPDIR, because TMPDIR is the guest's -- Termux points it into
+// its prefix, a guest path the host does not have, and the runtime's /proc
+// went missing ("lxrun: open /proc/self/exe: No such file or directory",
+// MEASURED). Processes that look for each other's /proc must also agree.
+const char *lxrt_host_tmpdir(void)
+{
+    static char dir[512];
+    if (dir[0])
+        return dir;
+    struct stat st;
+    const char *c = getenv("LXRT_HOST_TMPDIR");
+    if (!(c && c[0] == '/' && stat(c, &st) == 0 && S_ISDIR(st.st_mode))) {
+        c = getenv("TMPDIR");
+        if (!(c && c[0] == '/' && stat(c, &st) == 0 && S_ISDIR(st.st_mode)))
+            c = "/tmp";
+    }
+    snprintf(dir, sizeof dir, "%s", c);
+    size_t n = strlen(dir);
+    while (n > 1 && dir[n - 1] == '/')
+        dir[--n] = 0;
+    setenv("LXRT_HOST_TMPDIR", dir, 1);
+    return dir;
+}
+
 void lxrt_proc_init(const char *exe_path, const char *exe_link, int argc, char **argv)
 {
-    const char *tmp = getenv("TMPDIR");
-    if (!tmp || !*tmp)
-        tmp = "/tmp";
+    const char *tmp = lxrt_host_tmpdir();
     sweep_dead(tmp);
     snprintf(g_dir, sizeof g_dir, "%s/lxrt-proc-%d", tmp, getpid());
     note_inherited_fds();
@@ -520,9 +604,7 @@ void lxrt_proc_after_fork(void)
 {
     if (!g_ready)
         return;
-    const char *tmp = getenv("TMPDIR");
-    if (!tmp || !*tmp)
-        tmp = "/tmp";
+    const char *tmp = lxrt_host_tmpdir();
     char cmdline_src[600];
     snprintf(cmdline_src, sizeof cmdline_src, "%s/cmdline", g_dir);
     snprintf(g_dir, sizeof g_dir, "%s/lxrt-proc-%d", tmp, getpid());

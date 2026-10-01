@@ -121,11 +121,9 @@ static void free_entries(struct dir_entry *e)
 static int snapshot(int fd, struct dir_entry **out)
 {
     *out = NULL;
-    int scanfd = openat(fd, ".", O_RDONLY | O_DIRECTORY | O_CLOEXEC);
-    if (scanfd < 0) return errno;
-    DIR *dir = lxrt_fdopendir_private(scanfd);    // moves it: use dirfd(dir) from here
+    DIR *dir = lxrt_opendirat_private(fd, ".");
     if (!dir) return errno;
-    scanfd = dirfd(dir);
+    int scanfd = dirfd(dir);
     int error = 0;
     for (;;) {
         errno = 0;

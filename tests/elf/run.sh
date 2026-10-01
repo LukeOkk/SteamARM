@@ -820,14 +820,18 @@ fi
 # to a child that exec'd): F_GET_SEALS, no writable shared mapping. And a
 # syscall's write into a read-only 4 KiB guest page is EFAULT although the
 # host page stays writable. Both were checks Chromium's WebView renderer
-# makes before it runs.
+# makes before it runs. exec with a guest environment of its own (Termux's)
+# keeps the runtime's settings and /proc; pseudo-terminals the Linux way
+# (Termux's terminal).
 if [ -f "$STAGE/usr/lib64/libc.a" ] && [ -n "$GCCDIR" ]; then
-    for t in memfd_seal_xproc readonly_efault; do
+    for t in memfd_seal_xproc readonly_efault exec_env pty; do
         if err=$(glibc_cc -static-pie -O2 -o build/$t tests/elf/$t.c 2>&1); then
             env=""
             if [ "$t" = readonly_efault ]; then
                 env="LXRT_GUEST_PAGE=4096"
                 out=$(LXRT_GUEST_PAGE=4096 deadline 30 ./build/lxrun "$PWD/build/$t" 2>&1); rc=$?
+            elif [ "$t" = exec_env ]; then
+                out=$(LXRT_TEST_EXEC_ENV=kept deadline 30 ./build/lxrun "$PWD/build/$t" 2>&1); rc=$?
             else
                 out=$(deadline 30 ./build/lxrun "$PWD/build/$t" 2>&1); rc=$?
             fi

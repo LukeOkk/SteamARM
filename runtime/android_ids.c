@@ -719,6 +719,13 @@ long lxrt_aids_chown_file(const char *host, int fd, bool nofollow, uint32_t uid,
         if (uid != N && (uid != cu || fs != cu)) return LERR(EPERM);
         if (gid != N && gid != cg && (fs != cu || !member)) return LERR(EPERM);
     }
+    // A socket or a pipe has an owner on Linux (its sockfs/pipefs inode) and
+    // nowhere to record one here: no extended attributes on either. netd's
+    // resolver gives every AI_ADDRCONFIG probe socket the asking app's uid
+    // (bionic _find_src_addr), and the failure there read as "no address":
+    // apt in Termux, "No address associated with hostname" (MEASURED).
+    if (!host && (S_ISSOCK(st.st_mode) || S_ISFIFO(st.st_mode)))
+        return 0;
     uint32_t nu = uid == N ? cu : uid, ng = gid == N ? cg : gid;
     char val[32];
     const char *v = NULL;                      // back to the Mac's own ids: no record

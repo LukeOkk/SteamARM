@@ -308,12 +308,15 @@ void lxrt_proc_set_cmdline(const char *args, size_t len);
 // (procfs.c). A guest close or dup2 onto the number makes it the guest's.
 void lxrt_fd_hide(int fd, bool hide);
 bool lxrt_fd_hidden(int fd);
+int lxrt_fd_dup_private(int fd);       // a hidden high duplicate, no low number in between (procfs.c)
+const char *lxrt_host_tmpdir(void);   // the host temp dir for the runtime's own files (procfs.c)
 // The runtime's own descriptors in the guest's table: high numbers, hidden
 // from /proc/self/fd (procfs.c).
 #include <dirent.h>
 int lxrt_fd_private(int fd);
 DIR *lxrt_fdopendir_private(int fd);
 DIR *lxrt_opendir_private(const char *path);
+DIR *lxrt_opendirat_private(int dirfd, const char *path);
 void lxrt_closedir_private(DIR *d);
 // procpid.c: other guest processes in /proc, and /proc/net.
 bool lxrt_procpid_is_guest(int pid);
@@ -326,6 +329,7 @@ struct stat;
 bool lxrt_magic_link_stat(int dfd, const char *hp, struct stat *d);
 void lxrt_proc_thread_gone(int tid);   // drop /proc/self/task/<tid>   // exit_group: remove this pid's directory
 FILE *lxrt_trace_stream(void);
+FILE *lxrt_info_stream(void);   // informational lines: nowhere with LXRT_QUIET=1 (dispatch.c)
 int lxrt_trace_fd(void);
 void lxrt_host_altstack_after_fork(void);
 // Guest address base for 32-bit guests (runtime/gbase.c).

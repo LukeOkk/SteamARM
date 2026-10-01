@@ -181,6 +181,11 @@ int main(int argc, char **argv)
     check(fd >= 0 && fchown(fd, (uid_t)-1, 42) == 0 && fstat(fd, &st1) == 0 && st1.st_uid == 1234 && st1.st_gid == 42,
           "fchown(-1, 42): only the group changes (1234:42)");
     if (fd >= 0) close(fd);
+    // A socket's owner, as netd's resolver sets one on each AI_ADDRCONFIG
+    // probe socket (the asking app's uid): succeeds, as on Linux.
+    int us = socket(AF_INET, SOCK_DGRAM, 0);
+    check(us >= 0 && fchown(us, 10144, (gid_t)-1) == 0, "fchown of a socket to an app's uid (netd's resolver): 0");
+    if (us >= 0) close(us);
     check(lstat(ol, &st1) == 0 && st1.st_uid == st0.st_uid, "the symlink to it keeps its own owner (lstat)");
     check(stat(ol, &st1) == 0 && st1.st_uid == 1234, "... and stat through it shows the file's");
     check(lchown(ol, 2000, 2000) == 0 && lstat(ol, &st1) == 0 && st1.st_uid == 2000 && stat(o, &st0) == 0 && st0.st_uid == 1234,

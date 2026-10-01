@@ -29,10 +29,13 @@ FAILED = b"401\0"             # ResponseCode::DnsProxyOperationFailed
 LINUX_AF_INET, LINUX_AF_INET6 = 2, 10
 FROM_LINUX_AF = {0: socket.AF_UNSPEC, LINUX_AF_INET: socket.AF_INET, LINUX_AF_INET6: socket.AF_INET6}
 TO_LINUX_AF = {socket.AF_INET: LINUX_AF_INET, socket.AF_INET6: LINUX_AF_INET6}
-# bionic's AI_* bits that mean the same on Darwin (AI_NUMERICSERV differs:
-# 0x400 on bionic/Linux, 0x1000 on Darwin).
+# bionic's AI_* bits that mean the same on Darwin. bionic's are BSD's, not
+# glibc's: AI_NUMERICSERV is 0x8 (Darwin 0x1000) and 0x400 is AI_ADDRCONFIG.
+# Read as glibc's AI_NUMERICSERV, apt's AI_ADDRCONFIG lookup of
+# "<mirror>:https" was refused as a non-numeric service and Termux could not
+# resolve a thing ("No address associated with hostname", MEASURED).
 AI_KEEP = socket.AI_PASSIVE | socket.AI_CANONNAME | socket.AI_NUMERICHOST
-LINUX_AI_NUMERICSERV = 0x400
+BIONIC_AI_NUMERICSERV = 0x8
 EAI_NODATA, EAI_SERVICE = 7, 9        # bionic's numbers are BSD's, as Darwin's
 HOST_NOT_FOUND, NO_RECOVERY = 1, 3
 
@@ -68,7 +71,7 @@ def getaddrinfo(args):
     dflags = 0
     if flags != -1:
         dflags = flags & AI_KEEP
-        if flags & LINUX_AI_NUMERICSERV:
+        if flags & BIONIC_AI_NUMERICSERV:
             dflags |= socket.AI_NUMERICSERV
     # Only the families the Mac has an address in, as Android's resolver
     # does for an unnumbered name (a numeric one is taken as it is).

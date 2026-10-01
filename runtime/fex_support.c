@@ -261,11 +261,9 @@ static pthread_once_t g_memfd_dir_once = PTHREAD_ONCE_INIT;
 
 static void memfd_dir_init(void)
 {
-    // TMPDIR is per-user and per-session on macOS; /tmp is the documented
-    // fallback and is what a sandboxed process without TMPDIR gets.
-    const char *tmp = getenv("TMPDIR");
-    if (!tmp || !*tmp)
-        tmp = "/tmp";
+    // The host's temporary directory (lxrt_host_tmpdir), not the guest's
+    // TMPDIR, which may name a guest path.
+    const char *tmp = lxrt_host_tmpdir();
     size_t n = strlen(tmp);
     int w = snprintf(g_memfd_dir, sizeof g_memfd_dir, "%s%s", tmp,
                      (n && tmp[n - 1] == '/') ? "" : "/");

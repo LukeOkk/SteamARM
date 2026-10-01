@@ -277,14 +277,14 @@ static int rewrite_and_seal_image(struct lxrt_image *img, const char *what)
         fprintf(lxrt_trace_stream(), "lxrun: rewrite %s: %s\n", what, err ? err : "failed");
         return -1;
     }
-    fprintf(lxrt_trace_stream(), "[lxrt] rewrite: %zu words scanned | svc %zu found, %zu "
+    fprintf(lxrt_info_stream(), "[lxrt] rewrite: %zu words scanned | svc %zu found, %zu "
                     "rewritten, %zu poisoned | tls %zu reads + %zu writes, "
                     "%zu rewritten, %zu poisoned | ctr %zu | sysreg %zu\n",
             rep.scanned_words, rep.sites_found, rep.sites_rewritten,
             rep.sites_unreachable, rep.tls_read_found, rep.tls_write_found,
             rep.tls_rewritten, rep.tls_unreachable, rep.ctr_rewritten,
             rep.sysreg_rewritten);
-    fprintf(lxrt_trace_stream(), "[lxrt] rewrite: x18 %zu found in %d code windows, %zu rewritten, "
+    fprintf(lxrt_info_stream(), "[lxrt] rewrite: x18 %zu found in %d code windows, %zu rewritten, "
                     "%zu unsupported, %zu unreachable\n", rep.x18_found, img->ncode,
             rep.x18_rewritten, rep.x18_unsupported, rep.x18_unreachable);
     if (rep.tls_kept)
@@ -520,7 +520,7 @@ int main(int argc, char **argv)
         fprintf(lxrt_trace_stream(), "lxrun: %s\n", err ? err : "load failed");
         return 1;
     }
-    fprintf(lxrt_trace_stream(), "[lxrt] %s: %s, %zu bytes at %p, entry 0x%llx\n",
+    fprintf(lxrt_info_stream(), "[lxrt] %s: %s, %zu bytes at %p, entry 0x%llx\n",
             path, img.is_pie ? "PIE" : "EXEC", img.span, (void *)img.base,
             (unsigned long long)img.entry);
     lxrt_main_image_base = (uint64_t)(uintptr_t)img.base;
@@ -538,7 +538,7 @@ int main(int argc, char **argv)
         extern const char *lxrt_guest_resolve_follow(const char *, char *, size_t);
         static char ifollowed[PATH_MAX];
         const char *ipath = resolve_guest_path(lxrt_guest_resolve_follow(img.interp, ifollowed, sizeof ifollowed));
-        fprintf(lxrt_trace_stream(), "[lxrt] PT_INTERP %s -> %s\n", img.interp, ipath);
+        fprintf(lxrt_info_stream(), "[lxrt] PT_INTERP %s -> %s\n", img.interp, ipath);
         if (lxrt_load_elf(ipath, &interp, &err) != 0) {
             fprintf(lxrt_trace_stream(), "lxrun: interpreter: %s\n", err ? err : "load failed");
             return 1;
@@ -547,7 +547,7 @@ int main(int argc, char **argv)
             return 1;
         img.interp_base = (uint64_t)interp.base;
         entry = interp.entry;
-        fprintf(lxrt_trace_stream(), "[lxrt] interpreter at %p, entry 0x%llx\n",
+        fprintf(lxrt_info_stream(), "[lxrt] interpreter at %p, entry 0x%llx\n",
                 (void *)interp.base, (unsigned long long)entry);
     }
 
@@ -586,6 +586,21 @@ int main(int argc, char **argv)
     // arrives with raw `svc` in it.
     lxrt_dispatch_set_rewrite_mapped(true);
     lxrt_vdso_setup();
+    // FEX is an aarch64 program with glibc's dynamic linker, which honours
+    // LD_PRELOAD -- the x86 guest's (Termux preloads libtermux-exec.so): it
+    // could not preload an x86 library and said so on stderr, into whatever
+    // the guest was capturing ("'10144' returned by 'id -u' command is not
+    // valid", MEASURED). FEX's linker gets it renamed, and FEX gives it back
+    // to the guest (patches/fex-lxrt-guest-ld-preload.patch).
+    {
+        const char *b = strrchr(argv[i], '/');     // path is the loader's by now
+        b = b ? b + 1 : argv[i];
+        const char *lp = getenv("LD_PRELOAD");
+        if (!strncmp(b, "FEX", 3) && lp) {
+            setenv("LXRT_GUEST_LD_PRELOAD", lp, 1);
+            unsetenv("LD_PRELOAD");
+        }
+    }
     void *sp = lxrt_build_stack(&img, argc - i, &argv[i], environ, &err);
     if (!sp) {
         fprintf(lxrt_trace_stream(), "lxrun: stack: %s\n", err ? err : "failed");
@@ -597,7 +612,7 @@ int main(int argc, char **argv)
     // mapped rather than next to it.
     lxrt_dispatch_init_brk(LXRT_ALIGN_UP(img.brk + LXRT_HOST_PAGE, LXRT_HOST_PAGE));
 
-    fprintf(lxrt_trace_stream(), "[lxrt] entering guest at 0x%llx, sp %p\n",
+    fprintf(lxrt_info_stream(), "[lxrt] entering guest at 0x%llx, sp %p\n",
             (unsigned long long)entry, sp);
     fflush(stderr);
 

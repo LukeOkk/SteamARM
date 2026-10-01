@@ -70,10 +70,13 @@ static const char *abstract_dir(void)
     if (tried)
         return ready ? dir : NULL;
     tried = true;
-    const char *tmp = getenv("TMPDIR");
-    if (!tmp || !*tmp)
-        tmp = "/tmp";
-    snprintf(dir, sizeof dir, "%s/lxrt-abstract-%u", tmp, (unsigned)getuid());
+    // Always /tmp, never $TMPDIR: the abstract namespace is one per machine
+    // (per user here), and TMPDIR is the guest's to set -- Termux points it
+    // into its own prefix, the directory could not be made there, and FEX
+    // could not reach its server ("Couldn't connect to FEXServer socket ...
+    // 22", MEASURED); two processes with different TMPDIRs would not even
+    // have met.
+    snprintf(dir, sizeof dir, "/tmp/lxrt-abstract-%u", (unsigned)getuid());
     if (mkdir(dir, 0700) != 0 && errno != EEXIST)
         return NULL;
     ready = true;

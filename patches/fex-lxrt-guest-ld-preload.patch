@@ -1,0 +1,27 @@
+--- a/Source/Tools/FEXInterpreter/ELFCodeLoader.h	2026-09-30 21:49:07
++++ b/Source/Tools/FEXInterpreter/ELFCodeLoader.h	2026-09-30 21:49:07
+@@ -33,6 +33,7 @@
+ #include <sys/personality.h>
+ #include <sys/prctl.h>
+ #include <sys/random.h>
++#include <string_view>
+ 
+ #define PAGE_START(x) ((x) & ~(uintptr_t)(4095))
+ #define PAGE_OFFSET(x) ((x) & 4095)
+@@ -331,6 +332,16 @@
+         if (envp[i] == nullptr) {
+           break;
+         }
++        // lxrun renames the guest's LD_PRELOAD for FEX's own (aarch64) dynamic
++        // linker, which would try to preload the guest's x86 library and
++        // complain on stderr: it is the guest's again here.
++        constexpr std::string_view HiddenPreload = "LXRT_GUEST_LD_PRELOAD=";
++        if (std::string_view(envp[i]).starts_with(HiddenPreload)) {
++          fextl::string Preload = "LD_PRELOAD=";
++          Preload += envp[i] + HiddenPreload.size();
++          EnvironmentVariables.emplace_back(std::move(Preload));
++          continue;
++        }
+         EnvironmentVariables.emplace_back(envp[i]);
+       }
+     }

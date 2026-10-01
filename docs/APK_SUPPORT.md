@@ -361,7 +361,14 @@ on the same cases.
    files included) since stage 30, the Mac's keyboard layout and the
    clipboard, text both ways, since stage 31
    (`benchmarks/stage31-runtime-waits-clipboard.txt`), WebView since stage 33
-   (`benchmarks/stage33-android-webview.txt`).
+   (`benchmarks/stage33-android-webview.txt`). Since stage 34
+   (`benchmarks/stage34-android-termux.txt`): apps that run programs (a
+   script or an x86 program from an app's seccomp-filtered process; FEX
+   read the program from a bogus descriptor before), pseudo-terminals
+   (`/dev/ptmx`, `/dev/pts/N`), and shared storage (`/sdcard`,
+   `/storage/emulated/0`, each app's external directory). MEASURED with
+   Termux: its bootstrap installs, its shell runs, `apt update` and
+   `apt install` work.
 2. **Real-session bundle validation.** Synthetic unit tests MEASURE the
    selection and local package storage of XAPK, APKS, APKM, plain APK bags
    and OBB data. `scripts/android-session.py` stages chosen APKs into one
@@ -378,8 +385,9 @@ on the same cases.
    - runtime permission grants;
    - `/data/data/<package>` inside a runtime: today's data directory is
      where it would be bound;
-   - general app media directories (bundle OBB files are staged, but their
-     real-session use is UNTESTED).
+   - general app media directories: shared storage works since stage 34
+     (an app's external directory is made, `/sdcard` is `/data/media/0`);
+     bundle OBB files are staged, but their real-session use is UNTESTED.
 5. **Google Play and Google Mobile Services.** These are policy, not code
    yet:
    - Google's proprietary components (GMS, the Play Store) are never

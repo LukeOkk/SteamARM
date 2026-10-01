@@ -170,6 +170,45 @@ long lxrt_execve(const char *path, char *const argv[], char *const envp[])
             }
         }
     }
+    // The runtime's own settings (LXRT_*: the root, the binder, property
+    // and input directories, ...) and the emulator's (FEX_*: its rootfs,
+    // server socket, guest base, ...) are not the guest's to drop: a program
+    // that execs with an environment of its own -- Termux runs its bootstrap
+    // that way -- started the next runtime without its root ("lxrun: open
+    // /usr/lib/lxrt-emu/FEX: No such file or directory", MEASURED). Those the
+    // guest's environment lacks are carried over from this process's.
+    {
+        int ec = 0, extra = 0;
+        while (use_env[ec]) ec++;
+        for (char **e = environ; *e; e++)
+            if (!strncmp(*e, "LXRT_", 5) || !strncmp(*e, "FEX_", 4)) extra++;
+        if (extra) {
+            char **carried = calloc((size_t)(ec + extra + 1), sizeof(char *));
+            if (carried) {
+                int k = 0;
+                for (int j = 0; j < ec; j++) carried[k++] = use_env[j];
+                for (char **e = environ; *e; e++) {
+                    if (strncmp(*e, "LXRT_", 5) && strncmp(*e, "FEX_", 4)) continue;
+                    // The guest's own LD_PRELOAD, renamed for FEX's linker
+                    // (main.c): the guest's environment decides that one.
+                    // And FEX's per-exec descriptors (the program, the
+                    // seccomp state): numbers this runtime was started with,
+                    // meaningless -- or someone else's -- in the next image.
+                    if (!strncmp(*e, "LXRT_GUEST_LD_PRELOAD=", 22) ||
+                        !strncmp(*e, "FEX_EXECVEFD=", 13) || !strncmp(*e, "FEX_SECCOMPFD=", 14))
+                        continue;
+                    const char *eq = strchr(*e, '=');
+                    size_t nl = eq ? (size_t)(eq - *e) + 1 : strlen(*e);
+                    bool have = false;
+                    for (int j = 0; j < ec && !have; j++)
+                        have = !strncmp(use_env[j], *e, nl);
+                    if (!have) carried[k++] = *e;
+                }
+                carried[k] = NULL;
+                use_env = carried;
+            }
+        }
+    }
     // Android ids (runtime/android_ids.h) follow execve, recomputed by
     // Linux's rules for the new image; whatever the guest's environment
     // said about them is replaced.

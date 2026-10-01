@@ -293,8 +293,7 @@ long lxrt_bwrap_exec(char *const argv0[], char *const envp[],
     v[cnt] = NULL;
 
     char sandbox[PATH_MAX];
-    const char *tmp = getenv("TMPDIR");
-    snprintf(sandbox, sizeof sandbox, "%s/lxrt-sandbox-XXXXXX", tmp && *tmp ? tmp : "/tmp");
+    snprintf(sandbox, sizeof sandbox, "%s/lxrt-sandbox-XXXXXX", lxrt_host_tmpdir());
     if (!mkdtemp(sandbox))
         return LERR(errno);
     if (lxrt_trace_on())

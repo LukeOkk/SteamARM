@@ -11,4 +11,7 @@
 #define LXRT_IOCTL_TTY_H
 #include <stdint.h>
 long lxrt_ioctl(int fd, unsigned long lreq, uint64_t arg);
+void lxrt_pty_slave_opened(const char *host_path);   // the guest opened /dev/ttysNNN
+void lxrt_pty_close(int fd);                          // a descriptor closed
+
 #endif

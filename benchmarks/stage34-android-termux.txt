@@ -1,0 +1,106 @@
+Stage 34: Termux, and apps that run programs (exec, terminals, apt)
+Mac mini M4, macOS 27; x86_64 LineageOS 18.1 root under FEX (sesstest
+clone). APKs from F-Droid only (~/SteamARM-roots/android/apk-samples):
+Termux 0.119.0-beta.3 (versionCode 1022), the F-Droid client (versionCode
+2000050), Shattered Pixel Dungeon (912). No Google software.
+
+== The app sweep before this stage
+Shattered Pixel Dungeon: window focused 4.7 s after am start, the game draws
+(GLES2 on SwiftShader). F-Droid: window focused 7.5 s after am start, its
+index downloaded, worker SUCCESS. Both had "Invalid mkdirs" for their
+external directories (wall 1). Termux: "Bootstrap Error", nothing usable.
+
+== One wall after another
+1. Shared storage. StorageManagerService.mkdirs refuses a path whose
+   canonical form is not /storage/<volume>/[<user>/]Android/(data|media|
+   obb)/<pkg>; with /storage a symlink to /data/media every app's external
+   directory was "Invalid mkdirs". scripts/android-boot.py storage_layout:
+   /storage a real directory, /storage/emulated/0 and /mnt/user/0/emulated/0
+   bound to /data/media/0, /storage/self/primary and /mnt/user/0/primary
+   links; every service and `android-session.py shell` get the binds
+   (tests/android "shared storage": one file seen through /sdcard,
+   /storage/emulated/0 and /storage/self/primary; no "Invalid mkdirs").
+2. Termux runs its bootstrap with an environment of its own: the next
+   runtime had no root ("lxrun: open /usr/lib/lxrt-emu/FEX: No such file or
+   directory"). execve now carries the runtime's LXRT_* and FEX_* settings a
+   guest environment lacks -- not FEX's per-exec descriptors
+   (FEX_EXECVEFD, FEX_SECCOMPFD) (tests/elf/exec_env.c 3 of 3; 0.3.10 0).
+3. "Couldn't connect to FEXServer socket ... 22": Termux sets TMPDIR to its
+   prefix, a guest path, and the abstract-socket directory and the
+   runtime's /proc followed it ("lxrun: open /proc/self/exe: No such file
+   or directory"). Abstract sockets are always /tmp/lxrt-abstract-<uid>; the
+   runtime's own files (/proc, memfds, sandboxes) use the host temporary
+   directory fixed once per process tree (LXRT_HOST_TMPDIR).
+4. "'10144' returned by 'id -u' command is not valid": the second stage
+   captures `id -u 2>&1`, and got the runtime's start-up lines and FEX's
+   linker's complaint that it could not preload the guest's x86
+   libtermux-exec.so. LXRT_QUIET=1 (Android sessions) sends the runtime's
+   informational lines nowhere -- a stream with no descriptor behind it: a
+   first version opened /dev/null and the zygote aborted on it ("Unable to
+   stat 40"). The guest's LD_PRELOAD reaches FEX renamed and FEX gives it
+   back to the guest (patches/fex-lxrt-guest-ld-preload.patch).
+5. "Invalid or Unsupported elf file." from FEX, in the app only. Logged in
+   the new process: FEX_EXECVEFD=-100 FEX_SECCOMPFD=4. With the app's
+   seccomp filter inherited, FEX's execve passed its dirfd (AT_FDCWD) as
+   "the program's descriptor" for every exec binfmt_misc would not take,
+   and the next FEX read its ELF from fd -100: every script and x86 program
+   an app runs (Termux's bootstrap, Runtime.exec) failed.
+   patches/fex-lxrt-execve-no-fd.patch: only an execveat of a descriptor
+   passes one, and a negative one means none. tests/android/
+   x86_seccomp_exec.c (freestanding x86-64 with a seccomp filter): a script
+   and `sh -c` both start; with the previous FEX neither.
+   Bootstrap: "Bootstrap packages installed successfully" (second stage 8 s).
+6. "Cannot open /dev/ptmx" and the app closed: no pseudo-terminals. The
+   master is the host's /dev/ptmx, slave N is /dev/ttysNNN where Linux has
+   /dev/pts/N (both ways: open/stat, and /proc/self/fd so ttyname works);
+   TIOCGPTN, TIOCSPTLCK (grant and unlock), TIOCGPTPEER. Darwin refuses a
+   master's termios and window size until the slave has been opened once
+   (ENOTTY), and resets them at that first open; apt and Termux set them
+   before. The runtime opens the slave privately and holds it until the
+   guest opens it or closes the master (tests/elf/pty.c 13 of 13).
+   Termux's shell: `bash -l` under FEX; a command typed with `input text`
+   gave x86_64, 10144, /data/data/com.termux/files/usr; `stty size` 42 49.
+7. apt update: "Something wicked happened resolving
+   'packages-cf.termux.dev:https' (7 - No address associated with
+   hostname)", while curl in the same terminal got 204. bionic's AI_* flags
+   are BSD's: 0x400 is AI_ADDRCONFIG, AI_NUMERICSERV is 0x8. The session's
+   dnsproxyd read 0x400 as glibc's AI_NUMERICSERV and refused the named
+   service (tests/test_android_dnsproxy.py: bionic AI_ADDRCONFIG with
+   "https", bionic AI_NUMERICSERV). Along the way: fchown of a socket (netd's
+   resolver gives each AI_ADDRCONFIG probe socket the app's uid) now
+   succeeds as on Linux (tests/elf ANDROID_IDS).
+   apt update: "Fetched 597 kB in 25s", signatures verified, "74 packages can
+   be upgraded". apt install tree: dpkg unpacks and sets it up, `tree
+   --version` 2.3.2; dpkg's progress comes through apt's pty.
+
+== Also fixed
+- The runtime's private descriptors passed through a low number for a
+  moment (dup, open before the move), and a guest thread listing
+  /proc/self/fd could catch one: zygote "Unsupported st_mode for FD 40:
+  DIR". Duplicates go straight to a high number; path opens and the listing
+  share a lock.
+- A service's exit kills its process group, as init's Service::Reap does:
+  after a zygote abort the old system_server kept its services registered
+  and every new one died on them ("BinderProxy cannot be cast to
+  PermissionManagerService").
+
+   Window size in the shell (`stty size` typed into Termux), 3 runs each:
+   with the held slave 42 49, 42 49, 42 49; without it 17 49, 0 0, 0 0.
+
+== Not explained
+Twice in 9 Termux runs, right after Termux's window appeared and before the
+typed command ran, system_server's watchdog killed it
+(WindowManagerGlobalLock held, its holder not in the dump; the ANR traces
+are empty without debuggerd), and every following system_server hung at
+start until the session was stopped. Not seen in 6 more runs (3 with the
+held pty slave, 3 without) nor in the full Android suite.
+
+== Matrix on this runtime
+tests/elf 99/0 (exec_env and pty new; ANDROID_IDS checks a socket's fchown);
+i386 18/0; win 11/0; vk_device 2/0; arm64 4/0; wlmac 4/0; launcher core
+35/0; Python 137 OK (two dnsproxy checks new); tests/android 87 passed, 0
+failed, 2 expected failures ("exec under a seccomp filter (FEX)" and
+"shared storage" new). After the last runtime change (FEX's per-exec
+descriptors no longer carried across exec): tests/elf 99/0, Python OK,
+x86_seccomp_exec PASS, Termux 6 of 6 runs with a working shell.
+Steam was not run on this runtime.

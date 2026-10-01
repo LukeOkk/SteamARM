@@ -299,7 +299,7 @@ const char *lxrt_procnet_translate(const char *sub, const char *dir)
 // The procfs directory another guest process maintains, if we can find it.
 static bool owner_dir(int pid, char *out, size_t n)
 {
-    const char *cands[3] = { getenv("TMPDIR"), "/tmp", "/private/tmp" };
+    const char *cands[3] = { lxrt_host_tmpdir(), "/tmp", "/private/tmp" };
     for (int i = 0; i < 3; i++) {
         if (!cands[i] || !*cands[i])
             continue;

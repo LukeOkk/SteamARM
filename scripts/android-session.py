@@ -333,6 +333,13 @@ def guest(s, argv, timeout=120, ids="root"):
     """A guest program in the session. (returncode, stdout)."""
     genv = "LXRT_BINDER_DIR=%s/binder LXRT_PROPERTY_DIR=%s/props LXRT_INPUT_DIR=%s/input LXRT_ANDROID_IDS=%s" % (
         s["dir"], s["dir"], s["dir"], ids)
+    # External storage as the session's services see it (android-boot.py
+    # storage_layout): /sdcard is /data/media/0 for a shell command too.
+    root = s["root"]
+    if os.path.isdir(root + "/storage/emulated") and not os.path.islink(root + "/storage"):
+        binds = [("/storage/emulated/0", root + "/data/media/0"), ("/mnt/user/0/emulated/0", root + "/data/media/0"),
+                 ("/storage/emulated", root + "/storage/emulated"), ("/storage/self", root + "/storage/self")]
+        genv += " LXRT_MOUNTS=" + "".join("%s\x1e%s\x1e0\x1f" % b for b in binds)
     env = dict(os.environ, ANDROID_X86_ROOT=s["root"], LXRUN=LXRUN, ANDROID_X86_GENV=genv,
                STEAMARM_NO_SAFEGUARD="1")
     try:
@@ -416,6 +423,10 @@ def start(a, exit_with=0):
             # "Waydroid" window and set active_apps=Waydroid itself.
             cmd += ["--prop", "persist.waydroid.multi_windows=true", "--prop", "waydroid.active_apps=none",
                     "--prop", "waydroid.background_start=true"]
+        # ANDROID_SESSION_PROPS="key=value ...": more boot properties (tests,
+        # experiments), after the session's own.
+        for kv in os.environ.get("ANDROID_SESSION_PROPS", "").split():
+            cmd += ["--prop", kv]
         if exit_with:
             cmd += ["--exit-with", str(exit_with)]
         p = subprocess.Popen(cmd, stdin=subprocess.DEVNULL, stdout=LOGF, stderr=subprocess.STDOUT,

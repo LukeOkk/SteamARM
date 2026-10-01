@@ -12,8 +12,10 @@
 #include "inotify.h"
 
 #include <errno.h>
+#include <pthread.h>
 #include <fcntl.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <sys/filio.h>
 #include <sys/ioctl.h>
@@ -33,8 +35,101 @@ enum {
     L_FIONCLEX = 0x5450, L_FIOCLEX = 0x5451,
     L_TCGETS2 = 0x802c542a, L_TCSETS2 = 0x402c542b, L_TCSETSW2 = 0x402c542c,
     L_TCSETSF2 = 0x402c542d,
-    L_TIOCGPTN = 0x80045430, L_TIOCSPTLCK = 0x40045431,
+    L_TIOCGPTN = 0x80045430, L_TIOCSPTLCK = 0x40045431, L_TIOCGPTPEER = 0x5441,
 };
+
+// Linux's pseudo-terminals on Darwin's: the master is the host's /dev/ptmx,
+// slave N is /dev/ttysNNN where Linux has /dev/pts/N (dispatch.c maps the
+// names both ways). Termux's terminal is one: "Cannot open /dev/ptmx" and
+// the app closed (MEASURED).
+static int pty_number(int fd)
+{
+    char name[128];
+    if (ioctl(fd, TIOCPTYGNAME, name) != 0)
+        return -1;
+    const char *t = strstr(name, "/dev/ttys");
+    return t ? atoi(t + 9) : -1;
+}
+
+// A master's terminal settings and window size: Linux has them from the
+// start, Darwin only once the slave has been opened (ENOTTY before), and it
+// resets them when the slave's first open comes. apt sets the master's modes
+// before its child opens the slave ("Setting in Start via TCSANOW for master
+// fd 13 failed! - tcsetattr (25: ...)", MEASURED), Termux its UTF-8 mode and
+// size. So the runtime opens the slave itself, privately, and holds it until
+// the guest opens it (lxrt_pty_slave_opened) or closes the master.
+static struct { int master, num, slave; } g_held[32];
+static pthread_mutex_t g_held_mu = PTHREAD_MUTEX_INITIALIZER;
+
+static bool pty_hold_slave(int mfd)
+{
+    char name[128];
+    if (ioctl(mfd, TIOCPTYGNAME, name) != 0)
+        return false;
+    const char *t = strstr(name, "/dev/ttys");
+    if (!t)
+        return false;
+    int num = atoi(t + 9);
+    bool ok = false;
+    pthread_mutex_lock(&g_held_mu);
+    for (size_t i = 0; i < sizeof g_held / sizeof g_held[0]; i++)
+        if (g_held[i].slave > 0 && g_held[i].num == num) { ok = true; goto out; }
+    for (size_t i = 0; i < sizeof g_held / sizeof g_held[0]; i++)
+        if (g_held[i].slave <= 0) {
+            int s = open(name, O_RDWR | O_NOCTTY | O_CLOEXEC | O_NONBLOCK);
+            if (s < 0)
+                break;
+            g_held[i].master = mfd;
+            g_held[i].num = num;
+            g_held[i].slave = lxrt_fd_private(s);
+            ok = true;
+            break;
+        }
+out:
+    pthread_mutex_unlock(&g_held_mu);
+    return ok;
+}
+
+static void held_release(size_t i)
+{
+    int s = g_held[i].slave;
+    g_held[i].slave = 0;
+    lxrt_fd_hide(s, false);
+    close(s);
+}
+
+void lxrt_pty_slave_opened(const char *host_path)
+{
+    if (strncmp(host_path, "/dev/ttys", 9))
+        return;
+    int num = atoi(host_path + 9);
+    pthread_mutex_lock(&g_held_mu);
+    for (size_t i = 0; i < sizeof g_held / sizeof g_held[0]; i++)
+        if (g_held[i].slave > 0 && g_held[i].num == num)
+            held_release(i);
+    pthread_mutex_unlock(&g_held_mu);
+}
+
+void lxrt_pty_close(int fd)
+{
+    if (!__atomic_load_n(&g_held[0].slave, __ATOMIC_RELAXED)) {
+        bool any = false;
+        for (size_t i = 1; i < sizeof g_held / sizeof g_held[0] && !any; i++)
+            any = __atomic_load_n(&g_held[i].slave, __ATOMIC_RELAXED) > 0;
+        if (!any)
+            return;
+    }
+    pthread_mutex_lock(&g_held_mu);
+    for (size_t i = 0; i < sizeof g_held / sizeof g_held[0]; i++)
+        if (g_held[i].slave > 0 && g_held[i].master == fd)
+            held_release(i);
+    pthread_mutex_unlock(&g_held_mu);
+}
+
+// tcgetattr/tcsetattr/ioctl on a terminal, through a held slave for a pty
+// master whose slave nobody opened yet.
+#define PTY_RETRY(fd, call) \
+    ((call) == 0 ? 0 : (errno == ENOTTY && pty_hold_slave(fd)) ? (call) : -1)
 
 // ---- Linux struct termios (36 bytes) / termios2 (44 bytes), NCCS = 19
 struct linux_termios {
@@ -158,7 +253,7 @@ long lxrt_ioctl(int fd, unsigned long lreq, uint64_t arg)
     switch ((uint32_t)lreq) {
     case L_TCGETS: case L_TCGETS2: {
         struct termios d;
-        if (tcgetattr(fd, &d) != 0) return LERR(errno);
+        if (PTY_RETRY(fd, tcgetattr(fd, &d)) != 0) return LERR(errno);
         if (!p) return LERR(EFAULT);
         struct linux_termios l;
         termios_to_linux(&d, &l);
@@ -169,7 +264,7 @@ long lxrt_ioctl(int fd, unsigned long lreq, uint64_t arg)
     case L_TCSETS2: case L_TCSETSW2: case L_TCSETSF2: {
         if (!p) return LERR(EFAULT);
         struct termios d;
-        if (tcgetattr(fd, &d) != 0) return LERR(errno);
+        if (PTY_RETRY(fd, tcgetattr(fd, &d)) != 0) return LERR(errno);
         struct linux_termios l;
         memset(&l, 0, sizeof l);
         bool two = lreq == L_TCSETS2 || lreq == L_TCSETSW2 || lreq == L_TCSETSF2;
@@ -181,7 +276,7 @@ long lxrt_ioctl(int fd, unsigned long lreq, uint64_t arg)
     }
     case L_TIOCGWINSZ: {
         struct winsize w;                   // same layout on both: 4 x u16
-        if (ioctl(fd, TIOCGWINSZ, &w) != 0) return LERR(errno);
+        if (PTY_RETRY(fd, ioctl(fd, TIOCGWINSZ, &w)) != 0) return LERR(errno);
         if (!p) return LERR(EFAULT);
         memcpy(p, &w, sizeof w);
         return 0;
@@ -189,7 +284,7 @@ long lxrt_ioctl(int fd, unsigned long lreq, uint64_t arg)
     case L_TIOCSWINSZ: {
         if (!p) return LERR(EFAULT);
         struct winsize w; memcpy(&w, p, sizeof w);
-        return ioctl(fd, TIOCSWINSZ, &w) == 0 ? 0 : LERR(errno);
+        return PTY_RETRY(fd, ioctl(fd, TIOCSWINSZ, &w)) == 0 ? 0 : LERR(errno);
     }
     case L_TIOCGPGRP: {
         pid_t g = tcgetpgrp(fd);
@@ -248,13 +343,31 @@ long lxrt_ioctl(int fd, unsigned long lreq, uint64_t arg)
     }
     case L_FIOCLEX:  return fcntl(fd, F_SETFD, FD_CLOEXEC) == 0 ? 0 : LERR(errno);
     case L_FIONCLEX: return fcntl(fd, F_SETFD, 0) == 0 ? 0 : LERR(errno);
-    case L_TIOCGPTN: case L_TIOCSPTLCK:
-        // Pseudo-terminal management: Darwin has posix_openpt/grantpt/ptsname
-        // but no pts number ioctl. Not a terminal request a program can
-        // recover from silently -- say so.
-        if (lxrt_trace_on())
-            fprintf(lxrt_trace_stream(), "[lxrt] ioctl: pty request 0x%lx not supported\n", lreq);
-        return LERR(ENOTTY);
+    case L_TIOCGPTN: {
+        if (!p) return LERR(EFAULT);
+        int n = pty_number(fd);
+        if (n < 0) return LERR(ENOTTY);
+        *(uint32_t *)p = (uint32_t)n;
+        return 0;
+    }
+    case L_TIOCSPTLCK: {
+        // Unlocking is Darwin's grant then unlock; a lock request (non-zero)
+        // has no Darwin counterpart and a fresh master is locked anyway.
+        if (!p) return LERR(EFAULT);
+        if (*(int32_t *)p != 0)
+            return pty_number(fd) < 0 ? LERR(ENOTTY) : 0;
+        if (ioctl(fd, TIOCPTYGRANT) != 0 || ioctl(fd, TIOCPTYUNLK) != 0)
+            return LERR(errno);
+        return 0;
+    }
+    case L_TIOCGPTPEER: {
+        // The slave, opened through the master: flags are open(2)'s.
+        char name[128];
+        if (ioctl(fd, TIOCPTYGNAME, name) != 0)
+            return LERR(ENOTTY);
+        int s = open(name, lxrt_open_flags_to_darwin((int)arg));
+        return s >= 0 ? s : LERR(errno);
+    }
     default:
         if (lxrt_trace_on())
             fprintf(lxrt_trace_stream(), "[lxrt] ioctl: unknown request 0x%lx on fd %d -> ENOTTY\n",

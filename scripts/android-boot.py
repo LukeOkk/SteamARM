@@ -632,6 +632,9 @@ class Boot:
             "OBJC_DISABLE_INITIALIZE_FORK_SAFETY": "YES",
             "LXRT_PROPERTY_DIR": self.propdir, "LXRT_BINDER_DIR": self.binderdir,
             "LXRT_BINDER_HUB_IDLE": "30",
+            # No runtime chatter on Android's stderr (runtime lxrt_info_stream):
+            # programs capture their children's (Termux's `$(id -u 2>&1)`).
+            "LXRT_QUIET": os.environ.get("LXRT_QUIET", "1"),
             # This boot's /dev/input (runtime/evdev.c): the display composer's
             # input FIFOs and InputFlinger's EventHub meet there, not in the
             # shared /tmp/lxrt-input of steamarm-inputd's controllers.
@@ -943,6 +946,8 @@ class Boot:
         env.update(svc.env)
         env.update(senv)
         env["LXRT_ANDROID_IDS"] = self.ids_for(svc)
+        if getattr(self, "storage_mounts", ""):
+            env["LXRT_MOUNTS"] = self.storage_mounts + env.get("LXRT_MOUNTS", "")
         if self.x86:
             env.update(self.profile.get("env_x86", {}).get(name, {}))
         if name == "hwservicemanager" and self.profile.get("vintf_passthrough"):
@@ -950,7 +955,7 @@ class Boot:
             if m:
                 # One bind in the runtime's table (runtime/mounts.c): this
                 # process reads the copy at the image's path.
-                env["LXRT_MOUNTS"] = "/vendor/etc/vintf/manifest.xml\x1e%s\x1e1\x1f" % m
+                env["LXRT_MOUNTS"] = env.get("LXRT_MOUNTS", "") + "/vendor/etc/vintf/manifest.xml\x1e%s\x1e1\x1f" % m
         # 32-bit vendor daemons (profile "vendor32"): the image's generated
         # linker configuration for them alone, and no seccomp policy.
         v32 = self.profile.get("vendor32", {}).get(name)
@@ -1131,6 +1136,16 @@ class Boot:
             how = ("signal %d" % -rc) if rc < 0 else ("status %d" % rc)
             log("service %s (pid %d) exited with %s after %.1f s" %
                 (name, svc.proc.pid, how, time.time() - svc.started_at))
+            # init's Service::Reap: KillProcessGroup(SIGKILL) -- what the
+            # service forked dies with it. The zygote's system_server stays in
+            # its group: left running after a zygote abort, it kept its
+            # services registered, and every new system_server died on them
+            # ("BinderProxy cannot be cast to PermissionManagerService", a
+            # crash loop to the end of the boot, MEASURED).
+            try:
+                os.killpg(svc.proc.pid, signal.SIGKILL)
+            except OSError:
+                pass
             if svc.oneshot:
                 svc.state = "stopped"
                 self.props.set("init.svc." + name, "stopped")
@@ -1233,6 +1248,47 @@ class Boot:
             os.chmod(hp, mode)
             set_owner(hp, AID[user], AID[group])
         log("init_user0: user 0's storage prepared as vold would (%d directories)" % len(dirs))
+        self.storage_layout()
+
+    def storage_layout(self):
+        """External storage the way vold and the zygote leave it, without
+        FUSE: /storage a real directory (canonical paths must start with
+        /storage/<volume>/<user>/ -- StorageManagerService.mkdirs refused
+        every app's external files directory, "Invalid mkdirs path:
+        /sdcard/Android/data/<package>/files", while /storage was a symlink
+        to /mnt/runtime/default and /storage/emulated did not exist),
+        /storage/emulated/0 and /mnt/user/0/emulated/0 bound to /data/media/0
+        in every process's mount table (storage_mounts; the zygote binds
+        /mnt/user/0 over /storage for each app), and self/primary pointing at
+        /storage/emulated/0 in both, as vold's symlinks do."""
+        st = self.hpath("/storage")
+        if os.path.islink(st):
+            os.unlink(st)
+        for d in ("/storage", "/storage/emulated", "/storage/emulated/0", "/storage/self",
+                  "/mnt/user/0", "/mnt/user/0/emulated", "/mnt/user/0/emulated/0", "/mnt/user/0/self"):
+            os.makedirs(self.hpath(d), exist_ok=True)
+        for link in ("/storage/self/primary", "/mnt/user/0/self/primary", "/mnt/user/0/primary"):
+            hp = self.hpath(link)
+            if os.path.islink(hp) and os.readlink(hp) == "/storage/emulated/0":
+                continue
+            if os.path.lexists(hp):
+                os.unlink(hp)
+            os.symlink("/storage/emulated/0", hp)
+        media = self.hpath("/data/media/0")
+        for d in ("Android", "Android/data", "Android/media", "Android/obb",
+                  "Download", "Pictures", "Music", "Movies", "DCIM", "Documents"):
+            p = os.path.join(media, d)
+            os.makedirs(p, exist_ok=True)
+            os.chmod(p, 0o777)
+        os.chmod(media, 0o777)
+        # Longest prefix wins in the runtime's table, so these hold whatever
+        # the zygote binds over /storage for an app (/mnt/user/0 with FUSE,
+        # /mnt/runtime/<mode> without).
+        binds = [("/storage/emulated/0", media), ("/mnt/user/0/emulated/0", media),
+                 ("/storage/emulated", self.hpath("/storage/emulated")),
+                 ("/storage/self", self.hpath("/storage/self"))]
+        self.storage_mounts = "".join("%s\x1e%s\x1e0\x1f" % b for b in binds)
+        log("storage: /storage/emulated/0 is /data/media/0 for every process")
 
     def skip(self, cmd, why):
         k = cmd[0]

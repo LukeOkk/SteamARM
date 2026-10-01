@@ -78,6 +78,8 @@ base_env=(
     FEX_LOWWINDOW="${FEX_LOWWINDOW:-1}" FEX_SMCCHECKS="${FEX_SMCCHECKS:-mtrack}"
     FEX_SILENTLOG="${FEX_SILENTLOG:-1}" FEX_OUTPUTLOG=stderr
     HOME=/data/local/tmp
+    # The runtime's informational lines off Android's stderr (lxrt_info_stream).
+    LXRT_QUIET="${LXRT_QUIET:-1}"
     # Process and thread ids below 65536 for every process of the stack
     # (runtime/ids.c): 32-bit bionic keeps them in 16 bits and aborted with
     # the Mac's pids past 65535 (LXRT_SMALL_IDS=0 turns it off).

@@ -418,6 +418,17 @@ static const char *translate_one(const char *path, char *buf, size_t bufn)
         if (n > 0 && (size_t)n < bufn)
             return buf;
     }
+    // A pseudo-terminal's slave: Linux's /dev/pts/N is Darwin's
+    // /dev/ttysNNN (ioctl_tty.c hands out the numbers).
+    if (path && strncmp(path, "/dev/pts/", 9) == 0 && path[9] >= '0' && path[9] <= '9') {
+        char *end;
+        long n = strtol(path + 9, &end, 10);
+        if (*end == '\0' && n >= 0 && n < 1000) {
+            int w = snprintf(buf, bufn, "/dev/ttys%03ld", n);
+            if (w > 0 && (size_t)w < bufn)
+                return buf;
+        }
+    }
     const char *root = guest_root();
     if (!root || !path || path[0] != '/')
         return path;
@@ -433,7 +444,7 @@ static const char *translate_one(const char *path, char *buf, size_t bufn)
         // that path jumped to a garbage RIP); the rest stays under the root,
         // where it does not exist, as before.
         static const char *const pass[] = { "/dev/null", "/dev/zero", "/dev/full",
-                                            "/dev/random", "/dev/urandom" };
+                                            "/dev/random", "/dev/urandom", "/dev/ptmx" };
         for (size_t i = 0; i < sizeof pass / sizeof pass[0]; i++)
             if (strcmp(path, pass[i]) == 0)
                 return path;
@@ -460,6 +471,32 @@ static _Atomic long g_last_unimplemented = -1;
 static FILE *g_trace_fp;
 static int g_trace_raw_fd = -1;
 FILE *lxrt_trace_stream(void) { return g_trace_fp ? g_trace_fp : stderr; }
+// Where the runtime's informational lines go (what it loaded, what it
+// rewrote, signals it cannot carry): the trace stream, or nowhere with
+// LXRT_QUIET=1 and no trace. Linux prints nothing when a program starts,
+// and a guest that captures a child's stderr -- Termux's `$(id -u 2>&1)` --
+// got these lines as the answer (MEASURED). Android sessions run quiet.
+static int discard_write(void *cookie, const char *buf, int n)
+{
+    (void)cookie; (void)buf;
+    return n;
+}
+
+FILE *lxrt_info_stream(void)
+{
+    static FILE *null_fp;
+    static int quiet = -1;
+    if (quiet < 0)
+        quiet = getenv("LXRT_QUIET") && strcmp(getenv("LXRT_QUIET"), "0") ? 1 : 0;
+    if (!quiet || g_trace)
+        return lxrt_trace_stream();
+    // A stream with no descriptor behind it: an fd opened here would be one
+    // more of the runtime's in a guest's fd table, and Android's zygote
+    // aborts on one it cannot account for ("Unable to stat 40", MEASURED).
+    if (!null_fp)
+        null_fp = funopen(NULL, NULL, discard_write, NULL, NULL);
+    return null_fp ? null_fp : lxrt_trace_stream();
+}
 int lxrt_trace_fd(void) { return g_trace_fp ? fileno(g_trace_fp) : -1; }
 void lxrt_dispatch_set_trace(bool on)
 {
@@ -586,6 +623,7 @@ static long guest_close(int fd)
     lxrt_signalfd_close(fd);
     lxrt_inotify_close(fd);
     lxrt_socket_close(fd);
+    lxrt_pty_close(fd);
     lxrt_memfd_close(fd);
     lxrt_pathfd_close(fd);
     lxrt_evdev_close(fd);
@@ -949,6 +987,7 @@ static void forget_fd(int fd)
     lxrt_signalfd_close(fd);
     lxrt_inotify_close(fd);
     lxrt_socket_close(fd);
+    lxrt_pty_close(fd);
     lxrt_memfd_close(fd);
     lxrt_binder_close(fd);
     lxrt_fd_hide(fd, false);
@@ -2912,6 +2951,8 @@ restart:
                 fd = lxrt_pathfd_open(ddir, hp, (dfl & O_CLOEXEC) != 0);
             else if (fd < 0 && errno == EOPNOTSUPP && hp[0] == '/')
                 fd = lxrt_evdev_open(hp, (int)a2);
+            if (fd >= 0 && hp[0] == '/' && hp[1] == 'd')
+                lxrt_pty_slave_opened(hp);      // a held slave can go (ioctl_tty.c)
             ret = ret_of((long)fd);
         }
         {
@@ -3409,6 +3450,14 @@ restart:
             break;
         }
         ret = ret_of(fchown((int)a0, (uid_t)a1, (gid_t)a2));
+        if (ret == LERR(EINVAL)) {
+            // Darwin refuses an owner for a socket or a pipe; Linux keeps one
+            // (android_ids.c, the same case).
+            struct stat st;
+            if (fstat((int)a0, &st) == 0 && (S_ISSOCK(st.st_mode) || S_ISFIFO(st.st_mode)))
+                ret = ((uid_t)a1 == (uid_t)-1 || (uid_t)a1 == getuid()) &&
+                      ((gid_t)a2 == (gid_t)-1 || (gid_t)a2 == getgid()) ? 0 : LERR(EPERM);
+        }
         break;
     case 88: {  // utimensat(dirfd, path, times[2], flags)
         // FEX turns every x86 variant (utime, utimes, futimesat, the i386

@@ -59,8 +59,12 @@ static DIR *dir_for(int fd)
     // fdopendir takes ownership of what it is given, and the guest still owns
     // its fd, so hand it a duplicate -- the runtime's own, out of the guest's
     // way and out of /proc/self/fd (lxrt_fd_private).
-    int dup_fd = dup(fd);
-    DIR *d = dup_fd < 0 ? NULL : lxrt_fdopendir_private(dup_fd);
+    int dup_fd = lxrt_fd_dup_private(fd);
+    DIR *d = dup_fd < 0 ? NULL : fdopendir(dup_fd);
+    if (!d && dup_fd >= 0) {
+        lxrt_fd_hide(dup_fd, false);
+        close(dup_fd);
+    }
     if (!d) {
         pthread_mutex_unlock(&g_dirs_lock);
         return NULL;

@@ -1501,7 +1501,7 @@ long lxrt_rt_sigaction(int lsig, const void *uact, void *uoldact, size_t sigsets
         // is remembered so sigaction round-trips.
         static atomic_flag warned[LINUX_NSIG + 1];
         if (!atomic_flag_test_and_set(&warned[lsig]))
-            fprintf(lxrt_trace_stream(), "[lxrt] signal %d has no Darwin equivalent and no "
+            fprintf(lxrt_info_stream(), "[lxrt] signal %d has no Darwin equivalent and no "
                             "carrier: recorded but never delivered\n", lsig);
         return 0;
     }

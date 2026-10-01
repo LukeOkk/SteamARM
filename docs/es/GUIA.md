@@ -65,7 +65,10 @@ Cerrar esa ventana, o **Detener**, termina la sesión. Funcionan el ratón, el
 teclado (con la distribución del Mac: una tecla ñ escribe ñ), la red del Mac,
 el sonido (también el comprimido, Ogg y similares), el portapapeles de
 texto en los dos sentidos (lo copiado en el Mac se pega en Android y al
-revés) y las páginas web dentro de las apps (WebView). Ejecuta apps sin código nativo y apps con código x86-64; la tarjeta
+revés), las páginas web dentro de las apps (WebView), el almacenamiento
+compartido (/sdcard) y las apps que ejecutan programas o abren una terminal:
+Termux instala sus paquetes base, abre su shell y `apt update` / `apt install`
+funcionan. Ejecuta apps sin código nativo y apps con código x86-64; la tarjeta
 queda desactivada, y dice por qué, si su código nativo es solo arm64-v8a (el
 runtime ARM64 de Android no arranca en macOS), solo ARM o x86 de 32 bits, o
 si necesita un Android más nuevo que el 11. Los paquetes XAPK, APKS y APKM

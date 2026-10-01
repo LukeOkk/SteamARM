@@ -86,6 +86,19 @@ class DnsProxyTest(unittest.TestCase):
         self.assertEqual(sa[:2], struct.pack("<H", 10))
         self.assertEqual(sa[8:24], socket.inet_pton(socket.AF_INET6, "::1"))
 
+    def test_bionic_addrconfig_with_service_name(self):
+        # bionic's AI_ADDRCONFIG (0x400, glibc's AI_NUMERICSERV) with a named
+        # service: what apt asks for its mirror, "<host> https".
+        code, ai = read_addrinfo(ask(self.root, "getaddrinfo localhost https 1024 2 1 6 0"))
+        self.assertEqual(code, b"222\0")
+        self.assertTrue(ai)
+        self.assertEqual(ai[0][3][2:4], struct.pack(">H", 443))
+
+    def test_bionic_numericserv(self):
+        # bionic's AI_NUMERICSERV is 0x8: a service name is then refused.
+        reply = ask(self.root, "getaddrinfo 10.1.2.3 https 12 2 1 6 0")
+        self.assertEqual(reply[:4], b"401\0")
+
     def test_no_hints_localhost(self):
         code, ai = read_addrinfo(ask(self.root, "getaddrinfo localhost ^ -1 -1 -1 -1 100"))
         self.assertEqual(code, b"222\0")
