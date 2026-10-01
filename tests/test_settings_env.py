@@ -75,10 +75,15 @@ class SettingsEnvironmentTests(unittest.TestCase):
         with patch.object(self.settings, "shim_selects_icd", return_value=True):
             self.assertEqual(self.env({"graphicsBackend": "vulkanKosmicKrisp"})[
                 "STEAMARM_VK_ICD"], "kosmickrisp")
-            for backend in ("auto", "vulkan", "vulkanMoltenVK", "openGLWineD3D"):
+            for backend in ("auto", "vulkan", "vulkanMoltenVK"):
                 env = self.env({"graphicsBackend": backend})
                 self.assertNotIn("STEAMARM_VK_ICD", env)
                 self.assertNotIn("PROTON_USE_WINED3D", env)
+                self.assertNotIn("GALLIUM_DRIVER", env)
+            # WineD3D: OpenGL from Zink on the Vulkan thunk, MoltenVK.
+            env = self.env({"graphicsBackend": "openGLWineD3D"})
+            self.assertEqual((env.get("PROTON_USE_WINED3D"), env.get("GALLIUM_DRIVER")), ("1", "zink"))
+            self.assertNotIn("STEAMARM_VK_ICD", env)
         with patch.object(self.settings, "shim_selects_icd", return_value=False):
             self.assertNotIn("STEAMARM_VK_ICD", self.env({
                 "graphicsBackend": "vulkanKosmicKrisp"}))

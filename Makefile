@@ -143,7 +143,7 @@ shim/vulkan_shim.S shim/vulkan_shim.c: shim/gen.py shim/entrypoints.txt build/sh
 	python3 shim/gen.py shim/entrypoints.txt shim/vulkan_shim.S shim/vulkan_shim.c build/shim-overrides.txt
 
 SHIM_SRCS := shim/vulkan_shim.S shim/vulkan_shim.c shim/wsi.c shim/features.c shim/fallback.c shim/map32.c \
-             shim/memcap.c shim/present.c build/vk_rebase.c
+             shim/memcap.c shim/present.c shim/spirv_names.c build/vk_rebase.c
 build/libvulkan.so.1: $(SHIM_SRCS) runtime/include/lxrt_host.h
 	@mkdir -p build
 	$(CC) -target $(LXRT_TARGET) -shared -fPIC -nostdlib -O2 \

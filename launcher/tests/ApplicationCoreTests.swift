@@ -241,7 +241,7 @@ struct ApplicationCoreTests {
         check(caps.graphicsFallback(after: .auto) == .vulkanMoltenVK, "AUTO starts at MoltenVK today")
         check(caps.graphicsFallback(after: .vulkanMoltenVK) == nil, "no WineD3D fallback yet")
         for (k, v) in caps.graphics { check(!v.reason.isEmpty, "\(k) has a reason") }
-        check(caps.graphics[.openGLWineD3D]?.state == .unsupported, "WineD3D: software GL only")
+        check(caps.graphics[.openGLWineD3D]?.state == .unavailable, "WineD3D: needs detection")
         check(caps.effectiveGraphics(.auto) == .vulkanMoltenVK, "AUTO graphics is MoltenVK")
         check(caps.effectiveGraphics(.vulkanKosmicKrisp) == .vulkanMoltenVK, "undetected KosmicKrisp -> MoltenVK")
         check(caps.effectiveGraphics(.openGLWineD3D) == .vulkanMoltenVK, "WineD3D -> MoltenVK")
@@ -260,6 +260,7 @@ struct ApplicationCoreTests {
          "kosmickrisp":{"icd_json":"/k.json","library":"/k.dylib","version":"26.2.3","api_version":"1.4.354","os_ok":true,"exports_icd":true},
          "shim":{"path":"/s","installed":true,"icd_selection":false},
          "presentation":{"native_x":true,"xvnc":true,"screen_sharing":true},
+         "opengl":{"zink":true,"glx_direct":false},
          "nativeArmReason":"r","note":"n"}
         """#
         var probe = try JSONDecoder().decode(RuntimeProbe.self, from: Data(json.utf8))
@@ -272,7 +273,19 @@ struct ApplicationCoreTests {
         check(d.synchronization[.fsync]?.state == .experimental && d.synchronization[.fsync]?.reason.contains("Proton 10.0") == true, "fsync: the Protons that have it")
         check(d.synchronization[.msync]?.state == .unavailable, "msync unchanged by detection")
         check(d.execution[.appleHypervisorLegacy]?.usable == false && d.execution[.lightningJIT]?.usable == false, "detection never enables JIT or a VM")
-        check(d.graphics[.openGLWineD3D]?.state == .unsupported, "detection never enables WineD3D")
+        check(probe.opengl == .init(zink: true, glxDirect: false), "opengl decodes")
+        check(d.graphics[.openGLWineD3D]?.state == .unavailable && d.graphics[.openGLWineD3D]?.reason.contains("GLX") == true,
+              "WineD3D without direct GLX: unavailable, says why")
+        var glProbe = probe
+        glProbe.opengl = .init(zink: true, glxDirect: true)
+        let gl = RuntimeCapabilities.detect(from: glProbe)
+        check(gl.graphics[.openGLWineD3D]?.state == .experimental, "WineD3D with Zink and direct GLX: experimental")
+        check(gl.effectiveGraphics(.auto) == .vulkanMoltenVK && gl.effectiveGraphics(.openGLWineD3D) == .openGLWineD3D,
+              "AUTO never picks WineD3D; an explicit choice runs it")
+        glProbe.opengl = .init(zink: false, glxDirect: true)
+        check(RuntimeCapabilities.detect(from: glProbe).graphics[.openGLWineD3D]?.reason.contains("zink_dri.so") == true, "no Zink: says so")
+        glProbe.opengl = nil
+        check(RuntimeCapabilities.detect(from: glProbe).graphics[.openGLWineD3D]?.usable == false, "an older probe: WineD3D stays off")
         check(d.effectiveSynchronization(.auto) == .wineserver, "AUTO still wineserver with esync experimental")
         probe.shim?.icdSelection = true
         d = RuntimeCapabilities.detect(from: probe)

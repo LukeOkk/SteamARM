@@ -1,0 +1,88 @@
+Stage 38 -- OpenGL on the GPU: Mesa's Zink over the Vulkan thunk; WineD3D
+Date: 2026-10-01. Apple M4, macOS 27. Zero VM. No game was launched (the
+user tests games at the end).
+
+WHY
+  Settings showed "OpenGL (WineD3D)" as unsupported: guest OpenGL was Mesa's
+  llvmpipe (software) and there is no FEX GL thunk. Zink is Mesa's OpenGL
+  driver on Vulkan; the guest's Vulkan already reaches MoltenVK through
+  FEX's Vulkan thunk and the runtime's shim (stage 10).
+
+1. ZINK, SURFACELESS (MEASURED)
+  The kisak Mesa 26.1.6 in the x86 root ships zink_dri.so (libgallium) for
+  x86-64 and i386. GALLIUM_DRIVER=zink (MESA_LOADER_DRIVER_OVERRIDE does
+  not reach it on a system without DRM):
+    eglinfo -p surfaceless, MoltenVK:    zink Vulkan 1.4(Apple M4 (MOLTENVK))
+                                         OpenGL 3.2 core/compat, ES 3.1
+                                         (missing for Zink: logicOp,
+                                         VK_EXT_custom_border_color)
+    eglinfo -p surfaceless, KosmicKrisp: OpenGL 3.3, ES 3.1
+  tests/elf/gl_zink.c (surfaceless EGL, a 3.3 core program -- 3.2 where
+  that is the maximum -- drawing a triangle into a framebuffer object,
+  pixels read back), in tests/elf/run_vk_device.sh:
+    x86_64 MoltenVK   centre 255,0,0 corner 0,0,255   0.76-1.19 ms per draw+readback
+    i386   MoltenVK   centre 255,0,0 corner 0,0,255   0.76-1.12 ms
+    x86_64 llvmpipe   same pixels                     10.5 ms
+    x86_64 KosmicKrisp  FAIL: KosmicKrisp 26.2.3 (Homebrew) compiles Zink's
+      vertex shader to invalid MSL ("type 'float3' is not valid for
+      attribute 'position'"), vkCreateGraphicsPipelines fails, Zink then
+      crashes. Not glClear: the draw alone fails. Upstream bug; WineD3D
+      uses MoltenVK.
+
+2. GLX ON THE NATIVE X SERVER
+  glxinfo with GALLIUM_DRIVER=zink: "glx: failed to create drisw screen",
+  and every GL client got indirect GLX: Apple's OpenGL 2.1 through the
+  server. Cause (Mesa 26.1 src/glx/dri_common.c driConfigEqual, read): Mesa
+  pairs each server fbconfig with one of its own and requires each attribute
+  equal or GLX_DONT_CARE. XQuartz declared bindToTextureRgb/Rgba,
+  bindToTextureTargets and yInverted as 0 (Mesa: TRUE, TRUE, 1D|2D|RECT,
+  TRUE), so nothing paired. After that, only depth-less visuals paired:
+  Apple Silicon's renderers report depth 0 and 32, Mesa offers 16 and 24
+  (glxgears: "couldn't get an RGB, Double-buffered visual").
+  patches/xquartz-glx-mesa-direct.patch: those attributes GLX_DONT_CARE;
+  16- and 24-bit depth added where only 32 is reported (CGL serves a
+  request for either with its 32-bit buffer).
+  After:
+    glxinfo -B, GALLIUM_DRIVER=zink:     direct rendering: Yes,
+                                         zink Vulkan 1.4 (MoltenVK), 3.2
+    glxinfo -B, llvmpipe:                direct rendering: Yes, 4.6
+    glxgears, Zink, 160x160 native window, vblank off: 2901 and 3086 fps
+  scripts/build-xquartz.sh records the patches it built with in the bundle
+  (Contents/Resources/steamarm-patches.txt); setup rebuilds and restarts
+  the server when no guest is running.
+
+3. WINED3D ON ZINK
+  tests/win d3d9 with Wine's builtin d3d9 (WINEDLLOVERRIDES=...=b):
+    first: wined3d.dll imports libvkd3d-1.dll, absent from the test prefix
+      (Proton's script copies lib/vkd3d into real prefixes); the suite now
+      copies it too.
+    llvmpipe: probe ok, 296 fps.
+    Zink: device created, then MoltenVK "Shader library compile failed":
+      SPIRV-Cross named a combined sampler after its OpName "sampler"
+      (WineD3D's GLSL blit shader), and Metal refuses
+      `texture2d<float> sampler; sampler samplerSmplr;`.
+  shim/spirv_names.c: vkCreateShaderModule upper-cases the first letter of
+  an OpName/OpMemberName equal to a Metal type name (sampler, texture), in
+  place, before MoltenVK sees it. After (tests/win/run.sh):
+    d3d9_wined3d      ok   1393.5 fps
+    d3d11_wined3d     ok   feature level 11_0, 1670.6 fps
+    d3d9_32_wined3d   ok   1293.5 fps; the process aborts as it exits
+                           (after its frames, no message; not explained)
+    d3d9 (DXVK, control) ok 157.9 fps
+  The probes clear and present; the frame rates are not comparable
+  between WineD3D and DXVK (different present paths).
+
+4. LAUNCHER
+  OpenGL (WineD3D) is unavailable until detected, and experimental when
+  scripts/compat-status.py finds Zink for both guest arches in the x86 root
+  and the GLX patch in the server's record, with MoltenVK and the shim
+  installed. AUTO never picks it. scripts/settings-env.py sets
+  PROTON_USE_WINED3D=1 and GALLIUM_DRIVER=zink for that choice (no
+  STEAMARM_VK_ICD: MoltenVK). Launcher and python tests cover detection
+  and the environment.
+
+NOT DONE
+  No game was run with WineD3D. KosmicKrisp through Zink is broken
+  upstream. The 32-bit WineD3D exit abort is open. Zink's OpenGL 3.2 limits
+  WineD3D to what it builds on 3.2 plus extensions (D3D11 reached 11_0 in
+  the probe).

@@ -180,5 +180,22 @@ class CompatibilityInventoryTests(unittest.TestCase):
             self.assertTrue(compat.presentation(root, xq_root=xq)["xvnc"])
 
 
+    def test_opengl(self):
+        with tempfile.TemporaryDirectory(prefix="steamarm-compat-test-") as temp:
+            root = Path(temp)
+            xq = root / "build/xquartz"
+            self.assertEqual(compat.opengl(root, xq_root=xq), {"zink": False, "glx_direct": False})
+            for triplet in ("x86_64-linux-gnu", "i386-linux-gnu"):
+                dri = root / "steamroot/usr/lib" / triplet / "dri"
+                dri.mkdir(parents=True)
+                (dri / "zink_dri.so").touch()
+            marker = xq / "SteamARM-X11.app/Contents/Resources/steamarm-patches.txt"
+            marker.parent.mkdir(parents=True)
+            marker.write_text("xquartz-evdev-keycodes.patch\n")
+            self.assertEqual(compat.opengl(root, xq_root=xq), {"zink": True, "glx_direct": False})
+            marker.write_text("xquartz-evdev-keycodes.patch\nxquartz-glx-mesa-direct.patch\n")
+            self.assertTrue(compat.opengl(root, xq_root=xq)["glx_direct"])
+
+
 if __name__ == "__main__":
     unittest.main()

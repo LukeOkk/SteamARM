@@ -128,20 +128,38 @@ Mesa's Vulkan-on-Metal driver.
 
 ## OpenGL and WineD3D
 
-- Guest OpenGL exists only as Mesa in the x86 FEX rootfs: llvmpipe,
-  software rendering (`glxinfo` under FEX reported llvmpipe OpenGL 4.6,
-  `benchmarks/stage8-steam-zero-vm.txt`). There is no FEX GL thunk: only the
-  Vulkan thunks are built and installed (VERIFIED IN SOURCE,
-  `scripts/build-fex-thunks.sh`, `scripts/install-steamroot-gfx.sh`).
-- The native X server has indirect GLX 1.4 (`+iglx`), measured with a test
-  window (`benchmarks/stage11-native-x11.txt`). No game used it.
-- So `PROTON_USE_WINED3D` would render in software: **unsupported for
-  games**. Two hardware routes are untested (HYPOTHESIS): WineD3D's Vulkan
-  renderer (`WINE_D3D_CONFIG=renderer=vulkan`) over the existing thunk, or
-  Zink over it.
-- Launcher state: unsupported (`launcher/ApplicationCore.swift:539`); the
-  OpenGL (WineD3D) choice is disabled with its reason, and detection never
-  makes it usable.
+- Guest OpenGL is Mesa in the x86 FEX rootfs. Without a choice it is
+  llvmpipe (software, OpenGL 4.6). There is no FEX GL thunk and none is
+  needed: Mesa's **Zink** (`GALLIUM_DRIVER=zink`) turns OpenGL into Vulkan
+  inside the guest, and that Vulkan goes through the existing thunk to
+  MoltenVK (MEASURED, `benchmarks/stage38-opengl-zink.txt`):
+  OpenGL 3.2 core/compatibility, OpenGL ES 3.1, renderer
+  `zink Vulkan 1.4(Apple M4 (MOLTENVK))`, x86-64 and i386 guests
+  (`tests/elf/gl_zink.c` in `tests/elf/run_vk_device.sh`).
+- KosmicKrisp 26.2.3 gives OpenGL 3.3 through Zink but fails to compile
+  Zink's vertex shaders to MSL (`float3 position [[position]]`): no draw
+  works. WineD3D therefore always uses MoltenVK.
+- GLX: Mesa renders direct only when it can pair the X server's fbconfigs
+  with its own. XQuartz declared the texture-from-pixmap attributes as 0 and
+  only the depth sizes Apple's renderer reports (0, 32), so nothing paired
+  and every GL client fell back to indirect GLX (Apple's OpenGL 2.1).
+  `patches/xquartz-glx-mesa-direct.patch` declares those attributes
+  `GLX_DONT_CARE` and adds 16- and 24-bit depth (CGL serves both with its
+  32-bit buffer): `glxinfo` reports direct rendering with Zink, and
+  `glxgears` runs at about 3000 frames/s in a native window.
+- MoltenVK's SPIRV-Cross turned a sampler named `sampler` (WineD3D's GLSL
+  blit shaders) into invalid Metal; the Vulkan shim renames such debug names
+  before MoltenVK sees them (`shim/spirv_names.c`).
+- WineD3D (`PROTON_USE_WINED3D=1`) on Zink: the D3D9 and D3D11 probes
+  (`tests/win/run.sh d3d9_wined3d d3d11_wined3d d3d9_32_wined3d`) render and
+  present; D3D11 reaches feature level 11_0. The 32-bit probe aborts when it
+  exits (after its frames; no message).
+- Launcher state: unavailable until detected; experimental when Zink is in
+  the x86 root, the native X server was built with the GLX patch
+  (`scripts/compat-status.py` reads the patch list `scripts/build-xquartz.sh`
+  records), and MoltenVK and the shim are installed. AUTO never picks it.
+  `scripts/settings-env.py` sets `PROTON_USE_WINED3D=1` and
+  `GALLIUM_DRIVER=zink` for that choice.
 
 ## Present modes and V-Sync
 
@@ -185,7 +203,7 @@ Gráficos** and the read-only **Runtime** page show it
 |---|---|---|
 | Vulkan · MoltenVK | ready | D3D9/11/12 probes (stages 14, 16) |
 | Vulkan · KosmicKrisp | unavailable until detected; experimental when installed, on macOS 26 or later, loadable as an ICD and the installed shim reads `STEAMARM_VK_ICD` | `ApplicationCore.swift:538`, `:554-565` |
-| OpenGL · WineD3D | unsupported | guest GL is software llvmpipe and there is no GL thunk (`:539`) |
+| OpenGL · WineD3D | unavailable until detected; experimental with Zink in the x86 root, the native X server's GLX patch, MoltenVK and the shim | WineD3D on Mesa's Zink on MoltenVK, OpenGL 3.2 (stage 38) |
 
 AUTO means MoltenVK. Fallback order (`ApplicationCore.swift:617-623`):
 KosmicKrisp, then MoltenVK, then WineD3D, only among usable backends; never

@@ -3,7 +3,9 @@
 # D3D12 (VKD3D-Proton) -> Vulkan -> FEX thunks -> the runtime's Vulkan shim
 # -> MoltenVK -> Metal, each presenting cleared frames to a native window.
 # The *_32 probes are the same programs built for 32-bit Windows: an i386
-# Wine under FEX's 32-bit mode, with the 32-bit Vulkan thunks.
+# Wine under FEX's 32-bit mode, with the 32-bit Vulkan thunks. The *_wined3d
+# probes use Wine's own D3D (WineD3D) on OpenGL from Mesa's Zink, which draws
+# with the same Vulkan thunk.
 #
 #   tests/win/run.sh                 the default set (64-bit and 32-bit)
 #   tests/win/run.sh d3d11 d3d9_32   some of them
@@ -32,11 +34,19 @@ if [ ! -d "$SYS32" ]; then
 fi
 cp -f "$PROTON"/lib/wine/dxvk/x86_64-windows/*.dll "$PROTON"/lib/wine/vkd3d-proton/x86_64-windows/*.dll "$SYS32/"
 cp -f "$PROTON"/lib/wine/dxvk/i386-windows/*.dll "$PROTON"/lib/wine/vkd3d-proton/i386-windows/*.dll "$SYS32/../syswow64/"
+# Wine's own vkd3d, which wined3d.dll imports (WineD3D runs below).
+cp -f "$PROTON"/lib/vkd3d/x86_64-windows/*.dll "$SYS32/"
+cp -f "$PROTON"/lib/vkd3d/i386-windows/*.dll "$SYS32/../syswow64/"
 
 PASS=0 FAIL=0
-for t in ${@:-tick tick_32 tone tone_32 regwin d3d11 d3d12 d3d9 d3d9_32 d3d11_32 d3d12_32}; do
-    api=${t%_32} cc=x86_64-w64-mingw32-gcc
-    [ "$api" = "$t" ] || cc=i686-w64-mingw32-gcc
+for t in ${@:-tick tick_32 tone tone_32 regwin d3d11 d3d12 d3d9 d3d9_32 d3d11_32 d3d12_32 d3d9_wined3d d3d11_wined3d d3d9_32_wined3d}; do
+    # <api>_wined3d: Wine's builtin D3D on OpenGL from Mesa's Zink, on the same
+    # Vulkan thunk (the launcher's "OpenGL (WineD3D)"; stage38-opengl-zink).
+    wined3d=0
+    case $t in *_wined3d) wined3d=1 ;; esac
+    base=${t%_wined3d}
+    api=${base%_32} cc=x86_64-w64-mingw32-gcc
+    [ "$api" = "$base" ] || cc=i686-w64-mingw32-gcc
     exe="$ROOT/tmp/${t}_clear.exe"
     rm -f "$ROOT/tmp/probe-result.txt"
     if [ "$api" = regwin ]; then
@@ -84,8 +94,12 @@ for t in ${@:-tick tick_32 tone tone_32 regwin d3d11 d3d12 d3d9 d3d9_32 d3d11_32
             -l"$api" -ldxgi -luser32 -lgdi32 -luuid -ldxguid || { FAIL=$((FAIL + 1)); continue; }
     fi
     log="$LOGS/win-$t.log"
-    DISPLAY=:2 WINEPREFIX=$PFX_GUEST WINEDEBUG=-all \
-    WINEDLLOVERRIDES="d3d9,d3d11,d3d12,d3d12core,dxgi,d3d10core=n" \
+    if [ $wined3d = 1 ]; then
+        dll=(WINEDLLOVERRIDES="d3d9,d3d11,dxgi,d3d10core=b" GALLIUM_DRIVER=zink)
+    else
+        dll=(WINEDLLOVERRIDES="d3d9,d3d11,d3d12,d3d12core,dxgi,d3d10core=n")
+    fi
+    env DISPLAY=:2 WINEPREFIX=$PFX_GUEST WINEDEBUG=-all "${dll[@]}" \
     LXRT_ROOT=$ROOT FEX_ROOTFS=/ scripts/run-fex.sh "$PROTON_GUEST/bin/wine" "Z:\\tmp\\${t}_clear.exe" > "$log" 2>&1 &
     pid=$!
     # A wall-clock limit that does not rely on the guest honouring SIGALRM.

@@ -158,10 +158,17 @@ def env_from_settings(s, total=None):
         env["FEX_X87REDUCEDPRECISION"] = "1"
 
     # Gráficos. The shim loads MoltenVK unless STEAMARM_VK_ICD names another
-    # driver; only a shim that reads the variable gets it. AUTO is MoltenVK,
-    # and WineD3D is never set (guest GL is software llvmpipe, no GL thunk).
-    if (s.get("graphicsBackend") or "auto") == "vulkanKosmicKrisp" and shim_selects_icd():
+    # driver; only a shim that reads the variable gets it. AUTO is MoltenVK.
+    # WineD3D renders with OpenGL from Mesa's Zink on the same Vulkan thunk,
+    # on MoltenVK (KosmicKrisp 26.2.3 cannot compile Zink's shaders to MSL);
+    # the launcher only offers it where Zink and direct GLX exist
+    # (benchmarks/stage38-opengl-zink.txt).
+    gfx = s.get("graphicsBackend") or "auto"
+    if gfx == "vulkanKosmicKrisp" and shim_selects_icd():
         env["STEAMARM_VK_ICD"] = "kosmickrisp"
+    elif gfx == "openGLWineD3D":
+        env["PROTON_USE_WINED3D"] = "1"
+        env["GALLIUM_DRIVER"] = "zink"
     if s.get("shaderCache") is False:
         env["DXVK_SHADER_CACHE"] = "0"
         env["VKD3D_SHADER_CACHE_PATH"] = "0"

@@ -143,6 +143,14 @@ if [ ! -x "$QWM/src/quartz-wm" ]; then
     )
 fi
 
+# The patches this server was built with, for scripts/compat-status.py: the
+# GLX fbconfig one decides whether Mesa can render direct (Zink, llvmpipe) or
+# every GL client falls back to Apple's indirect OpenGL 2.1.
+if [ -d "$XQ_ROOT/SteamARM-X11.app/Contents" ]; then
+    mkdir -p "$XQ_ROOT/SteamARM-X11.app/Contents/Resources"
+    ( cd "$PROJECT_DIR/patches" && ls xquartz-*.patch ) > "$XQ_ROOT/SteamARM-X11.app/Contents/Resources/steamarm-patches.txt"
+fi
+
 log "done"
 log "server : $XQ_ROOT/SteamARM-X11.app/Contents/MacOS/X11.bin"
 log "wm     : $QWM/src/quartz-wm"

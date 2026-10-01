@@ -1,0 +1,57 @@
+--- a/hw/xquartz/GL/capabilities.c
++++ b/hw/xquartz/GL/capabilities.c
+@@ -365,6 +365,26 @@
+ 
+ #undef DEPTH
+ 
++    /* Apple Silicon's renderers describe only 0 and 32 bits of depth. A
++     * direct-rendering Mesa client (Zink, llvmpipe) pairs each server
++     * fbconfig with one of its own by exact depth size and offers 16 and
++     * 24, never 32 (src/glx/dri_common.c driConfigEqual): with 0 and 32
++     * alone, nothing with a depth buffer matched -- glxgears found no
++     * double-buffered visual. CGL satisfies a request for 16 or 24 with its
++     * 32-bit buffer, so they are honest for indirect clients too. */
++    {
++        bool has16 = false, has24 = false, has32 = false;
++        for (int i = 0; i < offset; i++) {
++            has16 |= c->depth_buffers[i] == 16;
++            has24 |= c->depth_buffers[i] == 24;
++            has32 |= c->depth_buffers[i] == 32;
++        }
++        if (has32 && !has16 && offset < GLCAPS_DEPTH_BUFFERS - 1)
++            c->depth_buffers[offset++] = 16;
++        if (has32 && !has24 && offset < GLCAPS_DEPTH_BUFFERS - 1)
++            c->depth_buffers[offset++] = 24;
++    }
++
+     c->total_depth_buffer_depths = offset;
+     assert(c->total_depth_buffer_depths < GLCAPS_DEPTH_BUFFERS);
+ }
+--- a/hw/xquartz/GL/visualConfigs.c
++++ b/hw/xquartz/GL/visualConfigs.c
+@@ -250,12 +250,20 @@
+                                         c->optimalPbufferWidth = 0;
+                                         c->optimalPbufferHeight = 0;
+ 
+-                                        /* EXT_texture_from_pixmap */
+-                                        c->bindToTextureRgb = 0;
+-                                        c->bindToTextureRgba = 0;
++                                        /* EXT_texture_from_pixmap. GLX_DONT_CARE, not 0:
++                                         * a direct-rendering Mesa client (llvmpipe,
++                                         * Zink) pairs each server fbconfig with one of
++                                         * its own and requires these to be equal or
++                                         * GLX_DONT_CARE (src/glx/dri_common.c
++                                         * driConfigEqual). Mesa's are TRUE, TRUE and
++                                         * 1D|2D|RECT; with 0 here no fbconfig matched
++                                         * and every GL client fell back to indirect
++                                         * GLX (Apple's OpenGL 2.1). */
++                                        c->bindToTextureRgb = GLX_DONT_CARE;
++                                        c->bindToTextureRgba = GLX_DONT_CARE;
+                                         c->bindToMipmapTexture = 0;
+-                                        c->bindToTextureTargets = 0;
+-                                        c->yInverted = 0;
++                                        c->bindToTextureTargets = GLX_DONT_CARE;
++                                        c->yInverted = GLX_DONT_CARE;
+ 
+                                         /* EXT_framebuffer_sRGB */
+                                         c->sRGBCapable = GL_FALSE;

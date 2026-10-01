@@ -637,11 +637,20 @@ struct RuntimeProbe: Decodable, Equatable {
         enum CodingKeys: String, CodingKey { case nativeX = "native_x", xvnc, screenSharing = "screen_sharing" }
     }
 
+    /// OpenGL for WineD3D: Zink in the x86 root, and a native X server with
+    /// GLX fbconfigs Mesa can render direct to (scripts/compat-status.py).
+    struct OpenGL: Decodable, Equatable {
+        var zink: Bool
+        var glxDirect: Bool
+        enum CodingKeys: String, CodingKey { case zink, glxDirect = "glx_direct" }
+    }
+
     var moltenvk: Driver
     var kosmickrisp: KosmicKrisp?
     var shim: Shim?
     var protons: [Proton]
     var presentation: Presentation?
+    var opengl: OpenGL?
 }
 
 /// The launcher's source of truth for which options exist, and why the rest
@@ -674,7 +683,7 @@ struct RuntimeCapabilities {
         graphics: [
             .vulkanMoltenVK: .init(state: .ready, reason: "D3D9/11/12 por DXVK/VKD3D-Proton (benchmarks/stage14, stage16)"),
             .vulkanKosmicKrisp: .init(state: .unavailable, reason: "sin detectar todavía; el shim carga MoltenVK por ruta"),
-            .openGLWineD3D: .init(state: .unsupported, reason: "el OpenGL del invitado es llvmpipe por software y no hay thunk de GL"),
+            .openGLWineD3D: .init(state: .unavailable, reason: "sin detectar: necesita Zink en la raíz x86 y el servidor X nativo con GLX directo (patches/xquartz-glx-mesa-direct.patch)"),
         ])
 
     /// The static table when scripts/compat-status.py gave no answer: what
@@ -687,8 +696,9 @@ struct RuntimeCapabilities {
     }
 
     /// The static table refined with what is installed on this Mac. Nothing
-    /// becomes more than the table allows: MSync, WineD3D, Lightning
-    /// JIT and Apple Hypervisor stay what they are whatever is installed.
+    /// becomes more than the table allows: MSync, Lightning JIT and Apple
+    /// Hypervisor stay what they are whatever is installed; WineD3D becomes
+    /// experimental at most.
     static func detect(from probe: RuntimeProbe, base: RuntimeCapabilities = .current) -> RuntimeCapabilities {
         var caps = base
 
@@ -727,6 +737,17 @@ struct RuntimeCapabilities {
             caps.synchronization[.esync] = .init(state: .unavailable, reason: "ningún Proton instalado incluye esync (Proton Experimental y Hotfix no lo compilan)")
         } else {
             caps.synchronization[.esync] = .init(state: .experimental, reason: "solo en \(esync.joined(separator: ", ")); lxrun implementa eventfd también entre procesos (SCM_RIGHTS, tests/elf/eventfd_scm.c): sin verificar con juegos")
+        }
+
+        let gl = probe.opengl ?? .init(zink: false, glxDirect: false)
+        if !gl.zink {
+            caps.graphics[.openGLWineD3D] = .init(state: .unavailable, reason: "falta Zink (zink_dri.so) en la raíz x86 de Steam")
+        } else if !gl.glxDirect {
+            caps.graphics[.openGLWineD3D] = .init(state: .unavailable, reason: "el servidor X nativo no tiene GLX directo para Mesa: vuelve a ejecutar scripts/setup.sh (patches/xquartz-glx-mesa-direct.patch)")
+        } else if probe.moltenvk.path.isEmpty || probe.shim?.installed != true {
+            caps.graphics[.openGLWineD3D] = .init(state: .unavailable, reason: "Zink necesita el Vulkan del invitado: MoltenVK y el shim Vulkan instalados")
+        } else {
+            caps.graphics[.openGLWineD3D] = .init(state: .experimental, reason: "WineD3D sobre el OpenGL de Mesa Zink, sobre MoltenVK: OpenGL 3.2, GLX directo (tests/elf/gl_zink.c); sin verificar con juegos")
         }
 
         if let p = probe.presentation {

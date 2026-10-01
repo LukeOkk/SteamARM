@@ -107,6 +107,26 @@ def presentation(state, xq_root=None):
             "screen_sharing": screen_sharing}
 
 
+GLX_PATCH = "xquartz-glx-mesa-direct.patch"
+
+
+def opengl(state, xq_root=None):
+    """OpenGL for WineD3D: Mesa's Zink in the x86 root (both guest arches) over
+    the Vulkan thunk, and a native X server whose GLX fbconfigs Mesa can pair
+    with its own (patches/xquartz-glx-mesa-direct.patch, recorded by
+    scripts/build-xquartz.sh); without it every GL client is indirect GLX."""
+    xq = xq_root or os.environ.get("XQ_ROOT") or os.path.join(
+        os.environ.get("STEAMARM_BUILD", os.path.expanduser("~/SteamARM-build")), "xquartz")
+    zink = all((state / "steamroot/usr/lib" / triplet / "dri/zink_dri.so").is_file()
+               for triplet in ("x86_64-linux-gnu", "i386-linux-gnu"))
+    marker = Path(xq) / "SteamARM-X11.app/Contents/Resources/steamarm-patches.txt"
+    try:
+        glx_direct = GLX_PATCH in marker.read_text().split()
+    except OSError:
+        glx_direct = False
+    return {"zink": zink, "glx_direct": glx_direct}
+
+
 def proton_sync(folder):
     ntdll = next((folder / name for name in
                   ("files/lib/wine/x86_64-unix/ntdll.so", "files/lib/wine/aarch64-unix/ntdll.so")
@@ -186,6 +206,7 @@ def inventory(state):
         "kosmickrisp": kosmickrisp(),
         "shim": shim(state),
         "presentation": presentation(state),
+        "opengl": opengl(state),
         "fex": {"patchedInstalled": (state / "lxrt-root/usr/bin/FEX-gb").is_file(),
                 "steamInstalled": (common / "FEX-Emu/FEXCompatTool").is_file()},
         "protons": tools,
