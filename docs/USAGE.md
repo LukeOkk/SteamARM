@@ -78,6 +78,13 @@ affects games (the settings window reminds you).
 Options with no working backend on this stack are greyed out, with the
 reason: FSR scaling, global anti-aliasing.
 
+Native Linux games that draw with OpenGL use Mesa's software renderer
+unless told otherwise. Untested with games: their **Launch options** in
+Steam can ask for the GPU through Mesa's Zink (OpenGL 4.5 on MoltenVK):
+`GALLIUM_DRIVER=zink MESA_EXTENSION_OVERRIDE="+GL_ARB_vertex_type_2_10_10_10_rev +GL_ARB_texture_buffer_object_rgb32" %command%`.
+Do not set these for all of Steam: the Steam client itself then fails to
+start (`benchmarks/stage39-wined3d-gl45.txt`).
+
 ### Memory: DRAM and VRAM
 
 Apple Silicon shares memory between the CPU and GPU, so both limits come

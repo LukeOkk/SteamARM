@@ -51,6 +51,22 @@ Date: 2026-10-01. Apple M4, macOS 27. Zero VM. No game was launched.
       d3d11 (DXVK)     ok 158.1 fps
   The launcher's reason for WineD3D says OpenGL 4.5.
 
+4. NOT IN STEAM'S OWN ENVIRONMENT
+  Native Linux OpenGL games run on llvmpipe (software). Setting
+  GALLIUM_DRIVER=zink (and the override) for the whole Steam client
+  breaks Steam: its i386 client loads Mesa for its system information,
+  Zink loads the 32-bit Vulkan thunk next to the client's own Vulkan
+  load, and FEX fails ("E Input address for AddThunkTrampoline is
+  already linked elsewhere", "E NoExec instruction in entry block"), the
+  client faults and no window comes (0 of 1 in 150 s; without the
+  variables 2 of 2 at 60 s). So Zink stays per program: WineD3D gets it
+  from settings-env.py's per-launch environment, and a native Linux game
+  can get it from its Steam launch options
+    GALLIUM_DRIVER=zink MESA_EXTENSION_OVERRIDE="+GL_ARB_vertex_type_2_10_10_10_rev +GL_ARB_texture_buffer_object_rgb32" %command%
+  (UNTESTED with a game; OpenGL 4.5 on Zink is measured outside Steam's
+  runtime container only).
+
 NOT DONE
   No game. Why Wine's caps context needs 3.3 after the X server restart,
-  and did not before, is not explained.
+  and did not before, is not explained. The 32-bit thunk's double
+  registration (two Vulkan loads in one i386 process) is not fixed.
