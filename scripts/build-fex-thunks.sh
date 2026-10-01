@@ -297,7 +297,7 @@ do_guest() {
         -std=c++20 -O2 -g0 -fPIC -fwrapv -msse2 -mfpmath=sse -DGUEST_THUNK_LIBRARY \
         -I "$OUT/gen" -isystem "$tl/include" -isystem "$SRC/External/Vulkan-Headers/include" \
         -shared -fuse-ld=lld --ld-path="$LLD" -Wl,--build-id=sha1 \
-        -Wl,-soname,libvulkan.so.1 \
+        -Wl,-soname,libvulkan.so.1 -Wl,-z,nodelete \
         -o "$OUT/GuestThunks/libvulkan-guest.so" "$tl/libvulkan/Guest.cpp"
     "$LLVM_BIN/llvm-readelf" -h -d "$OUT/GuestThunks/libvulkan-guest.so" | grep -E 'Machine|NEEDED|SONAME' | sed 's/^/  /'
 }
@@ -349,7 +349,7 @@ do_guest32() {
         -std=c++20 -O2 -g0 -fPIC -fwrapv -msse2 -mfpmath=sse -DGUEST_THUNK_LIBRARY -DIS_32BIT_THUNK \
         -I "$OUT/gen32" -isystem "$tl/include" -isystem "$SRC/External/Vulkan-Headers/include" -isystem "$XINC" \
         -shared -fuse-ld=lld --ld-path="$LLD" -Wl,--build-id=sha1 ${lds[@]+"${lds[@]}"} \
-        -Wl,-soname,libvulkan.so.1 \
+        -Wl,-soname,libvulkan.so.1 -Wl,-z,nodelete \
         -o "$OUT/GuestThunks_32/libvulkan-guest.so" "$tl/libvulkan/Guest.cpp"
     "$LLVM_BIN/llvm-readelf" -h -d "$OUT/GuestThunks_32/libvulkan-guest.so" | grep -E 'Machine|NEEDED|SONAME' | sed 's/^/  /'
 }

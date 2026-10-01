@@ -33,6 +33,25 @@ for arch in x86_64 i386; do
     else
         printf '  FAIL  vk_device %-6s (log %s)\n' "$arch" "$ROOT/tmp/vk_device_$arch.log"; fail=$((fail + 1))
     fi
+    # libvulkan.so.1 loaded, used and unloaded three times in one process
+    # (tests/elf/vk_reload.c), as Steam's i386 client probes Vulkan and
+    # Mesa's Zink loads it again. The guest thunk is linked -z nodelete:
+    # unloaded, it came back elsewhere, FEX kept the trampolines into the
+    # old copy ("already linked elsewhere", "NoExec instruction").
+    rexe="$ROOT/tmp/vk_reload_$arch"
+    if ! "$CLANG" "${flags[@]}" -fuse-ld=lld -O2 -o "$rexe" tests/elf/vk_reload.c -ldl; then
+        printf '  FAIL  vk_reload %-6s (build)\n' "$arch"; fail=$((fail + 1))
+    else
+        LXRT_ROOT="$ROOT" FEX_ROOTFS=/ scripts/run-fex.sh "/tmp/vk_reload_$arch" > "$ROOT/tmp/vk_reload_$arch.log" 2>&1 &
+        pid=$!
+        for _ in $(seq 1 60); do kill -0 $pid 2>/dev/null || break; sleep 1; done
+        kill -9 $pid 2>/dev/null; wait $pid 2>/dev/null
+        if grep -q '^== vk_reload: ok' "$ROOT/tmp/vk_reload_$arch.log"; then
+            printf '  ok    vk_reload %-6s three loads and unloads of libvulkan.so.1\n' "$arch"; pass=$((pass + 1))
+        else
+            printf '  FAIL  vk_reload %-6s (log %s)\n' "$arch" "$ROOT/tmp/vk_reload_$arch.log"; fail=$((fail + 1))
+        fi
+    fi
     # OpenGL on the same thunk through Mesa's Zink (tests/elf/gl_zink.c):
     # surfaceless EGL, a triangle into a framebuffer object, pixels read back.
     # MoltenVK: KosmicKrisp 26.2.3 fails to compile one of Zink's shaders to
