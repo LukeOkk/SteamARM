@@ -146,10 +146,12 @@ LIBGL_ALWAYS_INDIRECT=1
 EOF
 # Vulkan for the client (steamsysinfo's GPU topology, the webhelper): the
 # shim as an ICD, the image's Qualcomm ICD set aside.
-if [ -f build/libvulkan.so.1 ]; then
-    scripts/install-frameroot-vulkan.sh "$NEW"
-else
+if [ ! -f build/libvulkan.so.1 ]; then
     echo "note: no build/libvulkan.so.1 (make shim): no Vulkan device in this root"
+elif [ ! -f "$NEW/usr/lib/libvulkan.so.1" ] || [ ! -d "$NEW/usr/share/vulkan" ]; then
+    echo "note: the image has no Vulkan loader: no Vulkan device in this root"
+else
+    scripts/install-frameroot-vulkan.sh "$NEW" || echo "note: Vulkan not installed in this root"
 fi
 {
     echo "made by scripts/mkframeroot.sh on $(date -u +%Y-%m-%dT%H:%M:%SZ)"
