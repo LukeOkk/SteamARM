@@ -39,5 +39,11 @@ vkGetPhysicalDeviceMemoryProperties2
 vkGetPhysicalDeviceMemoryProperties2KHR
 # present.c
 vkCreateSwapchainKHR
+# scaler.c
+vkGetSwapchainImagesKHR
+vkDestroySwapchainKHR
+vkQueuePresentKHR
+vkGetDeviceQueue
+vkGetDeviceQueue2
 # spirv_names.c
 vkCreateShaderModule

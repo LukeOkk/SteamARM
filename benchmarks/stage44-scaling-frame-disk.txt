@@ -1,0 +1,87 @@
+Stage 44 -- Scaling filters (FSR 1, MetalFX, whole pixels) and a fix of
+"Escala de resolución"; the Steam Frame and Android disk images; SteamOS's
+update client in the Steam Frame root; personal data in the repository
+Date: 2026-10-01. Apple M4, macOS 27, native XQuartz 1920x1050. Zero VM.
+No game.
+
+1. "ESCALA DE RESOLUCION" AS 0.3.20 SHIPPED IT WAS BROKEN FOR DXVK
+  tests/win/modeset.c now draws its left half red and its right half blue,
+  and the shim reads back what a swapchain image holds when it is presented
+  (LXRT_VK_SCALER_PROBE=1, shim/scaler.c probe_image):
+    0.3.20 (Proton's fullscreen hack on, the default)
+      "[shim] vkCreateSwapchainKHR extent 1x1 usage 0x8 flags 0x4"
+      Proton's hack (dlls/win32u/vulkan.c, win32u_vkCreateSwapchainKHR)
+      makes its swapchain at the surface's minImageExtent, which MoltenVK
+      reports as 1x1, and scales the game into it with a compute shader:
+      the picture became one pixel.
+    min = max = currentExtent for X11 surfaces (shim/wsi.c, as Linux's
+    drivers report them): the hack's swapchain became 1867x1050, but the
+    probe read 0,0,0,0 everywhere -- its compute blit into the swapchain
+    image writes nothing on MoltenVK.
+  So SteamARM turns the hack off (WINE_DISABLE_FULLSCREEN_HACK=1 with
+  "Escala de resolución", settings-env.py) and enlarges the game itself.
+  Without the hack Wine keeps the game's client window at 1280x720 inside a
+  toplevel that covers the screen, and detaches it (moves it under a 1x1
+  window of its own) to copy its X contents scaled -- contents that are
+  empty here, the frames being a Core Animation layer. shim/wsi.c
+  (LXRT_VK_PADDED_FULLSCREEN=1) shows the frames on that toplevel instead,
+  remembered when the client is detached, while the game still sees its own
+  window's size: its swapchain stays 1280x720 and the shim enlarges it to
+  the layer.
+
+2. SCALING FILTERS (shim/scaler.c; Settings "Filtro de escalado", per app)
+  The game's picture is kept in its aspect and centred, black bars around
+  (as Proton's hack drew it). tests/win/run.sh, DXVK on MoltenVK:
+    modeset          MoltenVK's stretch (aspect, centred): swapchain 1280x720,
+                     surface 1920x1050, left 0,0,255 right 255,0,0
+    modeset_fsr      AMD FSR 1.0 (EASU + RCAS, third_party/fsr1):
+                     1280x720 -> 1920x1050, left red, right blue, corner
+                     black (the bar)
+    modeset_nearest  vkCmdBlitImage NEAREST: same
+    modeset_metalfx  Apple MetalFX spatial scaler, encoded by the runtime
+                     (runtime/metalfx.m) between two of the shim's
+                     submissions, ordered by a timeline semaphore's
+                     MTLSharedEvent: same. (It first failed with -7:
+                     vkGetDeviceProcAddr gives no vkExportMetalObjectsEXT
+                     unless the game enabled VK_EXT_metal_objects; the shim
+                     calls MoltenVK's exported entry point.)
+    376-384 frames in 2.5 s for each; Windows suite 21/21, Vulkan 6/6.
+  Also found on the way: MoltenVK answered VK_SUBOPTIMAL_KHR to every
+  present of a swapchain smaller than its layer (4 frames in 2.5 s); the
+  shim asks for present scaling (shim/present.c).
+
+3. THE STEAM FRAME ROOT SAW 22 GB FREE
+  Its root lives in a case-sensitive sparse bundle made with a 40 GB
+  capacity; Steam reads free space inside it (statfs):
+    before   df in the root: 40G size, 18G used, 22G free (Mac: 219 GB free)
+    scripts/image-volume.sh grows a bundle to the size of the volume that
+    holds it (sparse: the bundle stayed 20 GB on disk) when nothing has it
+    open -- here only after a forced unmount: a system process held the
+    volume with no file of the user's open.
+    then     APFS answers free space from the Mac's disk but keeps the
+             capacity as its size: 1.7T size, "1.5T used"
+    runtime/fileops2.c (LXRT_STATFS_BACKING, written by image-volume.sh):
+             free capped by the Mac's volume, size = the volume's own used
+             space (ATTR_VOL_SPACEUSED) + free: 239G size, 18G used, 221G free
+  The Android image (24 GB) was grown the same way, after stopping three
+  logd stand-ins left by a test run that morning (tests/android/logd.py now
+  exits when its parent does) and SteamARM's PulseAudio, which held a socket
+  on it.
+
+4. atomupd-manager CRASHED 7 TIMES PER START OF THE STEAM FRAME CLIENT
+  The client checks for SteamOS updates (steamos-update check ->
+  atomupd-manager check), atomupd-manager talks to atomupd-daemon on the
+  system D-Bus, which does not exist here: SIGSEGV at addr 0x8 each time.
+  scripts/install-frameroot-atomupd.sh puts a stand-in in its place (the
+  image's kept as atomupd-manager.lxrt-off): "No update available"
+  (steamos-update exits 7, its "no update"), "idle" for the status, updates
+  and branch switches refused. setup.sh and mkframeroot.sh run it.
+
+5. PERSONAL DATA
+  Every file and every revision of this repository, its commit messages,
+  tags, releases, issues and pull requests, and the icons' metadata,
+  searched for home directories, e-mail addresses, private network
+  addresses, time zones, Steam IDs, tokens and keys: one home-network DNS
+  address in benchmarks/stage29 (removed from the current tree; it stays in
+  8 old revisions). tests/test_no_personal_data.py now fails on any of
+  those patterns in a tracked file.

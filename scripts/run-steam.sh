@@ -83,6 +83,9 @@ if [ "$MODE" != native ] && ! pgrep -f 'lxrun /usr/bin/Xvnc' >/dev/null; then
     sleep 3
 fi
 
+# Free space inside SteamARM's disk images is the Mac's (runtime/fileops2.c).
+LXRT_STATFS_BACKING="$(scripts/image-volume.sh backing 2>/dev/null)"
+export LXRT_STATFS_BACKING
 if ! pgrep -f 'build/lxrun .*ubuntu12_32/steam ' >/dev/null; then
     stop_steam
     L="$LOGS/steam-$(date +%H%M%S).log"

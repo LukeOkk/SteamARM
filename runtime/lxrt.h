@@ -165,6 +165,13 @@ void lxrt_host_altstack_install(void);
 // swapped pair (EAGAIN/EDEADLK). Never return a raw Darwin errno to a guest.
 int lxrt_errno_to_linux(int e);
 
+// ntsync.c: /dev/ntsync (LXRT_NTSYNC=1)
+bool lxrt_ntsync_enabled(void);
+bool lxrt_ntsync_path(int dirfd, const char *path);
+long lxrt_ntsync_open(int lflags);
+bool lxrt_ntsync_request(unsigned long lreq);
+bool lxrt_ntsync_ioctl(int fd, unsigned long lreq, uint64_t arg, long *ret);
+
 // subpage.c -- 4 KiB guest mappings on 16 KiB host pages. x86 Linux binaries
 // are linked with p_align 0x1000 and Darwin's mmap refuses a MAP_FIXED address
 // that is not 16 KiB aligned.

@@ -186,6 +186,8 @@ struct LauncherSettings: Codable, Equatable {
     var anisotropy: Int = 0
     var antialiasing: Int = 0          // MSAA samples DXVK forces on D3D9 swapchains; 0 = the game's
     var resolutionScaling: Bool = false // Wine's display-mode emulation in the game prefixes
+    var scalingFilter: String = "linear" // a picture smaller than its window: linear, nearest, fsr, metalfx (shim/scaler.c)
+    var fsrSharpness: Int = 90         // FSR's RCAS strength, percent
     var frameRateLimit: Int = 0
     var dxvkHud: String = "off"
     var audioBackend: String = "coreaudio"
@@ -236,6 +238,8 @@ struct LauncherSettings: Codable, Equatable {
         anisotropy = try c.decodeIfPresent(Int.self, forKey: .anisotropy) ?? 0
         antialiasing = try c.decodeIfPresent(Int.self, forKey: .antialiasing) ?? 0
         resolutionScaling = try c.decodeIfPresent(Bool.self, forKey: .resolutionScaling) ?? false
+        scalingFilter = try c.decodeIfPresent(String.self, forKey: .scalingFilter) ?? "linear"
+        fsrSharpness = try c.decodeIfPresent(Int.self, forKey: .fsrSharpness) ?? 90
         frameRateLimit = try c.decodeIfPresent(Int.self, forKey: .frameRateLimit) ?? 0
         dxvkHud = try c.decodeIfPresent(String.self, forKey: .dxvkHud) ?? "off"
         audioBackend = try c.decodeIfPresent(String.self, forKey: .audioBackend) ?? "coreaudio"

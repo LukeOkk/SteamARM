@@ -210,6 +210,10 @@ def inventory(state):
         "fex": {"patchedInstalled": (state / "lxrt-root/usr/bin/FEX-gb").is_file(),
                 "steamInstalled": (common / "FEX-Emu/FEXCompatTool").is_file()},
         "protons": tools,
+        # /dev/ntsync in this runtime (runtime/ntsync.c): the build has it when
+        # its directory name is in the binary.
+        "runtime": {"ntsync": settings_env.file_contains(
+            Path(__file__).resolve().parents[1] / "build/lxrun", b"/tmp/lxrt-ntsync-")},
         "nativeArmReason": native_reason,
         "note": "Instalado no garantiza compatibilidad con cada juego. FEX de Steam no sustituye al FEX adaptado a macOS.",
     }

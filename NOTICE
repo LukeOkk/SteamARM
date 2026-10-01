@@ -8,6 +8,11 @@ license of the project they apply to:
   xquartz-*.patch          XQuartz / X.Org     MIT/X11
   quartz-wm-*.patch        quartz-wm           APSL 2.0
 
+third_party/fsr1 is AMD FidelityFX Super Resolution 1.0 (ffx_a.h,
+ffx_fsr1.h), unmodified, MIT license (third_party/fsr1/LICENSE.txt,
+Copyright (c) 2021 Advanced Micro Devices, Inc.). The Vulkan shim's scaling
+pass compiles it into shim/scaler_spv.h.
+
 scripts/setup.sh downloads and builds, at install time, software that is not
 part of this repository and keeps its own license: FEX-Emu, XQuartz,
 quartz-wm, Fedora and Ubuntu packages, and Homebrew formulae (LLVM, MoltenVK,

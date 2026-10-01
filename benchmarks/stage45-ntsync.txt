@@ -1,0 +1,53 @@
+Stage 45 -- NTSYNC: /dev/ntsync emulated across processes
+Date: 2026-10-01. Apple M4, macOS 27. Zero VM. No game.
+
+WHAT
+  Linux 6.14's NT synchronization driver (drivers/misc/ntsync.c): Wine's
+  server makes every Windows semaphore, mutex and event an object of it and
+  hands the fds to its processes, which wait and signal without a round
+  trip to the server. Proton Experimental and Hotfix open /dev/ntsync when
+  it exists ("ntsync: up and running"; Proton 10.0 does not have it).
+  runtime/ntsync.c offers it only with LXRT_NTSYNC=1 (Settings ->
+  Sincronización -> NTSYNC, experimental): without it the open fails with
+  ENOENT as before.
+
+DESIGN
+  A device is a directory of the user's: an arena file (header with the
+  device lock, 65536 object slots, 1024 waiter records) mapped MAP_SHARED
+  by every process that has the device or one of its objects, and one small
+  file per object, whose fd is the object's fd. Each fd holds a shared
+  flock on its file; flock belongs to the open file description, which dup,
+  fork and SCM_RIGHTS share, so a file is free exactly when no process has
+  an fd of it -- the kernel's last fput, without tracking closes. One
+  futex-style lock per device (shared Darwin ulocks); signals hand objects
+  to waiters in queue order before the ioctl returns, as the driver's
+  try_wake_any_* / try_wake_all. A lock held by a dead process is taken over
+  after 200 ms; a dead process's waiters are dropped.
+
+CORRECTNESS
+  The kernel's own selftests (tools/testing/selftests/drivers/ntsync,
+  current master, built for aarch64 with the 6.14 harness: the newer one
+  needs pidfd_open), under lxrun with LXRT_NTSYNC=1, 3 runs:
+    pass 12, fail 0, skip 1 (wait_any_monotonic_timens: time namespaces)
+  tests/elf/ntsync.c (in tests/elf/run.sh): 17 of 17, aarch64 and x86_64
+  under FEX -- states, overflow, recursion, wrong owner, abandoned mutex,
+  wait-all taking all or nothing, alerts, and the Wine pattern: device and
+  objects handed to another process over SCM_RIGHTS, a semaphore released to
+  its waiter there before the release returns.
+  Proton Experimental, tests/win/sync.c (events between two threads,
+  WaitForMultipleObjects of all, abandoned mutex, a semaphore of 2 shared by
+  4 threads), tests/win/run.sh sync*:
+    sync          wineserver   ok
+    sync_fsync    fsync        ok
+    sync_ntsync   ntsync       ok ("ntsync: up and running" in the log)
+
+SPEED (event ping-pong between two threads, 20000 round trips)
+    wineserver           50.5 us
+    fsync                14.4-15.5 us
+    ntsync, first cut   116.7 us  (every ioctl opened and read the files)
+    ntsync, cached       20.9 us  (fds identified once per process, by
+                                   device, inode and birth time)
+
+NOT DONE
+  Not measured with a game. The launcher keeps it experimental and out of
+  AUTO.

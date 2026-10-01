@@ -39,12 +39,15 @@ cp -f "$PROTON"/lib/vkd3d/x86_64-windows/*.dll "$SYS32/"
 cp -f "$PROTON"/lib/vkd3d/i386-windows/*.dll "$SYS32/../syswow64/"
 
 PASS=0 FAIL=0
-for t in ${@:-tick tick_32 tone tone_32 regwin d3d11 d3d12 d3d9 d3d9_32 d3d11_32 d3d12_32 d3d9_wined3d d3d11_wined3d d3d9_32_wined3d modeset}; do
+for t in ${@:-tick tick_32 tone tone_32 regwin d3d11 d3d12 d3d9 d3d9_32 d3d11_32 d3d12_32 d3d9_wined3d d3d11_wined3d d3d9_32_wined3d modeset modeset_fsr modeset_nearest modeset_metalfx sync sync_fsync sync_ntsync}; do
     # <api>_wined3d: Wine's builtin D3D on OpenGL from Mesa's Zink, on the same
     # Vulkan thunk (the launcher's "OpenGL (WineD3D)"; stage38-opengl-zink).
     wined3d=0
     case $t in *_wined3d) wined3d=1 ;; esac
     base=${t%_wined3d}
+    # modeset_<filter>: the scaling filter of shim/scaler.c (LXRT_VK_SCALER).
+    scaler=""
+    case $base in modeset_*) scaler=${base#modeset_}; base=modeset ;; sync_*) base=sync ;; esac
     api=${base%_32} cc=x86_64-w64-mingw32-gcc
     [ "$api" = "$base" ] || cc=i686-w64-mingw32-gcc
     exe="$ROOT/tmp/${t}_clear.exe"
@@ -63,6 +66,40 @@ for t in ${@:-tick tick_32 tone tone_32 regwin d3d11 d3d12 d3d9 d3d9_32 d3d11_32
         fi
         continue
     fi
+    if [ "$api" = sync ]; then
+        # Windows synchronization (tests/win/sync.c) under each backend the
+        # launcher offers: sync (wineserver), sync_fsync (WINEFSYNC=1:
+        # futex_waitv.c), sync_ntsync (LXRT_NTSYNC=1: /dev/ntsync, ntsync.c).
+        # The server is stopped first: it keeps the backend it started with.
+        $cc -O2 -mconsole -o "$exe" tests/win/sync.c || { FAIL=$((FAIL + 1)); continue; }
+        pkill -9 -f "[b]in/wineserver" 2>/dev/null
+        for _ in $(seq 1 30); do pgrep -f "[b]in/wineserver" >/dev/null || break; sleep 1; done
+        case $t in
+            sync_fsync)  senv=(WINEFSYNC=1) ;;
+            sync_ntsync) senv=(LXRT_NTSYNC=1) ;;
+            *)           senv=(PROTON_NO_NTSYNC=1) ;;
+        esac
+        log="$LOGS/win-$t.log"
+        env DISPLAY=:2 WINEPREFIX=$PFX_GUEST WINEDEBUG=-all "${senv[@]}" \
+            LXRT_ROOT=$ROOT FEX_ROOTFS=/ scripts/run-fex.sh "$PROTON_GUEST/bin/wine" "Z:\\tmp\\${t}_clear.exe" > "$log" 2>&1 &
+        pid=$!
+        for _ in $(seq 1 120); do kill -0 $pid 2>/dev/null || break; sleep 1; done
+        kill -0 $pid 2>/dev/null && { pkill -9 -f "${t}_clear.exe"; kill -9 $pid; }
+        wait $pid 2>/dev/null
+        pkill -9 -f "[b]in/wineserver" 2>/dev/null
+        mode="wineserver"
+        grep -q "fsync: up and running" "$log" && mode="fsync"
+        grep -q "ntsync: up and running" "$log" && mode="ntsync"
+        want=${t#sync}; want=${want#_}; want=${want:-wineserver}
+        if grep -q "== sync probe: ok" "$log" && [ "$mode" = "$want" ]; then
+            echo "  ok    $t: $mode, $(grep -h '^event ping-pong' "$log" | sed 's/^event ping-pong: //')"; PASS=$((PASS + 1))
+        else
+            echo "  FAIL  $t (backend $mode, wanted $want; log $log)"
+            grep -v '^\[lxrt\]' "$log" | grep -E "ping-pong|wait all|abandoned|semaphore|== sync" | sed 's/^/        /'
+            FAIL=$((FAIL + 1))
+        fi
+        continue
+    fi
     if [ "$api" = modeset ]; then
         # "Escala de resolución": Wine's display-mode emulation (EmulateModeset,
         # scripts/wine-prefix-options.py) in this prefix for this run. The
@@ -74,7 +111,8 @@ for t in ${@:-tick tick_32 tone tone_32 regwin d3d11 d3d12 d3d9 d3d9_32 d3d11_32
         for _ in $(seq 1 60); do pgrep -f "[b]in/wineserver" >/dev/null || break; sleep 1; done
         python3 scripts/wine-prefix-options.py emulate-modeset on "$reg" >/dev/null
         log="$LOGS/win-$t.log"
-        env DISPLAY=:2 WINEPREFIX=$PFX_GUEST WINEDEBUG=-all LXRT_VK_DEBUG=1 \
+        env DISPLAY=:2 WINEPREFIX=$PFX_GUEST WINEDEBUG="${WIN_DEBUG:--all}" LXRT_VK_DEBUG=1 \
+            LXRT_VK_SCALER="$scaler" LXRT_VK_SCALER_PROBE=1 WINE_DISABLE_FULLSCREEN_HACK=1 LXRT_VK_PADDED_FULLSCREEN=1 \
             WINEDLLOVERRIDES="d3d9,d3d11,d3d12,d3d12core,dxgi,d3d10core=n" \
             LXRT_ROOT=$ROOT FEX_ROOTFS=/ scripts/run-fex.sh "$PROTON_GUEST/bin/wine" "Z:\\tmp\\${t}_clear.exe" > "$log" 2>&1 &
         pid=$!
@@ -90,8 +128,29 @@ for t in ${@:-tick tick_32 tone tone_32 regwin d3d11 d3d12 d3d9 d3d9_32 d3d11_32
         for _ in $(seq 1 60); do pgrep -f "[b]in/wineserver" >/dev/null || break; sleep 1; done
         python3 scripts/wine-prefix-options.py emulate-modeset off "$reg" >/dev/null
         screen=$(DISPLAY=:2 xdpyinfo 2>/dev/null | awk '/dimensions:/ {print $2}')
-        if grep -q "== modeset probe: ok" "$log" && grep -q "^backbuffer 1280x720" "$log" && [ "$geo" = "$screen" ]; then
-            echo "  ok    $t: 1280x720 drawn, X window $geo (the screen); $(grep -o '[0-9]* frames' "$log" | tail -1)"; PASS=$((PASS + 1))
+        # What reaches the window (the shim's probe, LXRT_VK_SCALER_PROBE),
+        # with Proton's fullscreen hack off and the game shown on its
+        # full-screen toplevel (LXRT_VK_PADDED_FULLSCREEN, settings-env.py):
+        # red in the left half, blue in the right one (B8G8R8A8: 0,0,255 and
+        # 255,0,0). With a filter of the shim's own, the image its pass wrote
+        # at the window's size; without one, the game's 1280x720 image, which
+        # MoltenVK stretches ("stretched") over a surface larger than it.
+        px=$(grep -m1 "^\[shim\] probe " "$log")
+        what=${scaler:-plain}
+        pw=$(echo "$px" | sed -n 's/.* \([0-9]*\)x\([0-9]*\) format.*/\1/p')
+        ph=$(echo "$px" | sed -n 's/.* \([0-9]*\)x\([0-9]*\) format.*/\2/p')
+        sw=$(grep -m1 "^\[shim\] vkCreateSwapchainKHR extent" "$log" | sed -n 's/.*surface \([0-9]*\)x.*/\1/p')
+        filtered=1
+        note="; ${px#*\[shim\] probe }"
+        echo "$px" | grep -q "probe $what " || filtered=0
+        if [ -n "$scaler" ]; then
+            [ "${pw:-0}" -gt 1280 ] && [ "${ph:-0}" -gt 720 ] || filtered=0
+        else
+            [ "${sw:-0}" -gt 1280 ] && grep -q "stretched" "$log" || filtered=0
+        fi
+        echo "$px" | grep -qE "left [0-3],[0-3],(25[2-5]),255 right (25[2-5]),[0-3],[0-3],255" || filtered=0
+        if [ $filtered = 1 ] && grep -q "== modeset probe: ok" "$log" && grep -q "^backbuffer 1280x720" "$log" && [ "$geo" = "$screen" ]; then
+            echo "  ok    $t: 1280x720 drawn, X window $geo (the screen); $(grep -o '[0-9]* frames' "$log" | tail -1)$note"; PASS=$((PASS + 1))
         else
             echo "  FAIL  $t (X window '$geo', screen $screen; log $log)"; FAIL=$((FAIL + 1))
         fi

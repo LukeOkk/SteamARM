@@ -67,11 +67,18 @@ enum {
     LNR_lxrt_rlayer_create = 0x4C580012,  // (w, h, uint32_t *ctx) -> CAMetalLayer * (remote_layer.m)
     LNR_lxrt_rlayer_resize = 0x4C580013,  // (layer, w, h) -> 0
     LNR_lxrt_rlayer_release = 0x4C580014, // (layer) -> 0
+    LNR_lxrt_mfx_encode = 0x4C580015,     // (struct lxrt_mfx_run *) -> 0 or -errno (metalfx.m)
+    LNR_lxrt_mfx_release = 0x4C580016,    // (scaler) -> 0
     LNR_lxrt_jit_wx  = 0x4C580020,  // (enable, addr, len) -> 0
     LNR_lxrt_guest_base = 0x4C580030, // (base) -> 0: 32-bit guest lives at host = base + guest
     LNR_lxrt_guest_base_get = 0x4C580031, // () -> base, 0 if none (the Vulkan shim's rebasing)
     LNR_lxrt_alias = 0x4C580032,          // (src, len, dst) -> 0: dst becomes a shared alias of src
 };
+
+// metalfx.m
+struct lxrt_mfx_run;
+long lxrt_mfx_encode(struct lxrt_mfx_run *r);
+void lxrt_mfx_release(void *scaler);
 
 // window.m
 void *lxrt_window_create(int w, int h, const char *title);
@@ -2742,6 +2749,13 @@ restart:
         lxrt_remote_layer_release((void *)a0);
         ret = 0;
         break;
+    case LNR_lxrt_mfx_encode:
+        ret = lxrt_mfx_encode((struct lxrt_mfx_run *)a0);
+        break;
+    case LNR_lxrt_mfx_release:
+        lxrt_mfx_release((void *)a0);
+        ret = 0;
+        break;
     case LNR_lxrt_drawable:
         lxrt_window_drawable_size((uint32_t *)a0, (uint32_t *)a1);
         ret = 0;
@@ -2916,6 +2930,12 @@ restart:
         ret = ret_of((long)lseek((int)a0, (off_t)a1, (int)a2));
         break;
     case LNR_openat:
+        // /dev/ntsync: Wine's NT synchronization objects (ntsync.c), offered
+        // only with LXRT_NTSYNC=1.
+        if (lxrt_ntsync_path((int)a0 == -100 ? -1 : lxrt_dirfd_to_darwin((int)a0), (const char *)a1)) {
+            ret = lxrt_ntsync_open((int)a2);
+            break;
+        }
         // /dev/binder, /dev/hwbinder, /dev/vndbinder: the userspace binder
         // driver (binder.c, binder_hub.c), whatever the root has under /dev.
         {

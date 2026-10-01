@@ -4,10 +4,12 @@
 // program then sees, and a borderless D3D11 window of that size presenting
 // for two seconds. tests/win/run.sh compares the X window and the Vulkan
 // swapchain with it: the program's 1280x720 shown over the whole screen is
-// the "Escala de resolución" of Settings.
+// the "Escala de resolución" of Settings. The left half is drawn red and the
+// right half blue: the shim's probe (LXRT_VK_SCALER_PROBE) reads a pixel of
+// each half of what reaches the window.
 #define COBJMACROS
 #include <windows.h>
-#include <d3d11.h>
+#include <d3d11_1.h>
 #include <dxgi.h>
 #include <stdio.h>
 
@@ -64,13 +66,22 @@ int main(void)
     D3D11_TEXTURE2D_DESC td;
     ID3D11Texture2D_GetDesc(bb, &td);
     printf("backbuffer %ux%u\n", td.Width, td.Height);
+    ID3D11DeviceContext1 *ctx1 = NULL;
+    ID3D11DeviceContext_QueryInterface(ctx, &IID_ID3D11DeviceContext1, (void **)&ctx1);
+    D3D11_RECT left = { 0, 0, (LONG)td.Width / 2, (LONG)td.Height };
+    D3D11_RECT right = { (LONG)td.Width / 2, 0, (LONG)td.Width, (LONG)td.Height };
     DWORD t0 = GetTickCount();
     int frames = 0;
     while (GetTickCount() - t0 < 2500) {
         MSG msg;
         while (PeekMessageA(&msg, NULL, 0, 0, PM_REMOVE)) DispatchMessageA(&msg);
-        const float c[4] = { 0.1f, 0.4f, 0.8f, 1.0f };
-        ID3D11DeviceContext_ClearRenderTargetView(ctx, rtv, c);
+        const float red[4] = { 1.0f, 0.0f, 0.0f, 1.0f }, blue[4] = { 0.0f, 0.0f, 1.0f, 1.0f };
+        if (ctx1) {
+            ID3D11DeviceContext1_ClearView(ctx1, (ID3D11View *)rtv, red, &left, 1);
+            ID3D11DeviceContext1_ClearView(ctx1, (ID3D11View *)rtv, blue, &right, 1);
+        } else {
+            ID3D11DeviceContext_ClearRenderTargetView(ctx, rtv, red);
+        }
         IDXGISwapChain_Present(sc, 1, 0);
         frames++;
     }

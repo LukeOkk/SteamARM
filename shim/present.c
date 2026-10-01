@@ -24,7 +24,8 @@
 // win32u asks for stretching (VkSwapchainPresentScalingCreateInfoEXT) only
 // when the instance enabled VK_EXT_surface_maintenance1, and DXVK enables the
 // KHR one; so on MoltenVK a swapchain whose extent differs from the surface's
-// gets STRETCH here, as Wine would have asked.
+// gets STRETCH here, as Wine would have asked. Other filters than this
+// bilinear stretch: shim/scaler.c (LXRT_VK_SCALER).
 #include <stdint.h>
 #include <stddef.h>
 #define VK_NO_PROTOTYPES
@@ -60,6 +61,10 @@ void lxrt_note_device(VkDevice dev, VkPhysicalDevice pd)
     g_dev[k].pd = pd;
     __atomic_store_n(&g_dev_lock, 0, __ATOMIC_RELEASE);
 }
+
+static VkPhysicalDevice device_pd(VkDevice dev);
+
+VkPhysicalDevice lxrt_device_pd(VkDevice dev) { return device_pd(dev); }   // scaler.c
 
 static VkPhysicalDevice device_pd(VkDevice dev)
 {
@@ -123,9 +128,11 @@ static int surface_offers(VkPhysicalDevice pd, VkSurfaceKHR surface, VkPresentMo
 }
 
 VkResult lxrt_inner_vkGetPhysicalDeviceSurfaceCapabilitiesKHR(VkPhysicalDevice, VkSurfaceKHR, void *);   // wsi.c
+int lxrt_wsi_layer_extent(VkSurfaceKHR, uint32_t *, uint32_t *);                                           // wsi.c
 
-// 1 when the swapchain needs MoltenVK to stretch it over its surface (above).
-static int needs_stretch(VkDevice dev, const VkSwapchainCreateInfoKHR *ci)
+// 1 when the swapchain needs MoltenVK to stretch it over its surface (above);
+// *window is then the surface's size.
+static int needs_stretch(VkDevice dev, const VkSwapchainCreateInfoKHR *ci, VkExtent2D *window)
 {
     if (!ci->surface || !s_ieq(lxrt_vk_driver, "moltenvk"))
         return 0;
@@ -137,8 +144,22 @@ static int needs_stretch(VkDevice dev, const VkSwapchainCreateInfoKHR *ci)
     if (!pd || lxrt_inner_vkGetPhysicalDeviceSurfaceCapabilitiesKHR(pd, ci->surface, &caps) != VK_SUCCESS ||
         caps.currentExtent.width == 0xFFFFFFFFu)
         return 0;
+    // The layer's size, which the game's own extents (wsi.c window_extents)
+    // may not be: a game on its full-screen toplevel.
+    uint32_t lw, lh;
+    if (lxrt_wsi_layer_extent(ci->surface, &lw, &lh)) {
+        caps.currentExtent.width = lw;
+        caps.currentExtent.height = lh;
+    }
+    *window = caps.currentExtent;
     return caps.currentExtent.width != ci->imageExtent.width || caps.currentExtent.height != ci->imageExtent.height;
 }
+
+// shim/scaler.c: the other filters (LXRT_VK_SCALER), or an error when MoltenVK
+// is to stretch.
+VkResult lxrt_scaler_create(VkDevice, VkPhysicalDevice, const VkSwapchainCreateInfoKHR *, VkExtent2D,
+                            const VkAllocationCallbacks *, VkSwapchainKHR *);
+void lxrt_scaler_note_plain(VkDevice, VkSwapchainKHR, VkExtent2D, VkFormat);
 
 VkResult lxrt_inner_vkCreateSwapchainKHR(VkDevice dev, const VkSwapchainCreateInfoKHR *ci,
                                          const VkAllocationCallbacks *alloc, VkSwapchainKHR *out)
@@ -147,8 +168,17 @@ VkResult lxrt_inner_vkCreateSwapchainKHR(VkDevice dev, const VkSwapchainCreateIn
     int dbg = d && *d == '1';
     VkPresentModeKHR want = VK_PRESENT_MODE_FIFO_KHR;
     int ov = wanted_mode(&raw, &want);
-    int stretch = ci && needs_stretch(dev, ci);
-    if ((!dbg && !ov && !stretch) || !ci)
+    VkExtent2D window = { 0, 0 };
+    int stretch = ci && needs_stretch(dev, ci, &window);
+    if (dbg && ci)
+        dprintf(2, "[shim] vkCreateSwapchainKHR extent %ux%u usage 0x%x flags 0x%x images %u, surface %ux%u\n",
+                ci->imageExtent.width, ci->imageExtent.height, (unsigned)ci->imageUsage, (unsigned)ci->flags,
+                ci->minImageCount, window.width, window.height);
+    if (stretch && lxrt_scaler_create(dev, device_pd(dev), ci, window, alloc, out) == VK_SUCCESS)
+        return VK_SUCCESS;
+    const char *pe = getenv("LXRT_VK_SCALER_PROBE");
+    int probe = pe && *pe == '1';
+    if ((!dbg && !ov && !stretch && !probe) || !ci)
         return lxrt_mvk_vkCreateSwapchainKHR(dev, ci, alloc, out);
 
     // A copy: the caller's structure is const and stays as it was.
@@ -156,10 +186,16 @@ VkResult lxrt_inner_vkCreateSwapchainKHR(VkDevice dev, const VkSwapchainCreateIn
     VkSwapchainPresentScalingCreateInfoEXT scaling = {
         .sType = VK_STRUCTURE_TYPE_SWAPCHAIN_PRESENT_SCALING_CREATE_INFO_EXT,
         .pNext = ci->pNext,
-        .scalingBehavior = VK_PRESENT_SCALING_STRETCH_BIT_EXT,
+        // Its aspect kept and centred, as Proton's fullscreen hack and the
+        // scaler's own passes (scaler.c fit) show a game.
+        .scalingBehavior = VK_PRESENT_SCALING_ASPECT_RATIO_STRETCH_BIT_EXT,
+        .presentGravityX = VK_PRESENT_GRAVITY_CENTERED_BIT_EXT,
+        .presentGravityY = VK_PRESENT_GRAVITY_CENTERED_BIT_EXT,
     };
     if (stretch)
         c.pNext = &scaling;
+    if (probe)
+        c.imageUsage |= VK_IMAGE_USAGE_TRANSFER_SRC_BIT;   // scaler.c reads it back once
     const char *note = "";
     if (ov < 0) {
         note = " (LXRT_VK_PRESENT_MODE not understood: FIFO or IMMEDIATE)";
@@ -173,6 +209,8 @@ VkResult lxrt_inner_vkCreateSwapchainKHR(VkDevice dev, const VkSwapchainCreateIn
             c.presentMode = want;
     }
     VkResult r = lxrt_mvk_vkCreateSwapchainKHR(dev, &c, alloc, out);
+    if (probe && r == VK_SUCCESS)
+        lxrt_scaler_note_plain(dev, *out, c.imageExtent, c.imageFormat);
     if (dbg || ov < 0 || *note)
         dprintf(2, "[shim] vkCreateSwapchainKHR driver=%s requested=%s passed=%s%s%s%s%s -> %d\n", lxrt_vk_driver,
                 mode_name(ci->presentMode), mode_name(c.presentMode), ov ? " LXRT_VK_PRESENT_MODE=" : "",

@@ -152,6 +152,7 @@ elif [ ! -f "$NEW/usr/lib/libvulkan.so.1" ] || [ ! -d "$NEW/usr/share/vulkan" ];
     echo "note: the image has no Vulkan loader: no Vulkan device in this root"
 else
     scripts/install-frameroot-vulkan.sh "$NEW" || echo "note: Vulkan not installed in this root"
+    scripts/install-frameroot-atomupd.sh "$NEW" || echo "note: atomupd-manager left as the image has it"
 fi
 {
     echo "made by scripts/mkframeroot.sh on $(date -u +%Y-%m-%dT%H:%M:%SZ)"

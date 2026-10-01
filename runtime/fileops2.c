@@ -35,6 +35,8 @@ bool lxrt_trace_on(void);
 #include <mach/mach.h>
 #include <mach/mach_vm.h>
 #include <pthread.h>
+#include <stdlib.h>
+#include <sys/attr.h>
 #include <sched.h>
 #include <string.h>
 #include <sys/file.h>
@@ -1121,6 +1123,68 @@ static void statfs_to_linux(const struct statfs *d, struct linux_statfs *l)
     // the concept.
 }
 
+// Free space of a disk-image volume (the Steam Frame root's and Android's
+// case-sensitive sparsebundles). Inside, APFS answers from the image's own
+// capacity: Steam in the Steam Frame root saw 22 GB free of a 40 GB image
+// while the Mac had 219 GB. The image can only grow as far as the volume that
+// holds it, so its free space is the smaller of the two:
+//
+//   LXRT_STATFS_BACKING=MOUNT=PATH[;MOUNT=PATH...]
+//     for a filesystem mounted at MOUNT, free blocks are capped by those of
+//     the filesystem holding PATH (scripts/image-volume.sh backing writes it)
+// Bytes a volume's own files take (ATTR_VOL_SPACEUSED), without the free
+// space statfs leaves out of a sparse image's capacity.
+static bool volume_used_bytes(const char *mount, uint64_t *out)
+{
+    struct attrlist al = { .bitmapcount = ATTR_BIT_MAP_COUNT, .volattr = ATTR_VOL_INFO | ATTR_VOL_SPACEUSED };
+    struct { uint32_t len; off_t used; } __attribute__((packed)) buf;
+    if (getattrlist(mount, &al, &buf, sizeof buf, 0) != 0 || buf.used < 0)
+        return false;
+    *out = (uint64_t)buf.used;
+    return true;
+}
+
+static void cap_by_backing(const struct statfs *d, struct linux_statfs *l)
+{
+    const char *e = getenv("LXRT_STATFS_BACKING");
+    if (!e || !*e || !d->f_bsize)
+        return;
+    size_t mlen = strlen(d->f_mntonname);
+    while (*e) {
+        const char *eq = strchr(e, '='), *end = strchr(e, ';');
+        if (!end)
+            end = e + strlen(e);
+        if (eq && eq < end && (size_t)(eq - e) == mlen && !memcmp(e, d->f_mntonname, mlen)) {
+            char path[1024];
+            size_t n = (size_t)(end - eq - 1);
+            struct statfs b;
+            if (n && n < sizeof path) {
+                memcpy(path, eq + 1, n);
+                path[n] = 0;
+                if (statfs(path, &b) == 0 && b.f_bsize &&
+                    (b.f_fsid.val[0] != d->f_fsid.val[0] || b.f_fsid.val[1] != d->f_fsid.val[1])) {
+                    uint64_t avail = (uint64_t)b.f_bavail * b.f_bsize / d->f_bsize;
+                    uint64_t bfree = (uint64_t)b.f_bfree * b.f_bsize / d->f_bsize;
+                    if ((uint64_t)l->f_bavail > avail)
+                        l->f_bavail = (int64_t)avail;
+                    if ((uint64_t)l->f_bfree > bfree)
+                        l->f_bfree = (int64_t)bfree;
+                    // The size: what the volume holds plus what is free. APFS
+                    // in a sparse image already answers free space from the
+                    // Mac's disk but keeps the image's capacity as its size,
+                    // so blocks - free came out as 1.5 TB "used" for 18 GB of
+                    // data (MEASURED, df in the Steam Frame root).
+                    uint64_t used;
+                    if (volume_used_bytes(d->f_mntonname, &used))
+                        l->f_blocks = (int64_t)(used / d->f_bsize + (uint64_t)l->f_bfree);
+                }
+            }
+            return;
+        }
+        e = *end ? end + 1 : end;
+    }
+}
+
 long lxrt_statfs(const char *tpath, void *ubuf)
 {
     if (!tpath)
@@ -1132,6 +1196,7 @@ long lxrt_statfs(const char *tpath, void *ubuf)
         return LERR(errno);
     struct linux_statfs l;
     statfs_to_linux(&d, &l);
+    cap_by_backing(&d, &l);
     memcpy(ubuf, &l, sizeof l);
     return 0;
 }
@@ -1145,6 +1210,7 @@ long lxrt_fstatfs(int fd, void *ubuf)
         return LERR(errno);
     struct linux_statfs l;
     statfs_to_linux(&d, &l);
+    cap_by_backing(&d, &l);
     memcpy(ubuf, &l, sizeof l);
     return 0;
 }

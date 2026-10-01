@@ -88,6 +88,14 @@ ROOT = os.environ.get("ANDROID_SESSION_ROOT") or VOLUME + "/session"
 # can leave the Android session alone. They used to kill every lxrun
 # process, Android included (MEASURED: a Steam stop ended the session's boot).
 os.environ["LXRT_SESSION"] = "android"
+# Free space inside the Android image is the Mac's (scripts/image-volume.sh,
+# runtime/fileops2.c).
+try:
+    os.environ["LXRT_STATFS_BACKING"] = subprocess.run(
+        [os.path.join(os.path.dirname(os.path.abspath(__file__)), "image-volume.sh"), "backing"],
+        capture_output=True, text=True, timeout=20).stdout.strip()
+except (OSError, subprocess.SubprocessError):
+    pass
 RUN_DIR = os.environ.get("ANDROID_SESSION_DIR") or "/tmp/lxrt-android-session-%d" % os.getuid()
 XDG = os.environ.get("ANDROID_SESSION_XDG") or "/dev/shm/steamarm-android"
 SOCKET = "wayland-0"
@@ -241,7 +249,9 @@ def ensure_volume():
     if not os.path.isdir(BUNDLE):
         die("no Android root at %s and no %s (scripts/mkandroidroot.sh --arch x86_64)" % (BASE_ROOT, BUNDLE))
     log("attaching %s at %s" % (BUNDLE, VOLUME))
-    subprocess.run(["hdiutil", "attach", "-nobrowse", "-mountpoint", VOLUME, BUNDLE],
+    # Grown to the Mac's disk first when it is smaller (sparse: no space is
+    # taken), then attached (scripts/image-volume.sh).
+    subprocess.run([os.path.join(REPO, "scripts/image-volume.sh"), "ensure", BUNDLE, VOLUME],
                    stdout=subprocess.DEVNULL, stderr=subprocess.STDOUT, check=False)
     if not os.path.isdir(BASE_ROOT):
         die("no Android root at %s after attaching the volume" % BASE_ROOT)

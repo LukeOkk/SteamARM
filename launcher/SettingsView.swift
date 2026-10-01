@@ -376,7 +376,17 @@ struct SettingsView: View {
                 Text("Lo fuerza DXVK en los juegos Direct3D 9. Los Direct3D 10, 11 y 12 lo eligen dentro del juego: no hay un ajuste global para ellos.")
                     .font(.caption).foregroundStyle(.secondary)
                 Toggle("Escala de resolución (experimental)", isOn: $draft.resolutionScaling)
-                Text("Los juegos ofrecen resoluciones menores que la de la pantalla; al elegir una dentro del juego, se dibuja a ese tamaño (más rápido) y Wine la estira a toda la pantalla (bilineal; el FSR de AMD ya no viene en Proton). Se aplica a los prefijos de los juegos al abrir Steam o una app, con ningún juego abierto; un juego nuevo, desde su segundo arranque.")
+                Text("Los juegos ofrecen resoluciones menores que la de la pantalla; al elegir una dentro del juego, se dibuja a ese tamaño (más rápido) y se agranda a toda la pantalla con el filtro de abajo, conservando su proporción. Se aplica a los prefijos de los juegos al abrir Steam o una app, con ningún juego abierto; un juego nuevo, desde su segundo arranque.")
+                    .font(.caption).foregroundStyle(.secondary)
+                choice("Filtro de escalado", $draft.scalingFilter, ScalingFilterChoice.options)
+                if draft.scalingFilter == "fsr" {
+                    LabeledContent("Nitidez FSR") {
+                        Slider(value: Binding(get: { Double(draft.fsrSharpness) }, set: { draft.fsrSharpness = Int($0) }),
+                               in: 0...100, step: 5)
+                        Text("\(draft.fsrSharpness)%").monospacedDigit().frame(width: 46)
+                    }
+                }
+                Text(ScalingFilterChoice.note(draft.scalingFilter))
                     .font(.caption).foregroundStyle(.secondary)
             }
         }

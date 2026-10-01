@@ -450,7 +450,7 @@ extension ApplicationBackendPreset {
 }
 
 enum SynchronizationBackend: String, Codable, CaseIterable {
-    case auto, wineserver, msync, fsync, esync
+    case auto, wineserver, msync, fsync, esync, ntsync
 
     var label: String {
         switch self {
@@ -459,6 +459,7 @@ enum SynchronizationBackend: String, Codable, CaseIterable {
         case .msync: return "MSYNC"
         case .fsync: return "FSYNC"
         case .esync: return "ESYNC"
+        case .ntsync: return "NTSYNC"
         }
     }
 }
@@ -691,6 +692,12 @@ struct RuntimeProbe: Decodable, Equatable {
     var protons: [Proton]
     var presentation: Presentation?
     var opengl: OpenGL?
+    var runtime: Runtime?
+
+    /// What the installed runtime itself offers (scripts/compat-status.py).
+    struct Runtime: Decodable, Equatable {
+        var ntsync: Bool
+    }
 }
 
 /// The launcher's source of truth for which options exist, and why the rest
@@ -718,7 +725,8 @@ struct RuntimeCapabilities {
             .wineserver: .init(state: .ready, reason: "el camino por defecto de Wine, sin vía rápida"),
             .esync: .init(state: .experimental, reason: "solo Proton 10.0 lo incluye; lxrun implementa eventfd también entre procesos, enviado por SCM_RIGHTS como hace wineserver (tests/elf/eventfd_scm.c): sin verificar con juegos"),
             .fsync: .init(state: .experimental, reason: "lxrun implementa futex_waitv sobre ulocks de Darwin (runtime/futex_waitv.c, tests/elf/futex_waitv.c); sin verificar con juegos"),
-            .msync: .init(state: .unavailable, reason: "MSync es un parche del Wine de macOS (semáforos Mach) y Proton es Wine para Linux: no puede usarlo. Su equivalente aquí es fsync, que lxrun sirve con las esperas del propio kernel de macOS (ulocks): elige fsync"),
+            .msync: .init(state: .unavailable, reason: "MSync es un parche del Wine de macOS (semáforos Mach) y Proton es Wine para Linux: no puede usarlo. Sus equivalentes aquí son fsync y NTSYNC, que lxrun sirve con las esperas del propio kernel de macOS (ulocks)"),
+            .ntsync: .init(state: .unavailable, reason: "sin datos de los Proton instalados"),
         ],
         graphics: [
             .vulkanMoltenVK: .init(state: .ready, reason: "D3D9/11/12 por DXVK/VKD3D-Proton (benchmarks/stage14, stage16)"),
@@ -770,6 +778,15 @@ struct RuntimeCapabilities {
             caps.synchronization[.fsync] = .init(state: .unavailable, reason: "ningún Proton instalado incluye fsync")
         } else {
             caps.synchronization[.fsync] = .init(state: .experimental, reason: "en \(fsync.joined(separator: ", ")); lxrun implementa futex_waitv sobre ulocks de Darwin (tests/elf/futex_waitv.c): sin verificar con juegos")
+        }
+
+        let ntsync = probe.protons.filter { $0.supported && $0.ntsync }.map(\.name)
+        if probe.runtime?.ntsync != true {
+            caps.synchronization[.ntsync] = .init(state: .unavailable, reason: "el runtime instalado no tiene /dev/ntsync: actualiza SteamARM")
+        } else if ntsync.isEmpty {
+            caps.synchronization[.ntsync] = .init(state: .unavailable, reason: "ningún Proton instalado usa /dev/ntsync (Proton Experimental y Hotfix sí; Proton 10.0 no)")
+        } else {
+            caps.synchronization[.ntsync] = .init(state: .experimental, reason: "en \(ntsync.joined(separator: ", ")); lxrun emula /dev/ntsync entre procesos (runtime/ntsync.c): pasa las pruebas del kernel (12 de 12) y tests/elf/ntsync.c; sin verificar con juegos")
         }
 
         let esync = probe.protons.filter { $0.supported && $0.esync }.map(\.name)
@@ -1534,5 +1551,35 @@ enum AndroidApps {
             return nil
         }
         return String(output[start...end]).data(using: .utf8)
+    }
+}
+
+/// Settings "Filtro de escalado": how a game's picture smaller than its window
+/// ("Escala de resolución") is enlarged. scripts/settings-env.py passes it to
+/// the Vulkan shim as LXRT_VK_SCALER (shim/scaler.c).
+enum ScalingFilterChoice {
+    static let options: [(String, String)] = [
+        ("linear", "Bilineal"),
+        ("fsr", "AMD FidelityFX Super Resolution 1.0"),
+        ("metalfx", "Apple MetalFX (espacial)"),
+        ("nearest", "Píxeles nítidos (vecino más cercano)"),
+    ]
+
+    static func label(_ value: String) -> String {
+        options.first { $0.0 == value }?.1 ?? "Bilineal"
+    }
+
+    static func note(_ value: String) -> String {
+        let scope = " Actúa cuando un juego Vulkan o Direct3D (DXVK, VKD3D) dibuja más pequeño que su ventana; no en OpenGL (WineD3D)."
+        switch value {
+        case "fsr":
+            return "FSR 1.0 de AMD: agranda respetando los bordes (EASU) y afila (RCAS); la nitidez va de suave (0 %) al máximo de FSR (100 %)." + scope
+        case "metalfx":
+            return "El escalador espacial de Apple, en la GPU del Mac. Si macOS lo rechaza, se vuelve a bilineal." + scope
+        case "nearest":
+            return "Cada píxel del juego se repite tal cual: aspecto pixelado, sin suavizado." + scope
+        default:
+            return "El estirado de MoltenVK: suave y el más barato." + scope
+        }
     }
 }

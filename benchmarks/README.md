@@ -79,6 +79,8 @@ the Fedora VM that was deleted on 2026-09-27; they are history, and
 | 41 | `stage41-frame-root-vulkan.txt` | 10-01 | The native client on the Steam Frame root gets a Vulkan device: the shim installed as an ICD for the image's own loader (freedreno set aside), vulkaninfo and the client's steamsysinfo report Apple M4; sign-in window 10 of 12 with it, 4 of 4 without |
 | 42 | `stage42-settings-scale-msaa.txt` | 10-01 | Settings: MSAA 2x/4x/8x for Direct3D 9 games through DXVK (measured on MoltenVK); per-entry settings for the built-in Steams; resolution scale/FSR stays unavailable (no Proton has its upscaler; a smaller reported surface does not survive Wine) |
 | 43 | `stage43-settings-presets.txt` | 10-01 | Resolution scale through Wine's display-mode emulation (EmulateModeset): a 1280x720 program stretched over a 1600x900 screen; Lightning JIT not added (FEX speed settings: no measurable gain), MSync impossible under Linux Proton (fsync already waits on Darwin ulocks), Apple Hypervisor against Zero-VM |
+| 44 | `stage44-scaling-frame-disk.txt` | 10-01 | Scaling filters of the Vulkan shim (FSR 1 with sharpness, MetalFX spatial, nearest) over a 1280x720 game on a 1920x1050 window; the Steam Frame and Android disk images grown to the Mac's disk, free space capped by it; SteamOS's update client answered in the Steam Frame root |
+| 45 | `stage45-ntsync.txt` | 10-01 | /dev/ntsync emulated across processes: the kernel's selftests 12/12, tests/elf/ntsync.c 17/17 (aarch64, x86_64 under FEX), Proton Experimental "ntsync: up and running"; event round trip 20.9 us (fsync 14.4, wineserver 50.5) |
 
 ## After stage 21 (no stage file)
 

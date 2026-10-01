@@ -41,9 +41,9 @@ clean:
 LXRT_SRCS := runtime/ids.c runtime/procpid.c runtime/main.c runtime/android_ids.c runtime/binder.c runtime/binder_hub.c runtime/props.c runtime/propsvc.c runtime/elf.c runtime/elfsect.c runtime/errno_map.c runtime/fsflags.c runtime/pathfd.c runtime/evdev.c runtime/rewrite.c \
              runtime/dirents.c runtime/jit.c runtime/wxsplit.c runtime/dispatch.c runtime/x18.c runtime/gbase.c \
              runtime/epoll_eventfd.c runtime/fex_support.c runtime/fileops2.c runtime/offmap.c \
-             runtime/futex_ops.c runtime/futex_waitv.c runtime/inotify.c runtime/ioctl_tty.c runtime/mounts.c runtime/memlog.c runtime/mremap.c runtime/timerfd_signalfd.c runtime/posixtimer.c runtime/proc_ext.c runtime/privmap.c runtime/shmirror.c runtime/sysv_ipc.c runtime/process.c runtime/procfs.c runtime/signal.c runtime/socket.c runtime/stack.c runtime/storemu.c runtime/subpage.c runtime/sysfs.c runtime/sysreg.c runtime/window.m runtime/remote_layer.m runtime/thread.c runtime/tls.c runtime/trampoline.S runtime/vdso_map.c runtime/vdso_blob.S
+             runtime/futex_ops.c runtime/futex_waitv.c runtime/inotify.c runtime/ioctl_tty.c runtime/mounts.c runtime/memlog.c runtime/mremap.c runtime/timerfd_signalfd.c runtime/posixtimer.c runtime/proc_ext.c runtime/privmap.c runtime/shmirror.c runtime/sysv_ipc.c runtime/process.c runtime/procfs.c runtime/signal.c runtime/socket.c runtime/stack.c runtime/storemu.c runtime/subpage.c runtime/sysfs.c runtime/sysreg.c runtime/window.m runtime/remote_layer.m runtime/metalfx.m runtime/ntsync.c runtime/thread.c runtime/tls.c runtime/trampoline.S runtime/vdso_map.c runtime/vdso_blob.S
 LXRT_CFLAGS := -arch arm64 -fmodules -Wall -Wextra -Wno-unused-parameter -O2 -Iruntime
-LXRT_LDFLAGS := -framework Cocoa -framework Metal -framework QuartzCore
+LXRT_LDFLAGS := -framework Cocoa -framework Metal -framework QuartzCore -weak_framework MetalFX
 # LXRT_KEEP_X18 (default 1 since stage 28; LXRT_KEEP_X18=0 opts out): link
 # lxrun as built against the macOS 12.3 SDK. xnu keeps x18 across exceptions
 # for such a binary -- in the process it exec'd, not in a forked child
@@ -143,8 +143,8 @@ shim/vulkan_shim.S shim/vulkan_shim.c: shim/gen.py shim/entrypoints.txt build/sh
 	python3 shim/gen.py shim/entrypoints.txt shim/vulkan_shim.S shim/vulkan_shim.c build/shim-overrides.txt
 
 SHIM_SRCS := shim/vulkan_shim.S shim/vulkan_shim.c shim/wsi.c shim/features.c shim/fallback.c shim/map32.c \
-             shim/memcap.c shim/present.c shim/spirv_names.c build/vk_rebase.c
-build/libvulkan.so.1: $(SHIM_SRCS) runtime/include/lxrt_host.h
+             shim/memcap.c shim/present.c shim/scaler.c shim/spirv_names.c build/vk_rebase.c
+build/libvulkan.so.1: $(SHIM_SRCS) shim/scaler_spv.h runtime/include/lxrt_host.h
 	@mkdir -p build
 	$(CC) -target $(LXRT_TARGET) -shared -fPIC -nostdlib -O2 \
 	      -fuse-ld=$(CROSS_LD) -Iruntime/include -I$(VK_HEADERS)/include \

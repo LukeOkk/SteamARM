@@ -600,6 +600,10 @@ struct AppOverridesSection: View {
                         .help(status?.reason ?? "Sin datos")
                 }
             }
+            Picker("Filtro de escalado", selection: binding("scalingFilter")) {
+                Text("Global (\(ScalingFilterChoice.label(model.settings.scalingFilter)))").tag("")
+                ForEach(ScalingFilterChoice.options, id: \.0) { Text($0.1).tag($0.0) }
+            }
             Picker("Gráficos", selection: binding("graphicsBackend")) {
                 Text("Global (\(model.settings.graphics.label))").tag("")
                 ForEach(graphicsOrder, id: \.self) { backend in
@@ -625,6 +629,7 @@ struct AppOverridesSection: View {
             switch key {
             case "display": valid = ["", "native", "vnc"].contains(value)
             case "vsync": valid = ["", "game", "on", "off"].contains(value)
+            case "scalingFilter": valid = value.isEmpty || ScalingFilterChoice.options.contains { $0.0 == value }
             case "synchronization": valid = value.isEmpty || SynchronizationBackend(rawValue: value) != nil
             case "graphicsBackend": valid = value.isEmpty || GraphicsBackend(rawValue: value) != nil
             default: valid = false

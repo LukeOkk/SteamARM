@@ -119,9 +119,14 @@ step_frameroot() {
     # The Steam Frame root is made by hand (scripts/mkframeroot.sh, from the
     # user's recovery image); when it exists, its Vulkan shim follows this
     # source. Reported, not fatal.
+    # Its case-sensitive image attached (and grown to the Mac's disk) first.
+    [ -d "$STATE/steamframe-root.sparsebundle" ] &&
+        scripts/image-volume.sh ensure "$STATE/steamframe-root.sparsebundle" /Volumes/SteamFrameRoot
     if [ -d "$STATE/arm64root/usr/share/vulkan" ]; then
         log "Vulkan in the Steam Frame root (scripts/install-frameroot-vulkan.sh)"
         scripts/install-frameroot-vulkan.sh "$STATE/arm64root" || log "Steam Frame root: Vulkan not installed (setup goes on)"
+        log "SteamOS's update client in the Steam Frame root (scripts/install-frameroot-atomupd.sh)"
+        scripts/install-frameroot-atomupd.sh "$STATE/arm64root" || log "Steam Frame root: atomupd-manager left as it was (setup goes on)"
     fi
 }
 

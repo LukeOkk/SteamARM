@@ -6,12 +6,12 @@
 emulate-modeset  HKCU\\Software\\Wine\\X11 Driver "EmulateModeset": Wine's
                  display-mode emulation (win32u). A game that asks for a lower
                  full-screen resolution gets it virtually: it renders at that
-                 size and Wine stretches the picture over the whole screen
-                 (the launcher's "Escala de resolución"). MEASURED with
-                 tests/win/modeset.c: 1280x720 drawn in a 1600x900 X window
-                 (WineD3D) and in a 1920x1050 one (DXVK, with shim/present.c
-                 asking MoltenVK to stretch); without it the real mode change
-                 stalled (2 frames).
+                 size and is enlarged over the whole screen (the launcher's
+                 "Escala de resolución": WineD3D by Wine; Vulkan by the shim,
+                 with Proton's fullscreen hack off -- settings-env.py,
+                 shim/wsi.c, shim/scaler.c). MEASURED with tests/win/modeset.c:
+                 1280x720 shown over 1920x1050 with every filter; without it
+                 the real mode change stalled (2 frames).
                  benchmarks/stage43-settings-presets.txt.
 
 Without USER_REG: every user.reg of the Steam game prefixes (compatdata) in

@@ -21,7 +21,8 @@ import sys
 STATE = os.environ.get("STEAMARM_STATE") or os.path.expanduser("~/SteamARM-roots")
 SHIM = os.path.join(STATE, "steamroot", "usr", "lib", "lxrt-emu", "libvulkan.so.1")
 ICD_MARKER = b"STEAMARM_VK_ICD"
-OVERRIDABLE = ("display", "vsync", "synchronization", "graphicsBackend")
+OVERRIDABLE = ("display", "vsync", "synchronization", "graphicsBackend", "scalingFilter")
+SCALING_FILTERS = ("linear", "nearest", "fsr", "metalfx")
 
 
 ZINK_GL45_OVERRIDE = "+GL_ARB_vertex_type_2_10_10_10_rev +GL_ARB_texture_buffer_object_rgb32"
@@ -29,10 +30,11 @@ ZINK_GL45_OVERRIDE = "+GL_ARB_vertex_type_2_10_10_10_rev +GL_ARB_texture_buffer_
 
 def effective_synchronization(value):
     """The backend Proton actually gets. Mirrors RuntimeCapabilities.effectiveSynchronization
-    (launcher/ApplicationCore.swift): esync and fsync (futex_waitv, runtime/futex_waitv.c)
+    (launcher/ApplicationCore.swift): esync, fsync (futex_waitv, runtime/futex_waitv.c) and
+    ntsync (/dev/ntsync, runtime/ntsync.c)
     are experimental, so only an explicit choice gets them and AUTO does not; no
     MSync-capable Wine exists here. Anything else is Wine's default, wineserver."""
-    return value if value in ("esync", "fsync") else "wineserver"
+    return value if value in ("esync", "fsync", "ntsync") else "wineserver"
 
 
 def file_contains(path, needle):
@@ -142,6 +144,10 @@ def env_from_settings(s, total=None):
         # explicit choice may get it while it is experimental.
         if eff != "fsync":
             env["PROTON_NO_FSYNC"] = "1"
+        # /dev/ntsync exists only when asked for (runtime/ntsync.c): Proton
+        # Experimental and Hotfix use it whenever it opens.
+        if eff == "ntsync":
+            env["LXRT_NTSYNC"] = "1"
 
     # Procesador (FEX reads FEX_<OPTION>)
     if s.get("fexDiskCache"):
@@ -188,6 +194,26 @@ def env_from_settings(s, total=None):
     msaa = int(s.get("antialiasing") or 0)
     if msaa in (2, 4, 8):
         dxvk.append("d3d9.forceSwapchainMSAA = %d" % msaa)
+    # "Escala de resolución": Wine's emulated display modes (the prefixes'
+    # EmulateModeset, wine-prefix-options.py) and the Vulkan shim enlarging
+    # the game, not Proton's fullscreen hack: on MoltenVK that one made its
+    # swapchain 1x1, then drew nothing into it (MEASURED, benchmarks/stage44).
+    # The shim shows the game on its full-screen toplevel (shim/wsi.c).
+    if s.get("resolutionScaling"):
+        env["WINE_DISABLE_FULLSCREEN_HACK"] = "1"
+        env["LXRT_VK_PADDED_FULLSCREEN"] = "1"
+    # A picture smaller than its window: the Vulkan shim's scaling pass
+    # (shim/scaler.c). "linear" is MoltenVK's own stretch.
+    # MEASURED: tests/win/run.sh modeset_* (benchmarks/stage44).
+    flt = s.get("scalingFilter") or "linear"
+    if flt in SCALING_FILTERS and flt != "linear":
+        env["LXRT_VK_SCALER"] = flt
+        if flt == "fsr":
+            try:
+                sharp = int(s.get("fsrSharpness", 90))
+            except (TypeError, ValueError):
+                sharp = 90
+            env["LXRT_VK_FSR_SHARPNESS"] = str(max(0, min(100, sharp)))
     aniso = int(s.get("anisotropy") or 0)
     if aniso in (2, 4, 8, 16):
         dxvk += ["d3d11.samplerAnisotropy = %d" % aniso, "d3d9.samplerAnisotropy = %d" % aniso]

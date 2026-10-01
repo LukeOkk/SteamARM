@@ -72,11 +72,17 @@ def main(argv):
     s.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 4 << 20)
     s.bind(path)
     os.chmod(path, 0o666)
-    if seconds:
-        s.settimeout(0.5)
+    # Wakes twice a second either way: a stand-in whose parent died (a
+    # session or test killed outright) goes too, instead of holding the
+    # Android volume open for days (three were found keeping it from being
+    # detached, benchmarks/stage44).
+    s.settimeout(0.5)
+    parent = os.getppid()
     end = time.time() + seconds if seconds else None
     try:
         while end is None or time.time() < end:
+            if os.getppid() != parent:
+                break
             try:
                 pkt = s.recv(65536)
             except socket.timeout:

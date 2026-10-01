@@ -249,6 +249,11 @@ long lxrt_ioctl(int fd, unsigned long lreq, uint64_t arg)
         return lxrt_evdev_ioctl(fd, lreq, arg);
     if (lxrt_binder_is(fd))
         return lxrt_binder_ioctl(fd, lreq, arg);
+    if (lxrt_ntsync_request(lreq)) {
+        long r;
+        if (lxrt_ntsync_ioctl(fd, lreq, arg, &r))
+            return r;
+    }
     lxrt_binder_note_stray_ioctl(fd, lreq);
     switch ((uint32_t)lreq) {
     case L_TCGETS: case L_TCGETS2: {

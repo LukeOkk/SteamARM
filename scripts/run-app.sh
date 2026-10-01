@@ -536,6 +536,16 @@ if [ -n "$(guest_pids)" ]; then
     exit 3
 fi
 
+# The Steam Frame root's case-sensitive image: attached when it is not, and
+# grown to the Mac's disk when nothing has it open (scripts/image-volume.sh;
+# it was made with 40 GB and Steam showed 22 GB free).
+if [ -z "$APP_ANDROID" ] && [ -d "$STATE/steamframe-root.sparsebundle" ]; then
+    frame_link=$(readlink "$STATE/arm64root" 2>/dev/null)
+    case "$frame_link" in
+        /Volumes/*/*) scripts/image-volume.sh ensure "$STATE/steamframe-root.sparsebundle" \
+                          "/Volumes/$(echo "${frame_link#/Volumes/}" | cut -d/ -f1)" ;;
+    esac
+fi
 [ -n "$APP_ANDROID" ] || scripts/env-links.sh "$STATE" >/dev/null || exit 1
 # The guest root must be there before anything is made in it: a root on a
 # volume that is not attached (the Steam Frame root's sparsebundle) left
@@ -570,6 +580,9 @@ rm -f "$STATUSFILE" "$PGIDFILE"
 # under it. PYTHONCOERCECLOCALE: see session.py (no Python locale for guests).
 # The log is opened for appending: the session's watcher writes to it too.
 SESSION=(env PYTHONCOERCECLOCALE=0 STEAMARM_SESSION_PY=1 /usr/bin/python3 scripts/session.py run "$LDIR" "$RUNNER")
+# Free space inside the disk images is the Mac's (runtime/fileops2.c).
+LXRT_STATFS_BACKING="$(scripts/image-volume.sh backing 2>/dev/null)"
+export LXRT_STATFS_BACKING
 if [ "$APP_ARCH" = aarch64 ]; then
     env ${APP_ENV[@]+"${APP_ENV[@]}"} DISPLAY=$DISP LXRT_ROOT="$APP_ROOT" \
         nohup "${SESSION[@]}" "${APP_CMD[@]}" >> "$L" 2>&1 < /dev/null &

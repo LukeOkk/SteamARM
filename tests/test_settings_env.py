@@ -101,6 +101,20 @@ class SettingsEnvironmentTests(unittest.TestCase):
             os.unlink(f.name)
             self.assertEqual(out.getvalue().strip(), want)
 
+    def test_scaling_filter(self):
+        env = self.settings.env_from_settings({})
+        self.assertNotIn("LXRT_VK_SCALER", env)
+        env = self.settings.env_from_settings({"scalingFilter": "fsr", "fsrSharpness": 40})
+        self.assertEqual((env["LXRT_VK_SCALER"], env["LXRT_VK_FSR_SHARPNESS"]), ("fsr", "40"))
+        env = self.settings.env_from_settings({"scalingFilter": "fsr", "fsrSharpness": 500})
+        self.assertEqual(env["LXRT_VK_FSR_SHARPNESS"], "100")
+        env = self.settings.env_from_settings({"scalingFilter": "metalfx"})
+        self.assertEqual(env["LXRT_VK_SCALER"], "metalfx")
+        self.assertNotIn("LXRT_VK_FSR_SHARPNESS", env)
+        self.assertNotIn("LXRT_VK_SCALER", self.settings.env_from_settings({"scalingFilter": "bogus"}))
+        merged = self.settings.with_overrides({"scalingFilter": "linear"}, {"scalingFilter": "nearest"})
+        self.assertEqual(self.settings.env_from_settings(merged)["LXRT_VK_SCALER"], "nearest")
+
     def test_antialiasing(self):
         for value in (2, 4, 8):
             cfg = self.env({"antialiasing": value}).get("DXVK_CONFIG", "")

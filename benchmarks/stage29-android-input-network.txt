@@ -28,7 +28,7 @@ key Escape                      -> shade closed
 click at 428,380 (Klondike tile)-> mResumedActivity de.tobiasbielefeld.solitaire/.ui.GameManager
 
 == Network (scripts/android_dnsproxy.py, NetworkAgentStandIn)
-logcat: SteamARMNetwork: registered eth0 (10.0.2.15/24, gateway 10.0.2.2, dns 192.168.1.1): network 100
+logcat: SteamARMNetwork: registered eth0 (10.0.2.15/24, gateway 10.0.2.2, dns <the Mac's resolver>): network 100
         SteamARMNetwork: ConnectivityService connected to the agent
 dumpsys connectivity:
   Active default network: 100

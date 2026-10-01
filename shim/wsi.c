@@ -74,6 +74,8 @@ VkResult lxrt_mvk_vkGetPhysicalDeviceSurfaceCapabilitiesKHR(VkPhysicalDevice, Vk
 VkResult lxrt_mvk_vkGetPhysicalDeviceSurfaceCapabilities2KHR(VkPhysicalDevice, const VkPhysicalDeviceSurfaceInfo2KHR *, void *);
 VkResult vkCreateMetalSurfaceEXT(VkInstance, const VkMetalSurfaceCreateInfoEXT *, const void *, VkSurfaceKHR *);
 // vulkan_shim.c (generated): a driver reached through the loader-ICD interface.
+extern char *getenv(const char *);   // the guest's libc
+extern int dprintf(int, const char *, ...);
 extern int lxrt_vk_icd;
 void lxrt_vk_icd_fill(VkInstance);
 int lxrt_vk_missing(const char *name);
@@ -107,6 +109,10 @@ typedef struct {
 typedef struct {
     uint8_t response_type, pad0; uint16_t sequence; uint32_t length; uint32_t atom;
 } xcb_intern_atom_reply_t;
+typedef struct {
+    uint8_t response_type, pad0; uint16_t sequence; uint32_t length;
+    uint32_t root, parent; uint16_t children_len; uint8_t pad1[14];
+} xcb_query_tree_reply_t;
 
 static struct {
     void *(*get_xcb)(void *dpy);
@@ -116,6 +122,9 @@ static struct {
     xcb_intern_atom_reply_t *(*intern_atom_reply)(void *c, xcb_cookie_t, void **e);
     xcb_cookie_t (*change_property)(void *c, uint8_t mode, uint32_t w, uint32_t prop,
                                     uint32_t type, uint8_t format, uint32_t len, const void *data);
+    xcb_cookie_t (*delete_property)(void *c, uint32_t w, uint32_t prop);
+    xcb_cookie_t (*query_tree)(void *c, uint32_t w);
+    xcb_query_tree_reply_t *(*query_tree_reply)(void *c, xcb_cookie_t, void **e);
     int (*flush)(void *c);
     int loaded;
 } X;
@@ -132,6 +141,9 @@ static int load_xcb(void)
         X.intern_atom = dlsym(xcb, "xcb_intern_atom");
         X.intern_atom_reply = dlsym(xcb, "xcb_intern_atom_reply");
         X.change_property = dlsym(xcb, "xcb_change_property");
+        X.delete_property = dlsym(xcb, "xcb_delete_property");
+        X.query_tree = dlsym(xcb, "xcb_query_tree");
+        X.query_tree_reply = dlsym(xcb, "xcb_query_tree_reply");
         X.flush = dlsym(xcb, "xcb_flush");
     }
     if (xx)
@@ -152,11 +164,67 @@ static int window_size(void *conn, uint32_t win, uint32_t *w, uint32_t *h)
     return 1;
 }
 
+// Where a window's frames are shown. Normally the window itself. With an
+// emulated display mode (Settings "Escala de resolución", run with Proton's
+// fullscreen hack off: LXRT_VK_PADDED_FULLSCREEN=1) Wine keeps a game's
+// client window at the mode it chose -- 1280x720 -- inside a toplevel that
+// covers the screen, black around it: then the toplevel, so that the
+// swapchain is enlarged over the whole screen (present.c, scaler.c) instead
+// of sitting in a corner.
+static uint32_t present_window(void *conn, uint32_t win, uint32_t *hint)
+{
+    const char *e = getenv("LXRT_VK_PADDED_FULLSCREEN");
+    if (!e || *e != '1' || !X.query_tree || !X.query_tree_reply)
+        return win;
+    uint32_t top = win, root = 0;
+    for (int depth = 0; depth < 16; depth++) {
+        xcb_query_tree_reply_t *t = X.query_tree_reply(conn, X.query_tree(conn, top), 0);
+        if (!t)
+            return win;
+        root = t->root;
+        uint32_t parent = t->parent;
+        free(t);
+        if (!parent || parent == root)
+            break;
+        top = parent;
+    }
+    if (top == win || !root) {
+        const char *d = getenv("LXRT_VK_DEBUG");
+        if (d && *d == '1')
+            dprintf(2, "[shim] padded full screen? window %#x is a toplevel\n", win);
+        return win;
+    }
+    uint32_t w, h, tw, th, sw, sh;
+    if (!window_size(conn, win, &w, &h) || !window_size(conn, top, &tw, &th) || !window_size(conn, root, &sw, &sh))
+        return win;
+    // Wine then detaches the client window: it moves it under a 1x1 window
+    // of its own and copies the client's X contents, scaled, into the
+    // toplevel. Here those contents are empty (the frames are a Core
+    // Animation layer, not X drawing): the toplevel seen before goes on
+    // showing them (MEASURED: client 1280x720 under a 1x1 parent after the
+    // first query, benchmarks/stage44).
+    if (tw <= 1 && th <= 1 && hint && *hint && window_size(conn, *hint, &tw, &th))
+        top = *hint;
+    // The toplevel covers the screen (a few rows may go to the menu bar) and
+    // the client is smaller.
+    const char *d = getenv("LXRT_VK_DEBUG");
+    if (d && *d == '1')
+        dprintf(2, "[shim] padded full screen? window %#x %ux%u, toplevel %#x %ux%u, screen %ux%u\n", win, w, h, top,
+                tw, th, sw, sh);
+    if (tw < sw || th + 64 < sh || (w >= tw && h >= th))
+        return win;
+    if (hint)
+        *hint = top;
+    return top;
+}
+
 // ---------------------------------------------------------------- surfaces
 typedef struct wsi_surface {
     VkSurfaceKHR surface;
     void *layer, *conn;
     uint32_t window, w, h;
+    uint32_t shown, ctx, atom;   // the window the frames show on (present_window)
+    uint32_t top;                // the full-screen toplevel last seen for it
     struct wsi_surface *next;
 } wsi_surface;
 static wsi_surface *g_surfaces;   // few, long-lived: a list is enough
@@ -175,7 +243,9 @@ static VkResult create_x11_surface(VkInstance inst, void *conn, uint32_t window,
     if (!conn || !window || !load_xcb())
         return VK_ERROR_INITIALIZATION_FAILED;
     uint32_t w = 1, h = 1, ctx = 0;
-    window_size(conn, window, &w, &h);
+    uint32_t top = 0;
+    uint32_t shown = present_window(conn, window, &top);
+    window_size(conn, shown, &w, &h);
     void *layer = (void *)lxrt_syscall3(LXRT_NR_RLAYER_CREATE, w, h, (long)(uintptr_t)&ctx);
     if (!layer)
         return VK_ERROR_INITIALIZATION_FAILED;
@@ -188,14 +258,17 @@ static VkResult create_x11_surface(VkInstance inst, void *conn, uint32_t window,
     // Tell the X server which Core Animation context shows this window.
     static const char name[] = "_STEAMARM_LAYER";
     xcb_intern_atom_reply_t *a = X.intern_atom_reply(conn, X.intern_atom(conn, 0, sizeof name - 1, name), 0);
+    uint32_t atom = 0;
     if (a) {
-        X.change_property(conn, 0 /* Replace */, window, a->atom, 6 /* CARDINAL */, 32, 1, &ctx);
+        atom = a->atom;
+        X.change_property(conn, 0 /* Replace */, shown, atom, 6 /* CARDINAL */, 32, 1, &ctx);
         X.flush(conn);
         free(a);
     }
     wsi_surface *s = malloc(sizeof *s);
     if (s) {
         s->surface = *out; s->layer = layer; s->conn = conn; s->window = window; s->w = w; s->h = h;
+        s->shown = shown; s->ctx = ctx; s->atom = atom; s->top = top;
         s->next = g_surfaces; g_surfaces = s;
     }
     return VK_SUCCESS;
@@ -245,7 +318,18 @@ static void follow_window(VkSurfaceKHR surface)
 {
     wsi_surface *s = find(surface);
     uint32_t w, h;
-    if (!s || !window_size(s->conn, s->window, &w, &h) || (w == s->w && h == s->h))
+    if (!s)
+        return;
+    // A game going in or out of an emulated full screen: the frames move to
+    // the window they now belong on.
+    uint32_t shown = present_window(s->conn, s->window, &s->top);
+    if (shown != s->shown && s->atom && X.delete_property) {
+        X.delete_property(s->conn, s->shown, s->atom);
+        X.change_property(s->conn, 0, shown, s->atom, 6, 32, 1, &s->ctx);
+        X.flush(s->conn);
+        s->shown = shown;
+    }
+    if (!window_size(s->conn, s->shown, &w, &h) || (w == s->w && h == s->h))
         return;
     if (lxrt_syscall3(LXRT_NR_RLAYER_RESIZE, (long)(uintptr_t)s->layer, w, h) == 0) {
         s->w = w;
@@ -253,10 +337,53 @@ static void follow_window(VkSurfaceKHR surface)
     }
 }
 
+// An X11 surface's image extents are its window's, as Linux's drivers report
+// them (minImageExtent = maxImageExtent = currentExtent); MoltenVK allows any
+// size from 1x1. Proton's fullscreen hack (an emulated display mode, Settings
+// "Escala de resolución") creates its swapchain at minImageExtent and
+// scales the game into it: on MoltenVK's 1x1 the picture became one pixel
+// (MEASURED, "[shim] vkCreateSwapchainKHR extent 1x1 usage 0x8",
+// benchmarks/stage44). VkSurfaceCapabilitiesKHR: currentExtent at byte 8,
+// minImageExtent at 16, maxImageExtent at 24.
+//
+// A game shown on its full-screen toplevel (present_window) still gets its
+// own window's size: its swapchain stays at the game's resolution and the
+// shim enlarges it to the layer (present.c, scaler.c: lxrt_wsi_layer_extent).
+static void window_extents(VkSurfaceKHR surface, void *caps)
+{
+    wsi_surface *s = find(surface);
+    if (!caps || !s)
+        return;
+    uint32_t *c = caps;
+    if (c[2] == 0xFFFFFFFFu)
+        return;
+    uint32_t w, h;
+    if (s->shown != s->window && window_size(s->conn, s->window, &w, &h)) {
+        c[2] = w;
+        c[3] = h;
+    }
+    c[4] = c[6] = c[2];
+    c[5] = c[7] = c[3];
+}
+
+// The layer's size: what the swapchain is shown at (present.c).
+int lxrt_wsi_layer_extent(VkSurfaceKHR surface, uint32_t *w, uint32_t *h)
+{
+    wsi_surface *s = find(surface);
+    if (!s)
+        return 0;
+    *w = s->w;
+    *h = s->h;
+    return 1;
+}
+
 VkResult lxrt_inner_vkGetPhysicalDeviceSurfaceCapabilitiesKHR(VkPhysicalDevice pd, VkSurfaceKHR surface, void *caps)
 {
     follow_window(surface);
-    return lxrt_mvk_vkGetPhysicalDeviceSurfaceCapabilitiesKHR(pd, surface, caps);
+    VkResult r = lxrt_mvk_vkGetPhysicalDeviceSurfaceCapabilitiesKHR(pd, surface, caps);
+    if (r == VK_SUCCESS)
+        window_extents(surface, caps);
+    return r;
 }
 
 VkResult lxrt_inner_vkGetPhysicalDeviceSurfaceCapabilities2KHR(VkPhysicalDevice pd, const VkPhysicalDeviceSurfaceInfo2KHR *info,
@@ -264,7 +391,11 @@ VkResult lxrt_inner_vkGetPhysicalDeviceSurfaceCapabilities2KHR(VkPhysicalDevice 
 {
     if (info)
         follow_window(info->surface);
-    return lxrt_mvk_vkGetPhysicalDeviceSurfaceCapabilities2KHR(pd, info, caps);
+    VkResult r = lxrt_mvk_vkGetPhysicalDeviceSurfaceCapabilities2KHR(pd, info, caps);
+    // VkSurfaceCapabilities2KHR: sType, pNext, then the capabilities at 16.
+    if (r == VK_SUCCESS && info && caps)
+        window_extents(info->surface, (char *)caps + 16);
+    return r;
 }
 
 // ---------------------------------------------------------------- instance
