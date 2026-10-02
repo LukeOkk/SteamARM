@@ -758,11 +758,14 @@ static bool host_heap_hit(uint64_t addr, uint64_t len, const char *op)
              t != VM_MEMORY_SBRK) ||
             t == VM_MEMORY_MALLOC_NANO || t == VM_MEMORY_MALLOC_MEDIUM ||
             t == VM_MEMORY_MALLOC_PROB_GUARD) {
+            uint64_t alo, ahi;
+            lxrt_arena_bounds(&alo, &ahi);
             fprintf(lxrt_trace_stream(), "[lxrt] REFUSED %s 0x%llx+0x%llx: overlaps host "
-                    "malloc region 0x%llx+0x%llx (tag %u), guest lr 0x%llx\n", op,
+                    "malloc region 0x%llx+0x%llx (tag %u), guest lr 0x%llx [pid %d, arena 0x%llx-0x%llx]\n", op,
                     (unsigned long long)addr, (unsigned long long)len,
                     (unsigned long long)ra, (unsigned long long)rs, t,
-                    (unsigned long long)lxrt_last_guest_lr());
+                    (unsigned long long)lxrt_last_guest_lr(), (int)getpid(),
+                    (unsigned long long)alo, (unsigned long long)ahi);
             return true;
         }
         p = ra + rs;
@@ -934,7 +937,16 @@ static long do_madvise(uint64_t addr, uint64_t len, int ladvice)
 // tracked guest ranges are forgotten so a later mmap can reuse them. The
 // divergence: reading a freed 4 KiB slot that shares a host page with live
 // memory does not fault here. Linux would SIGSEGV; nothing measured minds.
+static long do_munmap_inner(uint64_t addr, uint64_t len);
 static long do_munmap(uint64_t addr, uint64_t len)
+{
+    long r = do_munmap_inner(addr, len);
+    if (r == 0)
+        lxrt_arena_unmapped(addr, len);    // holes in the guest's arena get its reservation back
+    return r;
+}
+
+static long do_munmap_inner(uint64_t addr, uint64_t len)
 {
     static int knob = -1;                       // LXRT_PLAIN_MUNMAP=1: bisecting aid
     if (knob < 0) knob = getenv("LXRT_PLAIN_MUNMAP") ? 1 : 0;
@@ -1082,8 +1094,29 @@ void lxrt_note_growsdown(uint64_t addr, uint64_t len, long prot)
                 (unsigned long long)addr, (unsigned long long)len, (unsigned long long)top);
 }
 
+static long do_mmap_inner(uint64_t addr, uint64_t len, long prot, long lflags,
+                          long fd, long off);
 static long do_mmap(uint64_t addr, uint64_t len, long prot, long lflags,
                     long fd, long off)
+{
+    // In the guest's arena (arena.c) a range no guest mapping touches holds
+    // only the runtime's reservation: an address the guest asks for there --
+    // MAP_FIXED_NOREPLACE or a hint -- is free as Linux would see it, and the
+    // mapping replaces the reservation.
+    if (addr && !(lflags & LINUX_MAP_FIXED) && lxrt_arena_free(addr, len))
+        lflags = (lflags & ~(long)LINUX_MAP_FIXED_NOREPLACE) | LINUX_MAP_FIXED;
+    long r = do_mmap_inner(addr, len, prot, lflags, fd, off);
+    if (r >= 0)
+        lxrt_arena_mapped((uint64_t)r, len);
+    else if (addr >= 0x140000000ull && addr < 0x160000000ull && getenv("LXRT_ARENA_DEBUG"))
+        fprintf(lxrt_trace_stream(), "[lxrt] arena: mmap 0x%llx+0x%llx prot %ld flags 0x%lx fd %ld -> %ld (arena %s)\n",
+                (unsigned long long)addr, (unsigned long long)len, prot, lflags, fd, r,
+                lxrt_arena_on() ? "on" : "OFF");
+    return r;
+}
+
+static long do_mmap_inner(uint64_t addr, uint64_t len, long prot, long lflags,
+                          long fd, long off)
 {
     int flags = 0;
     if (lflags & LINUX_MAP_SHARED)  flags |= MAP_SHARED;
@@ -1223,12 +1256,15 @@ static long do_mmap(uint64_t addr, uint64_t len, long prot, long lflags,
                     else
                         who = "another mapping";
                 }
+                uint64_t ta = addr, ts = 0;
+                unsigned tag = 0;
+                region_info_at(&ta, &ts, &tag);
                 fprintf(lxrt_trace_stream(), "[lxrt] MAP_FIXED_NOREPLACE 0x%llx+0x%llx: %s "
-                                "(%s at 0x%llx+0x%llx) guestLR=0x%llx\n",
+                                "(%s at 0x%llx+0x%llx, tag %u) guestLR=0x%llx\n",
                         (unsigned long long)addr, (unsigned long long)len,
                         kr == KERN_INVALID_ADDRESS ? "outside the address space"
                                                    : "range busy",
-                        who, (unsigned long long)ra, (unsigned long long)rs,
+                        who, (unsigned long long)ra, (unsigned long long)rs, tag,
                         (unsigned long long)lxrt_last_guest_lr());
             }
             // The distinction matters more than it looks. EEXIST means "busy,
@@ -1239,7 +1275,30 @@ static long do_mmap(uint64_t addr, uint64_t len, long prot, long lflags,
             // [2^47, 2^48) to fence off what the guest must not see. Darwin
             // tops out at 2^47, so that reservation could never succeed, and
             // FEX asserted.
-            return LERR(kr == KERN_INVALID_ADDRESS ? ENOMEM : EEXIST);
+            //
+            // Not every invalid address is past the top, though. Darwin's
+            // page zero slides with the image: the first bytes above 4 GiB,
+            // up to the runtime's own image, are below the map's minimum
+            // and answer KERN_INVALID_ADDRESS too. Wine looks for room for a
+            // 64-bit DLL upward from exactly 4 GiB with these probes, takes
+            // anything but EEXIST as the end of the search ("mmap() error
+            // Cannot allocate memory, range 0x100000000-0x100100000"), and
+            // its services and DLLs failed to load (MEASURED, stage 50). On
+            // Linux that address exists; here it is taken, by the host.
+            // Only that gap is "taken": below 4 GiB and past the top of the
+            // address space stay ENOMEM (FEX's probe again, which a wider
+            // EEXIST broke: every exec under it failed with EFAULT).
+            extern const struct mach_header_64 __dso_handle;
+            bool below_image = addr >= (1ull << 32) && addr < (uint64_t)(uintptr_t)&__dso_handle;
+            // The same at the other end: Darwin's address space stops 32 MiB
+            // short of 2^47, and an x86-64 Wine allocates top-down from
+            // 0x7fffffff0000 with these probes ("mmap() error Cannot
+            // allocate memory, range 0x7ffffffd0000-0x7ffffffef000": its
+            // services did not start). Taken, so it steps down -- except
+            // for FEX's width probe itself, which is one inaccessible page.
+            bool top_gap = addr >= MACH_VM_MAX_ADDRESS && addr + len <= (1ull << 47) &&
+                           !(prot == PROT_NONE && len <= LXRT_HOST_PAGE);
+            return LERR(kr == KERN_INVALID_ADDRESS && !below_image && !top_gap ? ENOMEM : EEXIST);
         }
         if (mprotect((void *)at, (size_t)len, (int)prot) != 0) {
             int e = errno;
@@ -1826,6 +1885,13 @@ static uint64_t g_brk_base, g_brk_cur;
 
 void lxrt_dispatch_init_brk(uint64_t fallback)
 {
+    // A hole of the guest's own (arena.c): the host's heap cannot open a
+    // region in it, and the page after the break is still free to the guest.
+    uint64_t heap = lxrt_arena_reserve_heap();
+    if (heap) {
+        g_brk_base = g_brk_cur = heap;
+        return;
+    }
     mach_vm_address_t at = 0;
     if (mach_vm_allocate(mach_task_self(), &at, LXRT_HEAP_HOLE,
                          VM_FLAGS_ANYWHERE) == KERN_SUCCESS) {
@@ -1850,6 +1916,15 @@ static long do_brk(uint64_t want)
 
     if (want_page > cur_page) {
         mach_vm_address_t at = cur_page;
+        if (lxrt_arena_free(cur_page, want_page - cur_page)) {
+            // In the guest's hole: the new pages take the reservation's place.
+            if (mmap((void *)(uintptr_t)cur_page, (size_t)(want_page - cur_page), PROT_READ | PROT_WRITE,
+                     MAP_PRIVATE | MAP_ANON | MAP_FIXED, -1, 0) == MAP_FAILED)
+                return (long)g_brk_cur;
+            lxrt_arena_mapped(cur_page, want_page - cur_page);
+            g_brk_cur = want;
+            return (long)g_brk_cur;
+        }
         if (mach_vm_allocate(mach_task_self(), &at,
                              (mach_vm_size_t)(want_page - cur_page),
                              VM_FLAGS_FIXED) != KERN_SUCCESS)
@@ -1863,6 +1938,7 @@ static long do_brk(uint64_t want)
     } else if (want_page < cur_page) {
         mach_vm_deallocate(mach_task_self(), (mach_vm_address_t)want_page,
                            (mach_vm_size_t)(cur_page - want_page));
+        lxrt_arena_unmapped(want_page, cur_page - want_page);
     }
 
     g_brk_cur = want;
@@ -4317,7 +4393,27 @@ restart:
             strncmp(gp, "/proc/", 6)) {
             const char *hp = translate_follow(gp);
             struct stat est;
-            if (stat(hp, &est) != 0) { ret = LERR(errno); break; }
+            if (stat(hp, &est) != 0) {
+                // Not in this root. The new image still takes a program
+                // that exists only on the host, by its host path (main.c,
+                // resolve_program): tools/steamarm-fex-proton execs SteamARM's
+                // FEX that way from the ARM64 client's root, and this check
+                // answered ENOENT for it ("FEX-gb: No such file or
+                // directory", every game and d3ddriverquery64.exe; MEASURED,
+                // benchmarks/stage50). Only an ELF: macOS's own
+                // /usr/local/bin/python3 is nothing a guest can run, and
+                // execvp has to go on to the next PATH entry.
+                int e = errno;
+                unsigned char magic[4] = {0};
+                int hfd = gp[0] == '/' ? open(gp, O_RDONLY | O_CLOEXEC) : -1;
+                ssize_t got = hfd >= 0 ? read(hfd, magic, 4) : -1;
+                if (hfd >= 0) close(hfd);
+                if (got != 4 || memcmp(magic, "\x7f" "ELF", 4) != 0 || stat(gp, &est) != 0) {
+                    ret = LERR(e);
+                    break;
+                }
+                hp = gp;
+            }
             if (S_ISDIR(est.st_mode) || access(hp, X_OK) != 0) { ret = LERR(EACCES); break; }
         }
         ret = lxrt_execve(gp, (char *const *)a1, (char *const *)a2);

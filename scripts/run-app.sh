@@ -598,6 +598,13 @@ export LXRT_STATFS_BACKING
 # scripts/run-fex.sh's fixed environment.
 if [ "$APP_ARCH" = aarch64 ] && [ "$APP_KIND" = steam ]; then
     pgrep -f 'lxrun /tmp/lxrt-root/usr/bin/FEXServer' >/dev/null || scripts/run-fex.sh /bin/true >/dev/null 2>&1
+    # ~/.steam's links, which Valve's launcher makes and the client starts
+    # every game through (scripts/steam-arm64-links.sh).
+    guest_home=/tmp/armhome
+    for kv in ${APP_ENV[@]+"${APP_ENV[@]}"}; do
+        case "$kv" in HOME_IN_GUEST=/*) guest_home=${kv#HOME_IN_GUEST=} ;; esac
+    done
+    scripts/steam-arm64-links.sh "$APP_ROOT" "$guest_home" || true
 fi
 if [ "$APP_ARCH" = aarch64 ]; then
     env ${APP_ENV[@]+"${APP_ENV[@]}"} DISPLAY=$DISP LXRT_ROOT="$APP_ROOT" \

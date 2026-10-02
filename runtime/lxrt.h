@@ -350,6 +350,15 @@ void lxrt_host_altstack_after_fork(void);
 // Guest address base for 32-bit guests (runtime/gbase.c).
 void lxrt_gbase_set(uint64_t base);
 uint64_t lxrt_gbase(void);
+
+// arena.c: the range kept for the guest's fixed mappings (Windows programs
+// load at 0x140000000), reserved before the host's heap can take it.
+bool lxrt_arena_on(void);
+uint64_t lxrt_arena_reserve_heap(void);
+void lxrt_arena_bounds(uint64_t *lo, uint64_t *hi);
+bool lxrt_arena_free(uint64_t addr, uint64_t len);
+void lxrt_arena_mapped(uint64_t addr, uint64_t len);
+void lxrt_arena_unmapped(uint64_t addr, uint64_t len);
 // Host (non-FEX) code faulting on a guest pointer below 4 GiB: rebase the
 // load/store's base register and retry (gbase.c).
 bool lxrt_lowptr_fixup(void *uap, uint64_t fault_addr);

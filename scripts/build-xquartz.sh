@@ -82,6 +82,12 @@ if [ ! -f "$SRC/build/build.ninja" ]; then
         -Dapple-applications-dir="$XQ_ROOT" -Dapple-application-name=SteamARM-X11 \
         -Dbundle-id-prefix=org.steamarm -Dbuilder_string=SteamARM
 fi
+# A Homebrew upgrade moves a formula's Cellar directory, and meson recorded
+# the old one (mesa's libGL.dylib: "missing and no known rule to make it").
+if ! ninja -C "$SRC/build" -n >/dev/null 2>&1; then
+    log "meson setup --wipe (dependency paths changed)"
+    meson setup --wipe "$SRC/build" "$SRC" >/dev/null
+fi
 log "ninja"
 ninja -C "$SRC/build"
 log "meson install"
@@ -120,18 +126,26 @@ fi
 
 # 5. quartz-wm: the window manager that gives X toplevels native macOS title
 #    bars, traffic lights and resizing (AppleWM extension; dock support
-#    through the system's libXplugin). Pinned upstream commit + one patch
-#    (a QuickDraw/Xrender "Picture" typedef clash with the current SDK).
+#    through the system's libXplugin). Pinned upstream commit + patches, in
+#    this order: a QuickDraw/Xrender "Picture" typedef clash with the current
+#    SDK, then _NET_WM_MOVERESIZE & co. for frameless clients (Steam's SDL3
+#    windows, Chromium/CEF custom frames). Rebuilt when the patches change;
+#    the link makes a new file, so a running quartz-wm keeps working and
+#    picks the patches up when it is restarted.
 QWM_COMMIT=3570364dd893713e6697d0d80beb61ad03e43c6c
 QWM="$XQ_ROOT/quartz-wm"
-if [ ! -x "$QWM/src/quartz-wm" ]; then
+QWM_PATCHES=(quartz-wm-picture.patch quartz-wm-netwm-moveresize.patch)
+QWM_STAMP="$QWM_COMMIT $( cd "$PROJECT_DIR/patches" && cat "${QWM_PATCHES[@]}" | shasum -a 256 | cut -d' ' -f1 )"
+if [ ! -x "$QWM/src/quartz-wm" ] || [ "$(cat "$QWM/.steamarm-patches" 2>/dev/null)" != "$QWM_STAMP" ]; then
     log "building quartz-wm"
     if [ ! -d "$QWM/.git" ]; then
         git clone -q https://github.com/XQuartz/quartz-wm.git "$QWM"
     fi
     git -C "$QWM" checkout -q "$QWM_COMMIT"
     git -C "$QWM" checkout -q -- .
-    git -C "$QWM" apply "$PROJECT_DIR/patches/quartz-wm-picture.patch"
+    for p in "${QWM_PATCHES[@]}"; do
+        git -C "$QWM" apply "$PROJECT_DIR/patches/$p"
+    done
     (
         cd "$QWM"
         export ACLOCAL_PATH="$BREW/share/aclocal"
@@ -141,6 +155,7 @@ if [ ! -x "$QWM/src/quartz-wm" ]; then
             --with-bundle-id-prefix=org.steamarm >/dev/null
         make -j"$(sysctl -n hw.ncpu)" >/dev/null
     )
+    echo "$QWM_STAMP" > "$QWM/.steamarm-patches"
 fi
 
 # The patches this server was built with, for scripts/compat-status.py: the

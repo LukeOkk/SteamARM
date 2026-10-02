@@ -790,6 +790,22 @@ static void host_handler(int dsig, siginfo_t *dinfo, void *uap)
     // The carrier signal is not itself a signal the guest asked for: it is a
     // realtime delivery, and the real number comes out of this thread's queue.
     if (dsig == LXRT_RT_CARRIER) {
+        // What another process sent to THIS thread is raised here with
+        // pthread_kill, and must not run nested in this handler: its frame
+        // would hold this handler's context (a pc inside pthread_kill, the
+        // host alternate stack) as the interrupted one. A guest handler
+        // that returns there does no harm; FEX's does not return -- it
+        // points the context at its dispatcher to run the x86 handler, this
+        // handler was left half-run for good, and the process aborted:
+        // wineserver's SIGUSR1 to a thread waiting under fsync or NTSYNC
+        // (an APC: every overlapped I/O completion) killed it, Wine's
+        // services with it (MEASURED, benchmarks/stage50). Blocked until
+        // this handler returns, the signal arrives on the context the
+        // carrier interrupted, as one sent within the process does; the
+        // return restores the mask.
+        sigset_t every;
+        sigfillset(&every);
+        pthread_sigmask(SIG_BLOCK, &every, NULL);
         xsig_drain();                                      // from other processes
         lsig = lxrt_rt_dequeue_self_mask(g_rt_blocked);   // blocked ones wait
         if (lsig == 0)

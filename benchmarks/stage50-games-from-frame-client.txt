@@ -1,0 +1,90 @@
+Stage 50 -- Why no game started from the Steam Frame client, and from the
+x86 client's container either
+Date: 2026-10-02. Apple M4, macOS 27, display 165 Hz. Zero VM. Probes only
+(tests/win's D3D11/D3D12 programs, tests/elf); no game was run here.
+
+1. THE CLIENT'S LINKS
+  Each game ended in 2 s whichever tool was chosen (compat_log.txt:
+  StartSession ... OnAppLifetimeNotification 2 s later), the session log:
+    "/bin/sh: line 1: /tmp/armhome/.steam/sdkarm64/steam-launch-wrapper: No
+     such file or directory"
+    "ERROR: ld.so: object '/tmp/armhome/.steam/bin64/gameoverlayrenderer.so'
+     from LD_PRELOAD cannot be preloaded"
+  Valve starts the ARM64 client through RUNSTEAM.sh (in SteamOS for ARM64's
+  /usr/lib/steam/steam.tar.zst), which first links ~/.steam/{steam,root,
+  sdk32,sdk64,sdkarm64,binarm64,bin32,bin64}. SteamARM starts
+  steamrtarm64/steam itself. Fix: scripts/steam-arm64-links.sh, run by
+  scripts/run-app.sh for an ARM64 Steam.
+
+2. PROTON ARM64 (Valve's, unchanged)
+  Its Wine runs under the runtime ("wine-11.0" from files/bin-arm64/wine
+  --version) and stops at
+    "err:virtual:map_fixed_area out of memory for 0x7ffe0000-0x7ffe1000"
+    "wine: failed to map the shared user data: c0000017"
+  The page Windows keeps at 0x7ffe0000 is inside Darwin's 4 GiB page zero.
+  Not fixed here (open).
+
+3. THE TOOL (x86 Proton under SteamARM's FEX) AND THE x86 CLIENT'S CONTAINER
+  tests/win/run_fex_boundary.sh and run_steam_path.sh, d3d11/d3d12 probes.
+  Both failed; five causes, in the order they were found:
+
+  a) execve of a host-only ELF. The tool execs /tmp/lxrt-root/usr/bin/FEX-gb
+     by its host path; the check added for execvp (ENOENT before the exec,
+     35816df) answered "FEX-gb: No such file or directory". Fix: a path that
+     exists on the host and is an ELF passes (runtime/dispatch.c).
+  b) LXRT_* carried over at execve (f95df5c) undid the tool's unset of
+     LXRT_GUEST_PAGE: FEX started with 4 KiB guest pages, "Couldn't allocate
+     page after SBRK.". Fix: the tool sets them empty.
+  c) The host's malloc where Windows programs load.
+     "[lxrt] REFUSED mmap MAP_FIXED 0x140000000+0x17000: overlaps host malloc
+      region 0x140000000+0x8000000 (tag 12)" then FEX's "NoExec instruction
+      in entry block: 0": Wine ran a program that was never mapped.
+     libmalloc places its regions from a random address in this part of the
+     address space; a 128 MiB medium region is 128 MiB-aligned, so it sits
+     at 0x140000000 in about one start in eight. A reservation made in a
+     constructor was too late (the regions exist by then). Fix: a zero-fill
+     segment of the runtime's own image (runtime/arena_seg.s, -segaddr
+     0x13b000000, 0x25000000 bytes), mapped by the kernel at exec; image
+     slide MEASURED over 1500 starts: 0x4000 to 0x4ff8000. A probe program
+     with the segment: MAP_FIXED of 512 MiB at 0x140000000 in 200 of 200
+     starts. The runtime treats the range as free for the guest and puts the
+     reservation back on munmap (runtime/arena.c).
+  d) The same below the guest's break. With (c) in place the medium region
+     went to the next free 128 MiB-aligned address, 0x7000000000 -- the hole
+     the break starts in: "MAP_FIXED_NOREPLACE 0x7000000000+0x1000: range
+     busy (another mapping at 0x7000000000+0x8000000, tag 12)", FEX's
+     "Couldn't allocate page after SBRK." in 15 of 40 starts. Fix: the hole
+     is reserved and kept for the guest the same way; 0 of 40 after.
+  e) Wine's searches. "err:virtual:try_map_free_area mmap() error Cannot
+     allocate memory, range 0x100000000-0x100100000" (103 times in a run of
+     0.3.24) and "... range 0x7ffffffd0000-0x7ffffffef000": MAP_FIXED_
+     NOREPLACE answered ENOMEM just above 4 GiB (Darwin's page zero slides
+     with the image) and in the last 32 MiB below 2^47 (Darwin stops there);
+     Wine ends a search on anything but EEXIST, and its DLLs and services
+     did not load. Fix: EEXIST for those two gaps; FEX's own width probe
+     (one inaccessible page at the top) still gets ENOMEM.
+  f) A signal from another process, under FEX. With (a)-(e) fixed the
+     probes rendered, but "err:service:process_send_start_message service
+     L"Winedevice1" failed to start" (10 services with fsync, 16 with
+     NTSYNC, 1 with wineserver's own waits). wineserver's trace:
+       "set_inproc_event 204 / 00a8: *sent signal* SIGUSR1 / 00a8: *killed*"
+     the thread waiting on an overlapped pipe and a process handle dies when
+     the server signals it. tests/elf/xproc_signal_wait.c as an x86-64
+     program: rc 134 after "start" for futex_waitv, futex and nanosleep
+     alike; as aarch64: ok. The runtime's carrier handler raised the signal
+     with pthread_kill and it ran nested, on the carrier handler's own
+     context; FEX points the interrupted context at its dispatcher and never
+     returns. Fix: every signal blocked while the carrier handler drains the
+     mailbox, so the signal arrives on the context the carrier interrupted
+     (runtime/signal.c).
+
+4. AFTER
+  tests/elf/run_fex_rules.sh  8/8 (FEX starts 24/24, fixed_maps 24/24, the
+                              signal in futex_waitv, futex, nanosleep)
+  tests/win/run.sh            21/21; sync, sync_fsync, sync_ntsync now with
+                              two processes (overlapped pipe + process handle)
+  run_fex_boundary.sh         d3d11 158.0 fps, d3d12 152.8 fps (the tool, from
+                              the Steam Frame root)
+  run_steam_path.sh           d3d11 157.6 fps, tone ok; services that failed
+                              to start: 10 -> 1 (winebth, no Bluetooth)
+  tests/elf/run.sh            104/104

@@ -188,7 +188,13 @@ export STEAM_COMPAT_TOOL_PATHS="$proton_dir:$slr_dir"
 # x18 pass, its aarch64 libraries) mean nothing to FEX and x86 programs, and
 # an emulator or machine architecture from an arm64 client would send
 # pressure-vessel to Valve's FEX instead of SteamARM's.
-unset LXRT_GUEST_PAGE LXRT_X18_ALL_TEXT LD_LIBRARY_PATH STEAM_RUNTIME_LIBRARY_PATH
+# The runtime's two are set EMPTY, not unset: at execve the runtime carries
+# over every LXRT_* variable the new environment lacks (runtime/process.c,
+# for programs that exec with an environment of their own), so an unset one
+# came back and FEX started with 4 KiB guest pages: "Couldn't allocate page
+# after SBRK." (MEASURED, benchmarks/stage50). Empty reads as unset there.
+export LXRT_GUEST_PAGE= LXRT_X18_ALL_TEXT=
+unset LD_LIBRARY_PATH STEAM_RUNTIME_LIBRARY_PATH
 unset STEAM_COMPAT_EMULATOR PRESSURE_VESSEL_EMULATOR STEAM_COMPAT_MACHINE_ARCHITECTURE STEAM_COMPAT_GRAPHICS_PROVIDER
 [ "${STEAMARM_FEX_KEEP_LD_PRELOAD:-}" = 1 ] || unset LD_PRELOAD
 # The environment the ARM64 root names for its own guests (the Steam Frame
@@ -215,7 +221,7 @@ if [ "${STEAMARM_FEX_PROTON_DRYRUN:-}" = 1 ]; then
     done
     echo "env: LXRT_MOUNTS=$(show_table "$LXRT_MOUNTS")"
     for v in LXRT_GUEST_PAGE LXRT_X18_ALL_TEXT LD_LIBRARY_PATH LD_PRELOAD STEAM_COMPAT_EMULATOR ${dropped[@]+"${dropped[@]}"}; do
-        [ -z "${!v+x}" ] || echo "env: $v still set"
+        [ -z "${!v:-}" ] || echo "env: $v still set"
     done
     echo "dropped from the ARM64 root's guest environment: ${dropped[*]-none}"
     printf 'exec:'; printf ' [%s]' "${cmd[@]}"; echo

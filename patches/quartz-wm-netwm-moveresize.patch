@@ -1,0 +1,1283 @@
+quartz-wm: _NET_WM_MOVERESIZE and the EWMH frameless clients need
+
+Applies after quartz-wm-picture.patch (scripts/build-xquartz.sh step 5).
+
+Frameless X clients draw their own title bar and ask the window manager to
+run interactive moves/resizes with the EWMH _NET_WM_MOVERESIZE client
+message; quartz-wm neither advertised nor handled it, so those windows could
+not be moved or resized at all. SDL3 hit-test windows send it from
+X11_TriggerHitTestAction, Chromium/CEF custom frames from
+X11Window::DispatchHostWindowDragMovement (ui::DoWMMoveResize, button 0).
+Steam (CEF "System" composer) nests the two: SDL3 toplevel (Motif
+decorations = 0) -> CefWindowX11 -> Chromium X11Window, which selects
+ButtonPress. Chromium gets every press, SDL's hit test never runs, and any
+request names Chromium's window, two levels below the managed one.
+
+* _NET_WM_MOVERESIZE: directions 0-7 (edge/corner resize) and 8 (move),
+  11 (cancel: ends the drag where it is); 9/10 (keyboard) ignored. A
+  request for a window inside a managed one (up to 8 levels down) applies
+  to that one. Runs on X pointer events under an active grab on the root
+  (Xplugin windows belong to the X server, AppKit dragging is not
+  available), moving/resizing the frame with resize_frame like the
+  title-bar drag and grow box; motion is coalesced only while the next
+  queued event is motion too. Honours WM_NORMAL_HINTS min/max/inc, keeps
+  the opposite edge fixed, keeps a 28 px top strip on screen and the top
+  edge below the menu bar; ends if the window is minimized, hidden or made
+  fullscreen under it. Ignored if the button is already up.
+* Frameless windows (Motif decorations = 0, no title bar), from the
+  passive grab on the client window: a button 1 press within
+  wm_frameless_resize_border (default 5 px, 0 = off) of the left, right or
+  bottom edge, 3 px of the top edge (Steam's top bar menus live below
+  it), or 16 px of a corner resizes the window and never reaches the
+  client; Cmd-Option-drag moves it from anywhere (Option is Mode_switch,
+  an XKB group shift the press event does not carry, so the server's
+  current state is asked for when Cmd is down). Every other press is
+  replayed to the client as before. The activating click goes through
+  (click-through), so dragging an inactive window by its own title bar is
+  one gesture.
+    defaults write org.steamarm.X11 wm_frameless_resize_border -int 8
+* Double click on a frameless title bar (two move requests that name a
+  button, as SDL3 sends them, and never moved, within
+  com.apple.mouse.doubleClickThreshold) and on a quartz-wm title bar run
+  System Settings' AppleActionOnDoubleClick (Zoom/Fill -> zoom, Minimize,
+  None) instead of always minimizing; AppleMiniaturizeOnDoubleClick = NO
+  in X11's own domain still turns the title bar one off (the global key is
+  not read for that: System Settings sets it to 0 for Zoom and Fill).
+  Chromium (button 0) handles its own. Pref to turn off the frameless one:
+    defaults write org.steamarm.X11 wm_moveresize_double_click -bool false
+* _NET_WM_STATE: MAXIMIZED_HORZ/VERT requests from inside a managed window
+  apply to it (Chromium's caption buttons), and the pair counts as one
+  request (a toggle no longer undoes itself); _NET_WM_STATE_ABOVE (keep
+  above -> AppleWM floating level); _NET_WM_STATE_FOCUSED on the focused
+  window (SDL3 takes input focus from it). The property is only rewritten
+  when it changes, not on every frame change of a drag.
+* _NET_FRAME_EXTENTS (0, 0, title bar height, 0) so SDL3/Chromium place
+  decorated windows where they asked.
+* _NET_ACTIVE_WINDOW with source indication 2 (pager) also un-minimizes /
+  un-hides; applications (1: Steam's SDL_RaiseWindow on notifications) and
+  old clients (0) only get focus, as before.
+* Integer prefs no longer go through BOOL, which is bool on arm64 and read
+  every value as 1 (wm_auto_quit_timeout, wm_frameless_resize_border).
+
+diff --git a/src/main.m b/src/main.m
+index b4e4568..c9a5f86 100644
+--- a/src/main.m
++++ b/src/main.m
+@@ -44,6 +44,7 @@
+ 
+ Display *x_dpy;
+ unsigned int x_meta_mod;
++unsigned int x_option_mod;
+ int x_shape_event_base, x_shape_error_base;
+ int x_apple_wm_event_base, x_apple_wm_error_base;
+ int x_xinerama_event_base, x_xinerama_error_base;
+@@ -70,6 +71,8 @@
+ int auto_quit_timeout = 3;   /* Seconds to wait before auto-quiting */
+ BOOL minimize_on_double_click = YES;
+ BOOL show_shortcut = NO;
++BOOL moveresize_double_click = YES;
++int frameless_resize_border = 5;
+ BOOL enable_key_equivalents = YES; /* quartz-wm doesn't use this per
+                                     * se, but it queries it so it knows
+                                     * not to display shortcuts when key
+@@ -179,6 +182,7 @@
+     KeyCode code;
+ 
+     x_meta_mod = 0;
++    x_option_mod = 0;
+ 
+     XDisplayKeycodes (x_dpy, &min_code, &max_code);
+ 
+@@ -196,16 +200,24 @@
+             for (code_col = 0; code_col < syms_per_code; code_col++)
+             {
+                 sym = syms[((code - min_code) * syms_per_code) + code_col];
+-                if (sym == XK_Meta_L || sym == XK_Meta_R)
++                if ((sym == XK_Meta_L || sym == XK_Meta_R) && x_meta_mod == 0)
+                 {
+                     x_meta_mod = 1 << row;
+-                    goto done;
++                }
++                else if ((sym == XK_Alt_L || sym == XK_Alt_R
++                          || sym == XK_Mode_switch) && x_option_mod == 0)
++                {
++                    /* Option: Mode_switch, or Alt_L/Alt_R with "Option
++                     * keys send Alt_L and Alt_R" */
++                    x_option_mod = 1 << row;
+                 }
+             }
+         }
+     }
+ 
+-done:
++    if (x_option_mod == x_meta_mod)
++        x_option_mod = 0;
++
+     XFree((char *)syms);
+     XFreeModifiermap(mods);
+ }
+@@ -270,6 +282,8 @@
+     atoms.native_window_id = XInternAtom (x_dpy, "_NATIVE_WINDOW_ID", False);
+     atoms.net_active_window = XInternAtom (x_dpy, "_NET_ACTIVE_WINDOW", False);
+     atoms.net_close_window = XInternAtom (x_dpy, "_NET_CLOSE_WINDOW", False);
++    atoms.net_frame_extents = XInternAtom (x_dpy, "_NET_FRAME_EXTENTS", False);
++    atoms.net_wm_moveresize = XInternAtom (x_dpy, "_NET_WM_MOVERESIZE", False);
+     atoms.net_wm_action_close = XInternAtom (x_dpy, "_NET_WM_ACTION_CLOSE", False);
+     atoms.net_wm_action_fullscreen = XInternAtom (x_dpy, "_NET_WM_ACTION_FULLSCREEN", False);
+     atoms.net_wm_action_maximize_horz = XInternAtom (x_dpy, "_NET_WM_ACTION_MAXIMIZE_HORZ", False);
+@@ -281,6 +295,8 @@
+     atoms.net_wm_allowed_actions = XInternAtom (x_dpy, "_NET_WM_ALLOWED_ACTIONS", False);
+     atoms.net_wm_name = XInternAtom (x_dpy, "_NET_WM_NAME", False);
+     atoms.net_wm_state = XInternAtom (x_dpy, "_NET_WM_STATE", False);
++    atoms.net_wm_state_above = XInternAtom (x_dpy, "_NET_WM_STATE_ABOVE", False);
++    atoms.net_wm_state_focused = XInternAtom (x_dpy, "_NET_WM_STATE_FOCUSED", False);
+     atoms.net_wm_state_fullscreen = XInternAtom (x_dpy, "_NET_WM_STATE_FULLSCREEN", False);
+     atoms.net_wm_state_hidden = XInternAtom (x_dpy, "_NET_WM_STATE_HIDDEN", False);
+     atoms.net_wm_state_maximized_horz = XInternAtom (x_dpy, "_NET_WM_STATE_MAXIMIZED_HORZ", False);
+@@ -861,13 +877,51 @@ static BOOL prefs_get_bool (CFStringRef key, BOOL def) {
+     return ok ? (BOOL) ret : def;
+ }
+ 
+-static int prefs_get_int (CFStringRef key, BOOL def) {
++static int prefs_get_int (CFStringRef key, int def) {
+     int ret;
+     Boolean ok;
+ 
+-    ret = CFPreferencesGetAppIntegerValue (key, app_prefs_domain_cfstr, &ok);
++    /* Not through BOOL: that is bool on arm64 and turned every value into 1 */
++    ret = (int) CFPreferencesGetAppIntegerValue (key, app_prefs_domain_cfstr, &ok);
+ 
+-    return ok ? (BOOL) ret : def;
++    return ok ? ret : def;
++}
++
++/* Like prefs_get_bool, but only X11's own domain. CFPreferencesGet* also
++ * look in the global domain, and System Settings writes a global
++ * AppleMiniaturizeOnDoubleClick = 0 whenever the title bar action is Zoom
++ * or Fill: read through it, that turned every title-bar double click off. */
++static BOOL prefs_get_own_bool (CFStringRef key, BOOL def) {
++    CFPropertyListRef value;
++    BOOL ret = def;
++
++    value = CFPreferencesCopyValue (key, app_prefs_domain_cfstr,
++                                    kCFPreferencesCurrentUser,
++                                    kCFPreferencesAnyHost);
++    if (value == NULL)
++        value = CFPreferencesCopyValue (key, app_prefs_domain_cfstr,
++                                        kCFPreferencesCurrentUser,
++                                        kCFPreferencesCurrentHost);
++    if (value == NULL)
++        return def;
++
++    if (CFGetTypeID (value) == CFBooleanGetTypeID ()) {
++        ret = CFBooleanGetValue ((CFBooleanRef) value) ? YES : NO;
++    } else if (CFGetTypeID (value) == CFNumberGetTypeID ()) {
++        int i;
++
++        if (CFNumberGetValue ((CFNumberRef) value, kCFNumberIntType, &i))
++            ret = (i != 0);
++    } else if (CFGetTypeID (value) == CFStringGetTypeID ()) {
++        CFStringRef s = (CFStringRef) value;
++
++        ret = (CFStringCompare (s, CFSTR ("YES"), kCFCompareCaseInsensitive) == kCFCompareEqualTo
++               || CFStringCompare (s, CFSTR ("true"), kCFCompareCaseInsensitive) == kCFCompareEqualTo
++               || CFStringGetIntValue (s) != 0);
++    }
++
++    CFRelease (value);
++    return ret;
+ }
+ 
+ static inline void prefs_read(void) {
+@@ -880,9 +934,15 @@ static inline void prefs_read(void) {
+     rootless            = prefs_get_bool (CFSTR (PREFS_ROOTLESS), rootless);
+     auto_quit           = prefs_get_bool (CFSTR (PREFS_AUTO_QUIT), auto_quit);
+     auto_quit_timeout   = prefs_get_int (CFSTR (PREFS_AUTO_QUIT_TIMEOUT), auto_quit_timeout);
+-    minimize_on_double_click = prefs_get_bool (CFSTR(PREFS_MINIMIZE_ON_DOUBLE_CLICK), minimize_on_double_click);
++    minimize_on_double_click = prefs_get_own_bool (CFSTR(PREFS_MINIMIZE_ON_DOUBLE_CLICK), minimize_on_double_click);
+     show_shortcut       = prefs_get_bool (CFSTR (PREFS_SHOW_SHORTCUT), show_shortcut);
+     enable_key_equivalents = prefs_get_bool (CFSTR (PREFS_ENABLE_KEY_EQUIVALENTS), enable_key_equivalents);
++    moveresize_double_click = prefs_get_bool (CFSTR (PREFS_MOVERESIZE_DOUBLE_CLICK), moveresize_double_click);
++    frameless_resize_border = prefs_get_int (CFSTR (PREFS_FRAMELESS_RESIZE_BORDER), frameless_resize_border);
++    if (frameless_resize_border < 0)
++        frameless_resize_border = 0;
++    else if (frameless_resize_border > 32)
++        frameless_resize_border = 32;
+ }
+ 
+ static void signal_handler_cb(CFRunLoopObserverRef observer,
+@@ -1078,6 +1138,14 @@ int main (int argc, const char *argv[]) {
+         return "_NET_ACTIVE_WINDOW";
+     if(atom == atoms.net_close_window)
+         return "_NET_CLOSE_WINDOW";
++    if(atom == atoms.net_frame_extents)
++        return "_NET_FRAME_EXTENTS";
++    if(atom == atoms.net_wm_moveresize)
++        return "_NET_WM_MOVERESIZE";
++    if(atom == atoms.net_wm_state_above)
++        return "_NET_WM_STATE_ABOVE";
++    if(atom == atoms.net_wm_state_focused)
++        return "_NET_WM_STATE_FOCUSED";
+     if(atom == atoms.net_wm_action_close)
+         return "_NET_WM_ACTION_CLOSE";
+     if(atom == atoms.net_wm_action_fullscreen)
+diff --git a/src/quartz-wm.h b/src/quartz-wm.h
+index 068788a..031d281 100644
+--- a/src/quartz-wm.h
++++ b/src/quartz-wm.h
+@@ -121,6 +121,47 @@
+ extern void x_input_register (void);
+ extern void x_input_run (void);
+ 
++/* _NET_WM_MOVERESIZE directions (EWMH 1.5, "_NET_WM_MOVERESIZE") */
++#define NET_WM_MOVERESIZE_SIZE_TOPLEFT      0
++#define NET_WM_MOVERESIZE_SIZE_TOP          1
++#define NET_WM_MOVERESIZE_SIZE_TOPRIGHT     2
++#define NET_WM_MOVERESIZE_SIZE_RIGHT        3
++#define NET_WM_MOVERESIZE_SIZE_BOTTOMRIGHT  4
++#define NET_WM_MOVERESIZE_SIZE_BOTTOM       5
++#define NET_WM_MOVERESIZE_SIZE_BOTTOMLEFT   6
++#define NET_WM_MOVERESIZE_SIZE_LEFT         7
++#define NET_WM_MOVERESIZE_MOVE              8
++#define NET_WM_MOVERESIZE_SIZE_KEYBOARD     9
++#define NET_WM_MOVERESIZE_MOVE_KEYBOARD    10
++#define NET_WM_MOVERESIZE_CANCEL           11
++
++/* Height of the strip at the top of an undecorated window that is kept on
++ * screen (and below the menu bar) while it is dragged, standing in for the
++ * title bar that frameless clients (Chromium/CEF, SDL hit-test windows) draw
++ * themselves. */
++#define MOVERESIZE_TITLE_STRIP 28
++
++/* Drag that ends without the pointer passing DRAG_THRESHOLD is a click; two
++ * such clicks on the same window within the macOS double-click interval run
++ * the title-bar double-click action (System Settings > Desktop & Dock).
++ * Only for requests that name a button (SDL3); Chromium sends button 0 and
++ * handles double clicks on its own title bar itself. */
++#define PREFS_MOVERESIZE_DOUBLE_CLICK "wm_moveresize_double_click"
++extern BOOL moveresize_double_click;
++
++/* Frameless windows (_MOTIF_WM_HINTS decorations = 0): a press this close
++ * to the left, right or bottom edge resizes the window, within
++ * FRAMELESS_RESIZE_CORNER of a corner diagonally. The top edge only takes
++ * FRAMELESS_RESIZE_TOP pixels, the clients draw their title bar and menus
++ * there. 0 turns it off. */
++#define PREFS_FRAMELESS_RESIZE_BORDER "wm_frameless_resize_border"
++#define FRAMELESS_RESIZE_CORNER 16
++#define FRAMELESS_RESIZE_TOP 3
++extern int frameless_resize_border;
++
++/* Modifier for the Option keys (Alt_L / Mode_switch), 0 if none */
++extern unsigned int x_option_mod;
++
+ /* Try to work with older libAppleWM for Codeweavers support */
+ typedef Bool (* XAppleWMSendPSNProcPtr)(Display *dpy);
+ extern XAppleWMSendPSNProcPtr _XAppleWMSendPSN;
+@@ -139,6 +180,8 @@
+     Atom native_window_id;
+     Atom net_active_window;
+     Atom net_close_window;
++    Atom net_frame_extents;
++    Atom net_wm_moveresize;
+     Atom net_wm_action_close;
+     Atom net_wm_action_fullscreen;
+     Atom net_wm_action_maximize_horz;
+@@ -150,6 +193,8 @@
+     Atom net_wm_allowed_actions;
+     Atom net_wm_name;
+     Atom net_wm_state;
++    Atom net_wm_state_above;
++    Atom net_wm_state_focused;
+     Atom net_wm_state_fullscreen;
+     Atom net_wm_state_hidden;
+     Atom net_wm_state_maximized_horz;
+diff --git a/src/x-input.m b/src/x-input.m
+index ea18998..6da0e93 100644
+--- a/src/x-input.m
++++ b/src/x-input.m
+@@ -37,6 +37,7 @@
+ 
+ #include <X11/Xatom.h>
+ #include <X11/keysym.h>
++#include <X11/cursorfont.h>
+ #include <X11/extensions/applewm.h>
+ /* AppKit (via frame.h) already defines a QuickDraw Picture. */
+ #define Picture X11_Picture
+@@ -143,6 +144,8 @@
+     }
+ }
+ 
++static BOOL frameless_press (x_window *w, XButtonEvent *e);
++
+ static void
+ x_event_button (XButtonEvent *e)
+ {
+@@ -153,15 +156,23 @@
+ 
+     if (e->window == w->_id)
+     {
++        /* Edges of frameless windows, Cmd-Option-drag */
++        if (e->type == ButtonPress && frameless_press (w, e))
++            return;
++
+         /* Swallow the first activating click. Since the X server activates
+          us we need to look at timestamps to handle the case where the
+          user activated X by clicking on the already focused window. Use
+-         a 100ms window for this. */
++         a 100ms window for this.
++
++         Not on frameless windows: they draw their own title bar, and the
++         activating click is also the start of a drag of it. */
+ 
+         if ((!w->_focused || (e->time - last_activation_time) < 100)
+             && [w focus:e->time])
+         {
+-            if (w->_always_click_through || focus_click_through)
++            if (w->_always_click_through || focus_click_through
++                || w->_frameless)
+             {
+                 XAllowEvents (x_dpy, ReplayPointer, e->time);
+                 XUngrabPointer (x_dpy, e->time);
+@@ -271,9 +282,12 @@
+                 {
+                     if (w->_shadable && window_shading)
+                         [w do_toggle_shaded:e->time];
+-                    else if ((w->_frame_attr & XP_FRAME_ATTR_COLLAPSE) &&
+-                             minimize_on_double_click)
+-                        [w do_collapse];
++                    else if (minimize_on_double_click)
++                        /* System Settings' title bar action; X11's own
++                         AppleMiniaturizeOnDoubleClick = NO (its domain
++                         only, not the global key) still turns double
++                         clicks off */
++                        [w do_title_double_click];
+                 }
+ 
+                 pointer_state.down_id = 0;
+@@ -408,6 +422,383 @@
+         }
+ }
+ 
++/* _NET_WM_MOVERESIZE (EWMH): a client asks the window manager to run an
++ * interactive move or edge resize from the button press it just received.
++ * Frameless clients have no other way to be moved or resized: Chromium/CEF
++ * custom title bars (X11Window::DispatchHostWindowDragMovement ->
++ * ui::DoWMMoveResize) and SDL3 hit-test windows
++ * (X11_TriggerHitTestAction -> DispatchWindowMove / InitiateWindowResize).
++ * Steam is both at once: its SDL3 toplevel holds CEF's window, which holds
++ * Chromium's X11Window; Chromium gets the presses and sends the request for
++ * its own window, two levels below the one we manage.
++ *
++ * Xplugin windows belong to the X server, so AppKit's own window dragging is
++ * out of reach; like the title-bar drag above, this runs on X pointer events,
++ * under an active pointer grab on the root window, and moves/resizes the
++ * frame with resize_frame (pipelined against ConfigureNotify). The same
++ * drag also serves presses on the edges of frameless windows and
++ * Cmd-Option-drag (frameless_press). */
++
++static struct {
++    x_window *w;                /* retained while a drag runs */
++    int direction;
++    X11Point anchor;            /* root coordinates of the press */
++    X11Rect start_frame;
++    unsigned moved :1;          /* pointer went past DRAG_THRESHOLD */
++    unsigned record_click :1;   /* a click may start a double click */
++} moveresize;
++
++/* The last drag that turned out to be a plain click, for double clicks. */
++static struct {
++    Window id;
++    CFAbsoluteTime time;
++    X11Point where;
++} moveresize_click;
++
++/* Resize cursors by direction. A move keeps whatever cursor the window
++ * under the pointer has (None), as macOS keeps the arrow. */
++static Cursor
++moveresize_cursor (int direction)
++{
++    static Cursor cursors[8];
++    static const unsigned int shapes[8] = {
++        XC_top_left_corner, XC_top_side, XC_top_right_corner,
++        XC_right_side, XC_bottom_right_corner, XC_bottom_side,
++        XC_bottom_left_corner, XC_left_side,
++    };
++
++    if (direction < NET_WM_MOVERESIZE_SIZE_TOPLEFT
++        || direction > NET_WM_MOVERESIZE_SIZE_LEFT)
++        return None;
++
++    if (cursors[direction] == None)
++        cursors[direction] = XCreateFontCursor (x_dpy, shapes[direction]);
++
++    return cursors[direction];
++}
++
++static CFTimeInterval
++double_click_interval (void)
++{
++    CFPropertyListRef value;
++    double interval = 0.5;
++
++    value = CFPreferencesCopyAppValue (CFSTR ("com.apple.mouse.doubleClickThreshold"),
++                                       kCFPreferencesAnyApplication);
++    if (value != NULL) {
++        if (CFGetTypeID (value) == CFNumberGetTypeID ())
++            CFNumberGetValue ((CFNumberRef) value, kCFNumberDoubleType, &interval);
++        CFRelease (value);
++    }
++
++    if (interval < 0.1 || interval > 5.0)
++        interval = 0.5;
++
++    return interval;
++}
++
++/* Ends the drag where it is: button released, _NET_WM_MOVERESIZE_CANCEL,
++ * a new request, X going inactive, the window going away. */
++static void
++moveresize_end (void)
++{
++    x_window *w = moveresize.w;
++
++    if (w == nil)
++        return;
++
++    moveresize.w = nil;
++
++    XUngrabPointer (x_dpy, CurrentTime);
++
++    if (!w->_removed && !w->_deleted) {
++        if (moveresize.direction == NET_WM_MOVERESIZE_MOVE) {
++#if MAC_OS_X_VERSION_MIN_REQUIRED >= 1050
++            if (moveresize.moved)
++                qwm_dock_drag_end ([w get_osx_id]);
++#endif
++        } else {
++            [w remove_resizing_title];
++        }
++
++        if (moveresize.record_click && !moveresize.moved
++            && moveresize.direction == NET_WM_MOVERESIZE_MOVE) {
++            moveresize_click.id = w->_id;
++            moveresize_click.time = CFAbsoluteTimeGetCurrent ();
++            moveresize_click.where = moveresize.anchor;
++        } else {
++            moveresize_click.id = None;
++        }
++    }
++
++    DB("end: id 0x%lx direction %d moved %d", w->_id,
++       moveresize.direction, (int) moveresize.moved);
++
++    XFlush (x_dpy);
++    [w release];
++}
++
++static void
++moveresize_motion (int x_root, int y_root, unsigned int state)
++{
++    x_window *w = moveresize.w;
++    X11Point p = X11PointMake (x_root, y_root);
++    X11Rect r;
++
++    /* Gone, or minimized, hidden or made fullscreen under the drag */
++    if (![w can_moveresize:moveresize.direction]) {
++        moveresize_end ();
++        return;
++    }
++
++    if ((state & BUTTON_MASK) == 0) {
++        /* We must have missed the button release. */
++        moveresize_end ();
++        return;
++    }
++
++    if (!moveresize.moved) {
++        if (point_distance (moveresize.anchor, p) < DRAG_THRESHOLD)
++            return;
++
++        moveresize.moved = YES;
++#if MAC_OS_X_VERSION_MIN_REQUIRED >= 1050
++        if (moveresize.direction == NET_WM_MOVERESIZE_MOVE)
++            qwm_dock_drag_begin ([w get_osx_id]);
++#endif
++    }
++
++    r = [w moveresize_frame:moveresize.start_frame
++                  direction:moveresize.direction
++                         dx:p.x - moveresize.anchor.x
++                         dy:p.y - moveresize.anchor.y
++                    pointer:p];
++    [w resize_frame:r];
++
++    if (moveresize.direction != NET_WM_MOVERESIZE_MOVE)
++        [w set_resizing_title:r];
++}
++
++/* Takes the pointer for a drag of |w|: an active grab on the root with the
++ * cursor for |direction|. It replaces our own passive grab on the client
++ * window too, thawing the pointer without replaying the press. */
++static BOOL
++moveresize_grab (x_window *w, int direction)
++{
++    int status;
++
++    status = XGrabPointer (x_dpy, w->_screen->_root, False,
++                           ButtonPressMask | ButtonReleaseMask | PointerMotionMask,
++                           GrabModeAsync, GrabModeAsync, None,
++                           moveresize_cursor (direction), CurrentTime);
++    if (status != GrabSuccess) {
++        asl_log (aslc, NULL, ASL_LEVEL_WARNING,
++                 "_NET_WM_MOVERESIZE: pointer grab failed (%d)", status);
++        return NO;
++    }
++
++    return YES;
++}
++
++/* Starts the drag once the pointer is ours; |anchor| is the press. */
++static void
++moveresize_start (x_window *w, int direction, X11Point anchor,
++                  X11Rect start_frame, BOOL record_click)
++{
++    moveresize.w = [w retain];
++    moveresize.direction = direction;
++    moveresize.anchor = anchor;
++    moveresize.start_frame = start_frame;
++    moveresize.moved = NO;
++    moveresize.record_click = record_click;
++}
++
++static void
++moveresize_begin (x_window *w, XClientMessageEvent *e)
++{
++    int direction = (int) e->data.l[2];
++    Window root_ret, child_ret;
++    int rx, ry, wx, wy;
++    unsigned int mask;
++    X11Point ptr, anchor;
++    X11Rect fr, slack;
++    BOOL record_click;
++
++    DB("id 0x%lx (from 0x%lx) x_root %ld y_root %ld direction %d button %ld source %ld",
++       w->_id, e->window, e->data.l[0], e->data.l[1], direction, e->data.l[3],
++       e->data.l[4]);
++
++    if (direction == NET_WM_MOVERESIZE_CANCEL) {
++        /* Ends the drag where it is (EWMH); not a click either. */
++        if (moveresize.w == w)
++            moveresize_end ();
++        moveresize_click.id = None;
++        return;
++    }
++
++    /* A new request replaces whatever was running. */
++    moveresize_end ();
++
++    /* 9/10 (keyboard) are optional in EWMH; nothing sends them here. */
++    if (direction < NET_WM_MOVERESIZE_SIZE_TOPLEFT
++        || direction > NET_WM_MOVERESIZE_MOVE)
++        return;
++
++    if (![w can_moveresize:direction])
++        return;
++
++    if (!XQueryPointer (x_dpy, w->_screen->_root, &root_ret, &child_ret,
++                        &rx, &ry, &wx, &wy, &mask))
++        return;
++
++    /* The button may be up already by the time the message arrives. Chromium
++     * sends button 0, so look at the pointer, not at data.l[3]. */
++    if ((mask & BUTTON_MASK) == 0)
++        return;
++
++    ptr = X11PointMake (rx, ry);
++    fr = [w intended_frame];
++
++    /* Anchor at the press position the client reports when it is plausible
++     * (the pointer may have moved a few pixels since), else at the pointer. */
++    anchor = X11PointMake ((int) e->data.l[0], (int) e->data.l[1]);
++    slack = X11RectMake (fr.x - 32, fr.y - 32, fr.width + 64, fr.height + 64);
++    if (!X11RectContainsPoint (slack, anchor) || point_distance (anchor, ptr) > 64)
++        anchor = ptr;
++
++    /* Double clicks on a frameless title bar only for requests that name
++     * the button (SDL3 hit-test windows). Chromium sends button 0 and runs
++     * its own double click action. */
++    record_click = (moveresize_double_click && e->data.l[3] != 0
++                    && direction == NET_WM_MOVERESIZE_MOVE);
++
++    /* Second press of a double click on a frameless title bar. */
++    if (record_click && moveresize_click.id == w->_id
++        && CFAbsoluteTimeGetCurrent () - moveresize_click.time <= double_click_interval ()
++        && point_distance (moveresize_click.where, anchor) <= 4 * DRAG_THRESHOLD)
++    {
++        moveresize_click.id = None;
++        [w do_title_double_click];
++        XFlush (x_dpy);
++        return;
++    }
++
++    if (!moveresize_grab (w, direction))
++        return;
++
++    /* Released while we were grabbing: don't sit on a grab nobody holds. */
++    if (!XQueryPointer (x_dpy, w->_screen->_root, &root_ret, &child_ret,
++                        &rx, &ry, &wx, &wy, &mask)
++        || (mask & BUTTON_MASK) == 0) {
++        XUngrabPointer (x_dpy, CurrentTime);
++        XFlush (x_dpy);
++        return;
++    }
++
++    moveresize_start (w, direction, anchor, fr, record_click);
++
++    /* Catch up with the pointer if it is already past the threshold. */
++    moveresize_motion (rx, ry, mask);
++
++    XFlush (x_dpy);
++}
++
++/* Button 1 press on a frameless window (Motif decorations = 0), seen
++ * through our passive grab on the client window before the client gets it.
++ * Nothing the client draws covers its edges, and Steam's presses go to
++ * Chromium, never to SDL's hit test, so no request comes for them: like
++ * macOS for every window, presses on the edges resize. Cmd-Option-drag
++ * moves the window from anywhere. YES if a drag started; that press does not
++ * reach the client. */
++static BOOL
++frameless_press (x_window *w, XButtonEvent *e)
++{
++    BOOL cmd, option;
++    int direction;
++
++    if (!w->_frameless || e->button != Button1 || moveresize.w != nil)
++        return NO;
++
++    /* Option is Mode_switch on XQuartz: listed under mod1, but XKB applies
++     * it as a group shift and mod1 stays clear; the press event does not
++     * carry the group at all (MEASURED with XTEST: Cmd+Option gives the
++     * event state 0x10, XQueryPointer 0x2010). Ask the server for the
++     * current state when Cmd is down. */
++    cmd = x_meta_mod != 0 && (e->state & x_meta_mod) != 0;
++    option = x_option_mod != 0 && (e->state & x_option_mod) != 0;
++    if (cmd && !option)
++    {
++        Window root, child;
++        int rx, ry, wx, wy;
++        unsigned int mask;
++
++        if (XQueryPointer (x_dpy, e->root, &root, &child, &rx, &ry,
++                           &wx, &wy, &mask))
++            option = (x_option_mod != 0 && (mask & x_option_mod) != 0)
++                     || ((mask >> 13) & 3) != 0;
++    }
++    if (cmd && option)
++        direction = NET_WM_MOVERESIZE_MOVE;
++    else
++        direction = [w frameless_resize_direction:X11PointMake (e->x, e->y)];
++
++    if (direction < 0 || ![w can_moveresize:direction])
++        return NO;
++
++    DB("id 0x%lx x %d y %d state 0x%x direction %d", w->_id, e->x, e->y,
++       e->state, direction);
++
++    /* The pointer is frozen on the press: the button is down and its
++     * release has to come to us. */
++    if (!moveresize_grab (w, direction))
++        return NO;
++
++    moveresize_start (w, direction, X11PointMake (e->x_root, e->y_root),
++                      [w intended_frame], NO);
++    moveresize_click.id = None;
++
++    [w focus:e->time raise:!(e->state & x_meta_mod)];
++
++    XFlush (x_dpy);
++    return YES;
++}
++
++/* Pointer events while a drag runs; YES if consumed. */
++static BOOL
++moveresize_event (XEvent *e)
++{
++    XEvent next;
++
++    if (moveresize.w == nil)
++        return NO;
++
++    switch (e->type) {
++        case MotionNotify:
++            /* Only the newest position matters, but never skip past
++             * anything else: a ButtonRelease behind it ends the drag. */
++            while (XEventsQueued (x_dpy, QueuedAfterReading) > 0) {
++                XPeekEvent (x_dpy, &next);
++                if (next.type != MotionNotify)
++                    break;
++                XNextEvent (x_dpy, e);
++            }
++            moveresize_motion (e->xmotion.x_root, e->xmotion.y_root,
++                               e->xmotion.state);
++            return YES;
++
++        case ButtonRelease:
++            moveresize_motion (e->xbutton.x_root, e->xbutton.y_root,
++                               e->xbutton.state);
++            moveresize_end ();
++            return YES;
++
++        case ButtonPress:
++            return YES;
++    }
++
++    return NO;
++}
++
+ static void
+ x_event_key (XKeyEvent *e)
+ {
+@@ -442,24 +833,91 @@
+     [w property_changed:e->atom];
+ }
+ 
++/* The managed window |xwindow_id| is inside, nil if none. Chromium/CEF
++ * embedded in another toplevel sends EWMH requests for its own X window:
++ * Steam's (SDL3 toplevel -> CefWindowX11 -> X11Window) come from two levels
++ * below the window we manage. */
++static x_window *
++x_get_managed_ancestor (Window xwindow_id)
++{
++    Window root, parent, *children;
++    unsigned int n_children;
++    x_window *w;
++    int depth;
++
++    for (depth = 0; depth < 8; depth++)
++    {
++        children = NULL;
++        if (!XQueryTree (x_dpy, xwindow_id, &root, &parent, &children,
++                         &n_children))
++            return nil;
++        if (children != NULL)
++            XFree (children);
++
++        if (parent == None || parent == root)
++            return nil;
++
++        w = x_get_window (parent);
++        if (w != nil)
++            return w;
++
++        xwindow_id = parent;
++    }
++
++    return nil;
++}
++
++static BOOL
++is_maximized_atom (long atom)
++{
++    return ((Atom) atom == atoms.net_wm_state_maximized_horz
++            || (Atom) atom == atoms.net_wm_state_maximized_vert);
++}
++
+ static void x_event_client_message (XClientMessageEvent *e) {
+     x_window *w = x_get_window(e->window);
+ 
+-    if (w == nil || e->format != 32)
++    if (e->format != 32)
++        return;
++
++    /* Requests from inside a managed window: move/resize, and maximize
++     * (Chromium's caption buttons). Other states stay per window. */
++    if (w == nil
++        && (e->message_type == atoms.net_wm_moveresize
++            || (e->message_type == atoms.net_wm_state
++                && (e->data.l[1] != 0 || e->data.l[2] != 0)
++                && (e->data.l[1] == 0 || is_maximized_atom (e->data.l[1]))
++                && (e->data.l[2] == 0 || is_maximized_atom (e->data.l[2])))))
++    {
++        w = x_get_managed_ancestor (e->window);
++    }
++
++    if (w == nil)
+         return;
+ 
+     if(e->message_type == atoms.wm_change_state) {
+         if (e->data.l[0] == IconicState)
+             [w do_collapse];
+     } else if(e->message_type == atoms.net_active_window) {
+-        [w focus:x_current_timestamp ()];
++        /* Source 2 is a pager, i.e. the user picking the window: un-minimize
++         * and un-hide it too. Applications (1; Steam raises its window this
++         * way on every notification) and old clients (0) only get focus. */
++        if (e->data.l[0] == 2)
++            [w activate:x_current_timestamp ()];
++        else
++            [w focus:x_current_timestamp ()];
+     } else if(e->message_type == atoms.net_close_window) {
+         [w do_close:x_current_timestamp ()];
+     } else if(e->message_type == atoms.net_wm_state) {
+         if (e->data.l[1] != 0)
+             [w do_net_wm_state_change:e->data.l[0] atom:e->data.l[1]];
+-        if (e->data.l[2] != 0)
++        /* MAXIMIZED_HORZ + MAXIMIZED_VERT are one maximize here; a toggle
++         * applied twice would undo itself. */
++        if (e->data.l[2] != 0
++            && !(is_maximized_atom (e->data.l[1]) && is_maximized_atom (e->data.l[2])))
+             [w do_net_wm_state_change:e->data.l[0] atom:e->data.l[2]];
++    } else if(e->message_type == atoms.net_wm_moveresize) {
++        moveresize_begin (w, e);
+     }
+ }
+ 
+@@ -826,6 +1284,7 @@ static void x_event_configure_request(XConfigureRequestEvent *e) {
+                 break;
+ 
+             case AppleWMIsInactive:
++                moveresize_end ();
+                 x_set_is_active (NO);
+                 break;
+ 
+@@ -899,6 +1358,9 @@ static void x_event_configure_request(XConfigureRequestEvent *e) {
+ 
+         DB("<%s window:%lx>", event_name (e.type), e.xany.window);
+ 
++        if (moveresize_event (&e))
++            continue;
++
+         switch (e.type)
+         {
+             case KeyPress:
+diff --git a/src/x-screen.m b/src/x-screen.m
+index 92e4064..70e540e 100644
+--- a/src/x-screen.m
++++ b/src/x-screen.m
+@@ -54,6 +54,7 @@ @implementation x_screen
+     "_NET_CLIENT_LIST",
+     "_NET_CLIENT_LIST_STACKING",
+     "_NET_CLOSE_WINDOW",
++    "_NET_FRAME_EXTENTS",
+     "_NET_SUPPORTED",
+     "_NET_SUPPORTING_WM_CHECK",
+     "_NET_WM_ACTION_CLOSE",
+@@ -65,8 +66,11 @@ @implementation x_screen
+     "_NET_WM_ACTION_RESIZE",
+     "_NET_WM_ACTION_SHADE",
+     "_NET_WM_ALLOWED_ACTIONS",
++    "_NET_WM_MOVERESIZE",
+     "_NET_WM_NAME",
+     "_NET_WM_STATE",
++    "_NET_WM_STATE_ABOVE",
++    "_NET_WM_STATE_FOCUSED",
+     "_NET_WM_STATE_FULLSCREEN",
+     "_NET_WM_STATE_HIDDEN",
+     "_NET_WM_STATE_MAXIMIZED_HORZ",
+diff --git a/src/x-window.h b/src/x-window.h
+index fec131d..5e0d8f1 100644
+--- a/src/x-window.h
++++ b/src/x-window.h
+@@ -72,6 +72,7 @@ @interface x_window : NSObject
+     unsigned _always_click_through :1;
+     unsigned _movable :1;
+     unsigned _shadable :1;
++    unsigned _frameless :1;		/* Motif decorations = 0, no title bar */
+ 
+     NSString *_title;
+     int _shortcut_index;		/* 0 for unset */
+@@ -96,6 +97,16 @@ @interface x_window : NSObject
+     unsigned _modal :1;
+     unsigned _in_window_menu :1;
+     unsigned _pending_raise :1;
++    unsigned _above :1;			/* _NET_WM_STATE_ABOVE */
++    unsigned _net_frame_extents_valid :1;
++    unsigned _net_wm_state_valid :1;
++
++    /* Top value last written to _NET_FRAME_EXTENTS */
++    int _net_frame_extents_top;
++
++    /* Atoms last written to _NET_WM_STATE */
++    long _net_wm_state_atoms[16];
++    int _net_wm_state_count;
+ 
+     /* This differs from _current_frame.height in that it is the height
+      * when the frame is not shaded.
+@@ -190,6 +201,14 @@ - (void) install_colormaps;
+ - (void) collapse_finished:(BOOL)success;
+ - (void) uncollapse_finished:(BOOL)success;
+ 
++/* _NET_WM_MOVERESIZE support */
++- (X11Rect) intended_frame;
++- (BOOL) can_moveresize:(int)direction;
++- (X11Rect) moveresize_frame:(X11Rect)start direction:(int)direction
++                          dx:(int)dx dy:(int)dy pointer:(X11Point)p;
++- (void) do_title_double_click;
++- (int) frameless_resize_direction:(X11Point)p;
++
+ @end
+ 
+ #endif /* X_WINDOW_H */
+diff --git a/src/x-window.m b/src/x-window.m
+index 1dfb94c..4d097b1 100644
+--- a/src/x-window.m
++++ b/src/x-window.m
+@@ -68,7 +68,6 @@ - (X11Rect) validate_frame_rect:(X11Rect)r
+                       from_user:(BOOL)uflag constrain:(BOOL)cflag;
+ - (X11Rect) frame_inner_rect:(X11Rect)or;
+ - (X11Rect) client_rect:(X11Rect)or;
+-- (X11Rect) intended_frame;
+ @end
+ 
+ static const char *gravity_type(int gravity) {
+@@ -231,6 +230,10 @@ - (void) reparent_out {
+ 
+     [self ungrab_events];
+ 
++    /* Withdrawn: drop _NET_WM_STATE_FOCUSED (_removed is set by now) */
++    if (_focused)
++        [self update_net_wm_state_property];
++
+     ir = [self frame_inner_rect:_current_frame];
+     BEFORE_LOCAL_MAP;
+     XReparentWindow(x_dpy, _id, _screen->_root, ir.x, ir.y);
+@@ -1375,9 +1378,17 @@ - (void) update_net_wm_state_hints {
+     BOOL shaded = NO;
+     BOOL maximized = NO;
+     BOOL fullscreen = NO;
++    BOOL above = NO;
+ 
+     n = x_get_property (_id, atoms.net_wm_state, _atoms, 32, 0);
+ 
++    /* Someone else wrote the property: the next update_net_wm_state_property
++     * has to write ours again even if our state did not change. */
++    if (_net_wm_state_valid
++        && (n != _net_wm_state_count
++            || memcmp (_atoms, _net_wm_state_atoms, n * sizeof (long)) != 0))
++        _net_wm_state_valid = NO;
++
+     for (i = 0; i < n; i++)  {
+         if ((Atom)_atoms[i] == atoms.net_wm_state_modal)
+             _modal = YES;
+@@ -1393,8 +1404,17 @@ - (void) update_net_wm_state_hints {
+             maximized = YES;
+         else if ((Atom)_atoms[i] == atoms.net_wm_state_sticky)
+             _frame_behavior = XP_FRAME_CLASS_BEHAVIOR_STATIONARY;
++        else if ((Atom)_atoms[i] == atoms.net_wm_state_above)
++            above = YES;
+     }
+ 
++    /* Keep-above ("always on top": Chromium SetZOrderLevel, SDL
++     * SDL_SetWindowAlwaysOnTop) floats over normal windows; windows whose
++     * type already picked a level keep it. */
++    _above = above;
++    if (_above && _level == AppleWMWindowLevelNormal)
++        _level = AppleWMWindowLevelFloating;
++
+     if(_frame_attr & XP_FRAME_ATTR_ZOOM) {
+         if(fullscreen)
+             [self do_fullscreen:YES]; // Can set !_shadable
+@@ -1433,10 +1453,25 @@ - (void) update_net_wm_state_property
+     }
+     if(_frame_behavior == XP_FRAME_CLASS_BEHAVIOR_STATIONARY)
+         _atoms[n_atoms++] = atoms.net_wm_state_sticky;
++    if(_above)
++        _atoms[n_atoms++] = atoms.net_wm_state_above;
++    if(_focused && !_removed)
++        _atoms[n_atoms++] = atoms.net_wm_state_focused;
++
++    /* This runs on every frame change, each motion event of a drag
++     * included; only write (and wake up every client watching the
++     * property) when the state really changed. */
++    if(_net_wm_state_valid && n_atoms == _net_wm_state_count
++       && memcmp (_atoms, _net_wm_state_atoms, n_atoms * sizeof (long)) == 0)
++        return;
+ 
+     XChangeProperty (x_dpy, _id, atoms.net_wm_state,
+                      atoms.atom, 32, PropModeReplace, (unsigned char *) _atoms,
+                      n_atoms);
++
++    memcpy (_net_wm_state_atoms, _atoms, n_atoms * sizeof (long));
++    _net_wm_state_count = n_atoms;
++    _net_wm_state_valid = YES;
+ }
+ 
+ - (void) do_net_wm_state_change:(int)mode atom:(Atom)state
+@@ -1483,6 +1518,9 @@ - (void) do_net_wm_state_change:(int)mode atom:(Atom)state
+         [self do_fullscreen:(mode == 1 || (mode == 2 && !_fullscreen))];
+     } else if(state == atoms.net_wm_state_modal) {
+         _modal = (state == 1 || (mode == 2 && !_modal));
++    } else if(state == atoms.net_wm_state_above) {
++        /* update_frame re-reads the property written below and sets _level */
++        _above = (mode == 1 || (mode == 2 && !_above));
+     }
+ 
+     DB("update_net_wm_state_property from do_net_wm_state_change");
+@@ -1552,6 +1590,11 @@ - (void) update_motif_hints
+             _frame_decor = XP_FRAME_CLASS_DECOR_NONE;
+             _frame_attr &= ~XP_FRAME_ATTR_GROW_BOX;
+         }
++
++        /* No decorations at all: the client draws its own title bar
++         * (SDL3, Chromium/CEF, Electron), see x-input.m frameless_press */
++        if (hints[2] == 0)
++            _frameless = YES;
+     }
+     if (hints[3] != 0)
+     {
+@@ -1575,6 +1618,7 @@ - (void) update_frame
+ 
+     /* Start with the default set. */
+     _always_click_through = NO;
++    _frameless = NO;
+     _frame_attr  |= (XP_FRAME_ATTR_CLOSE_BOX | XP_FRAME_ATTR_COLLAPSE | XP_FRAME_ATTR_ZOOM | XP_FRAME_ATTR_GROW_BOX);
+     _frame_behavior = XP_FRAME_CLASS_BEHAVIOR_MANAGED;
+     _frame_decor = XP_FRAME_CLASS_DECOR_LARGE;
+@@ -1602,6 +1646,22 @@ - (void) update_frame
+ 
+     _frame_title_height = frame_titlebar_height([self get_xp_frame_class]);
+ 
++    /* A window type that brings a title bar back is not frameless. */
++    if (_frame_title_height != 0)
++        _frameless = NO;
++
++    /* _NET_FRAME_EXTENTS (left, right, top, bottom): lets clients that place
++     * themselves (SDL3 X11_UpdateWindowPosition, Chromium) account for the
++     * title bar instead of waiting for a position that never comes. */
++    if (!_net_frame_extents_valid || _net_frame_extents_top != _frame_title_height) {
++        long extents[4] = { 0, 0, _frame_title_height, 0 };
++
++        XChangeProperty (x_dpy, _id, atoms.net_frame_extents, XA_CARDINAL,
++                         32, PropModeReplace, (unsigned char *) extents, 4);
++        _net_frame_extents_top = _frame_title_height;
++        _net_frame_extents_valid = YES;
++    }
++
+     /* Notify listeners about our updated properties */
+     [self update_net_wm_action_property];
+     DB("update_net_wm_state_property from update_frame");
+@@ -1985,6 +2045,9 @@ - (void) x_focus_in
+     data = _id;
+     [_screen set_root_property:"_NET_ACTIVE_WINDOW"
+                           type:"WINDOW" length:1 data:&data];
++
++    /* _NET_WM_STATE_FOCUSED: SDL3 takes keyboard focus from it */
++    [self update_net_wm_state_property];
+ }
+ 
+ - (void) x_focus_out
+@@ -1999,6 +2062,8 @@ - (void) x_focus_out
+     _focused = NO;
+ 
+     x_set_active_window (nil);
++
++    [self update_net_wm_state_property];
+ }
+ 
+ - (void) update_state:(NSTimer *)timer
+@@ -2670,4 +2735,204 @@ - (X11Rect) intended_frame
+     return r;
+ }
+ 
++/* _NET_WM_MOVERESIZE support (x-input.m runs the pointer grab). */
++
++- (BOOL) can_moveresize:(int)direction
++{
++    if (_removed || _deleted || !_reparented || _fullscreen || _minimized
++        || _hidden || _unmapped)
++        return NO;
++
++    if (direction == NET_WM_MOVERESIZE_MOVE)
++        return _movable;
++
++    if (direction >= NET_WM_MOVERESIZE_SIZE_TOPLEFT
++        && direction <= NET_WM_MOVERESIZE_SIZE_LEFT)
++        return _resizable && !_shaded;
++
++    return NO;
++}
++
++/* The frame rect for a drag that started with frame |s| and has moved the
++ * pointer by (dx, dy). */
++- (X11Rect) moveresize_frame:(X11Rect)s direction:(int)direction
++                          dx:(int)dx dy:(int)dy pointer:(X11Point)p
++{
++    X11Rect r = s, vis;
++    BOOL left, right, top, bottom;
++
++    /* Visible frame of the screen under the pointer: below the menu bar,
++     * beside the Dock. */
++    vis = [_screen zoomed_rect:p];
++
++    if (direction == NET_WM_MOVERESIZE_MOVE) {
++        int strip = (_frame_title_height > 0 ? _frame_title_height
++                     : MIN (s.height, MOVERESIZE_TITLE_STRIP));
++
++        r.x += dx;
++        r.y += dy;
++        r = [_screen validate_window_position:r titlebar_height:strip];
++
++        /* Like a native title bar, never under the menu bar. */
++        if (r.y < vis.y)
++            r.y = vis.y;
++
++        return r;
++    }
++
++    left = (direction == NET_WM_MOVERESIZE_SIZE_TOPLEFT
++            || direction == NET_WM_MOVERESIZE_SIZE_LEFT
++            || direction == NET_WM_MOVERESIZE_SIZE_BOTTOMLEFT);
++    right = (direction == NET_WM_MOVERESIZE_SIZE_TOPRIGHT
++             || direction == NET_WM_MOVERESIZE_SIZE_RIGHT
++             || direction == NET_WM_MOVERESIZE_SIZE_BOTTOMRIGHT);
++    top = (direction == NET_WM_MOVERESIZE_SIZE_TOPLEFT
++           || direction == NET_WM_MOVERESIZE_SIZE_TOP
++           || direction == NET_WM_MOVERESIZE_SIZE_TOPRIGHT);
++    bottom = (direction == NET_WM_MOVERESIZE_SIZE_BOTTOMLEFT
++              || direction == NET_WM_MOVERESIZE_SIZE_BOTTOM
++              || direction == NET_WM_MOVERESIZE_SIZE_BOTTOMRIGHT);
++
++    if (left) {
++        r.x = s.x + dx;
++        r.width = s.width - dx;
++    } else if (right) {
++        r.width = s.width + dx;
++    }
++
++    if (top) {
++        int y = s.y + dy;
++
++        /* The top edge stops at the menu bar (unless it started above it). */
++        if (y < MIN (s.y, vis.y))
++            y = MIN (s.y, vis.y);
++
++        r.y = y;
++        r.height = s.height - (y - s.y);
++    } else if (bottom) {
++        r.height = s.height + dy;
++    }
++
++    /* WM_NORMAL_HINTS min/max size and increments; from_user: no cap at the
++     * screen size, same as the grow box. */
++    {
++        X11Rect c = r;
++        X11Size sz;
++
++        c.height -= _frame_title_height;
++        if (c.width < 1)
++            c.width = 1;
++        if (c.height < 1)
++            c.height = 1;
++
++        sz = [self validate_window_size:c from_user:YES constrain:YES];
++        r.width = sz.width;
++        r.height = sz.height + _frame_title_height;
++    }
++
++    /* The edge opposite the one being dragged stays put. */
++    if (left)
++        r.x = s.x + s.width - r.width;
++    if (top)
++        r.y = s.y + s.height - r.height;
++
++    return r;
++}
++
++/* Double click on a title bar: System Settings > Desktop & Dock >
++ * "Double-click a window's title bar to" (Zoom / Fill / Minimize / Do
++ * Nothing), like every native window. */
++- (void) do_title_double_click
++{
++    enum { ACTION_ZOOM, ACTION_MINIMIZE, ACTION_NONE } action = ACTION_ZOOM;
++    CFPropertyListRef value;
++
++    value = CFPreferencesCopyAppValue (CFSTR ("AppleActionOnDoubleClick"),
++                                       kCFPreferencesAnyApplication);
++    if (value != NULL && CFGetTypeID (value) == CFStringGetTypeID ()) {
++        CFStringRef str = (CFStringRef) value;
++
++        if (CFStringCompare (str, CFSTR ("Minimize"), kCFCompareCaseInsensitive) == kCFCompareEqualTo)
++            action = ACTION_MINIMIZE;
++        else if (CFStringCompare (str, CFSTR ("None"), kCFCompareCaseInsensitive) == kCFCompareEqualTo)
++            action = ACTION_NONE;
++        /* "Maximize" (Zoom) and "Fill" both fill the visible frame. */
++    } else {
++        /* Key used before macOS 10.11. */
++        Boolean ok = false;
++
++        if (CFPreferencesGetAppBooleanValue (CFSTR ("AppleMiniaturizeOnDoubleClick"),
++                                             kCFPreferencesAnyApplication, &ok) && ok)
++            action = ACTION_MINIMIZE;
++    }
++    if (value != NULL)
++        CFRelease (value);
++
++    DB("id: 0x%lx action: %d", _id, (int) action);
++
++    switch (action) {
++        case ACTION_MINIMIZE:
++            if (_frame_attr & XP_FRAME_ATTR_COLLAPSE)
++                [self do_collapse];
++            break;
++        case ACTION_ZOOM:
++            if (_frame_attr & XP_FRAME_ATTR_ZOOM)
++                [self do_zoom];
++            break;
++        case ACTION_NONE:
++            break;
++    }
++}
++
++/* The edge or corner of a frameless window under |p| (client window
++ * coordinates) as a _NET_WM_MOVERESIZE direction, -1 for none. Corners
++ * reach FRAMELESS_RESIZE_CORNER along both edges; the top edge is only
++ * FRAMELESS_RESIZE_TOP thick, below it are the client's title bar, tabs and
++ * menus (Steam's top bar). */
++- (int) frameless_resize_direction:(X11Point)p
++{
++    int border = frameless_resize_border;
++    int top_border = MIN (border, FRAMELESS_RESIZE_TOP);
++    int corner = MAX (border, FRAMELESS_RESIZE_CORNER);
++    int width, height;
++    BOOL left, right, top, bottom;
++    BOOL near_left, near_right, near_top, near_bottom;
++
++    if (!_frameless || border <= 0 || ![self can_moveresize:NET_WM_MOVERESIZE_SIZE_RIGHT])
++        return -1;
++
++    width = _current_frame.width;
++    height = _current_frame.height - _frame_title_height;
++
++    left = p.x < border;
++    right = !left && p.x >= width - border;
++    top = p.y < top_border;
++    bottom = !top && p.y >= height - border;
++
++    if (!left && !right && !top && !bottom)
++        return -1;
++
++    near_left = p.x < corner;
++    near_right = !near_left && p.x >= width - corner;
++    near_top = p.y < corner;
++    near_bottom = !near_top && p.y >= height - corner;
++
++    if ((left && near_top) || (top && near_left))
++        return NET_WM_MOVERESIZE_SIZE_TOPLEFT;
++    if ((right && near_top) || (top && near_right))
++        return NET_WM_MOVERESIZE_SIZE_TOPRIGHT;
++    if ((left && near_bottom) || (bottom && near_left))
++        return NET_WM_MOVERESIZE_SIZE_BOTTOMLEFT;
++    if ((right && near_bottom) || (bottom && near_right))
++        return NET_WM_MOVERESIZE_SIZE_BOTTOMRIGHT;
++    if (left)
++        return NET_WM_MOVERESIZE_SIZE_LEFT;
++    if (right)
++        return NET_WM_MOVERESIZE_SIZE_RIGHT;
++    if (top)
++        return NET_WM_MOVERESIZE_SIZE_TOP;
++
++    return NET_WM_MOVERESIZE_SIZE_BOTTOM;
++}
++
+ @end

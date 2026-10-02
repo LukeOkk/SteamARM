@@ -85,6 +85,7 @@ the Fedora VM that was deleted on 2026-09-27; they are history, and
 | 47 | `stage47-kosmickrisp.txt` | 10-01 | KosmicKrisp through the shim: Vulkan device 6/6, Direct3D 9/11/12 probes 150-158 fps; 32-bit D3D12 fails (mutable-descriptor struct not thunked); scaling made DXVK recreate swapchains (315 in 2.5 s) until the scaler served every driver |
 | 48 | `stage48-native-arm64-games.txt` | 10-01 | The Frame client gives CS2 to Steam Linux Runtime 4 arm64; its pressure-vessel is non-PIE and cannot load, so the runtime stands in for pressure-vessel-wrap; Vulkan through the root's loader recursed into it until the shim was linked -Bsymbolic; an aarch64 Vulkan program runs through the runtime's entry point on KosmicKrisp |
 | 49 | `stage49-frame-ui-smooth.txt` | 10-01 | The Frame client's window went from 1 fps to 157-160 fps (165 Hz display) on KosmicKrisp: GPU switches only for the browser process, Metal's shader compiler registered again in fork children (Chromium's zygote-forked GPU process), and XQuartz no longer tells clients its desktop is a 1 Hz display |
+| 50 | `stage50-games-from-frame-client.txt` | 10-02 | No game started from the Steam Frame client: ~/.steam's links were missing, and the x86 Proton path had five regressions (exec of a host ELF, carried LXRT_* variables, the host's malloc at 0x140000000 and under the break, ENOMEM where Wine expects EEXIST, a cross-process signal nested in the carrier handler under FEX); D3D11/D3D12 probes through the tool at 153-158 fps after |
 
 ## After stage 21 (no stage file)
 

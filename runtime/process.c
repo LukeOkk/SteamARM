@@ -338,7 +338,9 @@ long lxrt_execve(const char *path, char *const argv[], char *const envp[])
     {
         int ec = 0, extra = 0;
         while (use_env[ec]) ec++;
-        for (char **e = environ; *e; e++)
+        static int carry = -1;                   // LXRT_ENV_CARRY=0: bisecting aid
+        if (carry < 0) { const char *c = getenv("LXRT_ENV_CARRY"); carry = !(c && *c == '0'); }
+        for (char **e = environ; carry && *e; e++)
             if (!strncmp(*e, "LXRT_", 5) || !strncmp(*e, "FEX_", 4)) extra++;
         if (extra) {
             char **carried = calloc((size_t)(ec + extra + 1), sizeof(char *));
