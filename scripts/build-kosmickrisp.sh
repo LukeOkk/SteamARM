@@ -61,16 +61,22 @@ SRC="$KK_ROOT/mesa-$MESA_VER"
 TARBALL="$KK_ROOT/mesa-$MESA_VER.tar.xz"
 [ -f "$TARBALL" ] || curl -fL --retry 3 -o "$TARBALL" "https://archive.mesa3d.org/mesa-$MESA_VER.tar.xz"
 echo "$MESA_SHA  $TARBALL" | shasum -a 256 -c - >/dev/null || { log "sha256 mismatch: $TARBALL"; exit 1; }
-[ -d "$SRC" ] || tar xf "$TARBALL"
-for p in "$PROJECT_DIR"/patches/kosmickrisp-*.patch; do
-    [ -f "$p" ] || continue
-    if patch -d "$SRC" -p1 -R --dry-run -s -f < "$p" >/dev/null 2>&1; then
-        log "patch already applied: $(basename "$p")"
-    else
+# A fresh tree whenever the set of patches changes: they build on each
+# other's files, so "is it applied already" cannot be asked of each alone
+# (see build-xquartz.sh). The build directory is outside the tree and kept;
+# the sources get the time of extraction, so the driver is compiled again.
+PATCH_STAMP="$( cd "$PROJECT_DIR/patches" && cat kosmickrisp-*.patch | shasum -a 256 | cut -d' ' -f1 )"
+if [ ! -d "$SRC" ] || [ "$(cat "$SRC/.steamarm-patches" 2>/dev/null)" != "$PATCH_STAMP" ]; then
+    log "fresh source tree (new or changed patches)"
+    rm -rf "$SRC"
+    tar xmf "$TARBALL"
+    for p in "$PROJECT_DIR"/patches/kosmickrisp-*.patch; do
+        [ -f "$p" ] || continue
         log "applying $(basename "$p")"
-        patch -d "$SRC" -p1 -N < "$p"
-    fi
-done
+        patch -d "$SRC" -p1 -N -s < "$p"
+    done
+    echo "$PATCH_STAMP" > "$SRC/.steamarm-patches"
+fi
 
 # 3. Python modules Mesa's generators need (not Homebrew's: a virtualenv)
 if [ ! -x "$KK_ROOT/venv/bin/python" ]; then

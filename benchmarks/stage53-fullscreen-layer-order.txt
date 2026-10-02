@@ -90,6 +90,14 @@ HOW IT WAS MEASURED
     memory (patches/kosmickrisp-05-vertex-barrier.patch; main menu 82.5
     against 78.5 frames a second with the first version of it;
     tests/elf/vk_vtxread.c fails on a build without either exception).
+    The match of section 4, 200 s, last 120 s, one run each in the same
+    session: median 40.0 (average 36.5) with it, 27.5 (28.2) with
+    KK_VERTEX_BARRIER=1; the runs of section 4 were without the patch.
+  - The second setup of 0.3.27 failed in scripts/build-xquartz.sh: each
+    patch was asked alone whether it was applied (patch -R --dry-run), and
+    xquartz-remote-order changes files that xquartz-remote-layer creates.
+    Both build scripts now extract and patch a fresh tree when the hash of
+    their patches changes (.steamarm-patches in the tree).
   - Where the passes go, main menu, by leaving out the draws of one kind of
     pass (experiment builds): none at all 122.5 frames a second against
     78.5, so the passes alone cap it there; the multisampled ones 86.5.

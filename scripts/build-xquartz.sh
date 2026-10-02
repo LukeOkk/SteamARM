@@ -50,18 +50,27 @@ cd "$XQ_ROOT"
 # 2. xorg-server source + SteamARM patches
 SRC="$XQ_ROOT/xorg-server-$XS_VER"
 fetch "https://www.x.org/releases/individual/xserver/xorg-server-$XS_VER.tar.xz" "$XS_SHA"
-if [ ! -d "$SRC" ]; then
-    tar xf "xorg-server-$XS_VER.tar.xz"
-fi
-for p in "$PROJECT_DIR"/patches/xquartz-*.patch; do
-    [ -f "$p" ] || continue
-    if patch -d "$SRC" -p1 -R --dry-run -s -f < "$p" >/dev/null 2>&1; then
-        log "patch already applied: $(basename "$p")"
-    else
+# A fresh tree whenever the set of patches changes: one patch builds on
+# another's files (xquartz-remote-order on xquartz-remote-layer), so "is it
+# applied already" cannot be asked of each alone -- the second setup run
+# tried to apply xquartz-remote-layer again and failed (0.3.27). The build
+# directory is kept; the sources get the time of extraction, so everything
+# is compiled again (about two minutes).
+PATCH_STAMP="$( cd "$PROJECT_DIR/patches" && cat xquartz-*.patch | shasum -a 256 | cut -d' ' -f1 )"
+if [ ! -d "$SRC" ] || [ "$(cat "$SRC/.steamarm-patches" 2>/dev/null)" != "$PATCH_STAMP" ]; then
+    log "fresh source tree (new or changed patches)"
+    rm -rf "$XQ_ROOT/build.keep"
+    [ -d "$SRC/build" ] && mv "$SRC/build" "$XQ_ROOT/build.keep"
+    rm -rf "$SRC"
+    tar xmf "xorg-server-$XS_VER.tar.xz"
+    for p in "$PROJECT_DIR"/patches/xquartz-*.patch; do
+        [ -f "$p" ] || continue
         log "applying $(basename "$p")"
-        patch -d "$SRC" -p1 -N < "$p"
-    fi
-done
+        patch -d "$SRC" -p1 -N -s < "$p"
+    done
+    [ -d "$XQ_ROOT/build.keep" ] && mv "$XQ_ROOT/build.keep" "$SRC/build"
+    echo "$PATCH_STAMP" > "$SRC/.steamarm-patches"
+fi
 
 # 3. Configure (XQuartz DDX only) + build + install
 # -I$BREW/include: hw/xquartz/{GL,xpr} do not declare their gl/xfont2 deps in
