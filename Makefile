@@ -148,7 +148,7 @@ build/libvulkan.so.1: $(SHIM_SRCS) shim/scaler_spv.h runtime/include/lxrt_host.h
 	@mkdir -p build
 	$(CC) -target $(LXRT_TARGET) -shared -fPIC -nostdlib -O2 \
 	      -fuse-ld=$(CROSS_LD) -Iruntime/include -I$(VK_HEADERS)/include \
-	      -Wl,-soname,libvulkan.so.1 \
+	      -Wl,-soname,libvulkan.so.1 -Wl,-Bsymbolic \
 	      -o $@.new $(SHIM_SRCS)
 	@mv -f $@.new $@
 

@@ -1,0 +1,49 @@
+Stage 48 -- Native arm64 games under the Steam Frame client: Valve's
+Steam Linux Runtime 4 arm64, and Vulkan through the root's own loader
+Date: 2026-10-01. Apple M4, macOS 27. Zero VM. No game.
+
+1. WHAT THE CLIENT DOES WITH CS2
+  compat_log.txt of the Steam Frame client, while CS2 (730) downloads:
+    "Skip mapping AppID 730 to tool "SteamLinuxRuntime_sniper" with
+     priority 100: mapping to tool "steamlinuxruntime_steamrt4-arm64" with
+     priority 250 already exists."
+  An arm64 client is given CS2 through Steam Linux Runtime 4 arm64
+  (4185400, installed: 4.0.20260805.254769, pressure-vessel 0.20260805.0).
+  The game files had not arrived yet (0 bytes): whether its binary is
+  arm64 is UNKNOWN until they do.
+
+2. VULKAN THROUGH THE ROOT'S LOADER WAS BROKEN
+  tests/elf/vk_device.c built for aarch64 against the root's Khronos
+  loader, the shim installed as its ICD:
+    "[Vulkan Loader] ERROR: loader_add_instance_extensions:
+     /usr/lib/libvulkan_steamarm.so's vkEnumerateInstanceExtensionProperties
+     points to the loader, this would lead to infinite recursion."
+    then no progress (killed after 60 s)
+  The shim exports the same names as the loader, and its own references to
+  them bound to the loader's (ELF interposition). The web helper's ANGLE
+  Vulkan in stage 46 most probably went to the SwiftShader that CEF ships
+  for that reason. Fix: the shim is linked -Bsymbolic (Makefile).
+    MoltenVK      "device Apple M4, driver MoltenVK" ... "== vk_device: ok"
+    KosmicKrisp   "device Apple M4, driver KosmicKrisp, api 1.4" ... ok
+  ELF suite 104/104, Vulkan device 6/6 on each driver, Windows suite 21/21
+  (MoltenVK) after the change.
+
+3. VALVE'S PRESSURE-VESSEL FOR arm64 CANNOT LOAD
+    "pressure-vessel-wrap: non-PIE (ET_EXEC) images cannot be loaded. It
+     links at 0x410d30, inside Darwin's 4 GiB __PAGEZERO"
+  Every program in SteamLinuxRuntime_4-arm64/pressure-vessel/bin is
+  non-PIE. runtime/process.c now stands in for pressure-vessel-wrap when
+  it is such an image: the command after "--" runs in the arm64 client's
+  root (a SteamOS userspace), with its --env-if-host settings, no
+  container.
+    _v2-entry-point --verb=waitforexitandrun -- vk_device (aarch64)
+      "lxrun: pressure-vessel-wrap (non-PIE, cannot load here) stood in
+       for: /tmp/slrtest/vk_device_arm64"
+      "device Apple M4, driver KosmicKrisp, api 1.4" ... "== vk_device: ok"
+
+4. KOSMICKRISP SCALING (stage 47, completed)
+  MetalFX asked KosmicKrisp for vkExportMetalObjectsEXT through MoltenVK's
+  thunk and faulted; with any driver but MoltenVK "Bilineal" and "MetalFX"
+  are the shim's bilinear blit. tests/win/run.sh with
+  STEAMARM_VK_ICD=kosmickrisp: modeset (linear-blit), modeset_fsr,
+  modeset_nearest, modeset_metalfx (linear-blit) all ok, 347-382 frames.

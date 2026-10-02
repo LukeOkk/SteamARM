@@ -137,13 +137,19 @@ for t in ${@:-tick tick_32 tone tone_32 regwin d3d11 d3d12 d3d9 d3d9_32 d3d11_32
         # MoltenVK stretches ("stretched") over a surface larger than it.
         px=$(grep -m1 "^\[shim\] probe " "$log")
         what=${scaler:-plain}
+        # Another driver than MoltenVK (STEAMARM_VK_ICD=kosmickrisp) has no
+        # present scaling and no Metal objects to export: the shim's
+        # bilinear blit stands for "plain" and for MetalFX (scaler.c).
+        case "${STEAMARM_VK_ICD:-}:$what" in
+            ?*:plain|?*:metalfx) what=linear-blit ;;
+        esac
         pw=$(echo "$px" | sed -n 's/.* \([0-9]*\)x\([0-9]*\) format.*/\1/p')
         ph=$(echo "$px" | sed -n 's/.* \([0-9]*\)x\([0-9]*\) format.*/\2/p')
         sw=$(grep -m1 "^\[shim\] vkCreateSwapchainKHR extent" "$log" | sed -n 's/.*surface \([0-9]*\)x.*/\1/p')
         filtered=1
         note="; ${px#*\[shim\] probe }"
         echo "$px" | grep -q "probe $what " || filtered=0
-        if [ -n "$scaler" ]; then
+        if [ -n "$scaler" ] || [ "$what" = linear-blit ]; then
             [ "${pw:-0}" -gt 1280 ] && [ "${ph:-0}" -gt 720 ] || filtered=0
         else
             [ "${sw:-0}" -gt 1280 ] && grep -q "stretched" "$log" || filtered=0

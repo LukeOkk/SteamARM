@@ -32,8 +32,10 @@
 bool lxrt_trace_on(void);
 
 #include <errno.h>
+#include <fcntl.h>
 #include <mach-o/dyld.h>
 #include <stdatomic.h>
+#include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -102,6 +104,75 @@ long lxrt_fork(void)
     return lxrt_ids_on() && pid > 0 ? child_id : pid;
 }
 
+const char *lxrt_translate_guest_path(const char *path, char *out, size_t n);   // dispatch.c
+
+// An aarch64 ELF linked at a fixed address (ET_EXEC): it would sit inside
+// Darwin's 4 GiB __PAGEZERO and cannot be loaded (elf.c).
+static bool unloadable_arm64(const char *gpath)
+{
+    char hp[1024];
+    const char *h = lxrt_translate_guest_path(gpath, hp, sizeof hp);
+    int fd = open(h, O_RDONLY | O_CLOEXEC);
+    if (fd < 0)
+        return false;
+    unsigned char e[20];
+    bool r = pread(fd, e, sizeof e, 0) == (ssize_t)sizeof e && !memcmp(e, "\177ELF", 4) && e[4] == 2 &&
+             (e[16] | e[17] << 8) == 2 && (e[18] | e[19] << 8) == 183;
+    close(fd);
+    return r;
+}
+
+// Valve's arm64 Steam Linux Runtime (SteamLinuxRuntime_4-arm64) ships every
+// pressure-vessel program non-PIE, linked at 0x400000: none can run here
+// ("non-PIE (ET_EXEC) images cannot be loaded", MEASURED with the 4.0
+// runtime of 2026-08-05). pressure-vessel-wrap's job -- start the game's
+// command, after "--" -- is done the way it does it without a container:
+// in this root, the root of the arm64 client (a SteamOS userspace), with
+// its --env-if-host=VAR=VALUE settings applied. Its other options choose
+// the container and are ignored.
+static long pv_wrap_stand_in(char *const argv[], char *const envp[])
+{
+    int argc = 0, dd = -1;
+    while (argv[argc])
+        argc++;
+    for (int i = 1; i < argc && dd < 0; i++)
+        if (!strcmp(argv[i], "--"))
+            dd = i;
+    if (dd < 0 || dd + 1 >= argc)
+        return LERR(EINVAL);
+    char *const *src = envp && envp[0] ? envp : environ;
+    int ec = 0;
+    while (src[ec])
+        ec++;
+    char **env = calloc((size_t)(ec + dd + 2), sizeof(char *));
+    if (!env)
+        return LERR(ENOMEM);
+    int n = 0;
+    for (int i = 0; i < ec; i++)
+        env[n++] = src[i];
+    for (int i = 1; i < dd; i++) {
+        if (strncmp(argv[i], "--env-if-host=", 14) != 0)
+            continue;
+        char *kv = argv[i] + 14;
+        const char *eq = strchr(kv, '=');
+        if (!eq)
+            continue;
+        size_t kl = (size_t)(eq - kv) + 1;
+        int j;
+        for (j = 0; j < n; j++)
+            if (!strncmp(env[j], kv, kl))
+                break;
+        env[j] = kv;
+        if (j == n)
+            n++;
+    }
+    env[n++] = "STEAMARM_PRESSURE_VESSEL=stand-in";
+    env[n] = NULL;
+    const char *cmd = argv[dd + 1];
+    fprintf(stderr, "lxrun: pressure-vessel-wrap (non-PIE, cannot load here) stood in for: %s\n", cmd);
+    return lxrt_execve(cmd, argv + dd + 1, env);
+}
+
 long lxrt_execve(const char *path, char *const argv[], char *const envp[])
 {
     if (!path || !argv)
@@ -112,6 +183,8 @@ long lxrt_execve(const char *path, char *const argv[], char *const envp[])
     base = base ? base + 1 : path;
     if (!strcmp(base, "bwrap") || !strcmp(base, "srt-bwrap"))
         return lxrt_bwrap_exec(argv, envp, lxrt_execve);
+    if (!strcmp(base, "pressure-vessel-wrap") && unloadable_arm64(path))
+        return pv_wrap_stand_in(argv, envp);
     // FEX runs the next x86-64 program by re-executing itself as
     // /proc/self/exe. That name means nothing to a fresh runtime, so it is
     // replaced with the image this runtime actually loaded.

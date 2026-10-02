@@ -137,7 +137,6 @@ void lxrt_mvk_vkExportMetalObjectsEXT(VkDevice, VkExportMetalObjectsInfoEXT *);
 
 enum { F_LINEAR, F_NEAREST, F_FSR, F_METALFX, F_LINEAR_BLIT };
 extern const char *lxrt_vk_driver;   // vulkan_shim.c: the driver in use
-int lxrt_vk_missing(const char *name);   // vulkan_shim.c: an entry point the driver lacks (ICD mode)
 
 // runtime/metalfx.m
 struct lxrt_mfx_run {
@@ -695,7 +694,9 @@ VkResult lxrt_scaler_create(VkDevice dev, VkPhysicalDevice pd, const VkSwapchain
     // MoltenVK stretches by itself (present.c); another driver gets a
     // bilinear blit here. MetalFX needs MoltenVK's Metal objects.
     int mvk = s_eq(lxrt_vk_driver, "moltenvk");
-    if (!mvk && (f == F_LINEAR || (f == F_METALFX && lxrt_vk_missing("vkExportMetalObjectsEXT"))))
+    // (KosmicKrisp has no vkExportMetalObjectsEXT: asking MoltenVK's thunk for
+    // it there faulted, MEASURED.)
+    if (!mvk && (f == F_LINEAR || f == F_METALFX))
         f = F_LINEAR_BLIT;
     if (f == F_LINEAR || ci->imageArrayLayers != 1 || ci->imageExtent.width > window.width ||
         ci->imageExtent.height > window.height || !ci->imageExtent.width || !ci->imageExtent.height)
