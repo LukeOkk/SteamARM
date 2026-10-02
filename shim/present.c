@@ -162,6 +162,12 @@ static int needs_stretch(VkDevice dev, const VkSwapchainCreateInfoKHR *ci, VkExt
 // is to stretch.
 VkResult lxrt_scaler_create(VkDevice, VkPhysicalDevice, const VkSwapchainCreateInfoKHR *, VkExtent2D,
                             const VkAllocationCallbacks *, VkSwapchainKHR *);
+// shim/mailbox.c: an IMMEDIATE or MAILBOX swapchain that does not wait for
+// the display.
+int lxrt_mailbox_wanted(const VkSwapchainCreateInfoKHR *);
+VkResult lxrt_mailbox_create(VkDevice, VkPhysicalDevice, const VkSwapchainCreateInfoKHR *,
+                             const VkAllocationCallbacks *, VkSwapchainKHR *);
+void lxrt_mailbox_retire(VkSwapchainKHR);
 void lxrt_scaler_note_plain(VkDevice, VkSwapchainKHR, VkExtent2D, VkFormat);
 
 VkResult lxrt_inner_vkCreateSwapchainKHR(VkDevice dev, const VkSwapchainCreateInfoKHR *ci,
@@ -177,8 +183,24 @@ VkResult lxrt_inner_vkCreateSwapchainKHR(VkDevice dev, const VkSwapchainCreateIn
         dprintf(2, "[shim] vkCreateSwapchainKHR extent %ux%u usage 0x%x flags 0x%x images %u, surface %ux%u\n",
                 ci->imageExtent.width, ci->imageExtent.height, (unsigned)ci->imageUsage, (unsigned)ci->flags,
                 ci->minImageCount, window.width, window.height);
+    // The swapchain this one replaces: its thread leaves the driver first.
+    if (ci)
+        lxrt_mailbox_retire(ci->oldSwapchain);
     if (stretch && lxrt_scaler_create(dev, device_pd(dev), ci, window, alloc, out) == VK_SUCCESS)
         return VK_SUCCESS;
+    if (ci && !stretch) {
+        VkSwapchainCreateInfoKHR m = *ci;
+        if (ov > 0 && device_pd(dev) && surface_offers(device_pd(dev), ci->surface, want))
+            m.presentMode = want;
+        if (lxrt_mailbox_wanted(&m)) {
+            VkResult mr = lxrt_mailbox_create(dev, device_pd(dev), &m, alloc, out);
+            if (dbg)
+                dprintf(2, "[shim] vkCreateSwapchainKHR driver=%s requested=%s: mailbox -> %d\n", lxrt_vk_driver,
+                        mode_name(m.presentMode), (int)mr);
+            if (mr == VK_SUCCESS)
+                return VK_SUCCESS;
+        }
+    }
     const char *pe = getenv("LXRT_VK_SCALER_PROBE");
     int probe = pe && *pe == '1';
     if ((!dbg && !ov && !stretch && !probe) || !ci)

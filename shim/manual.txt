@@ -48,3 +48,7 @@ vkGetDeviceQueue
 vkGetDeviceQueue2
 # spirv_names.c
 vkCreateShaderModule
+# mailbox.c
+vkQueueSubmit
+vkQueueSubmit2
+vkQueueSubmit2KHR

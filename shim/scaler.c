@@ -327,6 +327,20 @@ static void note_queue(VkQueue q, uint32_t family)
     unlock();
 }
 
+// shim/mailbox.c: a queue to signal an acquire's semaphore on before the
+// game has presented anything, and a queue's family.
+VkQueue lxrt_scaler_a_queue(void)
+{
+    VkQueue q = VK_NULL_HANDLE;
+    lock();
+    for (int i = 0; i < 32 && !q; i++)
+        q = g_q[i].q;
+    unlock();
+    return q;
+}
+
+uint32_t lxrt_scaler_queue_family(VkQueue q) { return queue_family(q); }
+
 void lxrt_inner_vkGetDeviceQueue(VkDevice dev, uint32_t family, uint32_t index, VkQueue *q)
 {
     lxrt_mvk_vkGetDeviceQueue(dev, family, index, q);
@@ -780,8 +794,19 @@ fail:
     return r ? r : VK_ERROR_INITIALIZATION_FAILED;
 }
 
+// shim/mailbox.c: swapchains that do not wait for the display.
+int lxrt_mailbox_is(VkSwapchainKHR sc);
+VkResult lxrt_mailbox_images(VkSwapchainKHR sc, uint32_t *count, VkImage *images);
+int lxrt_mailbox_destroy(VkDevice dev, VkSwapchainKHR sc, const VkAllocationCallbacks *alloc);
+VkResult lxrt_mailbox_acquire(VkSwapchainKHR sc, VkSemaphore sem, VkFence fence, uint32_t *index);
+VkResult lxrt_mailbox_present(VkQueue q, VkSwapchainKHR sc, uint32_t i, const VkSemaphore *waits, uint32_t nwaits,
+                              int *shown);
+void lxrt_mailbox_stats(unsigned *shown, unsigned *dropped);
+
 VkResult lxrt_inner_vkGetSwapchainImagesKHR(VkDevice dev, VkSwapchainKHR sc, uint32_t *count, VkImage *images)
 {
+    if (lxrt_mailbox_is(sc))
+        return lxrt_mailbox_images(sc, count, images);
     lock();
     scaled *s = find(sc);
     unlock();
@@ -800,6 +825,8 @@ VkResult lxrt_inner_vkGetSwapchainImagesKHR(VkDevice dev, VkSwapchainKHR sc, uin
 
 void lxrt_inner_vkDestroySwapchainKHR(VkDevice dev, VkSwapchainKHR sc, const VkAllocationCallbacks *alloc)
 {
+    if (lxrt_mailbox_destroy(dev, sc, alloc))
+        return;
     lock();
     scaled *s = find(sc);
     for (int i = 0; s && i < 16; i++)
@@ -1176,6 +1203,10 @@ static void timing_note(int present, uint64_t ns)
                 lxrt_vk_driver, g_t.acq, g_t.acq ? g_t.acq_ns / 1e6 / g_t.acq : 0.0, g_t.acq_max / 1e6, g_t.pres,
                 g_t.pres ? g_t.pres_ns / 1e6 / g_t.pres : 0.0, g_t.pres_max / 1e6);
         g_t.start = t; g_t.acq = g_t.pres = 0; g_t.acq_ns = g_t.pres_ns = g_t.acq_max = g_t.pres_max = 0;
+        unsigned shown, dropped;
+        lxrt_mailbox_stats(&shown, &dropped);
+        if (shown || dropped)
+            dprintf(2, "[shim] mailbox: %u of those presents shown, %u dropped\n", shown, dropped);
         // LXRT_VK_CALLS=1 as well: the entry points called most in the window.
         if (lxrt_vk_calls_on) {
             static char top[8000];
@@ -1195,12 +1226,48 @@ VkResult lxrt_mvk_vkAcquireNextImageKHR(VkDevice, VkSwapchainKHR, uint64_t, VkSe
 VkResult lxrt_inner_vkAcquireNextImageKHR(VkDevice d, VkSwapchainKHR sc, uint64_t timeout, VkSemaphore sem, VkFence f,
                                           uint32_t *index)
 {
+    int mb = lxrt_mailbox_is(sc);
     if (!timing_on())
-        return lxrt_mvk_vkAcquireNextImageKHR(d, sc, timeout, sem, f, index);
+        return mb ? lxrt_mailbox_acquire(sc, sem, f, index) : lxrt_mvk_vkAcquireNextImageKHR(d, sc, timeout, sem, f, index);
     uint64_t t0 = now_ns();
-    VkResult r = lxrt_mvk_vkAcquireNextImageKHR(d, sc, timeout, sem, f, index);
+    VkResult r = mb ? lxrt_mailbox_acquire(sc, sem, f, index) : lxrt_mvk_vkAcquireNextImageKHR(d, sc, timeout, sem, f, index);
     timing_note(0, now_ns() - t0);
     return r;
+}
+
+// A present with a mailbox swapchain in it: each swapchain on its own, the
+// first one consuming what the present waits for. A present fence
+// (VK_EXT_swapchain_maintenance1) is signalled by an empty batch.
+static VkResult present_mailboxes(VkQueue q, const VkPresentInfoKHR *pi)
+{
+    const VkSwapchainPresentFenceInfoEXT *fences = 0;
+    for (const VkBaseInStructure *p = pi->pNext; p; p = p->pNext)
+        if (p->sType == VK_STRUCTURE_TYPE_SWAPCHAIN_PRESENT_FENCE_INFO_EXT)
+            fences = (const VkSwapchainPresentFenceInfoEXT *)p;
+    const VkSemaphore *waits = pi->pWaitSemaphores;
+    uint32_t nwaits = pi->waitSemaphoreCount;
+    VkResult worst = VK_SUCCESS;
+    for (uint32_t j = 0; j < pi->swapchainCount; j++) {
+        VkResult r;
+        int shown = 0;
+        if (lxrt_mailbox_is(pi->pSwapchains[j])) {
+            r = lxrt_mailbox_present(q, pi->pSwapchains[j], pi->pImageIndices[j], waits, nwaits, &shown);
+        } else {
+            VkPresentInfoKHR one = { .sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR, .waitSemaphoreCount = nwaits,
+                                     .pWaitSemaphores = waits, .swapchainCount = 1, .pSwapchains = &pi->pSwapchains[j],
+                                     .pImageIndices = &pi->pImageIndices[j] };
+            r = lxrt_mvk_vkQueuePresentKHR(q, &one);
+        }
+        waits = 0;
+        nwaits = 0;
+        if (fences && j < fences->swapchainCount && fences->pFences[j])
+            lxrt_mvk_vkQueueSubmit(q, 0, 0, fences->pFences[j]);
+        if (pi->pResults)
+            pi->pResults[j] = r;
+        if (r < 0 || (r > 0 && worst == VK_SUCCESS))
+            worst = r;
+    }
+    return worst;
 }
 
 static VkResult present_inner(VkQueue q, const VkPresentInfoKHR *pi);
@@ -1216,6 +1283,9 @@ VkResult lxrt_inner_vkQueuePresentKHR(VkQueue q, const VkPresentInfoKHR *pi)
 
 static VkResult present_inner(VkQueue q, const VkPresentInfoKHR *pi)
 {
+    for (uint32_t j = 0; j < pi->swapchainCount; j++)
+        if (lxrt_mailbox_is(pi->pSwapchains[j]))
+            return present_mailboxes(q, pi);
     scaled *ss[16];
     uint32_t k = 0, nsc = pi->swapchainCount < 16 ? pi->swapchainCount : 16;
     lock();

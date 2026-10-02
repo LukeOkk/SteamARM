@@ -1,0 +1,56 @@
+Stage 52 -- Presenting without waiting for the display (IMMEDIATE and
+MAILBOX swapchains)
+Date: 2026-10-02. Apple M4, macOS 27, display 1920x1080 at 165 Hz. Zero VM.
+Follows stage 51 (section 8a): Counter-Strike 2 stopped at 82.5 frames a
+second, half the display's rate.
+
+1. WHAT THE LAYER DOES
+  A guest's swapchain presents to a CAMetalLayer shown by another process
+  (CAContext, runtime/remote_layer.m). tests/elf/vk_x11_present.c, a clear
+  and a present per frame, 570 frames, median frame time:
+                         FIFO       IMMEDIATE
+    MoltenVK 1.4.2       6.071 ms   6.064 ms
+    KosmicKrisp 26.2.4   6.059 ms   6.064 ms
+  165 frames a second either way: the driver sets displaySyncEnabled = NO
+  for IMMEDIATE and the window server still takes one drawable per refresh.
+  CAMetalLayer nextDrawable is the only way to get one and it blocks (Mesa's
+  WSI: "we might block for up to 1 second"). So a frame that takes 8.8 ms
+  waits for the second refresh: 12.1 ms, 82.5 fps, and the game's
+  vkAcquireNextImageKHR took 3.3 ms on average.
+
+2. THE MAILBOX (shim/mailbox.c)
+  For a swapchain created with IMMEDIATE or MAILBOX (and not scaled): the
+  game gets images of the shim's own and its acquire returns at once; a
+  thread acquires the driver's image; the game's present copies its image
+  into the driver's and presents it if one is ready, and drops the frame if
+  not. The driver's acquire and present never overlap; everything on the
+  queue is done on the game's threads, the acquire's own batch and the
+  game's submits taking turns (DXVK acquires and submits on different
+  threads). LXRT_VK_MAILBOX=0 turns it off.
+
+3. RESULTS
+  vk_x11_present, IMMEDIATE, 1970 frames, median frame time:
+    KosmicKrisp   0.310 ms (was 6.064)      FIFO unchanged: 6.061 ms
+    MoltenVK      5.657 ms, mean 4.107 (was 6.064); FIFO unchanged: 6.056 ms
+  Counter-Strike 2, de_dust2, nine bots, last 120 s of 200 s (as stage 51):
+                         median  average  10th pct  minimum  maximum
+    stage 51 (0.3.25)    71.0    68.6     60.0      16.5     83.0
+                         72.0    70.8     60.5      35.0     82.0
+                         76.5    74.7     64.0      45.0     82.5
+    mailbox              75.5    74.0     60.0      45.5     91.5
+                         79.0    81.0     61.0      39.0    107.0
+                         83.0    80.8     69.0      48.0     96.0
+  Every frame was shown (0 dropped: the game is below the display's rate).
+  The GPU is now at 99 % throughout (81-94 % before, with the waits).
+  Main menu: 78.5 (75.5-79.0), GPU-bound.
+  A CrossOver process not part of SteamARM used ~295 % CPU during the runs.
+
+4. WHAT LIMITS IT NOW
+  The GPU: about 135 Metal passes a frame at 45 us each (stage 51, section
+  6) plus the scene, 13 ms a frame in all. And the game's translated main
+  thread: 46 % busy on average, 84 % in the heaviest moments, 7-12 % of it
+  in __ulock_wake and 10 % in epoll waits.
+
+Tests: Vulkan 14/14 (vk_x11_present: KosmicKrisp IMMEDIATE below 3 ms, FIFO
+above; MoltenVK FIFO above), Windows 21/21, D3D11/D3D12 through the tool
+157.2/159.1 fps (FIFO, unchanged), ELF 106/106.

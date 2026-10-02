@@ -127,5 +127,17 @@ FIFO and IMMEDIATE exist. Stage 22 recorded IMMEDIATE runs of
 `vk_x11_present` through the cross-process layer on MoltenVK and
 KosmicKrisp: the median stayed at the 165 Hz refresh (6.04-6.07 ms), the
 mean dropped below it in some runs (MEASURED,
-`benchmarks/stage22-kosmickrisp.txt` §6). Whether IMMEDIATE unlocks or
-tears there is UNKNOWN: that probe waits for its fence every frame.
+`benchmarks/stage22-kosmickrisp.txt` §6). The layer is shown by another
+process and gives up one drawable per refresh whatever
+`displaySyncEnabled` says, and `CAMetalLayer` has no acquire that does not
+block: a frame a little longer than a refresh waited for the second one
+(Counter-Strike 2 stopped at 82.5 fps on the 165 Hz display).
+
+So a swapchain created with IMMEDIATE or MAILBOX is the shim's
+(`shim/mailbox.c`): the game draws into images of the shim's own and never
+waits; a thread acquires the driver's image; a present copies the game's
+image into it if one is ready and drops the frame if not (no tearing).
+`vk_x11_present` with IMMEDIATE on KosmicKrisp: 0.33 ms per frame instead
+of 6.06 (MEASURED, `benchmarks/stage52-mailbox-present.txt`;
+`tests/elf/run_vk_arm64.sh`). `LXRT_VK_MAILBOX=0` leaves such swapchains to
+the driver; FIFO swapchains and scaled ones are not touched.

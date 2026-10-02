@@ -72,5 +72,36 @@ else
         echo "  skip  vk_passes kosmickrisp steamarm (no $OWN: scripts/build-kosmickrisp.sh)"
     fi
 fi
+# vk_x11_present: a swapchain on an X window of SteamARM's X server. With
+# IMMEDIATE the shim's mailbox (shim/mailbox.c) must not wait for the display
+# (the layer is shown by another process and takes one drawable per refresh:
+# 165 fps on a 165 Hz display before); with FIFO it must.
+exe3="$ROOT/tmp/vktest/vk_x11_present"
+XDISP="${DISPLAY:-:2}"
+if ! DISPLAY=$XDISP xdpyinfo >/dev/null 2>&1; then
+    echo "  skip  vk_x11_present (no X server on $XDISP)"
+elif ! "$CLANG" --target=aarch64-redhat-linux-gnu --sysroot="$STAGE" --gcc-install-dir="$GCCDIR" -fuse-ld=lld \
+        --ld-path=/opt/homebrew/opt/lld/bin/ld.lld -w -O2 -I/opt/homebrew/include -o "$exe3" \
+        tests/elf/vk_x11_present.c "$ROOT/usr/lib/libvulkan.so.1" "$(ls "$ROOT"/usr/lib/libxcb.so.1* | head -1)"; then
+    echo "  FAIL  vk_x11_present (build)"; fail=$((fail + 1))
+else
+    present() { # driver, mode letter, what the median frame time must be: "below N" or "above N" (ms)
+        local log="$ROOT/tmp/vktest/vk_x11_present_$1_$2.log" med
+        OBJC_DISABLE_INITIALIZE_FORK_SAFETY=YES STEAMARM_VK_ICD=$1 LXRT_ROOT="$ROOT" DISPLAY=$XDISP \
+            perl -e 'alarm 90; exec @ARGV' ./build/lxrun /tmp/vktest/vk_x11_present 900 "$2" > "$log" 2>&1
+        med=$(sed -n 's/.*mediana \([0-9.]*\) ms.*/\1/p' "$log" | tail -1)
+        if grep -q '^== vk x11 surface: ok' "$log" && [ -n "$med" ] &&
+           awk -v m="$med" -v how="$3" -v lim="$4" 'BEGIN { exit !((how == "below" && m < lim) || (how == "above" && m > lim)) }'; then
+            printf '  ok    vk_x11_present %-11s %s: median %s ms\n' "$1" "$([ "$2" = i ] && echo IMMEDIATE || echo FIFO)" "$med"
+            pass=$((pass + 1))
+        else
+            printf '  FAIL  vk_x11_present %s %s: median "%s" ms, wanted %s %s (log %s)\n' "$1" "$2" "$med" "$3" "$4" "$log"
+            fail=$((fail + 1))
+        fi
+    }
+    present kosmickrisp i below 3
+    present kosmickrisp f above 3
+    present moltenvk f above 3
+fi
 echo "== $pass passed, $fail failed"
 [ "$fail" -eq 0 ]
