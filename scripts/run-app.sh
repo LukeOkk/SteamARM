@@ -305,6 +305,12 @@ if app.get("kind") == "windows":
         sys.stderr.write("run-app: %s\n" % error)
         sys.exit(2)
     env.update(proton_env)
+# LXRT_EXEC_ARGS_EXTRA (debugging, from the caller): more switches for a
+# program, after the ones the settings give (runtime/process.c applies
+# every matching entry).
+extra_args = os.environ.get("LXRT_EXEC_ARGS_EXTRA")
+if extra_args:
+    env["LXRT_EXEC_ARGS"] = (env["LXRT_EXEC_ARGS"] + ";" if env.get("LXRT_EXEC_ARGS") else "") + extra_args
 pairs = []
 for k, v in sorted(env.items()):
     # Translator settings are for x86 payloads only, never a native program:

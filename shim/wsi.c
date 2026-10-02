@@ -480,6 +480,10 @@ VkResult lxrt_inner_vkEnumerateInstanceExtensionProperties(const char *layer, ui
 
 VkResult lxrt_inner_vkCreateInstance(const VkInstanceCreateInfo *ci, const void *alloc, VkInstance *out)
 {
+    // A forked child (Chromium's GPU process comes from its zygote) cannot
+    // compile shaders until the runtime registers Metal's compiler service
+    // for it (runtime/process.c, lxrt_metal_attach).
+    lxrt_syscall2(LXRT_NR_METAL_ATTACH, 0, 0);
     // Drop the X11 surface extensions MoltenVK does not know; make sure the
     // two it needs to back them are on.
     uint32_t n = ci->enabledExtensionCount;

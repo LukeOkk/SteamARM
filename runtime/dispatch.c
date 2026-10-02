@@ -69,11 +69,14 @@ enum {
     LNR_lxrt_rlayer_release = 0x4C580014, // (layer) -> 0
     LNR_lxrt_mfx_encode = 0x4C580015,     // (struct lxrt_mfx_run *) -> 0 or -errno (metalfx.m)
     LNR_lxrt_mfx_release = 0x4C580016,    // (scaler) -> 0
+    LNR_lxrt_metal_attach = 0x4C580017,   // () -> 0: Metal's compiler for a forked child (process.c)
     LNR_lxrt_jit_wx  = 0x4C580020,  // (enable, addr, len) -> 0
     LNR_lxrt_guest_base = 0x4C580030, // (base) -> 0: 32-bit guest lives at host = base + guest
     LNR_lxrt_guest_base_get = 0x4C580031, // () -> base, 0 if none (the Vulkan shim's rebasing)
     LNR_lxrt_alias = 0x4C580032,          // (src, len, dst) -> 0: dst becomes a shared alias of src
 };
+
+long lxrt_metal_attach(void);   // process.c
 
 // metalfx.m
 struct lxrt_mfx_run;
@@ -2755,6 +2758,9 @@ restart:
     case LNR_lxrt_mfx_release:
         lxrt_mfx_release((void *)a0);
         ret = 0;
+        break;
+    case LNR_lxrt_metal_attach:
+        ret = lxrt_metal_attach();
         break;
     case LNR_lxrt_drawable:
         lxrt_window_drawable_size((uint32_t *)a0, (uint32_t *)a1);

@@ -1,0 +1,72 @@
+Stage 49 -- The Steam Frame client's window: from one frame a second to
+the display's rate, GPU-composited on KosmicKrisp
+Date: 2026-10-01. Apple M4, macOS 27, display 1920x1080 at 165 Hz. Zero VM.
+No game. Measured with tests/steam/ui_frames.py (300 moving, shadowed,
+rounded boxes in the client's main window, requestAnimationFrame intervals
+over 5 s) and Chromium's own trace over DevTools; nothing of the page read.
+
+1. BEFORE
+  0.3.23, GPU UI on (ANGLE/Vulkan), KosmicKrisp: black window.
+  GPU UI off (software): the window changed every 1-2 s.
+    ui_frames: frames 4, p50 = p95 = p99 = 1000 ms
+
+2. THREE CAUSES, IN ORDER OF DISCOVERY
+
+  a) Chromium switches given to every web-helper process.
+     LXRT_EXEC_ARGS appended the GPU switches to every steamwebhelper exec:
+     renderers and utility processes died at start, 1,072 renderer and
+     2,144 utility launches in 3 minutes, no main window.
+     Fix: LXRT_EXEC_ARGS=NAME!PREFIX:ARGS skips a program that has an
+     argument starting with PREFIX; settings-env.py gives the switches to
+     "steamwebhelper!--type=" (the browser process; Chromium passes them on).
+     After: 9 child launches, the 1280x800 main window appears.
+
+  b) The GPU process could not compile a shader.
+     Every pipeline failed, on both drivers:
+       MoltenVK     "[mvk-error] VK_ERROR_INITIALIZATION_FAILED: Shader
+                    library compile failed (Error code 3)", 443
+                    vkCreateGraphicsPipelines -> -3 in a minute
+       KosmicKrisp  831 vkCreateGraphicsPipelines -> -1000012000
+                    (VK_ERROR_INVALID_SHADER_NV)
+       both         "Unable to reach MTLCompilerService. ... Connection init
+                    failed at lookup with error 3 - No such process."
+                    "GPU process exited unexpectedly: exit_code=11" x6
+     The same pipeline compiled in a plain program and in a fork+exec child.
+     Chromium's GPU process without a sandbox is forked from its unsandboxed
+     zygote and does not exec. The runtime links Metal (AppKit, QuartzCore);
+     libxpc registers Metal.framework's XPC services for the pid that loads
+     it, once per image; a fork child has none. Reproduced with
+     tests/elf/vk_pipeline.c "zygote" (fresh shader each run, so Metal's
+     shader cache cannot hide it), and with a plain macOS program that forks:
+       child: FAIL Unable to reach MTLCompilerService
+       child after xpc_add_bundle(".../Metal.framework", 0): ok
+     xpc_add_bundle costs 2.6 ms; scanning all 286 loaded frameworks for
+     XPCServices 38 ms, so not on every fork. Fix: the shim asks the runtime
+     before vkCreateInstance (LXRT_NR_METAL_ATTACH); in a process that forked
+     since its image started, the runtime registers Metal again.
+     tests/elf/run_vk_arm64.sh: plain, fork, zygote x MoltenVK, KosmicKrisp:
+     6/6 (zygote 0/2 before). Steam: no pipeline error, no GPU process exit;
+     Chromium's GPU report: "ANGLE (Apple, Vulkan 1.4.354 (Apple M4),
+     KosmicKrisp-26.2.3)", gpu_compositing enabled, vulkan enabled_on.
+
+  c) The X server said the desktop was a 1 Hz display.
+     Still 1-1.5 fps with the GPU path working; presents took 0.04-0.3 ms.
+     Chromium's trace: "DelayBasedBeginFrameSource::OnTimerTick ...
+     interval: 1000000" (us). xrandr on :2:
+       1920x1050 (0x193) 2.016MHz *current ... v: clock 1.00Hz
+     XQuartz marks its rootless and fullscreen modes with fake rates 1 and 2
+     and sent them to clients as the mode's rate; Chromium paces every X11
+     output surface by the RandR rate (and viz allows twice that interval:
+     "every 1 or 2 seconds"). Fix: patches/xquartz-randr-real-refresh.patch
+     advertises the main display's rate for the rootless mode:
+       1920x1050    165.00*
+
+3. AFTER (KosmicKrisp, GPU UI on)
+  ui_frames, three runs:
+    {"frames":786,"fps":157.2,"p50":6.1,"p95":6.2,"p99":18.1,"over20":3}
+    {"frames":801,"fps":160,  "p50":6.1,"p95":6.1,"p99":12.2,"over20":4}
+    {"frames":790,"fps":157.8,"p50":6.1,"p95":6.2,"p99":12.1,"over20":2}
+  Shim (LXRT_VK_TIMING=1): 329 presents in 2 s, acquire 5.4 ms average
+  (FIFO at 165 Hz), present 0.04 ms.
+  Idle, the client and its web helper together: 1.3 % CPU.
+  Python 148/148, ELF 104/104.

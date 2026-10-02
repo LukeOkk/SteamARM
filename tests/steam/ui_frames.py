@@ -113,29 +113,38 @@ def ws_recv(s):
             return msg.decode()
 
 
-def main():
-    targets = json.load(urllib.request.urlopen("http://127.0.0.1:%d/json" % PORT, timeout=10))
-    # The client's main window: a page target that is not one of its hidden
-    # contexts. Chosen by type and size of its title only, never shown.
-    pages = [t for t in targets if t.get("type") == "page" and t.get("webSocketDebuggerUrl")]
-    main_page = None
-    for t in pages:
-        title = t.get("title", "")
-        if title in ("Steam", "Steam Big Picture Mode") or title.startswith("Steam"):
-            main_page = t
-            break
-    if not main_page and pages:
-        main_page = pages[0]
-    if not main_page:
-        print(json.dumps({"error": "no page target"}))
-        return 1
-    s = ws_connect(main_page["webSocketDebuggerUrl"])
+def evaluate(url, expression, timeout=60):
+    s = ws_connect(url)
+    s.settimeout(timeout)
     ws_send(s, json.dumps({"id": 1, "method": "Runtime.evaluate",
-                           "params": {"expression": JS, "awaitPromise": True, "returnByValue": True}}))
+                           "params": {"expression": expression, "awaitPromise": True, "returnByValue": True}}))
     while True:
         reply = json.loads(ws_recv(s))
         if reply.get("id") == 1:
-            break
+            s.close()
+            return reply
+
+
+def main():
+    targets = json.load(urllib.request.urlopen("http://127.0.0.1:%d/json" % PORT, timeout=10))
+    # The client's main window: the largest visible page. Hidden pages (the
+    # client keeps a dozen: menus, the shared JS context) never run
+    # requestAnimationFrame. Only the size and visibility are read.
+    pages = [t for t in targets if t.get("type") == "page" and t.get("webSocketDebuggerUrl")]
+    main_page, best = None, 0
+    for t in pages:
+        try:
+            v = evaluate(t["webSocketDebuggerUrl"],
+                         "JSON.stringify([innerWidth * innerHeight, document.visibilityState])", 5)
+            area, vis = json.loads(v["result"]["result"]["value"])
+        except Exception:
+            continue
+        if vis == "visible" and area > best:
+            main_page, best = t, area
+    if not main_page:
+        print(json.dumps({"error": "no visible page target"}))
+        return 1
+    reply = evaluate(main_page["webSocketDebuggerUrl"], JS)
     value = reply.get("result", {}).get("result", {}).get("value")
     print(value if value else json.dumps({"error": reply.get("result", {}).get("exceptionDetails", {}).get("text", "?")}))
     return 0

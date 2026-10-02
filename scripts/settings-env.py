@@ -223,7 +223,9 @@ def env_from_settings(s, total=None):
     # With these switches the GPU process stays up (MEASURED, stage 46).
     # runtime/process.c appends them when steamwebhelper is executed.
     if s.get("steamUIAcceleration", True):
-        env["LXRT_EXEC_ARGS"] = ("steamwebhelper:" + " ".join(STEAM_UI_GPU_SWITCHES))
+        # The browser process only (no --type=): Chromium passes the
+        # switches on to its GPU process itself.
+        env["LXRT_EXEC_ARGS"] = ("steamwebhelper!--type=:" + " ".join(STEAM_UI_GPU_SWITCHES))
     aniso = int(s.get("anisotropy") or 0)
     if aniso in (2, 4, 8, 16):
         dxvk += ["d3d11.samplerAnisotropy = %d" % aniso, "d3d9.samplerAnisotropy = %d" % aniso]

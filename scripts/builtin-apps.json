@@ -13,7 +13,8 @@
     "env": {
       "HOME_IN_GUEST": "/tmp/armhome",
       "LXRT_GUEST_PAGE": "4096",
-      "LXRT_X18_ALL_TEXT": "libcef.so"
+      "LXRT_X18_ALL_TEXT": "libcef.so",
+      "STEAM_IGNORE_INDIRECT_RENDERING": "1"
     },
     "architecture": "aarch64"
   },
@@ -31,7 +32,8 @@
     "env": {
       "HOME_IN_GUEST": "/tmp/armhome",
       "LXRT_GUEST_PAGE": "4096",
-      "LXRT_X18_ALL_TEXT": "libcef.so"
+      "LXRT_X18_ALL_TEXT": "libcef.so",
+      "STEAM_IGNORE_INDIRECT_RENDERING": "1"
     },
     "architecture": "aarch64"
   },

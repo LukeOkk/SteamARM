@@ -31,9 +31,11 @@
 #include "ids.h"
 bool lxrt_trace_on(void);
 
+#include <dlfcn.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <mach-o/dyld.h>
+#include <pthread.h>
 #include <stdatomic.h>
 #include <stdbool.h>
 #include <stdio.h>
@@ -58,6 +60,38 @@ static const char *self_path(void)
         return NULL;
     ready = true;
     return path;
+}
+
+// Metal compiles shaders in MTLCompilerService, an XPC service inside
+// Metal.framework that launchd keeps per process: libxpc registers a
+// framework's services for the pid that loads it. The runtime links Metal
+// (AppKit, QuartzCore), so that happens once, when an image starts; a fork
+// child that does not exec has Metal loaded but nothing registered for its
+// pid, and every compile fails: "Unable to reach MTLCompilerService ...
+// Connection init failed at lookup with error 3 - No such process". Chromium
+// starts its GPU process that way, from its unsandboxed zygote, and Steam's
+// web helper drew a black window: vkCreateGraphicsPipelines -> -3 on
+// MoltenVK, VK_ERROR_INVALID_SHADER_NV on KosmicKrisp (MEASURED;
+// tests/elf/vk_pipeline.c "zygote" reproduces it). The Vulkan shim calls
+// this before it creates an instance: in a process that has forked since its
+// image started, it registers Metal's services again (xpc_add_bundle, flags
+// 0: what fixed it, MEASURED in a plain macOS fork as well). About 2.6 ms,
+// once per process -- not in every fork, which would tax every shell.
+static pid_t g_xpc_pid;
+__attribute__((constructor)) static void xpc_pid_at_start(void) { g_xpc_pid = getpid(); }
+long lxrt_metal_attach(void)
+{
+    static pthread_mutex_t mu = PTHREAD_MUTEX_INITIALIZER;
+    pid_t me = getpid();
+    pthread_mutex_lock(&mu);
+    if (g_xpc_pid != me) {
+        void (*add)(const char *, int) = (void (*)(const char *, int))dlsym(RTLD_DEFAULT, "xpc_add_bundle");
+        if (add)
+            add("/System/Library/Frameworks/Metal.framework", 0);
+        g_xpc_pid = me;
+    }
+    pthread_mutex_unlock(&mu);
+    return 0;
 }
 
 long lxrt_fork(void)
@@ -219,11 +253,15 @@ long lxrt_execve(const char *path, char *const argv[], char *const envp[])
     // dropped: the runtime rebuilds it from the path, which is what the guest
     // would see for a normal exec anyway.
     //
-    // LXRT_EXEC_ARGS=NAME:ARG ARG...[;NAME:ARG...] appends arguments when a
-    // program named NAME is executed (space-separated, no quoting): the
-    // launcher gives Steam's steamwebhelper Chromium switches this way
-    // (settings-env.py) instead of editing Valve's files, which the client
-    // would check and download again.
+    // LXRT_EXEC_ARGS=NAME[!PREFIX]:ARG ARG...[;...] appends arguments when a
+    // program named NAME is executed (space-separated, no quoting), unless
+    // one of its arguments starts with PREFIX: the launcher gives Steam's
+    // steamwebhelper Chromium switches this way (settings-env.py) instead of
+    // editing Valve's files, which the client would check and download
+    // again -- to the browser process only ("steamwebhelper!--type="):
+    // Chromium hands its children the switches they need, and appended to
+    // every renderer and utility process they killed them at start, 3,200
+    // relaunches in 3 minutes and a black window (MEASURED, stage 49).
     char *extra[32];
     int nextra = 0;
     static char exec_args[2048];
@@ -236,7 +274,15 @@ long lxrt_execve(const char *path, char *const argv[], char *const envp[])
             if (!colon)
                 continue;
             *colon = 0;
+            char *bang = strchr(ent, '!');
+            if (bang)
+                *bang++ = 0;
             if (strcmp(ent, base) != 0)
+                continue;
+            bool excluded = false;
+            for (int i = 1; bang && *bang && i < argc && !excluded; i++)
+                excluded = !strncmp(argv[i], bang, strlen(bang));
+            if (excluded)
                 continue;
             char *save2 = NULL;
             for (char *a = strtok_r(colon + 1, " ", &save2); a && nextra < 32; a = strtok_r(NULL, " ", &save2))
@@ -359,7 +405,12 @@ long lxrt_execve(const char *path, char *const argv[], char *const envp[])
             use_env = withids;
         }
     }
-    if (lxrt_trace_on()) {
+    // A process traced because its command line matched LXRT_TRACE_MATCH
+    // (main.c) does not pass tracing on: its children are traced only if
+    // their own command lines match, as the variable says.
+    const char *tenv = getenv("LXRT_TRACE"), *tmatch = getenv("LXRT_TRACE_MATCH");
+    bool by_match = tmatch && *tmatch && !(tenv && *tenv == '1');
+    if (lxrt_trace_on() && !by_match) {
         int ec = 0;
         while (use_env[ec]) ec++;
         char **traced = calloc((size_t)ec + 3, sizeof(char *));

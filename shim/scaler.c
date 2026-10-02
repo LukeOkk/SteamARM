@@ -1139,7 +1139,67 @@ static VkResult present_mfx(scaled *s, VkQueue q, uint32_t i, const VkSubmitInfo
     return lxrt_mvk_vkQueueSubmit(q, 1, &b, s->fence[i]);
 }
 
+// LXRT_VK_TIMING=1: how long vkAcquireNextImageKHR and vkQueuePresentKHR
+// take, summed over 2-second windows and printed per process (stderr).
+struct lxrt_ts { long tv_sec, tv_nsec; };
+extern int clock_gettime(int, struct lxrt_ts *);
+static uint64_t now_ns(void)
+{
+    struct lxrt_ts t;
+    clock_gettime(1 /* CLOCK_MONOTONIC */, &t);
+    return (uint64_t)t.tv_sec * 1000000000ull + (uint64_t)t.tv_nsec;
+}
+static int timing_on(void)
+{
+    static int on = -1;
+    if (on < 0) {
+        const char *e = getenv("LXRT_VK_TIMING");
+        on = e && *e == '1';
+    }
+    return on;
+}
+static struct { uint64_t start, acq_ns, acq_max, pres_ns, pres_max; unsigned acq, pres; } g_t;
+static void timing_note(int present, uint64_t ns)
+{
+    uint64_t t = now_ns();
+    lock();
+    if (!g_t.start)
+        g_t.start = t;
+    if (present) { g_t.pres++; g_t.pres_ns += ns; if (ns > g_t.pres_max) g_t.pres_max = ns; }
+    else { g_t.acq++; g_t.acq_ns += ns; if (ns > g_t.acq_max) g_t.acq_max = ns; }
+    if (t - g_t.start > 2000000000ull) {
+        dprintf(2, "[shim] timing %s: %u acquires avg %.2f ms max %.1f ms, %u presents avg %.2f ms max %.1f ms (2 s)\n",
+                lxrt_vk_driver, g_t.acq, g_t.acq ? g_t.acq_ns / 1e6 / g_t.acq : 0.0, g_t.acq_max / 1e6, g_t.pres,
+                g_t.pres ? g_t.pres_ns / 1e6 / g_t.pres : 0.0, g_t.pres_max / 1e6);
+        g_t.start = t; g_t.acq = g_t.pres = 0; g_t.acq_ns = g_t.pres_ns = g_t.acq_max = g_t.pres_max = 0;
+    }
+    unlock();
+}
+
+VkResult lxrt_mvk_vkAcquireNextImageKHR(VkDevice, VkSwapchainKHR, uint64_t, VkSemaphore, VkFence, uint32_t *);
+VkResult lxrt_inner_vkAcquireNextImageKHR(VkDevice d, VkSwapchainKHR sc, uint64_t timeout, VkSemaphore sem, VkFence f,
+                                          uint32_t *index)
+{
+    if (!timing_on())
+        return lxrt_mvk_vkAcquireNextImageKHR(d, sc, timeout, sem, f, index);
+    uint64_t t0 = now_ns();
+    VkResult r = lxrt_mvk_vkAcquireNextImageKHR(d, sc, timeout, sem, f, index);
+    timing_note(0, now_ns() - t0);
+    return r;
+}
+
+static VkResult present_inner(VkQueue q, const VkPresentInfoKHR *pi);
 VkResult lxrt_inner_vkQueuePresentKHR(VkQueue q, const VkPresentInfoKHR *pi)
+{
+    if (!timing_on())
+        return present_inner(q, pi);
+    uint64_t t0 = now_ns();
+    VkResult r = present_inner(q, pi);
+    timing_note(1, now_ns() - t0);
+    return r;
+}
+
+static VkResult present_inner(VkQueue q, const VkPresentInfoKHR *pi)
 {
     scaled *ss[16];
     uint32_t k = 0, nsc = pi->swapchainCount < 16 ? pi->swapchainCount : 16;

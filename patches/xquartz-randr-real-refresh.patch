@@ -1,0 +1,75 @@
+--- a/hw/xquartz/quartzRandR.c
++++ b/hw/xquartz/quartzRandR.c
+@@ -56,6 +56,30 @@
+ #define DEFAULT_REFRESH         60
+ #define kDisplayModeUsableFlags (kDisplayModeValidFlag | kDisplayModeSafeFlag)
+ 
++/* SteamARM: the fake modes are told apart from real CoreGraphics modes by
++ * their refresh rate, 1 Hz (rootless) and 2 Hz (fullscreen), and that number
++ * also went out on the wire as the mode's rate. RandR 1.2 clients derive a
++ * mode's refresh as dotClock / (hTotal * vTotal), and RROldModeAdd
++ * (randr/rrinfo.c) builds the dot clock from this rate, so the rootless
++ * desktop looked like a 1 Hz display. Chromium paces its compositor by that
++ * number (ui/base/x/x11_display_util.cc,
++ * GetPrimaryDisplayRefreshIntervalFromXrandr, used by every X11 output
++ * surface through XrandrIntervalOnlyVSyncProvider) and drew one frame per
++ * second; SDL3 and Wine read the same field. Clients now see the display's
++ * real rate for the rootless mode. The fake value stays the server's internal
++ * key, and a set request for the rootless size at that rate is mapped back to
++ * it. The fullscreen fake mode keeps 2 Hz on the wire: it has the size of a
++ * real mode, and the rate is what tells the two apart in a set request. */
++static int rootless_wire_refresh = DEFAULT_REFRESH;
++
++static int
++QuartzRandRWireRefresh(const QuartzModeInfo *pMode)
++{
++    if (pMode->refresh == FAKE_REFRESH_ROOTLESS)
++        return rootless_wire_refresh;
++    return pMode->refresh;
++}
++
+ #define CALLBACK_SUCCESS        0
+ #define CALLBACK_CONTINUE       1
+ #define CALLBACK_ERROR          -1
+@@ -221,12 +245,12 @@
+         RRRegisterSize(pScreen, pMode->width, pMode->height, pScreen->mmWidth,
+                        pScreen->mmHeight);
+     if (pMode->pSize) {
+-        //DEBUG_LOG("registering: %d x %d @ %d %s\n", (int)pMode->width, (int)pMode->height, (int)pMode->refresh, isCurrentMode ? "*" : "");
+-        RRRegisterRate(pScreen, pMode->pSize, pMode->refresh);
++        int rate = QuartzRandRWireRefresh(pMode);
++        //DEBUG_LOG("registering: %d x %d @ %d %s\n", (int)pMode->width, (int)pMode->height, rate, isCurrentMode ? "*" : "");
++        RRRegisterRate(pScreen, pMode->pSize, rate);
+ 
+         if (isCurrentMode)
+-            RRSetCurrentConfig(pScreen, RR_Rotate_0, pMode->refresh,
+-                               pMode->pSize);
++            RRSetCurrentConfig(pScreen, RR_Rotate_0, rate, pMode->pSize);
+ 
+         return TRUE;
+     }
+@@ -343,6 +367,12 @@
+     reqMode.width = pSize->width;
+     reqMode.height = pSize->height;
+     reqMode.refresh = rate;
++    /* The rootless mode is registered at the display's rate (see
++     * QuartzRandRWireRefresh): map a request for it back to its fake key. */
++    if (rate == rootless_wire_refresh &&
++        reqMode.width == pQuartzScreen->rootlessMode.width &&
++        reqMode.height == pQuartzScreen->rootlessMode.height)
++        reqMode.refresh = FAKE_REFRESH_ROOTLESS;
+ 
+     /* Do not switch modes if requested mode is equal to current mode. */
+     if (QuartzRandRModesEqual(&reqMode, &pQuartzScreen->currentMode))
+@@ -379,6 +409,11 @@
+         activeMode.refresh = 60;
+     }
+ 
++    /* What clients are told the rootless mode's rate is: the main display's
++     * own (QuartzRandRGetModeInfo already turns an unknown 0 into 60). */
++    rootless_wire_refresh = activeMode.refresh > FAKE_REFRESH_FULLSCREEN ?
++                            activeMode.refresh : DEFAULT_REFRESH;
++
+     if (pQuartzScreen->fullscreenMode.ref)
+         CFRelease(pQuartzScreen->fullscreenMode.ref);
+     if (pQuartzScreen->currentMode.ref)

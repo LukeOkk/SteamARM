@@ -104,7 +104,7 @@ class SettingsEnvironmentTests(unittest.TestCase):
     def test_steam_ui_acceleration(self):
         self.assertNotIn("LXRT_EXEC_ARGS", self.settings.env_from_settings({"steamUIAcceleration": False}))
         env = self.settings.env_from_settings({})
-        self.assertTrue(env["LXRT_EXEC_ARGS"].startswith("steamwebhelper:--use-gl=angle --use-angle=vulkan"))
+        self.assertTrue(env["LXRT_EXEC_ARGS"].startswith("steamwebhelper!--type=:--use-gl=angle --use-angle=vulkan"))
         self.assertNotIn(";", env["LXRT_EXEC_ARGS"])
 
     def test_scaling_filter(self):

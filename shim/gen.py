@@ -91,6 +91,52 @@ static const char *const k_kk_paths[] = {
     "/usr/local/lib/libvulkan_kosmickrisp.dylib",
 };
 
+// STEAMARM_VK_ICD_FOR=NAME=DRIVER[;NAME=DRIVER...]: the driver for one
+// program, over STEAMARM_VK_ICD. NAME is the guest program's file name
+// (argv[1] of the runtime, or argv[2] under FEX). The launcher keeps Steam's
+// web helper on MoltenVK this way: KosmicKrisp could not compile ANGLE's
+// pipelines (vkCreateGraphicsPipelines -> VK_ERROR_INVALID_SHADER_NV, 831
+// times in a minute, and a black window; MEASURED, benchmarks/stage49).
+static const char *driver_for_program(char *(*henv)(const char *), const char *req)
+{
+    static char pick[64];
+    const char *spec = henv ? henv("STEAMARM_VK_ICD_FOR") : 0;
+    char ***(*nsargv)(void) = (char ***(*)(void))lxrt_host_dlsym((void *)-2, "_NSGetArgv");
+    int *(*nsargc)(void) = (int *(*)(void))lxrt_host_dlsym((void *)-2, "_NSGetArgc");
+    if (!spec || !*spec || !nsargv || !nsargc)
+        return req;
+    char **argv = *nsargv();
+    int argc = *nsargc();
+    for (int a = 1; a < argc && a <= 2; a++) {
+        const char *base = argv[a];
+        for (const char *p = argv[a]; *p; p++)
+            if (*p == '/')
+                base = p + 1;
+        for (const char *e = spec; *e;) {
+            const char *eq = e, *end = e;
+            while (*eq && *eq != '=' && *eq != ';')
+                eq++;
+            end = eq;
+            while (*end && *end != ';')
+                end++;
+            if (*eq == '=') {
+                unsigned n = (unsigned)(eq - e), i;
+                for (i = 0; i < n && base[i] == e[i]; i++)
+                    ;
+                if (i == n && base[n] == 0 && (unsigned)(end - eq - 1) < sizeof pick) {
+                    unsigned k = 0;
+                    for (const char *v = eq + 1; v < end; v++)
+                        pick[k++] = *v;
+                    pick[k] = 0;
+                    return pick;
+                }
+            }
+            e = *end ? end + 1 : end;
+        }
+    }
+    return req;
+}
+
 // ICD mode: a driver that exports only the loader-ICD interface (Mesa's
 // drivers export vk_icd* and nothing else, MEASURED with nm). Its entry points
 // are asked of vk_icdGetInstanceProcAddr -- the global ones here, every other
@@ -162,7 +208,7 @@ static void lxrt_vk_init(void)
     // re-executed, runtime/process.c) with, which is the guest's; readable
     // before the guest's libc is initialised.
     char *(*henv)(const char *) = (char *(*)(const char *))lxrt_host_dlsym((void *)-2 /* RTLD_DEFAULT */, "getenv");
-    const char *req = henv ? henv("STEAMARM_VK_ICD") : 0;
+    const char *req = driver_for_program(henv, henv ? henv("STEAMARM_VK_ICD") : 0);
     const char *dbg = henv ? henv("LXRT_VK_DEBUG") : 0;
     const char *why = 0;
     void *h = 0;

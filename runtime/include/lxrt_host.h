@@ -26,6 +26,7 @@
 #define LXRT_NR_RLAYER_RELEASE 0x4C580014L
 #define LXRT_NR_MFX_ENCODE     0x4C580015L   // (struct lxrt_mfx_run *) -> 0: MetalFX (runtime/metalfx.m)
 #define LXRT_NR_MFX_RELEASE    0x4C580016L   // (scaler) -> 0
+#define LXRT_NR_METAL_ATTACH   0x4C580017L   // () -> 0: Metal's shader compiler reachable after a fork
 #define LXRT_NR_GUEST_BASE_GET 0x4C580031L   // () -> guest address base, 0 if none
 #define LXRT_NR_ALIAS          0x4C580032L   // (src, len, dst) -> 0: shared alias of host pages
 

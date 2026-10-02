@@ -60,6 +60,18 @@ stream output fails or draws wrong (HYPOTHESIS: few games do;
   stderr. The variable is read with the host's `getenv`, so it must be in
   the environment the process was started with (MEASURED and VERIFIED IN
   SOURCE, `benchmarks/stage22-kosmickrisp.txt` §1, §4).
+- `STEAMARM_VK_ICD_FOR=NAME=DRIVER[;NAME=DRIVER...]` overrides it for one
+  program, by file name (`argv[1]` of the runtime, or `argv[2]` under FEX;
+  `shim/gen.py`, `driver_for_program`). Nothing sets it by default.
+- A fork child that does not exec (Chromium's GPU process comes from its
+  zygote) has Metal loaded but no shader compiler: libxpc registers
+  Metal.framework's XPC services once per image. The shim calls
+  `LXRT_NR_METAL_ATTACH` before `vkCreateInstance`, and the runtime
+  registers them again for a pid that forked (`runtime/process.c`,
+  `lxrt_metal_attach`; MEASURED, `benchmarks/stage49-frame-ui-smooth.txt`
+  §2b; `tests/elf/run_vk_arm64.sh`).
+- `LXRT_VK_TIMING=1` prints, per process every 2 s, how many images were
+  acquired and presented and how long each call took (`shim/scaler.c`).
 - Installed: MoltenVK 1.4.2 from Homebrew
   (`/opt/homebrew/lib/libMoltenVK.dylib` → `Cellar/molten-vk/1.4.2`), 431
   exported `vk*` symbols (MEASURED, `readlink`, `nm -gU`, 2026-09-29).
