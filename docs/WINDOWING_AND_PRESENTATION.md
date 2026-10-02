@@ -179,6 +179,13 @@ had been shown: Counter-Strike 2 at its highest settings 23.5 frames a
 second against 35 through the mailbox (MEASURED, stage 53).
 `LXRT_VK_MAILBOX=immediate` leaves FIFO swapchains to the driver.
 
+A swapchain replaced while the mailbox holds an acquired image (always,
+one ahead) lost a drawable for good on KosmicKrisp, which never released
+its retain on a drawable presented or acquired: after two remakes the
+layer had none left and the game's window froze (MEASURED, stage 54;
+`patches/kosmickrisp-07-release-acquired-drawable.patch`,
+`tests/elf/vk_x11_modes.c`).
+
 The driver's swapchain under the mailbox is FIFO with three images since
 stage 53: with the game's IMMEDIATE, a layer covering the display was
 flipped outside the display's refreshes (times between shown frames
