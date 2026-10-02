@@ -102,8 +102,8 @@ class SettingsEnvironmentTests(unittest.TestCase):
             self.assertEqual(out.getvalue().strip(), want)
 
     def test_steam_ui_acceleration(self):
-        self.assertNotIn("LXRT_EXEC_ARGS", self.settings.env_from_settings({}))
-        env = self.settings.env_from_settings({"steamUIAcceleration": True})
+        self.assertNotIn("LXRT_EXEC_ARGS", self.settings.env_from_settings({"steamUIAcceleration": False}))
+        env = self.settings.env_from_settings({})
         self.assertTrue(env["LXRT_EXEC_ARGS"].startswith("steamwebhelper:--use-gl=angle --use-angle=vulkan"))
         self.assertNotIn(";", env["LXRT_EXEC_ARGS"])
 

@@ -135,7 +135,9 @@ void lxrt_mvk_vkCmdClearColorImage(VkCommandBuffer, VkImage, VkImageLayout, cons
                                    const VkImageSubresourceRange *);
 void lxrt_mvk_vkExportMetalObjectsEXT(VkDevice, VkExportMetalObjectsInfoEXT *);
 
-enum { F_LINEAR, F_NEAREST, F_FSR, F_METALFX };
+enum { F_LINEAR, F_NEAREST, F_FSR, F_METALFX, F_LINEAR_BLIT };
+extern const char *lxrt_vk_driver;   // vulkan_shim.c: the driver in use
+int lxrt_vk_missing(const char *name);   // vulkan_shim.c: an entry point the driver lacks (ICD mode)
 
 // runtime/metalfx.m
 struct lxrt_mfx_run {
@@ -251,7 +253,7 @@ static int probe_wanted(void)
 
 static const char *filter_name(int f)
 {
-    return f == F_NEAREST ? "nearest" : f == F_FSR ? "fsr" : f == F_METALFX ? "metalfx" : "linear";
+    return f == F_NEAREST ? "nearest" : f == F_FSR ? "fsr" : f == F_METALFX ? "metalfx" : f == F_LINEAR_BLIT ? "linear-blit" : "linear";
 }
 
 static uint32_t fbits(float f)
@@ -690,6 +692,11 @@ VkResult lxrt_scaler_create(VkDevice dev, VkPhysicalDevice pd, const VkSwapchain
                             VkExtent2D window, const VkAllocationCallbacks *alloc, VkSwapchainKHR *out)
 {
     int f = filter_wanted();
+    // MoltenVK stretches by itself (present.c); another driver gets a
+    // bilinear blit here. MetalFX needs MoltenVK's Metal objects.
+    int mvk = s_eq(lxrt_vk_driver, "moltenvk");
+    if (!mvk && (f == F_LINEAR || (f == F_METALFX && lxrt_vk_missing("vkExportMetalObjectsEXT"))))
+        f = F_LINEAR_BLIT;
     if (f == F_LINEAR || ci->imageArrayLayers != 1 || ci->imageExtent.width > window.width ||
         ci->imageExtent.height > window.height || !ci->imageExtent.width || !ci->imageExtent.height)
         return VK_ERROR_FEATURE_NOT_PRESENT;
@@ -927,7 +934,7 @@ static VkResult record(scaled *s, VkCommandBuffer cb, uint32_t i, int which)
     VkResult r = lxrt_mvk_vkBeginCommandBuffer(cb, &bi);
     if (r)
         return r;
-    if (which == CB_FALLBACK)
+    if (which == CB_FALLBACK || s->filter == F_LINEAR_BLIT)
         cmd_blit(s, cb, i, VK_FILTER_LINEAR);
     else if (which == CB_MFX_OUT)
         cmd_mfx_out(s, cb, i);

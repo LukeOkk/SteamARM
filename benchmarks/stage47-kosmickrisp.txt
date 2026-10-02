@@ -1,0 +1,32 @@
+Stage 47 -- KosmicKrisp (Mesa 26.2.3, Vulkan 1.4 on Metal 4) through the
+shim: what works, what did not, and the fixes
+Date: 2026-10-01. Apple M4, macOS 27, native XQuartz. Zero VM. No game.
+
+1. VULKAN DEVICE (tests/elf/run_vk_device.sh, STEAMARM_VK_ICD=kosmickrisp)
+    vk_device x86_64 / i386   readback ok ("device Apple M4, driver
+                              KosmicKrisp, api 1.4", Mesa 26.2.3)
+    vk_reload x86_64 / i386   ok
+    gl_zink  x86_64 / i386    OpenGL 4.5, readback ok
+    6 passed, 0 failed
+
+2. WINDOWS PROBES (tests/win/run.sh, STEAMARM_VK_ICD=kosmickrisp)
+    d3d11 150.6 fps, d3d12 153.3, d3d9 157.8, d3d11_32 154.0,
+    d3d9_32 156.3 (MoltenVK: 158-160 on the same probes)
+    d3d12_32  FAIL: "Unrecognized VkStructureType 1000351002 referenced by
+              pNext, left out" (VkMutableDescriptorTypeCreateInfoEXT, which
+              FEX's 32-bit Vulkan thunks do not carry), then a SIGSEGV at
+              address 0 in the driver. Open; 32-bit Direct3D 12 only.
+    modeset*  FAIL: the scaler and the present scaling were MoltenVK's
+              only; with a 1280x720 swapchain on a 1920x1050 layer
+              KosmicKrisp made DXVK recreate the swapchain 315 times in
+              2.5 s.
+  Fix (shim/present.c, shim/scaler.c): any driver but MoltenVK gets the
+  scaler's own pass -- a bilinear blit for "Bilineal", and FSR or whole
+  pixels as chosen; MetalFX, which needs MoltenVK's Metal objects, falls
+  back to the bilinear blit. Not yet run on the native screen with
+  KosmicKrisp (the Mac was in use).
+
+3. THE STEAM CLIENT'S OWN WINDOW
+  Settings "Interfaz de Steam ARM64 acelerada por GPU" (stage 46) is on by
+  default from 0.3.22; its Vulkan goes to the driver chosen in Settings
+  (STEAMARM_VK_ICD), KosmicKrisp included.

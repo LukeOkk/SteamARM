@@ -188,7 +188,7 @@ struct LauncherSettings: Codable, Equatable {
     var resolutionScaling: Bool = false // Wine's display-mode emulation in the game prefixes
     var scalingFilter: String = "linear" // a picture smaller than its window: linear, nearest, fsr, metalfx (shim/scaler.c)
     var fsrSharpness: Int = 90         // FSR's RCAS strength, percent
-    var steamUIAcceleration: Bool = false // ARM64 Steam's webhelper on ANGLE/Vulkan (LXRT_EXEC_ARGS)
+    var steamUIAcceleration: Bool = true // ARM64 Steam's webhelper on ANGLE/Vulkan (LXRT_EXEC_ARGS)
     var frameRateLimit: Int = 0
     var dxvkHud: String = "off"
     var audioBackend: String = "coreaudio"
@@ -241,7 +241,7 @@ struct LauncherSettings: Codable, Equatable {
         resolutionScaling = try c.decodeIfPresent(Bool.self, forKey: .resolutionScaling) ?? false
         scalingFilter = try c.decodeIfPresent(String.self, forKey: .scalingFilter) ?? "linear"
         fsrSharpness = try c.decodeIfPresent(Int.self, forKey: .fsrSharpness) ?? 90
-        steamUIAcceleration = try c.decodeIfPresent(Bool.self, forKey: .steamUIAcceleration) ?? false
+        steamUIAcceleration = try c.decodeIfPresent(Bool.self, forKey: .steamUIAcceleration) ?? true
         frameRateLimit = try c.decodeIfPresent(Int.self, forKey: .frameRateLimit) ?? 0
         dxvkHud = try c.decodeIfPresent(String.self, forKey: .dxvkHud) ?? "off"
         audioBackend = try c.decodeIfPresent(String.self, forKey: .audioBackend) ?? "coreaudio"

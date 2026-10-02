@@ -219,5 +219,11 @@ for t in ${@:-tick tick_32 tone tone_32 regwin d3d11 d3d12 d3d9 d3d9_32 d3d11_32
         FAIL=$((FAIL + 1))
     fi
 done
+# Nothing of the test prefix stays behind: its services (services.exe,
+# winedevice, rpcss...) outlived the suite and kept running for hours.
+for p in $(pgrep -f "build/lxrun /tmp/lxrt-root/usr/bin/FEX-gb"); do
+    ps eww -o command= -p "$p" 2>/dev/null | grep -q "WINEPREFIX=$PFX_GUEST" && kill -9 "$p" 2>/dev/null
+done
+pkill -9 -f "build/lxrun .*wineserver" 2>/dev/null
 echo "== $PASS passed, $FAIL failed"
 [ "$FAIL" -eq 0 ]

@@ -222,7 +222,7 @@ def env_from_settings(s, total=None):
     # GL ES and Steam fell back to software ("Disabling GPU acceleration").
     # With these switches the GPU process stays up (MEASURED, stage 46).
     # runtime/process.c appends them when steamwebhelper is executed.
-    if s.get("steamUIAcceleration"):
+    if s.get("steamUIAcceleration", True):
         env["LXRT_EXEC_ARGS"] = ("steamwebhelper:" + " ".join(STEAM_UI_GPU_SWITCHES))
     aniso = int(s.get("anisotropy") or 0)
     if aniso in (2, 4, 8, 16):

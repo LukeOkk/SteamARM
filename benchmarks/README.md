@@ -82,6 +82,7 @@ the Fedora VM that was deleted on 2026-09-27; they are history, and
 | 44 | `stage44-scaling-frame-disk.txt` | 10-01 | Scaling filters of the Vulkan shim (FSR 1 with sharpness, MetalFX spatial, nearest) over a 1280x720 game on a 1920x1050 window; the Steam Frame and Android disk images grown to the Mac's disk, free space capped by it; SteamOS's update client answered in the Steam Frame root |
 | 45 | `stage45-ntsync.txt` | 10-01 | /dev/ntsync emulated across processes: the kernel's selftests 12/12, tests/elf/ntsync.c 17/17 (aarch64, x86_64 under FEX), Proton Experimental "ntsync: up and running"; event round trip 20.9 us (fsync 14.4, wineserver 50.5) |
 | 46 | `stage46-steam-ui-gpu.txt` | 10-01 | The ARM64 clients' web helper: GPU process dead 3 times then software; with ANGLE/Vulkan switches (LXRT_EXEC_ARGS) it stays up; offered off by default. FEX settings reach games started by an ARM64 client; FEXServer started with it |
+| 47 | `stage47-kosmickrisp.txt` | 10-01 | KosmicKrisp through the shim: Vulkan device 6/6, Direct3D 9/11/12 probes 150-158 fps; 32-bit D3D12 fails (mutable-descriptor struct not thunked); scaling made DXVK recreate swapchains (315 in 2.5 s) until the scaler served every driver |
 
 ## After stage 21 (no stage file)
 

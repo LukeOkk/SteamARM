@@ -130,11 +130,14 @@ static int surface_offers(VkPhysicalDevice pd, VkSurfaceKHR surface, VkPresentMo
 VkResult lxrt_inner_vkGetPhysicalDeviceSurfaceCapabilitiesKHR(VkPhysicalDevice, VkSurfaceKHR, void *);   // wsi.c
 int lxrt_wsi_layer_extent(VkSurfaceKHR, uint32_t *, uint32_t *);                                           // wsi.c
 
-// 1 when the swapchain needs MoltenVK to stretch it over its surface (above);
-// *window is then the surface's size.
+// 1 when the swapchain must be enlarged over its surface (above); *window
+// is then the surface's size. MoltenVK stretches it itself; any other
+// driver (KosmicKrisp) gets the scaler's own pass (scaler.c): with a
+// swapchain smaller than its layer KosmicKrisp made DXVK recreate it 315
+// times in 2.5 s (MEASURED, benchmarks/stage47).
 static int needs_stretch(VkDevice dev, const VkSwapchainCreateInfoKHR *ci, VkExtent2D *window)
 {
-    if (!ci->surface || !s_ieq(lxrt_vk_driver, "moltenvk"))
+    if (!ci->surface)
         return 0;
     for (const VkBaseInStructure *p = ci->pNext; p; p = p->pNext)
         if (p->sType == VK_STRUCTURE_TYPE_SWAPCHAIN_PRESENT_SCALING_CREATE_INFO_EXT)
@@ -180,6 +183,10 @@ VkResult lxrt_inner_vkCreateSwapchainKHR(VkDevice dev, const VkSwapchainCreateIn
     int probe = pe && *pe == '1';
     if ((!dbg && !ov && !stretch && !probe) || !ci)
         return lxrt_mvk_vkCreateSwapchainKHR(dev, ci, alloc, out);
+    // Present scaling is MoltenVK's to honour (VK_EXT_swapchain_maintenance1);
+    // other drivers were given the scaler above, or keep the swapchain as is.
+    if (!s_ieq(lxrt_vk_driver, "moltenvk"))
+        stretch = 0;
 
     // A copy: the caller's structure is const and stays as it was.
     VkSwapchainCreateInfoKHR c = *ci;
