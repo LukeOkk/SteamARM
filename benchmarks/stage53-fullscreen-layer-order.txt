@@ -71,7 +71,8 @@ HOW IT WAS MEASURED
   After: every interval a whole number of refreshes (distance from one:
   median 0.00, 90th percentile 0.01), frames shown 3.4-13.8 ms after the GPU
   finished them, none dropped (506 of 506 in 16 s; with two driver images
-  and no wait: 363 shown, 176 dropped), presents 3.5 ms on average.
+  and no wait: 363 shown, 176 dropped), presents 3.5 ms on average. Five
+  more minutes of the same match: 8970 shown, 5 dropped.
   WHETHER THE BLACK IS GONE WAS NOT SEEN BY THIS MEASUREMENT: it needs eyes
   on the screen. LXRT_VK_MAILBOX_REAL=immediate gives the old presents.
 
@@ -95,6 +96,7 @@ HOW IT WAS MEASURED
     624,000 passes: 395,577 with one draw, 94,900 with only a clear, 19,946
     with neither.
 
-Tests: Vulkan 18/18 before the presentation changes (vk_pipeline 6,
-vk_passes 5, vk_vtxread 4 new, vk_x11_present 3). The other suites were not
-run again while the game was being played on this machine.
+Tests: Vulkan 18/18 (vk_pipeline 6, vk_passes 5, vk_vtxread 4 new,
+vk_x11_present 3: KosmicKrisp IMMEDIATE 0.35 ms, FIFO 6.03 ms, MoltenVK FIFO
+6.07 ms), Python 151/151. The runtime itself did not change; its suites
+(ELF, Windows) were not run again.
