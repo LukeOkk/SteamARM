@@ -26,6 +26,12 @@
 // LXRT_VK_MAILBOX=0 leaves such swapchains to the driver. FIFO swapchains,
 // and those the scaler takes (a picture smaller than its window), are not
 // touched. LXRT_VK_DEBUG=1 reports frames shown and dropped.
+// LXRT_VK_PROBE=1 reads back one shown frame in every 120 and prints the
+// mean colour of eight zones of it (4 x 2): what the game drew, without a
+// capture of the screen ("the picture is white": is it the game's image?).
+// LXRT_VK_PROBE=2 reads back every shown frame and prints only those that
+// are black or white all over, and those that differ from the frame before
+// by more than half the range in most zones ("the picture flickers").
 #include <stdint.h>
 #include <stddef.h>
 #define VK_NO_PROTOTYPES
@@ -35,6 +41,15 @@ extern char *getenv(const char *);
 extern int dprintf(int, const char *, ...);
 extern void *calloc(size_t, size_t);
 extern void free(void *);
+struct lx_timespec { long tv_sec, tv_nsec; };
+extern int clock_gettime(int, struct lx_timespec *);
+extern int nanosleep(const struct lx_timespec *, struct lx_timespec *);
+static uint64_t now_ns(void)
+{
+    struct lx_timespec t = { 0, 0 };
+    clock_gettime(1 /* CLOCK_MONOTONIC */, &t);
+    return (uint64_t)t.tv_sec * 1000000000ull + (uint64_t)t.tv_nsec;
+}
 
 // The guest's threads: glibc 2.34 and later have them in libc. Weak, so that
 // the shim still loads where they are not (the swapchain is then the
@@ -82,6 +97,13 @@ void lxrt_mvk_vkDestroyFence(VkDevice, VkFence, const VkAllocationCallbacks *);
 VkResult lxrt_mvk_vkWaitForFences(VkDevice, uint32_t, const VkFence *, VkBool32, uint64_t);
 VkResult lxrt_mvk_vkResetFences(VkDevice, uint32_t, const VkFence *);
 VkResult lxrt_mvk_vkDeviceWaitIdle(VkDevice);
+VkResult lxrt_mvk_vkCreateBuffer(VkDevice, const VkBufferCreateInfo *, const VkAllocationCallbacks *, VkBuffer *);
+void lxrt_mvk_vkDestroyBuffer(VkDevice, VkBuffer, const VkAllocationCallbacks *);
+void lxrt_mvk_vkGetBufferMemoryRequirements(VkDevice, VkBuffer, VkMemoryRequirements *);
+VkResult lxrt_mvk_vkBindBufferMemory(VkDevice, VkBuffer, VkDeviceMemory, VkDeviceSize);
+VkResult lxrt_mvk_vkMapMemory(VkDevice, VkDeviceMemory, VkDeviceSize, VkDeviceSize, VkMemoryMapFlags, void **);
+void lxrt_mvk_vkCmdCopyImageToBuffer(VkCommandBuffer, VkImage, VkImageLayout, VkBuffer, uint32_t,
+                                     const VkBufferImageCopy *);
 
 VkQueue lxrt_scaler_a_queue(void);            // scaler.c: a queue the game got from this shim
 uint32_t lxrt_scaler_queue_family(VkQueue);
@@ -112,6 +134,13 @@ typedef struct mailbox {
     uint32_t real_index;
     VkResult acquire_result, sticky;   // sticky: what the game is told at its next acquire
     unsigned shown, dropped;
+    uint64_t last_shown_ns;
+    // LXRT_VK_PROBE: a buffer a shown frame is read back into.
+    VkPhysicalDevice pd;
+    VkFormat format;
+    VkBuffer probe;
+    VkDeviceMemory probe_mem;
+    const unsigned char *probe_map;
 } mailbox;
 
 static mailbox *g_mb[16];
@@ -170,6 +199,84 @@ static int debug(void)
 {
     const char *d = getenv("LXRT_VK_DEBUG");
     return d && *d == '1';
+}
+
+static int probing(void)
+{
+    static int on = -1;
+    if (on < 0) {
+        const char *e = getenv("LXRT_VK_PROBE");
+        on = e && (*e == '1' || *e == '2') ? *e - '0' : 0;
+    }
+    return on;
+}
+
+// The read-back buffer, made at the first probe. 0 if there is none.
+static int probe_buffer(mailbox *m)
+{
+    if (m->probe_map)
+        return 1;
+    if (m->probe)
+        return 0;       // failed before
+    VkBufferCreateInfo bci = { .sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
+                               .size = (VkDeviceSize)m->ext.width * m->ext.height * 4,
+                               .usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT };
+    if (lxrt_mvk_vkCreateBuffer(m->dev, &bci, 0, &m->probe))
+        return 0;
+    VkMemoryRequirements mr;
+    lxrt_mvk_vkGetBufferMemoryRequirements(m->dev, m->probe, &mr);
+    VkPhysicalDeviceMemoryProperties mp;
+    lxrt_mvk_vkGetPhysicalDeviceMemoryProperties(m->pd, &mp);
+    const VkMemoryPropertyFlags want = VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
+    uint32_t type = UINT32_MAX;
+    for (uint32_t t = 0; t < mp.memoryTypeCount && type == UINT32_MAX; t++)
+        if ((mr.memoryTypeBits & (1u << t)) && (mp.memoryTypes[t].propertyFlags & want) == want)
+            type = t;
+    VkMemoryAllocateInfo mai = { VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO, 0, mr.size, type };
+    void *map = 0;
+    if (type == UINT32_MAX || lxrt_mvk_vkAllocateMemory(m->dev, &mai, 0, &m->probe_mem) ||
+        lxrt_mvk_vkBindBufferMemory(m->dev, m->probe, m->probe_mem, 0) ||
+        lxrt_mvk_vkMapMemory(m->dev, m->probe_mem, 0, VK_WHOLE_SIZE, 0, &map))
+        return 0;
+    m->probe_map = map;
+    return 1;
+}
+
+// The mean of each channel, as stored, in 4 x 2 zones of the frame read back.
+static void probe_report(const mailbox *m)
+{
+    char line[256];
+    int n = 0;
+    static unsigned char last[8];
+    unsigned char now[8];
+    int dark = 0, bright = 0, jumped = 0;
+    extern int snprintf(char *, size_t, const char *, ...);
+    for (int zy = 0; zy < 2; zy++)
+        for (int zx = 0; zx < 4; zx++) {
+            unsigned long sum[3] = { 0, 0, 0 }, count = 0;
+            uint32_t x0 = m->ext.width * zx / 4, x1 = m->ext.width * (zx + 1) / 4;
+            uint32_t y0 = m->ext.height * zy / 2, y1 = m->ext.height * (zy + 1) / 2;
+            for (uint32_t y = y0; y < y1; y += 8)
+                for (uint32_t x = x0; x < x1; x += 8) {
+                    const unsigned char *p = m->probe_map + 4 * ((size_t)y * m->ext.width + x);
+                    sum[0] += p[0]; sum[1] += p[1]; sum[2] += p[2];
+                    count++;
+                }
+            if (!count)
+                count = 1;
+            n += snprintf(line + n, sizeof line - n, " %lu,%lu,%lu", sum[0] / count, sum[1] / count, sum[2] / count);
+            unsigned long mean = (sum[0] + sum[1] + sum[2]) / (3 * count);
+            int z = zy * 4 + zx;
+            now[z] = (unsigned char)mean;
+            dark += mean < 4;
+            bright += mean > 250;
+            jumped += (mean > last[z] ? mean - last[z] : last[z] - mean) > 100;
+        }
+    for (int z = 0; z < 8; z++)
+        last[z] = now[z];
+    if (probing() == 2 && dark < 8 && bright < 8 && jumped < 5)
+        return;
+    dprintf(2, "[shim] probe: frame %u, format %d, zones%s\n", m->shown, (int)m->format, line);
 }
 
 int lxrt_mailbox_wanted(const VkSwapchainCreateInfoKHR *ci)
@@ -253,6 +360,8 @@ static void destroy(mailbox *m)
         if (m->done[k]) lxrt_mvk_vkDestroySemaphore(d, m->done[k], 0);
         if (m->fence[k]) lxrt_mvk_vkDestroyFence(d, m->fence[k], 0);
     }
+    if (m->probe) lxrt_mvk_vkDestroyBuffer(d, m->probe, 0);
+    if (m->probe_mem) lxrt_mvk_vkFreeMemory(d, m->probe_mem, 0);
     for (uint32_t i = 0; i < MAXV; i++) {
         if (m->virt[i]) lxrt_mvk_vkDestroyImage(d, m->virt[i], 0);
         if (m->vmem[i]) lxrt_mvk_vkFreeMemory(d, m->vmem[i], 0);
@@ -273,9 +382,27 @@ VkResult lxrt_mailbox_create(VkDevice dev, VkPhysicalDevice pd, const VkSwapchai
     if (!m)
         return VK_ERROR_OUT_OF_HOST_MEMORY;
     m->dev = dev;
+    m->pd = pd;
+    m->format = ci->imageFormat;
     m->ext = ci->imageExtent;
     VkSwapchainCreateInfoKHR c = *ci;
     c.imageUsage |= VK_IMAGE_USAGE_TRANSFER_DST_BIT;
+    // The driver's own swapchain is FIFO: its presents follow the display.
+    // The game does not wait for them (that is the thread's part), and an
+    // IMMEDIATE layer that covers the display is flipped by the window
+    // server outside its refreshes (LXRT_VK_MAILBOX_REAL=immediate: as the
+    // game asked).
+    const char *real = getenv("LXRT_VK_MAILBOX_REAL");
+    if (!(real && real[0] == 'i')) {
+        c.presentMode = VK_PRESENT_MODE_FIFO_KHR;
+        // Three of the driver's images: one on the display, one that the GPU
+        // has not finished yet (a frame's worth of time when the GPU is the
+        // limit) and one for the thread to acquire meanwhile. With two, a
+        // third of the frames found none ready and were dropped (MEASURED:
+        // 23 of 68 at 34 frames a second).
+        if (c.minImageCount < 3)
+            c.minImageCount = 3;
+    }
     VkResult r = lxrt_mvk_vkCreateSwapchainKHR(dev, &c, alloc, &m->sc);
     if (r) {
         free(m);
@@ -500,6 +627,30 @@ VkResult lxrt_mailbox_present(VkQueue q, VkSwapchainKHR sc, uint32_t i, const Vk
         m->ready = 0;
     pthread_mutex_unlock(&m->lock);
 
+    // No driver image yet. A game faster than the display drops this frame
+    // (the one before was shown a moment ago). A slow one -- the GPU is the
+    // limit, and the driver's image comes back only when the frame before
+    // has reached the display, a few milliseconds after the game's next
+    // present -- waits for it instead: every one of its frames is shown,
+    // and the wait is time its GPU is busy anyway (MEASURED: 34 frames a
+    // second drawn, 22 shown without the wait).
+    if (!ready && now_ns() - m->last_shown_ns > 13000000ull) {
+        const uint64_t deadline = now_ns() + 30000000ull;
+        const struct lx_timespec nap = { 0, 250000 };
+        while (!ready && now_ns() < deadline) {
+            nanosleep(&nap, 0);
+            pthread_mutex_lock(&m->lock);
+            ready = m->ready;
+            if (ready) {
+                m->ready = 0;
+                real = m->real_index;
+                slot = m->slot;
+                acquired = m->acquire_result;
+            }
+            pthread_mutex_unlock(&m->lock);
+        }
+    }
+
     if (!ready) {
         // No driver image yet: this frame is not shown. What it waited for
         // is still consumed, so that the game can signal it again.
@@ -531,6 +682,12 @@ VkResult lxrt_mailbox_present(VkQueue q, VkSwapchainKHR sc, uint32_t i, const Vk
                            { 0, 0, 0 }, { m->ext.width, m->ext.height, 1 } };
     lxrt_mvk_vkCmdCopyImage(cb, m->virt[i], VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, m->real[real],
                             VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
+    int probe = probing() && (probing() == 2 || m->shown % 120 == 119) && probe_buffer(m);
+    if (probe) {
+        VkBufferImageCopy out = { .imageSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 },
+                                  .imageExtent = { m->ext.width, m->ext.height, 1 } };
+        lxrt_mvk_vkCmdCopyImageToBuffer(cb, m->virt[i], VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, m->probe, 1, &out);
+    }
     image_barrier(cb, m->real[real], VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_PRESENT_SRC_KHR);
     image_barrier(cb, m->virt[i], VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_IMAGE_LAYOUT_PRESENT_SRC_KHR);
     if ((r = lxrt_mvk_vkEndCommandBuffer(cb)))
@@ -565,7 +722,10 @@ VkResult lxrt_mailbox_present(VkQueue q, VkSwapchainKHR sc, uint32_t i, const Vk
     r = lxrt_mvk_vkQueuePresentKHR(q, &pi);
     queue_unlock();
     m->shown++;
+    m->last_shown_ns = now_ns();
     *shown = 1;
+    if (probe && lxrt_mvk_vkWaitForFences(m->dev, 1, &m->fence[slot], VK_TRUE, UINT64_MAX) == VK_SUCCESS)
+        probe_report(m);
 
     // The driver's present is done: the next acquire may start.
     if (r == VK_SUCCESS || r == VK_SUBOPTIMAL_KHR) {

@@ -44,7 +44,7 @@ done
 # (scripts/build-kosmickrisp.sh: patches/kosmickrisp-04 draws them in one
 # Metal encoder) with the merging on and off.
 exe2="$ROOT/tmp/vktest/vk_passes"
-OWN="${STEAMARM_BUILD:-$HOME/SteamARM-build}/mesa-kk/out"
+OWN="${STEAMARM_KK_OWN:-${STEAMARM_BUILD:-$HOME/SteamARM-build}/mesa-kk/out}"
 if ! "$CLANG" --target=aarch64-redhat-linux-gnu --sysroot="$STAGE" --gcc-install-dir="$GCCDIR" -fuse-ld=lld \
         --ld-path=/opt/homebrew/opt/lld/bin/ld.lld -w -O2 -I/opt/homebrew/include -o "$exe2" \
         tests/elf/vk_passes.c "$ROOT/usr/lib/libvulkan.so.1"; then
@@ -70,6 +70,38 @@ else
         run_passes "kosmickrisp steamarm old load-store" STEAMARM_VK_ICD=kosmickrisp STEAMARM_KK_DIR="$OWN" KK_APP_LOAD_STORE=0
     else
         echo "  skip  vk_passes kosmickrisp steamarm (no $OWN: scripts/build-kosmickrisp.sh)"
+    fi
+fi
+# vk_vtxread: a vertex shader that fetches the target the pass before drew
+# into, and one that reads a buffer its fragment shader stored into. SteamARM's
+# KosmicKrisp lets the vertex stage of a pass start before the fragments of
+# the pass before are shaded (patches/kosmickrisp-05) except in these cases;
+# KK_VERTEX_BARRIER=1 is the driver as it was.
+exe4="$ROOT/tmp/vktest/vk_vtxread"
+if ! "$CLANG" --target=aarch64-redhat-linux-gnu --sysroot="$STAGE" --gcc-install-dir="$GCCDIR" -fuse-ld=lld \
+        --ld-path=/opt/homebrew/opt/lld/bin/ld.lld -w -O2 -I/opt/homebrew/include -o "$exe4" \
+        tests/elf/vk_vtxread.c "$ROOT/usr/lib/libvulkan.so.1"; then
+    echo "  FAIL  vk_vtxread (build)"; fail=$((fail + 1))
+else
+    run_vtxread() { # label, then environment assignments
+        local label=$1; shift
+        local log="$ROOT/tmp/vktest/vk_vtxread_${label// /_}.log"
+        env OBJC_DISABLE_INITIALIZE_FORK_SAFETY=YES LXRT_ROOT="$ROOT" "$@" \
+            perl -e 'alarm 120; exec @ARGV' ./build/lxrun /tmp/vktest/vk_vtxread > "$log" 2>&1
+        if [ "$(grep -E '^== vk_vtxread' "$log" | tail -1)" = "== vk_vtxread: ok" ]; then
+            printf '  ok    vk_vtxread %s\n' "$label"; pass=$((pass + 1))
+        else
+            printf '  FAIL  vk_vtxread %s: %s (log %s)\n' "$label" "$(grep -B1 '^== vk_vtxread' "$log" | head -1)" "$log"
+            fail=$((fail + 1))
+        fi
+    }
+    run_vtxread moltenvk STEAMARM_VK_ICD=moltenvk
+    run_vtxread "kosmickrisp homebrew" STEAMARM_VK_ICD=kosmickrisp
+    if [ -f "$OWN/libvulkan_kosmickrisp.dylib" ]; then
+        run_vtxread "kosmickrisp steamarm" STEAMARM_VK_ICD=kosmickrisp STEAMARM_KK_DIR="$OWN"
+        run_vtxread "kosmickrisp steamarm vertex barrier" STEAMARM_VK_ICD=kosmickrisp STEAMARM_KK_DIR="$OWN" KK_VERTEX_BARRIER=1
+    else
+        echo "  skip  vk_vtxread kosmickrisp steamarm (no $OWN: scripts/build-kosmickrisp.sh)"
     fi
 fi
 # vk_x11_present: a swapchain on an X window of SteamARM's X server. With

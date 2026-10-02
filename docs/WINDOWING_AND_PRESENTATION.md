@@ -83,10 +83,38 @@ Limitations (stage 12):
   upscaled (the test display was 1×).
 - **Two windows per toplevel** for the window server: Mission Control and
   Stage Manager move the X frame and the overlay separately.
-- **Stacking** relies on re-ordering after Xplugin's changes; a missed hook
-  can leave the overlay below its frame for up to 300 ms.
+- **Stacking**: the frame is put in front by the window manager's restack on
+  a click or a title-bar drag, on Xplugin's own thread, and the overlay could
+  only be ordered above it afterwards: the X window showed for a few
+  milliseconds (white; "everything goes white when I shoot"), and when the
+  re-ordering was missed the layer stayed hidden and got no drawable
+  (MEASURED, `benchmarks/stage53-fullscreen-layer-order.txt`). Since
+  `patches/xquartz-remote-order.patch` the overlay is one window level above
+  its frame while the X server is the active application and no other X
+  toplevel is stacked over the layer, and an overlay found below its frame
+  is put back every 100 ms. A window-server ordering group did not hold the
+  order and hid frames (MEASURED, same file).
 - **X drawing under the overlay is hidden** while the property is set, and
   XShape is ignored.
+
+## Fullscreen
+
+MEASURED, `benchmarks/stage53-fullscreen-layer-order.txt`:
+
+- The rootless X screen is the whole display (1920x1080 on the test
+  display, not 1920x1050): XQuartz leaves out the strip under the menu bar,
+  SteamARM's server does not (`patches/xquartz-remote-order.patch`;
+  `STEAMARM_X11_FULL_DISPLAY=0` restores it). The window manager places
+  ordinary windows in `NSScreen`'s visible frame as before.
+- quartz-wm's fullscreen is the whole head
+  (`patches/quartz-wm-fullscreen-head.patch`), and a borderless window of
+  the display's size at 0,0 is left there.
+- While a Vulkan layer covers a display, the server hides the menu bar and
+  the Dock (`NSApplicationPresentationHideDock | HideMenuBar`); they return
+  when another application is activated or the layer goes.
+- X windows without a layer (indirect GLX) get the geometry but not the
+  hidden menu bar. UNKNOWN: Mission Control and Stage Manager with a
+  fullscreen layer.
 
 ## VNC
 
@@ -141,3 +169,15 @@ image into it if one is ready and drops the frame if not (no tearing).
 of 6.06 (MEASURED, `benchmarks/stage52-mailbox-present.txt`;
 `tests/elf/run_vk_arm64.sh`). `LXRT_VK_MAILBOX=0` leaves such swapchains to
 the driver; FIFO swapchains and scaled ones are not touched.
+
+The driver's swapchain under the mailbox is FIFO with three images since
+stage 53: with the game's IMMEDIATE, a layer covering the display was
+flipped outside the display's refreshes (times between shown frames
+29.7-36.3 ms; now whole refreshes). A frame that finds no driver image is
+dropped only when the one before was shown less than 13 ms ago; a slower
+game waits for the image (3.5 ms on average at 33 fps) and has every frame
+shown. `LXRT_VK_MAILBOX_REAL=immediate` restores the old presents.
+`LXRT_VK_PROBE=1|2` prints the mean colour of eight zones of the game's
+image (2: only black, white or jumping frames); KosmicKrisp's
+`KK_PRESENT_LOG=1` prints, per present, when the GPU finished and when the
+display showed it (`patches/kosmickrisp-06-present-timing.patch`).

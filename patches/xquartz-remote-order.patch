@@ -1,0 +1,276 @@
+--- a/hw/xquartz/quartz.h
++++ b/hw/xquartz/quartz.h
+@@ -135,6 +135,14 @@
+ #define quartzScreenKey (&quartzScreenKeyRec)
+ extern int aquaMenuBarHeight;
+ 
++/* SteamARM: the rootless screen is the whole display, the strip under the
++ * menu bar included, so that a fullscreen window can be the display's own
++ * size (1920x1080, not 1920x1050) and cover all of it.  The window manager
++ * keeps ordinary windows below the menu bar (it places them in NSScreen's
++ * visible frame).  STEAMARM_X11_FULL_DISPLAY=0: the screen without that
++ * strip, as XQuartz has it. */
++int XQuartzFullDisplay(void);
++
+ // Name of GLX bundle for native OpenGL
+ extern const char      *quartzOpenGLBundle;
+ 
+--- a/hw/xquartz/quartz.c
++++ b/hw/xquartz/quartz.c
+@@ -82,6 +82,17 @@
+ 
+ DevPrivateKeyRec quartzScreenKeyRec;
+ int aquaMenuBarHeight = 0;
++
++int
++XQuartzFullDisplay(void)
++{
++    static int on = -1;
++    if (on < 0) {
++        const char *e = getenv("STEAMARM_X11_FULL_DISPLAY");
++        on = !(e && e[0] == '0');
++    }
++    return on;
++}
+ QuartzModeProcsPtr quartzProcs = NULL;
+ const char             *quartzOpenGLBundle = NULL;
+ 
+--- a/hw/xquartz/quartzRandR.c
++++ b/hw/xquartz/quartzRandR.c
+@@ -422,7 +422,7 @@
+     if (pQuartzScreen->displayCount > 1) {
+         activeMode.width = pScreen->width;
+         activeMode.height = pScreen->height;
+-        if (XQuartzIsRootless)
++        if (XQuartzIsRootless && !XQuartzFullDisplay())
+             activeMode.height += aquaMenuBarHeight;
+     }
+ 
+@@ -431,7 +431,8 @@
+ 
+     pQuartzScreen->rootlessMode = activeMode;
+     pQuartzScreen->rootlessMode.refresh = FAKE_REFRESH_ROOTLESS;
+-    pQuartzScreen->rootlessMode.height -= aquaMenuBarHeight;
++    if (!XQuartzFullDisplay())
++        pQuartzScreen->rootlessMode.height -= aquaMenuBarHeight;
+ 
+     if (XQuartzIsRootless) {
+         pQuartzScreen->currentMode = pQuartzScreen->rootlessMode;
+--- a/hw/xquartz/xpr/xprScreen.c
++++ b/hw/xquartz/xpr/xprScreen.c
+@@ -179,7 +179,7 @@
+     /* Remove menubar to help standard X11 window managers.
+      * On Mavericks and later, the menu bar is on all displays when spans-displays is false or unset.
+      */
+-    if (XQuartzIsRootless &&
++    if (XQuartzIsRootless && !XQuartzFullDisplay() &&
+         (spacePerDisplay || (frame.origin.x == 0 && frame.origin.y == 0))) {
+         frame.origin.y += aquaMenuBarHeight;
+         frame.size.height -= aquaMenuBarHeight;
+--- a/hw/xquartz/xpr/xprRemoteLayer.c
++++ b/hw/xquartz/xpr/xprRemoteLayer.c
+@@ -142,6 +142,21 @@
+     st->level = XQuartzIsRootless ? normal_window_levels[wr->level]
+                                   : rooted_window_levels[wr->level];
+     st->visible = 1;
++
++    /* Is any other viewable toplevel stacked above ours, over the layer?
++     * (prevSib leads towards the top of the stack.)  If none is, the overlay
++     * may sit one window level higher, where no reordering of the frames can
++     * put a frame in front of it (remoteLayerCocoa.m). */
++    st->top = 1;
++    for (p = top->prevSib; p; p = p->prevSib) {
++        if (!p->realized || p->drawable.class != InputOutput)
++            continue;
++        if (p->drawable.x < x2 && p->drawable.x + p->drawable.width > x1 &&
++            p->drawable.y < y2 && p->drawable.y + p->drawable.height > y1) {
++            st->top = 0;
++            break;
++        }
++    }
+ }
+ 
+ static void
+--- a/hw/xquartz/xpr/xprRemoteLayer.h
++++ b/hw/xquartz/xpr/xprRemoteLayer.h
+@@ -23,6 +23,7 @@
+     uint32_t native;      /* CGWindowID of the X toplevel's native frame */
+     int level;            /* CGWindowLevel of that frame */
+     int reorder;          /* re-assert ordering above `native` */
++    int top;              /* no other X toplevel is stacked over the layer */
+ } XQRemoteLayerState;
+ 
+ /* AppKit side; must run on the main thread. */
+--- a/hw/xquartz/remoteLayerCocoa.m
++++ b/hw/xquartz/remoteLayerCocoa.m
+@@ -25,6 +25,9 @@
+ 
+ @interface XQRemoteLayerWindow : NSWindow
+ @property (nonatomic) uint32_t nativeBelow;
++@property (nonatomic) NSInteger baseLevel;
++@property (nonatomic) BOOL top;
++@property (nonatomic) BOOL coversScreen;
+ @property (nonatomic, retain) CALayerHost *host;
+ @end
+ 
+@@ -41,7 +44,98 @@
+ static NSMutableDictionary<NSNumber *, XQRemoteLayerWindow *> *overlays;
+ static id observerActive, observerUnhide;
+ 
++/* A frame is put in front by the window manager's restack on every click in
++ * it, by Xplugin on its own thread, and the overlay is ordered above it
++ * again only afterwards: for a display frame or two the X window covered the
++ * game's picture (white in a window, black in fullscreen: "the screen
++ * flickers"), and when the re-ordering was missed altogether it stayed that
++ * way, with the layer, now hidden, given no drawable any more (Counter-
++ * Strike 2: one frame a second; MEASURED 2026-10-02).  A window-server
++ * ordering group (CGSAddWindowToWindowOrderingGroup) did not hold the
++ * overlay above the frame through those restacks, and took the frame off
++ * the screen with an overlay that was ordered out (MEASURED).
++ *
++ * So, while this application is the active one and no other X toplevel is
++ * stacked over the layer (st->top, xprRemoteLayer.c), the overlay sits one
++ * window level above its frame: nothing done to the frames can cover it.
++ * Otherwise it is at the frame's level, directly above it, as before. */
++static NSInteger
++rl_level(XQRemoteLayerWindow *w)
++{
++    return w.baseLevel + (w.top && NSApp.active ? 1 : 0);
++}
++
+ static void
++rl_relevel_all(void)
++{
++    for (XQRemoteLayerWindow *w in overlays.allValues) {
++        NSInteger level = rl_level(w);
++        if (w.level == level)
++            continue;
++        w.level = level;
++        if (w.isVisible && w.nativeBelow)
++            [w orderWindow:NSWindowAbove relativeTo:w.nativeBelow];
++    }
++}
++
++/* And what that does not catch (an overlay at its frame's level): every
++ * 100 ms, an overlay that is on screen but not above its frame is put back. */
++static void
++rl_watch(void)
++{
++    static unsigned fixed;
++    /* Only while this application is the active one: otherwise Stage Manager
++     * or Mission Control may hold the frames as miniatures, and an overlay
++     * ordered in over one of those lands in the middle of the screen. */
++    if (!NSApp.active)
++        return;
++    for (XQRemoteLayerWindow *w in overlays.allValues) {
++        if (!w.isVisible || !w.nativeBelow)
++            continue;
++        CFArrayRef above = CGWindowListCreate(kCGWindowListOptionOnScreenAboveWindow, w.nativeBelow);
++        if (!above)
++            continue;
++        uintptr_t wid = (uintptr_t)w.windowNumber;
++        Boolean ok = CFArrayContainsValue(above, CFRangeMake(0, CFArrayGetCount(above)), (const void *)wid);
++        CFRelease(above);
++        if (ok)
++            continue;
++        /* Not on screen at all (another Space, the application hidden): the
++         * frame is not either, and there is nothing to put back. */
++        CFArrayRef self = CGWindowListCreate(kCGWindowListOptionOnScreenOnly | kCGWindowListOptionIncludingWindow,
++                                             (CGWindowID)wid);
++        Boolean shown = self && CFArrayGetCount(self) > 0;
++        if (self)
++            CFRelease(self);
++        if (!shown)
++            continue;
++        [w orderWindow:NSWindowAbove relativeTo:w.nativeBelow];
++        if (fixed++ < 50)
++            ErrorF("remote layer: overlay %u was below frame %u, put back above it\n",
++                   (unsigned)wid, w.nativeBelow);
++    }
++}
++
++/* A layer that takes a whole display is a game in fullscreen: the menu bar
++ * and the Dock are hidden while this application is the active one (they
++ * come back with any other application, as for every fullscreen program). */
++static void
++rl_presentation(void)
++{
++    BOOL full = NO;
++    for (XQRemoteLayerWindow *w in overlays.allValues)
++        if (w.isVisible && w.coversScreen)
++            full = YES;
++    NSApplicationPresentationOptions want = full
++        ? NSApplicationPresentationHideDock | NSApplicationPresentationHideMenuBar
++        : NSApplicationPresentationDefault;
++    if (NSApp.presentationOptions != want) {
++        NSApp.presentationOptions = want;
++        ErrorF("remote layer: menu bar and Dock %s\n", full ? "hidden (a layer covers a display)" : "back");
++    }
++}
++
++static void
+ reorder_all(void)
+ {
+     for (XQRemoteLayerWindow *w in overlays.allValues) {
+@@ -93,6 +187,15 @@
+                                      usingBlock:^(NSNotification *n) { reorder_all(); }];
+         [observerActive retain];
+         [observerUnhide retain];
++        [[nc addObserverForName:NSApplicationDidBecomeActiveNotification object:nil queue:nil
++                     usingBlock:^(NSNotification *n) { rl_relevel_all(); }] retain];
++        [[nc addObserverForName:NSApplicationDidResignActiveNotification object:nil queue:nil
++                     usingBlock:^(NSNotification *n) { rl_relevel_all(); }] retain];
++        dispatch_source_t timer = dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER, 0, 0, dispatch_get_main_queue());
++        dispatch_source_set_timer(timer, dispatch_time(DISPATCH_TIME_NOW, 100 * NSEC_PER_MSEC),
++                                  100 * NSEC_PER_MSEC, 10 * NSEC_PER_MSEC);
++        dispatch_source_set_event_handler(timer, ^{ @autoreleasepool { rl_watch(); } });
++        dispatch_resume(timer);     /* for the life of the server */
+     }
+     return w;
+ }
+@@ -110,8 +213,10 @@
+               st->lx, st->ly, st->lw, st->lh, st->native, st->level, st->reorder);
+ 
+         if (!st->visible) {
+-            if (w)
++            if (w) {
+                 [w orderOut:nil];
++                rl_presentation();
++            }
+             if (!w || !st->ctx)
+                 return;
+         }
+@@ -139,8 +244,15 @@
+                                    st->lw, st->lh);
+             if (!CGRectEqualToRect(w.host.frame, hf))
+                 w.host.frame = hf;
+-            if (w.level != st->level)
+-                w.level = st->level;
++            w.baseLevel = st->level;
++            w.top = st->top != 0;
++            if (w.level != rl_level(w))
++                w.level = rl_level(w);
++            BOOL covers = NO;
++            for (NSScreen *sc in NSScreen.screens)
++                if (NSEqualRects(sc.frame, r) && st->lw == st->cw && st->lh == st->ch)
++                    covers = YES;
++            w.coversScreen = covers;
+         }
+         [CATransaction commit];
+ 
+@@ -163,6 +275,7 @@
+                 });
+             }
+         }
++        rl_presentation();
+     }
+ }
+ 
+@@ -177,6 +290,7 @@
+         [w orderOut:nil];
+         [w close];
+         [overlays removeObjectForKey:key];
++        rl_presentation();
+     }
+ }
+ 

@@ -1,0 +1,100 @@
+Stage 53 -- Counter-Strike 2 played by a person: the game's picture behind
+its own window, a real fullscreen, and presents in step with the display
+Date: 2026-10-02. Apple M4, macOS 27, display 1920x1080 at 165 Hz (fixed
+rate). Zero VM. Valve's files unchanged. Steam Frame client, the game's
+native Linux build through tools/steamarm-fex-linux, KosmicKrisp 26.2.4 with
+SteamARM's patches. Stages 51 and 52 measured the game with bots and no hands
+on it; this one is what its owner met when playing.
+
+HOW IT WAS MEASURED
+  No capture of the screen. The window server's list of windows
+  (CGWindowListCopyWindowInfo: ids, levels, bounds, order; no names, no
+  pixels) sampled every 2 ms. The shim's LXRT_VK_PROBE (new): the mean colour
+  of eight zones of the game's own image, read back from the swapchain. The
+  driver's KK_PRESENT_LOG=1 (new, patch 06): for every present, when the GPU
+  finished the frame and when the display showed it (CAMetalDrawable
+  presentedTime). Two films of the screen made by the user with a telephone.
+  Input: XTEST (tests/android/xtest_input.py and the like).
+
+1. "EVERYTHING GOES WHITE" WHEN MOVING OR SHOOTING
+  The picture of a Vulkan window is a second window of the X server's (the
+  overlay with the CALayerHost) ordered directly above the X window's frame.
+  The frame is put in front by the window manager's restack on a click and
+  on a drag of its title bar, by Xplugin on its own thread, and the overlay
+  was ordered above it again only afterwards (and at 50 and 300 ms). Seen in
+  the order of the windows: the frame above the overlay for a sample of 2 to
+  5 ms at every step of a drag, and once for good: [frame][overlay] until a
+  restack was forced by hand. What the user sees then is the X window (white;
+  black in fullscreen). And the layer, hidden, is given no drawable any
+  more: vkAcquireNextImageKHR 1005 ms (nextDrawable's timeout), 1.5 frames a
+  second, for as long as it lasted.
+  Tried first: a window-server ordering group
+  (CGSAddWindowToWindowOrderingGroup(frame, overlay, above); returns 0). It
+  did not hold the order through the restacks (the overlay was found below
+  its frame at 20 consecutive checks 100 ms apart), and a frame whose
+  overlay was ordered out left the screen with it (Steam's main window:
+  viewable for X, not on screen). Removed.
+  Fix (patches/xquartz-remote-order.patch): while the X server is the active
+  application and no other X toplevel is stacked over the layer, the overlay
+  is one window level above its frame; otherwise at the frame's level as
+  before, and every 100 ms an overlay found below its frame is put back.
+  After: 40 raises and clicks in 4 s, and 30 s of a match, sampled every
+  2 ms: the order never changed; 0 corrections by the 100 ms check.
+
+2. NO 1920x1080, AND NO WAY TO FILL THE SCREEN
+  XQuartz's rootless screen leaves out the strip under the menu bar:
+  1920x1050 here, so the game's list ended at 1920x1050 and its window had a
+  title bar. Now (same patch, and patches/quartz-wm-fullscreen-head.patch):
+  the X screen is the display (1920x1080; STEAMARM_X11_FULL_DISPLAY=0 for the
+  old one); the window manager still places ordinary windows in NSScreen's
+  visible frame (a new 800x600 window: +0+30); its fullscreen is the whole
+  head; and while a layer covers a display the server hides the menu bar and
+  the Dock (they return with any other application).
+  Counter-Strike 2 with fullscreen=1, 1920x1080: window 1920x1080+0+0, the
+  overlay over all of the display.
+
+3. "THE SCREEN FLICKERS BLACK" IN FULLSCREEN
+  The user's films (24 frames a second) alternate between the game's picture
+  and black, frame by frame, with the pointer visible on the black ones.
+  Not the game's image: LXRT_VK_PROBE=2 read back all ~2300 frames of a 70 s
+  match and found 4 black ones (the first three and one at a load).
+  Not the order of the windows (section 1: stable at 2 ms).
+  Not a drawable shown before it was drawn: KK_PRESENT_LOG, 200 presents:
+  each on the display within -0.7..+1.9 ms of the end of its GPU work.
+  What that log did show: the times between shown frames were not whole
+  refreshes (29.7-36.3 ms): with the game's IMMEDIATE, the layer covering
+  the display is flipped outside the display's refreshes.
+  Change (shim/mailbox.c): the driver's own swapchain under the mailbox is
+  FIFO, with three images. The game still never waits for the display; a
+  frame that finds no driver image is dropped only if the one before was
+  shown less than 13 ms ago, and otherwise waits for it (up to 30 ms).
+  After: every interval a whole number of refreshes (distance from one:
+  median 0.00, 90th percentile 0.01), frames shown 3.4-13.8 ms after the GPU
+  finished them, none dropped (506 of 506 in 16 s; with two driver images
+  and no wait: 363 shown, 176 dropped), presents 3.5 ms on average.
+  WHETHER THE BLACK IS GONE WAS NOT SEEN BY THIS MEASUREMENT: it needs eyes
+  on the screen. LXRT_VK_MAILBOX_REAL=immediate gives the old presents.
+
+4. THE SETTINGS ASKED FOR, AND WHAT THEY COST
+  1920x1080 fullscreen, everything at its highest (4x MSAA: the GPU has no
+  8x; shadows, particles, ambient occlusion and textures at the top, FSR
+  off): de_dust2 with nine bots, median 32.5-34.5 frames a second, GPU-bound
+  (stage 52's 86-93.5 were at the game's own lower settings with FSR
+  Performance). Footprint 8.0-8.7 GB; safeguard.sh logged memory pressure
+  level 2 with 22-24 % free.
+
+5. ALSO
+  - A vertex stage no longer waits for the render pass before it unless it
+    samples a texture, and everything waits for a pass whose shaders write
+    memory (patches/kosmickrisp-05-vertex-barrier.patch; main menu 82.5
+    against 78.5 frames a second with the first version of it;
+    tests/elf/vk_vtxread.c fails on a build without either exception).
+  - Where the passes go, main menu, by leaving out the draws of one kind of
+    pass (experiment builds): none at all 122.5 frames a second against
+    78.5, so the passes alone cap it there; the multisampled ones 86.5.
+    624,000 passes: 395,577 with one draw, 94,900 with only a clear, 19,946
+    with neither.
+
+Tests: Vulkan 18/18 before the presentation changes (vk_pipeline 6,
+vk_passes 5, vk_vtxread 4 new, vk_x11_present 3). The other suites were not
+run again while the game was being played on this machine.

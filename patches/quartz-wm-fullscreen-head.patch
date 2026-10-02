@@ -1,0 +1,25 @@
+--- a/src/x-screen.h
++++ b/src/x-screen.h
+@@ -84,6 +84,7 @@
+ - get_window_by_osx_id:(xp_native_window_id)id;
+ - (X11Rect) validate_window_position:(X11Rect)r titlebar_height:(size_t)titlebar_height;
+ - (X11Rect) zoomed_rect:(X11Point)p;
++- (X11Rect) head_containing_point:(X11Point)p;
+ - (X11Rect) zoomed_rect;
+ - (X11Point) center_on_head:(X11Point)p;
+ - (void) disable_update;
+--- a/src/x-window.m
++++ b/src/x-window.m
+@@ -2433,7 +2433,11 @@
+ 
+     if(flag) {
+         X11Rect r = [self intended_frame];
+-        X11Rect maximized_rect = [self validate_frame_rect:[_screen zoomed_rect:X11RectOrigin(r)]];
++        /* SteamARM: fullscreen is the whole head, the menu bar's strip and
++         * the Dock's included (the server hides both while a game's layer
++         * covers the display), not the zoomed size with a title bar's worth
++         * of pixels taken off. */
++        X11Rect maximized_rect = [_screen head_containing_point:X11RectOrigin(r)];
+ 
+         _unzoomed_frame = r;
+         _has_unzoomed_frame = YES;

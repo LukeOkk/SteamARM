@@ -1,0 +1,145 @@
+diff -ruN -x __pycache__ b5/src/kosmickrisp/bridge/mtl_command_queue.h b6/src/kosmickrisp/bridge/mtl_command_queue.h
+--- a/src/kosmickrisp/bridge/mtl_command_queue.h	2026-10-02 16:16:00
++++ b/src/kosmickrisp/bridge/mtl_command_queue.h	2026-10-02 16:16:00
+@@ -40,5 +40,9 @@
+                                        void *drawable);
+ 
+ void mtl_drawable_present(void *drawable);
++/* As mtl_drawable_present; with `log`, the time the drawable reached the
++ * display is printed when it has (seq names it). */
++void mtl_drawable_present_seq(void *drawable, uint32_t seq, int log);
++void mtl_command_queue_wait_for_drawable(mtl_command_queue *queue, void *drawable);
+ 
+ #endif /* MTL_COMMAND_QUEUE_H */
+\ No newline at end of file
+diff -ruN -x __pycache__ b5/src/kosmickrisp/bridge/mtl_command_queue.m b6/src/kosmickrisp/bridge/mtl_command_queue.m
+--- a/src/kosmickrisp/bridge/mtl_command_queue.m	2026-10-02 16:16:00
++++ b/src/kosmickrisp/bridge/mtl_command_queue.m	2026-10-02 16:16:00
+@@ -120,6 +120,30 @@
+ }
+ 
+ void
++mtl_drawable_present_seq(void *drawable, uint32_t seq, int log)
++{
++   @autoreleasepool {
++      id<MTLDrawable> d = (id<MTLDrawable>)drawable;
++      if (log)
++         [d addPresentedHandler:^(id<MTLDrawable> shown) {
++            fprintf(stderr, "[kk] present %u: on the display at %.4f\n", seq,
++                    shown.presentedTime);
++         }];
++      [d present];
++   }
++}
++
++void
++mtl_command_queue_wait_for_drawable(mtl_command_queue *queue, void *drawable)
++{
++   @autoreleasepool {
++      id<MTL4CommandQueue> q = (id<MTL4CommandQueue>)queue;
++      id<MTLDrawable> d = (id<MTLDrawable>)drawable;
++      [q waitForDrawable:d];
++   }
++}
++
++void
+ mtl_drawable_present(void *drawable)
+ {
+    @autoreleasepool {
+diff -ruN -x __pycache__ b5/src/kosmickrisp/bridge/stubs/mtl_command_queue.c b6/src/kosmickrisp/bridge/stubs/mtl_command_queue.c
+--- a/src/kosmickrisp/bridge/stubs/mtl_command_queue.c	2026-10-02 16:16:00
++++ b/src/kosmickrisp/bridge/stubs/mtl_command_queue.c	2026-10-02 16:16:00
+@@ -62,6 +62,16 @@
+ }
+ 
+ void
++mtl_drawable_present_seq(void *drawable, uint32_t seq, int log)
++{
++}
++
++void
++mtl_command_queue_wait_for_drawable(mtl_command_queue *queue, void *drawable)
++{
++}
++
++void
+ mtl_drawable_present(void *drawable)
+ {
+ }
+diff -ruN -x __pycache__ b5/src/kosmickrisp/vulkan/kk_device.c b6/src/kosmickrisp/vulkan/kk_device.c
+--- a/src/kosmickrisp/vulkan/kk_device.c	2026-10-02 16:16:00
++++ b/src/kosmickrisp/vulkan/kk_device.c	2026-10-02 16:16:00
+@@ -430,6 +430,16 @@
+          mtl_command_queue_error_to_string(data->error), data->error_message);
+    }
+ 
++   if (slot->present_log)
++      fprintf(stderr, "[kk] present %u: GPU done at %.4f%s\n", slot->present_seq,
++              data->gpu_end, slot->drawable ? ", presented now" : "");
++   if (slot->drawable) {
++      mtl_drawable_present_seq(slot->drawable, slot->present_seq,
++                               slot->present_log);
++      slot->drawable = NULL;
++   }
++   slot->present_log = false;
++
+    util_dynarray_foreach(&slot->cmd_bufs, mtl_command_buffer *, cmd_buf) {
+       mtl_release(*cmd_buf);
+    }
+diff -ruN -x __pycache__ b5/src/kosmickrisp/vulkan/kk_device.h b6/src/kosmickrisp/vulkan/kk_device.h
+--- a/src/kosmickrisp/vulkan/kk_device.h	2026-10-02 16:16:00
++++ b/src/kosmickrisp/vulkan/kk_device.h	2026-10-02 16:16:00
+@@ -143,6 +143,11 @@
+    struct util_dynarray cmd_bufs;   /* mtl_command_buffer * */
+    struct util_dynarray allocators; /* mtl_command_allocator * */
+    struct kk_retire_slot *next;
++   /* A drawable the commit rendered into: presented by the handler, when
++    * the GPU has finished it (kk_queue.c), and/or reported. */
++   void *drawable;
++   uint32_t present_seq;
++   bool present_log;
+ };
+ 
+ mtl_command_allocator *kk_device_get_allocator(struct kk_device *dev);
+diff -ruN -x __pycache__ b5/src/kosmickrisp/vulkan/kk_queue.c b6/src/kosmickrisp/vulkan/kk_queue.c
+--- a/src/kosmickrisp/vulkan/kk_queue.c	2026-10-02 16:16:00
++++ b/src/kosmickrisp/vulkan/kk_queue.c	2026-10-02 16:16:00
+@@ -79,6 +79,38 @@
+          struct kk_retire_slot *slot = kk_device_get_retire_slot(dev);
+          if (slot) {
+             cmds = kk_cmd_buffer_retire(cmd_buffer, slot);
++            if (cmd_buffer->drawable) {
++               /* KK_PRESENT: 1 = the queue waits until the display has let
++                * go of the drawable before the commit that draws into it;
++                * 2 = the drawable is presented when the GPU has finished
++                * that commit, not when it was handed over; 3 = both.
++                * KK_PRESENT_LOG=1 prints both times of every present. */
++               static int mode = -1, log = -1;
++               static uint32_t seq;
++               if (mode < 0) {
++                  const char *e = getenv("KK_PRESENT");
++                  mode = e ? atoi(e) : 0;
++                  e = getenv("KK_PRESENT_LOG");
++                  log = e && e[0] == '1';
++               }
++               slot->present_seq = ++seq;
++               slot->present_log = log;
++               if (mode & 1)
++                  mtl_command_queue_wait_for_drawable(queue->mtl_handle,
++                                                      cmd_buffer->drawable);
++               if (mode & 2) {
++                  slot->drawable = cmd_buffer->drawable;
++                  cmd_buffer->drawable = NULL;
++               } else if (log) {
++                  mtl_command_queue_commit(queue->mtl_handle, cmds, count,
++                                           slot->options);
++                  mtl_command_queue_signal_drawable(queue->mtl_handle,
++                                                    cmd_buffer->drawable);
++                  mtl_drawable_present_seq(cmd_buffer->drawable, slot->present_seq, true);
++                  cmd_buffer->drawable = NULL;
++                  continue;
++               }
++            }
+             mtl_command_queue_commit(queue->mtl_handle, cmds, count,
+                                      slot->options);
+          } else {

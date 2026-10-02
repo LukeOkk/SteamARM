@@ -1,0 +1,224 @@
+diff -ruN -x __pycache__ b4/src/kosmickrisp/bridge/mtl_encoder.h b5/src/kosmickrisp/bridge/mtl_encoder.h
+--- a/src/kosmickrisp/bridge/mtl_encoder.h	2026-10-02 11:50:45
++++ b/src/kosmickrisp/bridge/mtl_encoder.h	2026-10-02 16:16:00
+@@ -29,6 +29,10 @@
+ void mtl_barrier_after_stages_device(void *encoder,
+                                      enum mtl_stages after_stages,
+                                      enum mtl_stages before_queue_stages);
++/* As mtl_barrier_after_queue_stages, with MTL4VisibilityOptionDevice. */
++void mtl_barrier_after_queue_stages_device(void *encoder,
++                                           enum mtl_stages after_queue_stages,
++                                           enum mtl_stages before_stages);
+ void mtl_barrier_after_stages(void *encoder, enum mtl_stages after_stages,
+                               enum mtl_stages before_queue_stages);
+ void mtl_barrier_after_encoder_stages(void *encoder,
+diff -ruN -x __pycache__ b4/src/kosmickrisp/bridge/mtl_encoder.m b5/src/kosmickrisp/bridge/mtl_encoder.m
+--- a/src/kosmickrisp/bridge/mtl_encoder.m	2026-10-02 11:50:45
++++ b/src/kosmickrisp/bridge/mtl_encoder.m	2026-10-02 16:16:00
+@@ -88,6 +88,19 @@
+ }
+ 
+ void
++mtl_barrier_after_queue_stages_device(void *encoder,
++                                      enum mtl_stages after_queue_stages,
++                                      enum mtl_stages before_stages)
++{
++   @autoreleasepool {
++      id<MTL4CommandEncoder> enc = (id<MTL4CommandEncoder>)encoder;
++      [enc barrierAfterQueueStages:(MTLStages)after_queue_stages
++                      beforeStages:(MTLStages)before_stages
++                 visibilityOptions:MTL4VisibilityOptionDevice];
++   }
++}
++
++void
+ mtl_barrier_after_queue_stages(void *encoder,
+                                enum mtl_stages after_queue_stages,
+                                enum mtl_stages before_stages)
+diff -ruN -x __pycache__ b4/src/kosmickrisp/bridge/stubs/mtl_encoder.c b5/src/kosmickrisp/bridge/stubs/mtl_encoder.c
+--- a/src/kosmickrisp/bridge/stubs/mtl_encoder.c	2026-10-02 11:50:45
++++ b/src/kosmickrisp/bridge/stubs/mtl_encoder.c	2026-10-02 16:16:00
+@@ -31,6 +31,13 @@
+ }
+ 
+ void
++mtl_barrier_after_queue_stages_device(void *encoder,
++                                      enum mtl_stages after_queue_stages,
++                                      enum mtl_stages before_stages)
++{
++}
++
++void
+ mtl_barrier_after_stages_device(void *encoder, enum mtl_stages after_stages,
+                                 enum mtl_stages before_queue_stages)
+ {
+diff -ruN -x __pycache__ b4/src/kosmickrisp/vulkan/kk_cmd_buffer.c b5/src/kosmickrisp/vulkan/kk_cmd_buffer.c
+--- a/src/kosmickrisp/vulkan/kk_cmd_buffer.c	2026-10-02 11:50:45
++++ b/src/kosmickrisp/vulkan/kk_cmd_buffer.c	2026-10-02 16:16:00
+@@ -383,12 +383,33 @@
+       const char *e = getenv("KK_BARRIER_ALIAS");
+       alias_always = e && e[0] == '1';
+    }
++   /* What a render encoder leaves is its attachments, which the vertex
++    * stages of later encoders do not read: those may start while this
++    * encoder's fragments are still being shaded, as Metal does for any two
++    * passes (the menu of Counter-Strike 2: 82.5 frames a second against
++    * 78.5; MEASURED). The exceptions keep the wait: a shader of this encoder
++    * that writes buffers or images (wrote_memory: all of the barrier), and a
++    * later vertex stage that samples a texture, which waits at its own
++    * encoder (kk_flush_pipeline, vertex_waited). KK_VERTEX_BARRIER=1 makes
++    * every vertex stage wait as before. */
++   static int vertex_always = -1;
++   if (vertex_always < 0) {
++      const char *e = getenv("KK_VERTEX_BARRIER");
++      vertex_always = e && e[0] == '1';
++   }
++   const enum mtl_stages geometry =
++      MTL_STAGE_VERTEX | MTL_STAGE_OBJECTS | MTL_STAGE_MESH;
+    if (alias_always || es->wrote_visibility)
+       mtl_barrier_after_stages(es->encoder, MTL_STAGE_ALL, MTL_STAGE_ALL);
++   else if (es == &cmd->gfx && !es->wrote_memory && !vertex_always)
++      mtl_barrier_after_stages_device(es->encoder, MTL_STAGE_ALL,
++                                      MTL_STAGE_ALL & ~geometry);
+    else
+       mtl_barrier_after_stages_device(es->encoder, MTL_STAGE_ALL,
+                                       MTL_STAGE_ALL);
+    es->wrote_visibility = false;
++   es->wrote_memory = false;
++   es->vertex_waited = false;
+    mtl_end_encoding(es->encoder);
+    mtl_release(es->encoder);
+    es->encoder = NULL;
+diff -ruN -x __pycache__ b4/src/kosmickrisp/vulkan/kk_cmd_buffer.h b5/src/kosmickrisp/vulkan/kk_cmd_buffer.h
+--- a/src/kosmickrisp/vulkan/kk_cmd_buffer.h	2026-10-02 11:50:45
++++ b/src/kosmickrisp/vulkan/kk_cmd_buffer.h	2026-10-02 16:16:00
+@@ -220,6 +220,11 @@
+    /* The encoder counted visibility results: they are read back through
+     * the buffer's address, which the barrier at its end has to allow for. */
+    bool wrote_visibility;
++   /* A shader bound in the encoder writes buffers or images: what follows
++    * waits for all of it. And: the encoder's vertex stages already wait for
++    * everything before it (a vertex stage that samples a texture). */
++   bool wrote_memory;
++   bool vertex_waited;
+    /* Pending timestamp resolves (struct kk_ts_resolve), flushed at cs_end. */
+    struct util_dynarray ts_resolves;
+ };
+diff -ruN -x __pycache__ b4/src/kosmickrisp/vulkan/kk_cmd_draw.c b5/src/kosmickrisp/vulkan/kk_cmd_draw.c
+--- a/src/kosmickrisp/vulkan/kk_cmd_draw.c	2026-10-02 11:50:45
++++ b/src/kosmickrisp/vulkan/kk_cmd_draw.c	2026-10-02 16:16:00
+@@ -1110,6 +1110,27 @@
+          mtl_set_depth_stencil_state(enc, gfx->depth_stencil_state);
+    }
+ 
++   /* The barriers around this encoder (kk_stop_encoder): a stage that writes
++    * memory makes everything after the encoder wait for it; a stage before
++    * the fragment shader that samples a texture waits here for whatever was
++    * rendered before the encoder. */
++   if (cmd->state.dirty_shaders) {
++      for (unsigned stage = 0; stage < MESA_SHADER_STAGES; stage++) {
++         const struct kk_shader *shader = cmd->state.shaders[stage];
++         if (!shader || stage == MESA_SHADER_COMPUTE)
++            continue;
++         if (shader->info.writes_memory)
++            cmd->gfx.wrote_memory = true;
++         if (stage != MESA_SHADER_FRAGMENT && shader->info.reads_images &&
++             !cmd->gfx.vertex_waited) {
++            mtl_barrier_after_queue_stages_device(
++               enc, MTL_STAGE_ALL,
++               MTL_STAGE_VERTEX | MTL_STAGE_OBJECTS | MTL_STAGE_MESH);
++            cmd->gfx.vertex_waited = true;
++         }
++      }
++   }
++
+    /* Merge tess info before GS construction since that depends on
+     * gfx->tess.prim
+     */
+diff -ruN -x __pycache__ b4/src/kosmickrisp/vulkan/kk_shader.c b5/src/kosmickrisp/vulkan/kk_shader.c
+--- a/src/kosmickrisp/vulkan/kk_shader.c	2026-10-02 11:50:45
++++ b/src/kosmickrisp/vulkan/kk_shader.c	2026-10-02 16:16:00
+@@ -683,12 +683,67 @@
+    return false;
+ }
+ 
++/* What the stage reads and writes besides its inputs and outputs, for the
++ * barriers between encoders. */
+ static void
++gather_sync_info(struct kk_shader *shader, nir_shader *nir)
++{
++   bool reads = !BITSET_IS_EMPTY(nir->info.textures_used) ||
++                !BITSET_IS_EMPTY(nir->info.images_used);
++   bool writes = nir->info.writes_memory;
++
++   nir_foreach_function_impl(impl, nir) {
++      nir_foreach_block(block, impl) {
++         nir_foreach_instr(instr, block) {
++            if (instr->type == nir_instr_type_tex) {
++               reads = true;
++               continue;
++            }
++            if (instr->type != nir_instr_type_intrinsic)
++               continue;
++            switch (nir_instr_as_intrinsic(instr)->intrinsic) {
++            case nir_intrinsic_image_load:
++            case nir_intrinsic_image_deref_load:
++            case nir_intrinsic_bindless_image_load:
++            case nir_intrinsic_image_size:
++            case nir_intrinsic_image_deref_size:
++            case nir_intrinsic_bindless_image_size:
++               reads = true;
++               break;
++            case nir_intrinsic_image_store:
++            case nir_intrinsic_image_deref_store:
++            case nir_intrinsic_bindless_image_store:
++            case nir_intrinsic_image_atomic:
++            case nir_intrinsic_image_deref_atomic:
++            case nir_intrinsic_bindless_image_atomic:
++            case nir_intrinsic_image_atomic_swap:
++            case nir_intrinsic_image_deref_atomic_swap:
++            case nir_intrinsic_bindless_image_atomic_swap:
++            case nir_intrinsic_store_ssbo:
++            case nir_intrinsic_ssbo_atomic:
++            case nir_intrinsic_ssbo_atomic_swap:
++            case nir_intrinsic_deref_atomic:
++            case nir_intrinsic_deref_atomic_swap:
++               reads = true;
++               writes = true;
++               break;
++            default:
++               break;
++            }
++         }
++      }
++   }
++   shader->info.reads_images = reads;
++   shader->info.writes_memory = writes;
++}
++
++static void
+ gather_shader_info(struct kk_shader *shader, nir_shader *nir,
+                    const struct vk_graphics_pipeline_state *state)
+ {
+    shader->info.stage = nir->info.stage;
+    shader->info.uses_per_draw_data = msl_gather_uses_per_draw_data(nir);
++   gather_sync_info(shader, nir);
+    shader->info.num_cull_distances = nir->info.cull_distance_array_size;
+    if (nir->info.stage == MESA_SHADER_VERTEX) {
+       nir_shader_intrinsics_pass(nir, gather_vs_inputs, nir_metadata_all,
+diff -ruN -x __pycache__ b4/src/kosmickrisp/vulkan/kk_shader.h b5/src/kosmickrisp/vulkan/kk_shader.h
+--- a/src/kosmickrisp/vulkan/kk_shader.h	2026-10-02 11:50:45
++++ b/src/kosmickrisp/vulkan/kk_shader.h	2026-10-02 16:16:00
+@@ -49,6 +49,12 @@
+    mesa_shader_stage stage;
+    bool uses_per_draw_data;
+ 
++   /* For the barriers between encoders (kk_cmd_buffer.c, kk_stop_encoder):
++    * the stage samples textures or loads images; the stage writes buffers
++    * or images. */
++   bool reads_images;
++   bool writes_memory;
++
+    /* Required for fragment shader cull distance discards. */
+    uint8_t num_cull_distances;
+ 

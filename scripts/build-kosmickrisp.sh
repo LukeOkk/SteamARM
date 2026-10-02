@@ -15,7 +15,15 @@
 #   02  an occlusion query takes its visibility-buffer slot when it is begun:
 #       the third pool of 16384 queries could not be created;
 #   03  subgroup operations outside fragment and compute shaders act on a
-#       subgroup of one: Metal has no SIMD groups in a vertex function.
+#       subgroup of one: Metal has no SIMD groups in a vertex function;
+#   04  consecutive passes on the same attachments in one Metal encoder, the
+#       application's load and store operations, cheaper barriers: the GPU
+#       pays for every pass, whatever its size;
+#   05  a vertex stage does not wait for the render pass before it, unless
+#       it samples a texture or the pass's shaders write memory
+#       (benchmarks/stage53-fullscreen-layer-order.txt);
+#   06  KK_PRESENT_LOG=1: when the GPU finished each presented frame and when
+#       the display showed it; KK_PRESENT=1|2|3: other orders of a present.
 #
 # Only Homebrew formulae and a Python virtualenv are installed. Re-running is
 # safe: the download is cached and the build is incremental. Needs macOS 26.

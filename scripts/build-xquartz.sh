@@ -129,12 +129,13 @@ fi
 #    through the system's libXplugin). Pinned upstream commit + patches, in
 #    this order: a QuickDraw/Xrender "Picture" typedef clash with the current
 #    SDK, then _NET_WM_MOVERESIZE & co. for frameless clients (Steam's SDL3
-#    windows, Chromium/CEF custom frames). Rebuilt when the patches change;
+#    windows, Chromium/CEF custom frames), then fullscreen as the whole head
+#    (a game at the display's own size). Rebuilt when the patches change;
 #    the link makes a new file, so a running quartz-wm keeps working and
 #    picks the patches up when it is restarted.
 QWM_COMMIT=3570364dd893713e6697d0d80beb61ad03e43c6c
 QWM="$XQ_ROOT/quartz-wm"
-QWM_PATCHES=(quartz-wm-picture.patch quartz-wm-netwm-moveresize.patch)
+QWM_PATCHES=(quartz-wm-picture.patch quartz-wm-netwm-moveresize.patch quartz-wm-fullscreen-head.patch)
 QWM_STAMP="$QWM_COMMIT $( cd "$PROJECT_DIR/patches" && cat "${QWM_PATCHES[@]}" | shasum -a 256 | cut -d' ' -f1 )"
 if [ ! -x "$QWM/src/quartz-wm" ] || [ "$(cat "$QWM/.steamarm-patches" 2>/dev/null)" != "$QWM_STAMP" ]; then
     log "building quartz-wm"
