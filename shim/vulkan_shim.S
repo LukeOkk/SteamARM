@@ -4735,3 +4735,5186 @@ lxrt_mvk_vkWaitSemaphoresKHR:
 // through zero, and the runtime's fault reporter names the address.
 .Lmissing:
     brk     #2
+
+// LXRT_VK_CALLS=1: one counting thunk per entry point. The table then holds
+// these, and the driver's own pointers are in lxrt_vk_real. The increment is
+// not atomic: a diagnostic's count may lose a call between threads. x17 (IP1)
+// is the other register a veneer may use.
+
+.Lcnt0:
+    adrp    x17, lxrt_vk_counts
+    add     x17, x17, :lo12:lxrt_vk_counts
+    ldr     x16, [x17, #0]
+    add     x16, x16, #1
+    str     x16, [x17, #0]
+    adrp    x16, lxrt_vk_real
+    add     x16, x16, :lo12:lxrt_vk_real
+    ldr     x16, [x16, #0]
+    br      x16
+
+.Lcnt1:
+    adrp    x17, lxrt_vk_counts
+    add     x17, x17, :lo12:lxrt_vk_counts
+    ldr     x16, [x17, #8]
+    add     x16, x16, #1
+    str     x16, [x17, #8]
+    adrp    x16, lxrt_vk_real
+    add     x16, x16, :lo12:lxrt_vk_real
+    ldr     x16, [x16, #8]
+    br      x16
+
+.Lcnt2:
+    adrp    x17, lxrt_vk_counts
+    add     x17, x17, :lo12:lxrt_vk_counts
+    ldr     x16, [x17, #16]
+    add     x16, x16, #1
+    str     x16, [x17, #16]
+    adrp    x16, lxrt_vk_real
+    add     x16, x16, :lo12:lxrt_vk_real
+    ldr     x16, [x16, #16]
+    br      x16
+
+.Lcnt3:
+    adrp    x17, lxrt_vk_counts
+    add     x17, x17, :lo12:lxrt_vk_counts
+    ldr     x16, [x17, #24]
+    add     x16, x16, #1
+    str     x16, [x17, #24]
+    adrp    x16, lxrt_vk_real
+    add     x16, x16, :lo12:lxrt_vk_real
+    ldr     x16, [x16, #24]
+    br      x16
+
+.Lcnt4:
+    adrp    x17, lxrt_vk_counts
+    add     x17, x17, :lo12:lxrt_vk_counts
+    ldr     x16, [x17, #32]
+    add     x16, x16, #1
+    str     x16, [x17, #32]
+    adrp    x16, lxrt_vk_real
+    add     x16, x16, :lo12:lxrt_vk_real
+    ldr     x16, [x16, #32]
+    br      x16
+
+.Lcnt5:
+    adrp    x17, lxrt_vk_counts
+    add     x17, x17, :lo12:lxrt_vk_counts
+    ldr     x16, [x17, #40]
+    add     x16, x16, #1
+    str     x16, [x17, #40]
+    adrp    x16, lxrt_vk_real
+    add     x16, x16, :lo12:lxrt_vk_real
+    ldr     x16, [x16, #40]
+    br      x16
+
+.Lcnt6:
+    adrp    x17, lxrt_vk_counts
+    add     x17, x17, :lo12:lxrt_vk_counts
+    ldr     x16, [x17, #48]
+    add     x16, x16, #1
+    str     x16, [x17, #48]
+    adrp    x16, lxrt_vk_real
+    add     x16, x16, :lo12:lxrt_vk_real
+    ldr     x16, [x16, #48]
+    br      x16
+
+.Lcnt7:
+    adrp    x17, lxrt_vk_counts
+    add     x17, x17, :lo12:lxrt_vk_counts
+    ldr     x16, [x17, #56]
+    add     x16, x16, #1
+    str     x16, [x17, #56]
+    adrp    x16, lxrt_vk_real
+    add     x16, x16, :lo12:lxrt_vk_real
+    ldr     x16, [x16, #56]
+    br      x16
+
+.Lcnt8:
+    adrp    x17, lxrt_vk_counts
+    add     x17, x17, :lo12:lxrt_vk_counts
+    ldr     x16, [x17, #64]
+    add     x16, x16, #1
+    str     x16, [x17, #64]
+    adrp    x16, lxrt_vk_real
+    add     x16, x16, :lo12:lxrt_vk_real
+    ldr     x16, [x16, #64]
+    br      x16
+
+.Lcnt9:
+    adrp    x17, lxrt_vk_counts
+    add     x17, x17, :lo12:lxrt_vk_counts
+    ldr     x16, [x17, #72]
+    add     x16, x16, #1
+    str     x16, [x17, #72]
+    adrp    x16, lxrt_vk_real
+    add     x16, x16, :lo12:lxrt_vk_real
+    ldr     x16, [x16, #72]
+    br      x16
+
+.Lcnt10:
+    adrp    x17, lxrt_vk_counts
+    add     x17, x17, :lo12:lxrt_vk_counts
+    ldr     x16, [x17, #80]
+    add     x16, x16, #1
+    str     x16, [x17, #80]
+    adrp    x16, lxrt_vk_real
+    add     x16, x16, :lo12:lxrt_vk_real
+    ldr     x16, [x16, #80]
+    br      x16
+
+.Lcnt11:
+    adrp    x17, lxrt_vk_counts
+    add     x17, x17, :lo12:lxrt_vk_counts
+    ldr     x16, [x17, #88]
+    add     x16, x16, #1
+    str     x16, [x17, #88]
+    adrp    x16, lxrt_vk_real
+    add     x16, x16, :lo12:lxrt_vk_real
+    ldr     x16, [x16, #88]
+    br      x16
+
+.Lcnt12:
+    adrp    x17, lxrt_vk_counts
+    add     x17, x17, :lo12:lxrt_vk_counts
+    ldr     x16, [x17, #96]
+    add     x16, x16, #1
+    str     x16, [x17, #96]
+    adrp    x16, lxrt_vk_real
+    add     x16, x16, :lo12:lxrt_vk_real
+    ldr     x16, [x16, #96]
+    br      x16
+
+.Lcnt13:
+    adrp    x17, lxrt_vk_counts
+    add     x17, x17, :lo12:lxrt_vk_counts
+    ldr     x16, [x17, #104]
+    add     x16, x16, #1
+    str     x16, [x17, #104]
+    adrp    x16, lxrt_vk_real
+    add     x16, x16, :lo12:lxrt_vk_real
+    ldr     x16, [x16, #104]
+    br      x16
+
+.Lcnt14:
+    adrp    x17, lxrt_vk_counts
+    add     x17, x17, :lo12:lxrt_vk_counts
+    ldr     x16, [x17, #112]
+    add     x16, x16, #1
+    str     x16, [x17, #112]
+    adrp    x16, lxrt_vk_real
+    add     x16, x16, :lo12:lxrt_vk_real
+    ldr     x16, [x16, #112]
+    br      x16
+
+.Lcnt15:
+    adrp    x17, lxrt_vk_counts
+    add     x17, x17, :lo12:lxrt_vk_counts
+    ldr     x16, [x17, #120]
+    add     x16, x16, #1
+    str     x16, [x17, #120]
+    adrp    x16, lxrt_vk_real
+    add     x16, x16, :lo12:lxrt_vk_real
+    ldr     x16, [x16, #120]
+    br      x16
+
+.Lcnt16:
+    adrp    x17, lxrt_vk_counts
+    add     x17, x17, :lo12:lxrt_vk_counts
+    ldr     x16, [x17, #128]
+    add     x16, x16, #1
+    str     x16, [x17, #128]
+    adrp    x16, lxrt_vk_real
+    add     x16, x16, :lo12:lxrt_vk_real
+    ldr     x16, [x16, #128]
+    br      x16
+
+.Lcnt17:
+    adrp    x17, lxrt_vk_counts
+    add     x17, x17, :lo12:lxrt_vk_counts
+    ldr     x16, [x17, #136]
+    add     x16, x16, #1
+    str     x16, [x17, #136]
+    adrp    x16, lxrt_vk_real
+    add     x16, x16, :lo12:lxrt_vk_real
+    ldr     x16, [x16, #136]
+    br      x16
+
+.Lcnt18:
+    adrp    x17, lxrt_vk_counts
+    add     x17, x17, :lo12:lxrt_vk_counts
+    ldr     x16, [x17, #144]
+    add     x16, x16, #1
+    str     x16, [x17, #144]
+    adrp    x16, lxrt_vk_real
+    add     x16, x16, :lo12:lxrt_vk_real
+    ldr     x16, [x16, #144]
+    br      x16
+
+.Lcnt19:
+    adrp    x17, lxrt_vk_counts
+    add     x17, x17, :lo12:lxrt_vk_counts
+    ldr     x16, [x17, #152]
+    add     x16, x16, #1
+    str     x16, [x17, #152]
+    adrp    x16, lxrt_vk_real
+    add     x16, x16, :lo12:lxrt_vk_real
+    ldr     x16, [x16, #152]
+    br      x16
+
+.Lcnt20:
+    adrp    x17, lxrt_vk_counts
+    add     x17, x17, :lo12:lxrt_vk_counts
+    ldr     x16, [x17, #160]
+    add     x16, x16, #1
+    str     x16, [x17, #160]
+    adrp    x16, lxrt_vk_real
+    add     x16, x16, :lo12:lxrt_vk_real
+    ldr     x16, [x16, #160]
+    br      x16
+
+.Lcnt21:
+    adrp    x17, lxrt_vk_counts
+    add     x17, x17, :lo12:lxrt_vk_counts
+    ldr     x16, [x17, #168]
+    add     x16, x16, #1
+    str     x16, [x17, #168]
+    adrp    x16, lxrt_vk_real
+    add     x16, x16, :lo12:lxrt_vk_real
+    ldr     x16, [x16, #168]
+    br      x16
+
+.Lcnt22:
+    adrp    x17, lxrt_vk_counts
+    add     x17, x17, :lo12:lxrt_vk_counts
+    ldr     x16, [x17, #176]
+    add     x16, x16, #1
+    str     x16, [x17, #176]
+    adrp    x16, lxrt_vk_real
+    add     x16, x16, :lo12:lxrt_vk_real
+    ldr     x16, [x16, #176]
+    br      x16
+
+.Lcnt23:
+    adrp    x17, lxrt_vk_counts
+    add     x17, x17, :lo12:lxrt_vk_counts
+    ldr     x16, [x17, #184]
+    add     x16, x16, #1
+    str     x16, [x17, #184]
+    adrp    x16, lxrt_vk_real
+    add     x16, x16, :lo12:lxrt_vk_real
+    ldr     x16, [x16, #184]
+    br      x16
+
+.Lcnt24:
+    adrp    x17, lxrt_vk_counts
+    add     x17, x17, :lo12:lxrt_vk_counts
+    ldr     x16, [x17, #192]
+    add     x16, x16, #1
+    str     x16, [x17, #192]
+    adrp    x16, lxrt_vk_real
+    add     x16, x16, :lo12:lxrt_vk_real
+    ldr     x16, [x16, #192]
+    br      x16
+
+.Lcnt25:
+    adrp    x17, lxrt_vk_counts
+    add     x17, x17, :lo12:lxrt_vk_counts
+    ldr     x16, [x17, #200]
+    add     x16, x16, #1
+    str     x16, [x17, #200]
+    adrp    x16, lxrt_vk_real
+    add     x16, x16, :lo12:lxrt_vk_real
+    ldr     x16, [x16, #200]
+    br      x16
+
+.Lcnt26:
+    adrp    x17, lxrt_vk_counts
+    add     x17, x17, :lo12:lxrt_vk_counts
+    ldr     x16, [x17, #208]
+    add     x16, x16, #1
+    str     x16, [x17, #208]
+    adrp    x16, lxrt_vk_real
+    add     x16, x16, :lo12:lxrt_vk_real
+    ldr     x16, [x16, #208]
+    br      x16
+
+.Lcnt27:
+    adrp    x17, lxrt_vk_counts
+    add     x17, x17, :lo12:lxrt_vk_counts
+    ldr     x16, [x17, #216]
+    add     x16, x16, #1
+    str     x16, [x17, #216]
+    adrp    x16, lxrt_vk_real
+    add     x16, x16, :lo12:lxrt_vk_real
+    ldr     x16, [x16, #216]
+    br      x16
+
+.Lcnt28:
+    adrp    x17, lxrt_vk_counts
+    add     x17, x17, :lo12:lxrt_vk_counts
+    ldr     x16, [x17, #224]
+    add     x16, x16, #1
+    str     x16, [x17, #224]
+    adrp    x16, lxrt_vk_real
+    add     x16, x16, :lo12:lxrt_vk_real
+    ldr     x16, [x16, #224]
+    br      x16
+
+.Lcnt29:
+    adrp    x17, lxrt_vk_counts
+    add     x17, x17, :lo12:lxrt_vk_counts
+    ldr     x16, [x17, #232]
+    add     x16, x16, #1
+    str     x16, [x17, #232]
+    adrp    x16, lxrt_vk_real
+    add     x16, x16, :lo12:lxrt_vk_real
+    ldr     x16, [x16, #232]
+    br      x16
+
+.Lcnt30:
+    adrp    x17, lxrt_vk_counts
+    add     x17, x17, :lo12:lxrt_vk_counts
+    ldr     x16, [x17, #240]
+    add     x16, x16, #1
+    str     x16, [x17, #240]
+    adrp    x16, lxrt_vk_real
+    add     x16, x16, :lo12:lxrt_vk_real
+    ldr     x16, [x16, #240]
+    br      x16
+
+.Lcnt31:
+    adrp    x17, lxrt_vk_counts
+    add     x17, x17, :lo12:lxrt_vk_counts
+    ldr     x16, [x17, #248]
+    add     x16, x16, #1
+    str     x16, [x17, #248]
+    adrp    x16, lxrt_vk_real
+    add     x16, x16, :lo12:lxrt_vk_real
+    ldr     x16, [x16, #248]
+    br      x16
+
+.Lcnt32:
+    adrp    x17, lxrt_vk_counts
+    add     x17, x17, :lo12:lxrt_vk_counts
+    ldr     x16, [x17, #256]
+    add     x16, x16, #1
+    str     x16, [x17, #256]
+    adrp    x16, lxrt_vk_real
+    add     x16, x16, :lo12:lxrt_vk_real
+    ldr     x16, [x16, #256]
+    br      x16
+
+.Lcnt33:
+    adrp    x17, lxrt_vk_counts
+    add     x17, x17, :lo12:lxrt_vk_counts
+    ldr     x16, [x17, #264]
+    add     x16, x16, #1
+    str     x16, [x17, #264]
+    adrp    x16, lxrt_vk_real
+    add     x16, x16, :lo12:lxrt_vk_real
+    ldr     x16, [x16, #264]
+    br      x16
+
+.Lcnt34:
+    adrp    x17, lxrt_vk_counts
+    add     x17, x17, :lo12:lxrt_vk_counts
+    ldr     x16, [x17, #272]
+    add     x16, x16, #1
+    str     x16, [x17, #272]
+    adrp    x16, lxrt_vk_real
+    add     x16, x16, :lo12:lxrt_vk_real
+    ldr     x16, [x16, #272]
+    br      x16
+
+.Lcnt35:
+    adrp    x17, lxrt_vk_counts
+    add     x17, x17, :lo12:lxrt_vk_counts
+    ldr     x16, [x17, #280]
+    add     x16, x16, #1
+    str     x16, [x17, #280]
+    adrp    x16, lxrt_vk_real
+    add     x16, x16, :lo12:lxrt_vk_real
+    ldr     x16, [x16, #280]
+    br      x16
+
+.Lcnt36:
+    adrp    x17, lxrt_vk_counts
+    add     x17, x17, :lo12:lxrt_vk_counts
+    ldr     x16, [x17, #288]
+    add     x16, x16, #1
+    str     x16, [x17, #288]
+    adrp    x16, lxrt_vk_real
+    add     x16, x16, :lo12:lxrt_vk_real
+    ldr     x16, [x16, #288]
+    br      x16
+
+.Lcnt37:
+    adrp    x17, lxrt_vk_counts
+    add     x17, x17, :lo12:lxrt_vk_counts
+    ldr     x16, [x17, #296]
+    add     x16, x16, #1
+    str     x16, [x17, #296]
+    adrp    x16, lxrt_vk_real
+    add     x16, x16, :lo12:lxrt_vk_real
+    ldr     x16, [x16, #296]
+    br      x16
+
+.Lcnt38:
+    adrp    x17, lxrt_vk_counts
+    add     x17, x17, :lo12:lxrt_vk_counts
+    ldr     x16, [x17, #304]
+    add     x16, x16, #1
+    str     x16, [x17, #304]
+    adrp    x16, lxrt_vk_real
+    add     x16, x16, :lo12:lxrt_vk_real
+    ldr     x16, [x16, #304]
+    br      x16
+
+.Lcnt39:
+    adrp    x17, lxrt_vk_counts
+    add     x17, x17, :lo12:lxrt_vk_counts
+    ldr     x16, [x17, #312]
+    add     x16, x16, #1
+    str     x16, [x17, #312]
+    adrp    x16, lxrt_vk_real
+    add     x16, x16, :lo12:lxrt_vk_real
+    ldr     x16, [x16, #312]
+    br      x16
+
+.Lcnt40:
+    adrp    x17, lxrt_vk_counts
+    add     x17, x17, :lo12:lxrt_vk_counts
+    ldr     x16, [x17, #320]
+    add     x16, x16, #1
+    str     x16, [x17, #320]
+    adrp    x16, lxrt_vk_real
+    add     x16, x16, :lo12:lxrt_vk_real
+    ldr     x16, [x16, #320]
+    br      x16
+
+.Lcnt41:
+    adrp    x17, lxrt_vk_counts
+    add     x17, x17, :lo12:lxrt_vk_counts
+    ldr     x16, [x17, #328]
+    add     x16, x16, #1
+    str     x16, [x17, #328]
+    adrp    x16, lxrt_vk_real
+    add     x16, x16, :lo12:lxrt_vk_real
+    ldr     x16, [x16, #328]
+    br      x16
+
+.Lcnt42:
+    adrp    x17, lxrt_vk_counts
+    add     x17, x17, :lo12:lxrt_vk_counts
+    ldr     x16, [x17, #336]
+    add     x16, x16, #1
+    str     x16, [x17, #336]
+    adrp    x16, lxrt_vk_real
+    add     x16, x16, :lo12:lxrt_vk_real
+    ldr     x16, [x16, #336]
+    br      x16
+
+.Lcnt43:
+    adrp    x17, lxrt_vk_counts
+    add     x17, x17, :lo12:lxrt_vk_counts
+    ldr     x16, [x17, #344]
+    add     x16, x16, #1
+    str     x16, [x17, #344]
+    adrp    x16, lxrt_vk_real
+    add     x16, x16, :lo12:lxrt_vk_real
+    ldr     x16, [x16, #344]
+    br      x16
+
+.Lcnt44:
+    adrp    x17, lxrt_vk_counts
+    add     x17, x17, :lo12:lxrt_vk_counts
+    ldr     x16, [x17, #352]
+    add     x16, x16, #1
+    str     x16, [x17, #352]
+    adrp    x16, lxrt_vk_real
+    add     x16, x16, :lo12:lxrt_vk_real
+    ldr     x16, [x16, #352]
+    br      x16
+
+.Lcnt45:
+    adrp    x17, lxrt_vk_counts
+    add     x17, x17, :lo12:lxrt_vk_counts
+    ldr     x16, [x17, #360]
+    add     x16, x16, #1
+    str     x16, [x17, #360]
+    adrp    x16, lxrt_vk_real
+    add     x16, x16, :lo12:lxrt_vk_real
+    ldr     x16, [x16, #360]
+    br      x16
+
+.Lcnt46:
+    adrp    x17, lxrt_vk_counts
+    add     x17, x17, :lo12:lxrt_vk_counts
+    ldr     x16, [x17, #368]
+    add     x16, x16, #1
+    str     x16, [x17, #368]
+    adrp    x16, lxrt_vk_real
+    add     x16, x16, :lo12:lxrt_vk_real
+    ldr     x16, [x16, #368]
+    br      x16
+
+.Lcnt47:
+    adrp    x17, lxrt_vk_counts
+    add     x17, x17, :lo12:lxrt_vk_counts
+    ldr     x16, [x17, #376]
+    add     x16, x16, #1
+    str     x16, [x17, #376]
+    adrp    x16, lxrt_vk_real
+    add     x16, x16, :lo12:lxrt_vk_real
+    ldr     x16, [x16, #376]
+    br      x16
+
+.Lcnt48:
+    adrp    x17, lxrt_vk_counts
+    add     x17, x17, :lo12:lxrt_vk_counts
+    ldr     x16, [x17, #384]
+    add     x16, x16, #1
+    str     x16, [x17, #384]
+    adrp    x16, lxrt_vk_real
+    add     x16, x16, :lo12:lxrt_vk_real
+    ldr     x16, [x16, #384]
+    br      x16
+
+.Lcnt49:
+    adrp    x17, lxrt_vk_counts
+    add     x17, x17, :lo12:lxrt_vk_counts
+    ldr     x16, [x17, #392]
+    add     x16, x16, #1
+    str     x16, [x17, #392]
+    adrp    x16, lxrt_vk_real
+    add     x16, x16, :lo12:lxrt_vk_real
+    ldr     x16, [x16, #392]
+    br      x16
+
+.Lcnt50:
+    adrp    x17, lxrt_vk_counts
+    add     x17, x17, :lo12:lxrt_vk_counts
+    ldr     x16, [x17, #400]
+    add     x16, x16, #1
+    str     x16, [x17, #400]
+    adrp    x16, lxrt_vk_real
+    add     x16, x16, :lo12:lxrt_vk_real
+    ldr     x16, [x16, #400]
+    br      x16
+
+.Lcnt51:
+    adrp    x17, lxrt_vk_counts
+    add     x17, x17, :lo12:lxrt_vk_counts
+    ldr     x16, [x17, #408]
+    add     x16, x16, #1
+    str     x16, [x17, #408]
+    adrp    x16, lxrt_vk_real
+    add     x16, x16, :lo12:lxrt_vk_real
+    ldr     x16, [x16, #408]
+    br      x16
+
+.Lcnt52:
+    adrp    x17, lxrt_vk_counts
+    add     x17, x17, :lo12:lxrt_vk_counts
+    ldr     x16, [x17, #416]
+    add     x16, x16, #1
+    str     x16, [x17, #416]
+    adrp    x16, lxrt_vk_real
+    add     x16, x16, :lo12:lxrt_vk_real
+    ldr     x16, [x16, #416]
+    br      x16
+
+.Lcnt53:
+    adrp    x17, lxrt_vk_counts
+    add     x17, x17, :lo12:lxrt_vk_counts
+    ldr     x16, [x17, #424]
+    add     x16, x16, #1
+    str     x16, [x17, #424]
+    adrp    x16, lxrt_vk_real
+    add     x16, x16, :lo12:lxrt_vk_real
+    ldr     x16, [x16, #424]
+    br      x16
+
+.Lcnt54:
+    adrp    x17, lxrt_vk_counts
+    add     x17, x17, :lo12:lxrt_vk_counts
+    ldr     x16, [x17, #432]
+    add     x16, x16, #1
+    str     x16, [x17, #432]
+    adrp    x16, lxrt_vk_real
+    add     x16, x16, :lo12:lxrt_vk_real
+    ldr     x16, [x16, #432]
+    br      x16
+
+.Lcnt55:
+    adrp    x17, lxrt_vk_counts
+    add     x17, x17, :lo12:lxrt_vk_counts
+    ldr     x16, [x17, #440]
+    add     x16, x16, #1
+    str     x16, [x17, #440]
+    adrp    x16, lxrt_vk_real
+    add     x16, x16, :lo12:lxrt_vk_real
+    ldr     x16, [x16, #440]
+    br      x16
+
+.Lcnt56:
+    adrp    x17, lxrt_vk_counts
+    add     x17, x17, :lo12:lxrt_vk_counts
+    ldr     x16, [x17, #448]
+    add     x16, x16, #1
+    str     x16, [x17, #448]
+    adrp    x16, lxrt_vk_real
+    add     x16, x16, :lo12:lxrt_vk_real
+    ldr     x16, [x16, #448]
+    br      x16
+
+.Lcnt57:
+    adrp    x17, lxrt_vk_counts
+    add     x17, x17, :lo12:lxrt_vk_counts
+    ldr     x16, [x17, #456]
+    add     x16, x16, #1
+    str     x16, [x17, #456]
+    adrp    x16, lxrt_vk_real
+    add     x16, x16, :lo12:lxrt_vk_real
+    ldr     x16, [x16, #456]
+    br      x16
+
+.Lcnt58:
+    adrp    x17, lxrt_vk_counts
+    add     x17, x17, :lo12:lxrt_vk_counts
+    ldr     x16, [x17, #464]
+    add     x16, x16, #1
+    str     x16, [x17, #464]
+    adrp    x16, lxrt_vk_real
+    add     x16, x16, :lo12:lxrt_vk_real
+    ldr     x16, [x16, #464]
+    br      x16
+
+.Lcnt59:
+    adrp    x17, lxrt_vk_counts
+    add     x17, x17, :lo12:lxrt_vk_counts
+    ldr     x16, [x17, #472]
+    add     x16, x16, #1
+    str     x16, [x17, #472]
+    adrp    x16, lxrt_vk_real
+    add     x16, x16, :lo12:lxrt_vk_real
+    ldr     x16, [x16, #472]
+    br      x16
+
+.Lcnt60:
+    adrp    x17, lxrt_vk_counts
+    add     x17, x17, :lo12:lxrt_vk_counts
+    ldr     x16, [x17, #480]
+    add     x16, x16, #1
+    str     x16, [x17, #480]
+    adrp    x16, lxrt_vk_real
+    add     x16, x16, :lo12:lxrt_vk_real
+    ldr     x16, [x16, #480]
+    br      x16
+
+.Lcnt61:
+    adrp    x17, lxrt_vk_counts
+    add     x17, x17, :lo12:lxrt_vk_counts
+    ldr     x16, [x17, #488]
+    add     x16, x16, #1
+    str     x16, [x17, #488]
+    adrp    x16, lxrt_vk_real
+    add     x16, x16, :lo12:lxrt_vk_real
+    ldr     x16, [x16, #488]
+    br      x16
+
+.Lcnt62:
+    adrp    x17, lxrt_vk_counts
+    add     x17, x17, :lo12:lxrt_vk_counts
+    ldr     x16, [x17, #496]
+    add     x16, x16, #1
+    str     x16, [x17, #496]
+    adrp    x16, lxrt_vk_real
+    add     x16, x16, :lo12:lxrt_vk_real
+    ldr     x16, [x16, #496]
+    br      x16
+
+.Lcnt63:
+    adrp    x17, lxrt_vk_counts
+    add     x17, x17, :lo12:lxrt_vk_counts
+    ldr     x16, [x17, #504]
+    add     x16, x16, #1
+    str     x16, [x17, #504]
+    adrp    x16, lxrt_vk_real
+    add     x16, x16, :lo12:lxrt_vk_real
+    ldr     x16, [x16, #504]
+    br      x16
+
+.Lcnt64:
+    adrp    x17, lxrt_vk_counts
+    add     x17, x17, :lo12:lxrt_vk_counts
+    ldr     x16, [x17, #512]
+    add     x16, x16, #1
+    str     x16, [x17, #512]
+    adrp    x16, lxrt_vk_real
+    add     x16, x16, :lo12:lxrt_vk_real
+    ldr     x16, [x16, #512]
+    br      x16
+
+.Lcnt65:
+    adrp    x17, lxrt_vk_counts
+    add     x17, x17, :lo12:lxrt_vk_counts
+    ldr     x16, [x17, #520]
+    add     x16, x16, #1
+    str     x16, [x17, #520]
+    adrp    x16, lxrt_vk_real
+    add     x16, x16, :lo12:lxrt_vk_real
+    ldr     x16, [x16, #520]
+    br      x16
+
+.Lcnt66:
+    adrp    x17, lxrt_vk_counts
+    add     x17, x17, :lo12:lxrt_vk_counts
+    ldr     x16, [x17, #528]
+    add     x16, x16, #1
+    str     x16, [x17, #528]
+    adrp    x16, lxrt_vk_real
+    add     x16, x16, :lo12:lxrt_vk_real
+    ldr     x16, [x16, #528]
+    br      x16
+
+.Lcnt67:
+    adrp    x17, lxrt_vk_counts
+    add     x17, x17, :lo12:lxrt_vk_counts
+    ldr     x16, [x17, #536]
+    add     x16, x16, #1
+    str     x16, [x17, #536]
+    adrp    x16, lxrt_vk_real
+    add     x16, x16, :lo12:lxrt_vk_real
+    ldr     x16, [x16, #536]
+    br      x16
+
+.Lcnt68:
+    adrp    x17, lxrt_vk_counts
+    add     x17, x17, :lo12:lxrt_vk_counts
+    ldr     x16, [x17, #544]
+    add     x16, x16, #1
+    str     x16, [x17, #544]
+    adrp    x16, lxrt_vk_real
+    add     x16, x16, :lo12:lxrt_vk_real
+    ldr     x16, [x16, #544]
+    br      x16
+
+.Lcnt69:
+    adrp    x17, lxrt_vk_counts
+    add     x17, x17, :lo12:lxrt_vk_counts
+    ldr     x16, [x17, #552]
+    add     x16, x16, #1
+    str     x16, [x17, #552]
+    adrp    x16, lxrt_vk_real
+    add     x16, x16, :lo12:lxrt_vk_real
+    ldr     x16, [x16, #552]
+    br      x16
+
+.Lcnt70:
+    adrp    x17, lxrt_vk_counts
+    add     x17, x17, :lo12:lxrt_vk_counts
+    ldr     x16, [x17, #560]
+    add     x16, x16, #1
+    str     x16, [x17, #560]
+    adrp    x16, lxrt_vk_real
+    add     x16, x16, :lo12:lxrt_vk_real
+    ldr     x16, [x16, #560]
+    br      x16
+
+.Lcnt71:
+    adrp    x17, lxrt_vk_counts
+    add     x17, x17, :lo12:lxrt_vk_counts
+    ldr     x16, [x17, #568]
+    add     x16, x16, #1
+    str     x16, [x17, #568]
+    adrp    x16, lxrt_vk_real
+    add     x16, x16, :lo12:lxrt_vk_real
+    ldr     x16, [x16, #568]
+    br      x16
+
+.Lcnt72:
+    adrp    x17, lxrt_vk_counts
+    add     x17, x17, :lo12:lxrt_vk_counts
+    ldr     x16, [x17, #576]
+    add     x16, x16, #1
+    str     x16, [x17, #576]
+    adrp    x16, lxrt_vk_real
+    add     x16, x16, :lo12:lxrt_vk_real
+    ldr     x16, [x16, #576]
+    br      x16
+
+.Lcnt73:
+    adrp    x17, lxrt_vk_counts
+    add     x17, x17, :lo12:lxrt_vk_counts
+    ldr     x16, [x17, #584]
+    add     x16, x16, #1
+    str     x16, [x17, #584]
+    adrp    x16, lxrt_vk_real
+    add     x16, x16, :lo12:lxrt_vk_real
+    ldr     x16, [x16, #584]
+    br      x16
+
+.Lcnt74:
+    adrp    x17, lxrt_vk_counts
+    add     x17, x17, :lo12:lxrt_vk_counts
+    ldr     x16, [x17, #592]
+    add     x16, x16, #1
+    str     x16, [x17, #592]
+    adrp    x16, lxrt_vk_real
+    add     x16, x16, :lo12:lxrt_vk_real
+    ldr     x16, [x16, #592]
+    br      x16
+
+.Lcnt75:
+    adrp    x17, lxrt_vk_counts
+    add     x17, x17, :lo12:lxrt_vk_counts
+    ldr     x16, [x17, #600]
+    add     x16, x16, #1
+    str     x16, [x17, #600]
+    adrp    x16, lxrt_vk_real
+    add     x16, x16, :lo12:lxrt_vk_real
+    ldr     x16, [x16, #600]
+    br      x16
+
+.Lcnt76:
+    adrp    x17, lxrt_vk_counts
+    add     x17, x17, :lo12:lxrt_vk_counts
+    ldr     x16, [x17, #608]
+    add     x16, x16, #1
+    str     x16, [x17, #608]
+    adrp    x16, lxrt_vk_real
+    add     x16, x16, :lo12:lxrt_vk_real
+    ldr     x16, [x16, #608]
+    br      x16
+
+.Lcnt77:
+    adrp    x17, lxrt_vk_counts
+    add     x17, x17, :lo12:lxrt_vk_counts
+    ldr     x16, [x17, #616]
+    add     x16, x16, #1
+    str     x16, [x17, #616]
+    adrp    x16, lxrt_vk_real
+    add     x16, x16, :lo12:lxrt_vk_real
+    ldr     x16, [x16, #616]
+    br      x16
+
+.Lcnt78:
+    adrp    x17, lxrt_vk_counts
+    add     x17, x17, :lo12:lxrt_vk_counts
+    ldr     x16, [x17, #624]
+    add     x16, x16, #1
+    str     x16, [x17, #624]
+    adrp    x16, lxrt_vk_real
+    add     x16, x16, :lo12:lxrt_vk_real
+    ldr     x16, [x16, #624]
+    br      x16
+
+.Lcnt79:
+    adrp    x17, lxrt_vk_counts
+    add     x17, x17, :lo12:lxrt_vk_counts
+    ldr     x16, [x17, #632]
+    add     x16, x16, #1
+    str     x16, [x17, #632]
+    adrp    x16, lxrt_vk_real
+    add     x16, x16, :lo12:lxrt_vk_real
+    ldr     x16, [x16, #632]
+    br      x16
+
+.Lcnt80:
+    adrp    x17, lxrt_vk_counts
+    add     x17, x17, :lo12:lxrt_vk_counts
+    ldr     x16, [x17, #640]
+    add     x16, x16, #1
+    str     x16, [x17, #640]
+    adrp    x16, lxrt_vk_real
+    add     x16, x16, :lo12:lxrt_vk_real
+    ldr     x16, [x16, #640]
+    br      x16
+
+.Lcnt81:
+    adrp    x17, lxrt_vk_counts
+    add     x17, x17, :lo12:lxrt_vk_counts
+    ldr     x16, [x17, #648]
+    add     x16, x16, #1
+    str     x16, [x17, #648]
+    adrp    x16, lxrt_vk_real
+    add     x16, x16, :lo12:lxrt_vk_real
+    ldr     x16, [x16, #648]
+    br      x16
+
+.Lcnt82:
+    adrp    x17, lxrt_vk_counts
+    add     x17, x17, :lo12:lxrt_vk_counts
+    ldr     x16, [x17, #656]
+    add     x16, x16, #1
+    str     x16, [x17, #656]
+    adrp    x16, lxrt_vk_real
+    add     x16, x16, :lo12:lxrt_vk_real
+    ldr     x16, [x16, #656]
+    br      x16
+
+.Lcnt83:
+    adrp    x17, lxrt_vk_counts
+    add     x17, x17, :lo12:lxrt_vk_counts
+    ldr     x16, [x17, #664]
+    add     x16, x16, #1
+    str     x16, [x17, #664]
+    adrp    x16, lxrt_vk_real
+    add     x16, x16, :lo12:lxrt_vk_real
+    ldr     x16, [x16, #664]
+    br      x16
+
+.Lcnt84:
+    adrp    x17, lxrt_vk_counts
+    add     x17, x17, :lo12:lxrt_vk_counts
+    ldr     x16, [x17, #672]
+    add     x16, x16, #1
+    str     x16, [x17, #672]
+    adrp    x16, lxrt_vk_real
+    add     x16, x16, :lo12:lxrt_vk_real
+    ldr     x16, [x16, #672]
+    br      x16
+
+.Lcnt85:
+    adrp    x17, lxrt_vk_counts
+    add     x17, x17, :lo12:lxrt_vk_counts
+    ldr     x16, [x17, #680]
+    add     x16, x16, #1
+    str     x16, [x17, #680]
+    adrp    x16, lxrt_vk_real
+    add     x16, x16, :lo12:lxrt_vk_real
+    ldr     x16, [x16, #680]
+    br      x16
+
+.Lcnt86:
+    adrp    x17, lxrt_vk_counts
+    add     x17, x17, :lo12:lxrt_vk_counts
+    ldr     x16, [x17, #688]
+    add     x16, x16, #1
+    str     x16, [x17, #688]
+    adrp    x16, lxrt_vk_real
+    add     x16, x16, :lo12:lxrt_vk_real
+    ldr     x16, [x16, #688]
+    br      x16
+
+.Lcnt87:
+    adrp    x17, lxrt_vk_counts
+    add     x17, x17, :lo12:lxrt_vk_counts
+    ldr     x16, [x17, #696]
+    add     x16, x16, #1
+    str     x16, [x17, #696]
+    adrp    x16, lxrt_vk_real
+    add     x16, x16, :lo12:lxrt_vk_real
+    ldr     x16, [x16, #696]
+    br      x16
+
+.Lcnt88:
+    adrp    x17, lxrt_vk_counts
+    add     x17, x17, :lo12:lxrt_vk_counts
+    ldr     x16, [x17, #704]
+    add     x16, x16, #1
+    str     x16, [x17, #704]
+    adrp    x16, lxrt_vk_real
+    add     x16, x16, :lo12:lxrt_vk_real
+    ldr     x16, [x16, #704]
+    br      x16
+
+.Lcnt89:
+    adrp    x17, lxrt_vk_counts
+    add     x17, x17, :lo12:lxrt_vk_counts
+    ldr     x16, [x17, #712]
+    add     x16, x16, #1
+    str     x16, [x17, #712]
+    adrp    x16, lxrt_vk_real
+    add     x16, x16, :lo12:lxrt_vk_real
+    ldr     x16, [x16, #712]
+    br      x16
+
+.Lcnt90:
+    adrp    x17, lxrt_vk_counts
+    add     x17, x17, :lo12:lxrt_vk_counts
+    ldr     x16, [x17, #720]
+    add     x16, x16, #1
+    str     x16, [x17, #720]
+    adrp    x16, lxrt_vk_real
+    add     x16, x16, :lo12:lxrt_vk_real
+    ldr     x16, [x16, #720]
+    br      x16
+
+.Lcnt91:
+    adrp    x17, lxrt_vk_counts
+    add     x17, x17, :lo12:lxrt_vk_counts
+    ldr     x16, [x17, #728]
+    add     x16, x16, #1
+    str     x16, [x17, #728]
+    adrp    x16, lxrt_vk_real
+    add     x16, x16, :lo12:lxrt_vk_real
+    ldr     x16, [x16, #728]
+    br      x16
+
+.Lcnt92:
+    adrp    x17, lxrt_vk_counts
+    add     x17, x17, :lo12:lxrt_vk_counts
+    ldr     x16, [x17, #736]
+    add     x16, x16, #1
+    str     x16, [x17, #736]
+    adrp    x16, lxrt_vk_real
+    add     x16, x16, :lo12:lxrt_vk_real
+    ldr     x16, [x16, #736]
+    br      x16
+
+.Lcnt93:
+    adrp    x17, lxrt_vk_counts
+    add     x17, x17, :lo12:lxrt_vk_counts
+    ldr     x16, [x17, #744]
+    add     x16, x16, #1
+    str     x16, [x17, #744]
+    adrp    x16, lxrt_vk_real
+    add     x16, x16, :lo12:lxrt_vk_real
+    ldr     x16, [x16, #744]
+    br      x16
+
+.Lcnt94:
+    adrp    x17, lxrt_vk_counts
+    add     x17, x17, :lo12:lxrt_vk_counts
+    ldr     x16, [x17, #752]
+    add     x16, x16, #1
+    str     x16, [x17, #752]
+    adrp    x16, lxrt_vk_real
+    add     x16, x16, :lo12:lxrt_vk_real
+    ldr     x16, [x16, #752]
+    br      x16
+
+.Lcnt95:
+    adrp    x17, lxrt_vk_counts
+    add     x17, x17, :lo12:lxrt_vk_counts
+    ldr     x16, [x17, #760]
+    add     x16, x16, #1
+    str     x16, [x17, #760]
+    adrp    x16, lxrt_vk_real
+    add     x16, x16, :lo12:lxrt_vk_real
+    ldr     x16, [x16, #760]
+    br      x16
+
+.Lcnt96:
+    adrp    x17, lxrt_vk_counts
+    add     x17, x17, :lo12:lxrt_vk_counts
+    ldr     x16, [x17, #768]
+    add     x16, x16, #1
+    str     x16, [x17, #768]
+    adrp    x16, lxrt_vk_real
+    add     x16, x16, :lo12:lxrt_vk_real
+    ldr     x16, [x16, #768]
+    br      x16
+
+.Lcnt97:
+    adrp    x17, lxrt_vk_counts
+    add     x17, x17, :lo12:lxrt_vk_counts
+    ldr     x16, [x17, #776]
+    add     x16, x16, #1
+    str     x16, [x17, #776]
+    adrp    x16, lxrt_vk_real
+    add     x16, x16, :lo12:lxrt_vk_real
+    ldr     x16, [x16, #776]
+    br      x16
+
+.Lcnt98:
+    adrp    x17, lxrt_vk_counts
+    add     x17, x17, :lo12:lxrt_vk_counts
+    ldr     x16, [x17, #784]
+    add     x16, x16, #1
+    str     x16, [x17, #784]
+    adrp    x16, lxrt_vk_real
+    add     x16, x16, :lo12:lxrt_vk_real
+    ldr     x16, [x16, #784]
+    br      x16
+
+.Lcnt99:
+    adrp    x17, lxrt_vk_counts
+    add     x17, x17, :lo12:lxrt_vk_counts
+    ldr     x16, [x17, #792]
+    add     x16, x16, #1
+    str     x16, [x17, #792]
+    adrp    x16, lxrt_vk_real
+    add     x16, x16, :lo12:lxrt_vk_real
+    ldr     x16, [x16, #792]
+    br      x16
+
+.Lcnt100:
+    adrp    x17, lxrt_vk_counts
+    add     x17, x17, :lo12:lxrt_vk_counts
+    ldr     x16, [x17, #800]
+    add     x16, x16, #1
+    str     x16, [x17, #800]
+    adrp    x16, lxrt_vk_real
+    add     x16, x16, :lo12:lxrt_vk_real
+    ldr     x16, [x16, #800]
+    br      x16
+
+.Lcnt101:
+    adrp    x17, lxrt_vk_counts
+    add     x17, x17, :lo12:lxrt_vk_counts
+    ldr     x16, [x17, #808]
+    add     x16, x16, #1
+    str     x16, [x17, #808]
+    adrp    x16, lxrt_vk_real
+    add     x16, x16, :lo12:lxrt_vk_real
+    ldr     x16, [x16, #808]
+    br      x16
+
+.Lcnt102:
+    adrp    x17, lxrt_vk_counts
+    add     x17, x17, :lo12:lxrt_vk_counts
+    ldr     x16, [x17, #816]
+    add     x16, x16, #1
+    str     x16, [x17, #816]
+    adrp    x16, lxrt_vk_real
+    add     x16, x16, :lo12:lxrt_vk_real
+    ldr     x16, [x16, #816]
+    br      x16
+
+.Lcnt103:
+    adrp    x17, lxrt_vk_counts
+    add     x17, x17, :lo12:lxrt_vk_counts
+    ldr     x16, [x17, #824]
+    add     x16, x16, #1
+    str     x16, [x17, #824]
+    adrp    x16, lxrt_vk_real
+    add     x16, x16, :lo12:lxrt_vk_real
+    ldr     x16, [x16, #824]
+    br      x16
+
+.Lcnt104:
+    adrp    x17, lxrt_vk_counts
+    add     x17, x17, :lo12:lxrt_vk_counts
+    ldr     x16, [x17, #832]
+    add     x16, x16, #1
+    str     x16, [x17, #832]
+    adrp    x16, lxrt_vk_real
+    add     x16, x16, :lo12:lxrt_vk_real
+    ldr     x16, [x16, #832]
+    br      x16
+
+.Lcnt105:
+    adrp    x17, lxrt_vk_counts
+    add     x17, x17, :lo12:lxrt_vk_counts
+    ldr     x16, [x17, #840]
+    add     x16, x16, #1
+    str     x16, [x17, #840]
+    adrp    x16, lxrt_vk_real
+    add     x16, x16, :lo12:lxrt_vk_real
+    ldr     x16, [x16, #840]
+    br      x16
+
+.Lcnt106:
+    adrp    x17, lxrt_vk_counts
+    add     x17, x17, :lo12:lxrt_vk_counts
+    ldr     x16, [x17, #848]
+    add     x16, x16, #1
+    str     x16, [x17, #848]
+    adrp    x16, lxrt_vk_real
+    add     x16, x16, :lo12:lxrt_vk_real
+    ldr     x16, [x16, #848]
+    br      x16
+
+.Lcnt107:
+    adrp    x17, lxrt_vk_counts
+    add     x17, x17, :lo12:lxrt_vk_counts
+    ldr     x16, [x17, #856]
+    add     x16, x16, #1
+    str     x16, [x17, #856]
+    adrp    x16, lxrt_vk_real
+    add     x16, x16, :lo12:lxrt_vk_real
+    ldr     x16, [x16, #856]
+    br      x16
+
+.Lcnt108:
+    adrp    x17, lxrt_vk_counts
+    add     x17, x17, :lo12:lxrt_vk_counts
+    ldr     x16, [x17, #864]
+    add     x16, x16, #1
+    str     x16, [x17, #864]
+    adrp    x16, lxrt_vk_real
+    add     x16, x16, :lo12:lxrt_vk_real
+    ldr     x16, [x16, #864]
+    br      x16
+
+.Lcnt109:
+    adrp    x17, lxrt_vk_counts
+    add     x17, x17, :lo12:lxrt_vk_counts
+    ldr     x16, [x17, #872]
+    add     x16, x16, #1
+    str     x16, [x17, #872]
+    adrp    x16, lxrt_vk_real
+    add     x16, x16, :lo12:lxrt_vk_real
+    ldr     x16, [x16, #872]
+    br      x16
+
+.Lcnt110:
+    adrp    x17, lxrt_vk_counts
+    add     x17, x17, :lo12:lxrt_vk_counts
+    ldr     x16, [x17, #880]
+    add     x16, x16, #1
+    str     x16, [x17, #880]
+    adrp    x16, lxrt_vk_real
+    add     x16, x16, :lo12:lxrt_vk_real
+    ldr     x16, [x16, #880]
+    br      x16
+
+.Lcnt111:
+    adrp    x17, lxrt_vk_counts
+    add     x17, x17, :lo12:lxrt_vk_counts
+    ldr     x16, [x17, #888]
+    add     x16, x16, #1
+    str     x16, [x17, #888]
+    adrp    x16, lxrt_vk_real
+    add     x16, x16, :lo12:lxrt_vk_real
+    ldr     x16, [x16, #888]
+    br      x16
+
+.Lcnt112:
+    adrp    x17, lxrt_vk_counts
+    add     x17, x17, :lo12:lxrt_vk_counts
+    ldr     x16, [x17, #896]
+    add     x16, x16, #1
+    str     x16, [x17, #896]
+    adrp    x16, lxrt_vk_real
+    add     x16, x16, :lo12:lxrt_vk_real
+    ldr     x16, [x16, #896]
+    br      x16
+
+.Lcnt113:
+    adrp    x17, lxrt_vk_counts
+    add     x17, x17, :lo12:lxrt_vk_counts
+    ldr     x16, [x17, #904]
+    add     x16, x16, #1
+    str     x16, [x17, #904]
+    adrp    x16, lxrt_vk_real
+    add     x16, x16, :lo12:lxrt_vk_real
+    ldr     x16, [x16, #904]
+    br      x16
+
+.Lcnt114:
+    adrp    x17, lxrt_vk_counts
+    add     x17, x17, :lo12:lxrt_vk_counts
+    ldr     x16, [x17, #912]
+    add     x16, x16, #1
+    str     x16, [x17, #912]
+    adrp    x16, lxrt_vk_real
+    add     x16, x16, :lo12:lxrt_vk_real
+    ldr     x16, [x16, #912]
+    br      x16
+
+.Lcnt115:
+    adrp    x17, lxrt_vk_counts
+    add     x17, x17, :lo12:lxrt_vk_counts
+    ldr     x16, [x17, #920]
+    add     x16, x16, #1
+    str     x16, [x17, #920]
+    adrp    x16, lxrt_vk_real
+    add     x16, x16, :lo12:lxrt_vk_real
+    ldr     x16, [x16, #920]
+    br      x16
+
+.Lcnt116:
+    adrp    x17, lxrt_vk_counts
+    add     x17, x17, :lo12:lxrt_vk_counts
+    ldr     x16, [x17, #928]
+    add     x16, x16, #1
+    str     x16, [x17, #928]
+    adrp    x16, lxrt_vk_real
+    add     x16, x16, :lo12:lxrt_vk_real
+    ldr     x16, [x16, #928]
+    br      x16
+
+.Lcnt117:
+    adrp    x17, lxrt_vk_counts
+    add     x17, x17, :lo12:lxrt_vk_counts
+    ldr     x16, [x17, #936]
+    add     x16, x16, #1
+    str     x16, [x17, #936]
+    adrp    x16, lxrt_vk_real
+    add     x16, x16, :lo12:lxrt_vk_real
+    ldr     x16, [x16, #936]
+    br      x16
+
+.Lcnt118:
+    adrp    x17, lxrt_vk_counts
+    add     x17, x17, :lo12:lxrt_vk_counts
+    ldr     x16, [x17, #944]
+    add     x16, x16, #1
+    str     x16, [x17, #944]
+    adrp    x16, lxrt_vk_real
+    add     x16, x16, :lo12:lxrt_vk_real
+    ldr     x16, [x16, #944]
+    br      x16
+
+.Lcnt119:
+    adrp    x17, lxrt_vk_counts
+    add     x17, x17, :lo12:lxrt_vk_counts
+    ldr     x16, [x17, #952]
+    add     x16, x16, #1
+    str     x16, [x17, #952]
+    adrp    x16, lxrt_vk_real
+    add     x16, x16, :lo12:lxrt_vk_real
+    ldr     x16, [x16, #952]
+    br      x16
+
+.Lcnt120:
+    adrp    x17, lxrt_vk_counts
+    add     x17, x17, :lo12:lxrt_vk_counts
+    ldr     x16, [x17, #960]
+    add     x16, x16, #1
+    str     x16, [x17, #960]
+    adrp    x16, lxrt_vk_real
+    add     x16, x16, :lo12:lxrt_vk_real
+    ldr     x16, [x16, #960]
+    br      x16
+
+.Lcnt121:
+    adrp    x17, lxrt_vk_counts
+    add     x17, x17, :lo12:lxrt_vk_counts
+    ldr     x16, [x17, #968]
+    add     x16, x16, #1
+    str     x16, [x17, #968]
+    adrp    x16, lxrt_vk_real
+    add     x16, x16, :lo12:lxrt_vk_real
+    ldr     x16, [x16, #968]
+    br      x16
+
+.Lcnt122:
+    adrp    x17, lxrt_vk_counts
+    add     x17, x17, :lo12:lxrt_vk_counts
+    ldr     x16, [x17, #976]
+    add     x16, x16, #1
+    str     x16, [x17, #976]
+    adrp    x16, lxrt_vk_real
+    add     x16, x16, :lo12:lxrt_vk_real
+    ldr     x16, [x16, #976]
+    br      x16
+
+.Lcnt123:
+    adrp    x17, lxrt_vk_counts
+    add     x17, x17, :lo12:lxrt_vk_counts
+    ldr     x16, [x17, #984]
+    add     x16, x16, #1
+    str     x16, [x17, #984]
+    adrp    x16, lxrt_vk_real
+    add     x16, x16, :lo12:lxrt_vk_real
+    ldr     x16, [x16, #984]
+    br      x16
+
+.Lcnt124:
+    adrp    x17, lxrt_vk_counts
+    add     x17, x17, :lo12:lxrt_vk_counts
+    ldr     x16, [x17, #992]
+    add     x16, x16, #1
+    str     x16, [x17, #992]
+    adrp    x16, lxrt_vk_real
+    add     x16, x16, :lo12:lxrt_vk_real
+    ldr     x16, [x16, #992]
+    br      x16
+
+.Lcnt125:
+    adrp    x17, lxrt_vk_counts
+    add     x17, x17, :lo12:lxrt_vk_counts
+    ldr     x16, [x17, #1000]
+    add     x16, x16, #1
+    str     x16, [x17, #1000]
+    adrp    x16, lxrt_vk_real
+    add     x16, x16, :lo12:lxrt_vk_real
+    ldr     x16, [x16, #1000]
+    br      x16
+
+.Lcnt126:
+    adrp    x17, lxrt_vk_counts
+    add     x17, x17, :lo12:lxrt_vk_counts
+    ldr     x16, [x17, #1008]
+    add     x16, x16, #1
+    str     x16, [x17, #1008]
+    adrp    x16, lxrt_vk_real
+    add     x16, x16, :lo12:lxrt_vk_real
+    ldr     x16, [x16, #1008]
+    br      x16
+
+.Lcnt127:
+    adrp    x17, lxrt_vk_counts
+    add     x17, x17, :lo12:lxrt_vk_counts
+    ldr     x16, [x17, #1016]
+    add     x16, x16, #1
+    str     x16, [x17, #1016]
+    adrp    x16, lxrt_vk_real
+    add     x16, x16, :lo12:lxrt_vk_real
+    ldr     x16, [x16, #1016]
+    br      x16
+
+.Lcnt128:
+    adrp    x17, lxrt_vk_counts
+    add     x17, x17, :lo12:lxrt_vk_counts
+    ldr     x16, [x17, #1024]
+    add     x16, x16, #1
+    str     x16, [x17, #1024]
+    adrp    x16, lxrt_vk_real
+    add     x16, x16, :lo12:lxrt_vk_real
+    ldr     x16, [x16, #1024]
+    br      x16
+
+.Lcnt129:
+    adrp    x17, lxrt_vk_counts
+    add     x17, x17, :lo12:lxrt_vk_counts
+    ldr     x16, [x17, #1032]
+    add     x16, x16, #1
+    str     x16, [x17, #1032]
+    adrp    x16, lxrt_vk_real
+    add     x16, x16, :lo12:lxrt_vk_real
+    ldr     x16, [x16, #1032]
+    br      x16
+
+.Lcnt130:
+    adrp    x17, lxrt_vk_counts
+    add     x17, x17, :lo12:lxrt_vk_counts
+    ldr     x16, [x17, #1040]
+    add     x16, x16, #1
+    str     x16, [x17, #1040]
+    adrp    x16, lxrt_vk_real
+    add     x16, x16, :lo12:lxrt_vk_real
+    ldr     x16, [x16, #1040]
+    br      x16
+
+.Lcnt131:
+    adrp    x17, lxrt_vk_counts
+    add     x17, x17, :lo12:lxrt_vk_counts
+    ldr     x16, [x17, #1048]
+    add     x16, x16, #1
+    str     x16, [x17, #1048]
+    adrp    x16, lxrt_vk_real
+    add     x16, x16, :lo12:lxrt_vk_real
+    ldr     x16, [x16, #1048]
+    br      x16
+
+.Lcnt132:
+    adrp    x17, lxrt_vk_counts
+    add     x17, x17, :lo12:lxrt_vk_counts
+    ldr     x16, [x17, #1056]
+    add     x16, x16, #1
+    str     x16, [x17, #1056]
+    adrp    x16, lxrt_vk_real
+    add     x16, x16, :lo12:lxrt_vk_real
+    ldr     x16, [x16, #1056]
+    br      x16
+
+.Lcnt133:
+    adrp    x17, lxrt_vk_counts
+    add     x17, x17, :lo12:lxrt_vk_counts
+    ldr     x16, [x17, #1064]
+    add     x16, x16, #1
+    str     x16, [x17, #1064]
+    adrp    x16, lxrt_vk_real
+    add     x16, x16, :lo12:lxrt_vk_real
+    ldr     x16, [x16, #1064]
+    br      x16
+
+.Lcnt134:
+    adrp    x17, lxrt_vk_counts
+    add     x17, x17, :lo12:lxrt_vk_counts
+    ldr     x16, [x17, #1072]
+    add     x16, x16, #1
+    str     x16, [x17, #1072]
+    adrp    x16, lxrt_vk_real
+    add     x16, x16, :lo12:lxrt_vk_real
+    ldr     x16, [x16, #1072]
+    br      x16
+
+.Lcnt135:
+    adrp    x17, lxrt_vk_counts
+    add     x17, x17, :lo12:lxrt_vk_counts
+    ldr     x16, [x17, #1080]
+    add     x16, x16, #1
+    str     x16, [x17, #1080]
+    adrp    x16, lxrt_vk_real
+    add     x16, x16, :lo12:lxrt_vk_real
+    ldr     x16, [x16, #1080]
+    br      x16
+
+.Lcnt136:
+    adrp    x17, lxrt_vk_counts
+    add     x17, x17, :lo12:lxrt_vk_counts
+    ldr     x16, [x17, #1088]
+    add     x16, x16, #1
+    str     x16, [x17, #1088]
+    adrp    x16, lxrt_vk_real
+    add     x16, x16, :lo12:lxrt_vk_real
+    ldr     x16, [x16, #1088]
+    br      x16
+
+.Lcnt137:
+    adrp    x17, lxrt_vk_counts
+    add     x17, x17, :lo12:lxrt_vk_counts
+    ldr     x16, [x17, #1096]
+    add     x16, x16, #1
+    str     x16, [x17, #1096]
+    adrp    x16, lxrt_vk_real
+    add     x16, x16, :lo12:lxrt_vk_real
+    ldr     x16, [x16, #1096]
+    br      x16
+
+.Lcnt138:
+    adrp    x17, lxrt_vk_counts
+    add     x17, x17, :lo12:lxrt_vk_counts
+    ldr     x16, [x17, #1104]
+    add     x16, x16, #1
+    str     x16, [x17, #1104]
+    adrp    x16, lxrt_vk_real
+    add     x16, x16, :lo12:lxrt_vk_real
+    ldr     x16, [x16, #1104]
+    br      x16
+
+.Lcnt139:
+    adrp    x17, lxrt_vk_counts
+    add     x17, x17, :lo12:lxrt_vk_counts
+    ldr     x16, [x17, #1112]
+    add     x16, x16, #1
+    str     x16, [x17, #1112]
+    adrp    x16, lxrt_vk_real
+    add     x16, x16, :lo12:lxrt_vk_real
+    ldr     x16, [x16, #1112]
+    br      x16
+
+.Lcnt140:
+    adrp    x17, lxrt_vk_counts
+    add     x17, x17, :lo12:lxrt_vk_counts
+    ldr     x16, [x17, #1120]
+    add     x16, x16, #1
+    str     x16, [x17, #1120]
+    adrp    x16, lxrt_vk_real
+    add     x16, x16, :lo12:lxrt_vk_real
+    ldr     x16, [x16, #1120]
+    br      x16
+
+.Lcnt141:
+    adrp    x17, lxrt_vk_counts
+    add     x17, x17, :lo12:lxrt_vk_counts
+    ldr     x16, [x17, #1128]
+    add     x16, x16, #1
+    str     x16, [x17, #1128]
+    adrp    x16, lxrt_vk_real
+    add     x16, x16, :lo12:lxrt_vk_real
+    ldr     x16, [x16, #1128]
+    br      x16
+
+.Lcnt142:
+    adrp    x17, lxrt_vk_counts
+    add     x17, x17, :lo12:lxrt_vk_counts
+    ldr     x16, [x17, #1136]
+    add     x16, x16, #1
+    str     x16, [x17, #1136]
+    adrp    x16, lxrt_vk_real
+    add     x16, x16, :lo12:lxrt_vk_real
+    ldr     x16, [x16, #1136]
+    br      x16
+
+.Lcnt143:
+    adrp    x17, lxrt_vk_counts
+    add     x17, x17, :lo12:lxrt_vk_counts
+    ldr     x16, [x17, #1144]
+    add     x16, x16, #1
+    str     x16, [x17, #1144]
+    adrp    x16, lxrt_vk_real
+    add     x16, x16, :lo12:lxrt_vk_real
+    ldr     x16, [x16, #1144]
+    br      x16
+
+.Lcnt144:
+    adrp    x17, lxrt_vk_counts
+    add     x17, x17, :lo12:lxrt_vk_counts
+    ldr     x16, [x17, #1152]
+    add     x16, x16, #1
+    str     x16, [x17, #1152]
+    adrp    x16, lxrt_vk_real
+    add     x16, x16, :lo12:lxrt_vk_real
+    ldr     x16, [x16, #1152]
+    br      x16
+
+.Lcnt145:
+    adrp    x17, lxrt_vk_counts
+    add     x17, x17, :lo12:lxrt_vk_counts
+    ldr     x16, [x17, #1160]
+    add     x16, x16, #1
+    str     x16, [x17, #1160]
+    adrp    x16, lxrt_vk_real
+    add     x16, x16, :lo12:lxrt_vk_real
+    ldr     x16, [x16, #1160]
+    br      x16
+
+.Lcnt146:
+    adrp    x17, lxrt_vk_counts
+    add     x17, x17, :lo12:lxrt_vk_counts
+    ldr     x16, [x17, #1168]
+    add     x16, x16, #1
+    str     x16, [x17, #1168]
+    adrp    x16, lxrt_vk_real
+    add     x16, x16, :lo12:lxrt_vk_real
+    ldr     x16, [x16, #1168]
+    br      x16
+
+.Lcnt147:
+    adrp    x17, lxrt_vk_counts
+    add     x17, x17, :lo12:lxrt_vk_counts
+    ldr     x16, [x17, #1176]
+    add     x16, x16, #1
+    str     x16, [x17, #1176]
+    adrp    x16, lxrt_vk_real
+    add     x16, x16, :lo12:lxrt_vk_real
+    ldr     x16, [x16, #1176]
+    br      x16
+
+.Lcnt148:
+    adrp    x17, lxrt_vk_counts
+    add     x17, x17, :lo12:lxrt_vk_counts
+    ldr     x16, [x17, #1184]
+    add     x16, x16, #1
+    str     x16, [x17, #1184]
+    adrp    x16, lxrt_vk_real
+    add     x16, x16, :lo12:lxrt_vk_real
+    ldr     x16, [x16, #1184]
+    br      x16
+
+.Lcnt149:
+    adrp    x17, lxrt_vk_counts
+    add     x17, x17, :lo12:lxrt_vk_counts
+    ldr     x16, [x17, #1192]
+    add     x16, x16, #1
+    str     x16, [x17, #1192]
+    adrp    x16, lxrt_vk_real
+    add     x16, x16, :lo12:lxrt_vk_real
+    ldr     x16, [x16, #1192]
+    br      x16
+
+.Lcnt150:
+    adrp    x17, lxrt_vk_counts
+    add     x17, x17, :lo12:lxrt_vk_counts
+    ldr     x16, [x17, #1200]
+    add     x16, x16, #1
+    str     x16, [x17, #1200]
+    adrp    x16, lxrt_vk_real
+    add     x16, x16, :lo12:lxrt_vk_real
+    ldr     x16, [x16, #1200]
+    br      x16
+
+.Lcnt151:
+    adrp    x17, lxrt_vk_counts
+    add     x17, x17, :lo12:lxrt_vk_counts
+    ldr     x16, [x17, #1208]
+    add     x16, x16, #1
+    str     x16, [x17, #1208]
+    adrp    x16, lxrt_vk_real
+    add     x16, x16, :lo12:lxrt_vk_real
+    ldr     x16, [x16, #1208]
+    br      x16
+
+.Lcnt152:
+    adrp    x17, lxrt_vk_counts
+    add     x17, x17, :lo12:lxrt_vk_counts
+    ldr     x16, [x17, #1216]
+    add     x16, x16, #1
+    str     x16, [x17, #1216]
+    adrp    x16, lxrt_vk_real
+    add     x16, x16, :lo12:lxrt_vk_real
+    ldr     x16, [x16, #1216]
+    br      x16
+
+.Lcnt153:
+    adrp    x17, lxrt_vk_counts
+    add     x17, x17, :lo12:lxrt_vk_counts
+    ldr     x16, [x17, #1224]
+    add     x16, x16, #1
+    str     x16, [x17, #1224]
+    adrp    x16, lxrt_vk_real
+    add     x16, x16, :lo12:lxrt_vk_real
+    ldr     x16, [x16, #1224]
+    br      x16
+
+.Lcnt154:
+    adrp    x17, lxrt_vk_counts
+    add     x17, x17, :lo12:lxrt_vk_counts
+    ldr     x16, [x17, #1232]
+    add     x16, x16, #1
+    str     x16, [x17, #1232]
+    adrp    x16, lxrt_vk_real
+    add     x16, x16, :lo12:lxrt_vk_real
+    ldr     x16, [x16, #1232]
+    br      x16
+
+.Lcnt155:
+    adrp    x17, lxrt_vk_counts
+    add     x17, x17, :lo12:lxrt_vk_counts
+    ldr     x16, [x17, #1240]
+    add     x16, x16, #1
+    str     x16, [x17, #1240]
+    adrp    x16, lxrt_vk_real
+    add     x16, x16, :lo12:lxrt_vk_real
+    ldr     x16, [x16, #1240]
+    br      x16
+
+.Lcnt156:
+    adrp    x17, lxrt_vk_counts
+    add     x17, x17, :lo12:lxrt_vk_counts
+    ldr     x16, [x17, #1248]
+    add     x16, x16, #1
+    str     x16, [x17, #1248]
+    adrp    x16, lxrt_vk_real
+    add     x16, x16, :lo12:lxrt_vk_real
+    ldr     x16, [x16, #1248]
+    br      x16
+
+.Lcnt157:
+    adrp    x17, lxrt_vk_counts
+    add     x17, x17, :lo12:lxrt_vk_counts
+    ldr     x16, [x17, #1256]
+    add     x16, x16, #1
+    str     x16, [x17, #1256]
+    adrp    x16, lxrt_vk_real
+    add     x16, x16, :lo12:lxrt_vk_real
+    ldr     x16, [x16, #1256]
+    br      x16
+
+.Lcnt158:
+    adrp    x17, lxrt_vk_counts
+    add     x17, x17, :lo12:lxrt_vk_counts
+    ldr     x16, [x17, #1264]
+    add     x16, x16, #1
+    str     x16, [x17, #1264]
+    adrp    x16, lxrt_vk_real
+    add     x16, x16, :lo12:lxrt_vk_real
+    ldr     x16, [x16, #1264]
+    br      x16
+
+.Lcnt159:
+    adrp    x17, lxrt_vk_counts
+    add     x17, x17, :lo12:lxrt_vk_counts
+    ldr     x16, [x17, #1272]
+    add     x16, x16, #1
+    str     x16, [x17, #1272]
+    adrp    x16, lxrt_vk_real
+    add     x16, x16, :lo12:lxrt_vk_real
+    ldr     x16, [x16, #1272]
+    br      x16
+
+.Lcnt160:
+    adrp    x17, lxrt_vk_counts
+    add     x17, x17, :lo12:lxrt_vk_counts
+    ldr     x16, [x17, #1280]
+    add     x16, x16, #1
+    str     x16, [x17, #1280]
+    adrp    x16, lxrt_vk_real
+    add     x16, x16, :lo12:lxrt_vk_real
+    ldr     x16, [x16, #1280]
+    br      x16
+
+.Lcnt161:
+    adrp    x17, lxrt_vk_counts
+    add     x17, x17, :lo12:lxrt_vk_counts
+    ldr     x16, [x17, #1288]
+    add     x16, x16, #1
+    str     x16, [x17, #1288]
+    adrp    x16, lxrt_vk_real
+    add     x16, x16, :lo12:lxrt_vk_real
+    ldr     x16, [x16, #1288]
+    br      x16
+
+.Lcnt162:
+    adrp    x17, lxrt_vk_counts
+    add     x17, x17, :lo12:lxrt_vk_counts
+    ldr     x16, [x17, #1296]
+    add     x16, x16, #1
+    str     x16, [x17, #1296]
+    adrp    x16, lxrt_vk_real
+    add     x16, x16, :lo12:lxrt_vk_real
+    ldr     x16, [x16, #1296]
+    br      x16
+
+.Lcnt163:
+    adrp    x17, lxrt_vk_counts
+    add     x17, x17, :lo12:lxrt_vk_counts
+    ldr     x16, [x17, #1304]
+    add     x16, x16, #1
+    str     x16, [x17, #1304]
+    adrp    x16, lxrt_vk_real
+    add     x16, x16, :lo12:lxrt_vk_real
+    ldr     x16, [x16, #1304]
+    br      x16
+
+.Lcnt164:
+    adrp    x17, lxrt_vk_counts
+    add     x17, x17, :lo12:lxrt_vk_counts
+    ldr     x16, [x17, #1312]
+    add     x16, x16, #1
+    str     x16, [x17, #1312]
+    adrp    x16, lxrt_vk_real
+    add     x16, x16, :lo12:lxrt_vk_real
+    ldr     x16, [x16, #1312]
+    br      x16
+
+.Lcnt165:
+    adrp    x17, lxrt_vk_counts
+    add     x17, x17, :lo12:lxrt_vk_counts
+    ldr     x16, [x17, #1320]
+    add     x16, x16, #1
+    str     x16, [x17, #1320]
+    adrp    x16, lxrt_vk_real
+    add     x16, x16, :lo12:lxrt_vk_real
+    ldr     x16, [x16, #1320]
+    br      x16
+
+.Lcnt166:
+    adrp    x17, lxrt_vk_counts
+    add     x17, x17, :lo12:lxrt_vk_counts
+    ldr     x16, [x17, #1328]
+    add     x16, x16, #1
+    str     x16, [x17, #1328]
+    adrp    x16, lxrt_vk_real
+    add     x16, x16, :lo12:lxrt_vk_real
+    ldr     x16, [x16, #1328]
+    br      x16
+
+.Lcnt167:
+    adrp    x17, lxrt_vk_counts
+    add     x17, x17, :lo12:lxrt_vk_counts
+    ldr     x16, [x17, #1336]
+    add     x16, x16, #1
+    str     x16, [x17, #1336]
+    adrp    x16, lxrt_vk_real
+    add     x16, x16, :lo12:lxrt_vk_real
+    ldr     x16, [x16, #1336]
+    br      x16
+
+.Lcnt168:
+    adrp    x17, lxrt_vk_counts
+    add     x17, x17, :lo12:lxrt_vk_counts
+    ldr     x16, [x17, #1344]
+    add     x16, x16, #1
+    str     x16, [x17, #1344]
+    adrp    x16, lxrt_vk_real
+    add     x16, x16, :lo12:lxrt_vk_real
+    ldr     x16, [x16, #1344]
+    br      x16
+
+.Lcnt169:
+    adrp    x17, lxrt_vk_counts
+    add     x17, x17, :lo12:lxrt_vk_counts
+    ldr     x16, [x17, #1352]
+    add     x16, x16, #1
+    str     x16, [x17, #1352]
+    adrp    x16, lxrt_vk_real
+    add     x16, x16, :lo12:lxrt_vk_real
+    ldr     x16, [x16, #1352]
+    br      x16
+
+.Lcnt170:
+    adrp    x17, lxrt_vk_counts
+    add     x17, x17, :lo12:lxrt_vk_counts
+    ldr     x16, [x17, #1360]
+    add     x16, x16, #1
+    str     x16, [x17, #1360]
+    adrp    x16, lxrt_vk_real
+    add     x16, x16, :lo12:lxrt_vk_real
+    ldr     x16, [x16, #1360]
+    br      x16
+
+.Lcnt171:
+    adrp    x17, lxrt_vk_counts
+    add     x17, x17, :lo12:lxrt_vk_counts
+    ldr     x16, [x17, #1368]
+    add     x16, x16, #1
+    str     x16, [x17, #1368]
+    adrp    x16, lxrt_vk_real
+    add     x16, x16, :lo12:lxrt_vk_real
+    ldr     x16, [x16, #1368]
+    br      x16
+
+.Lcnt172:
+    adrp    x17, lxrt_vk_counts
+    add     x17, x17, :lo12:lxrt_vk_counts
+    ldr     x16, [x17, #1376]
+    add     x16, x16, #1
+    str     x16, [x17, #1376]
+    adrp    x16, lxrt_vk_real
+    add     x16, x16, :lo12:lxrt_vk_real
+    ldr     x16, [x16, #1376]
+    br      x16
+
+.Lcnt173:
+    adrp    x17, lxrt_vk_counts
+    add     x17, x17, :lo12:lxrt_vk_counts
+    ldr     x16, [x17, #1384]
+    add     x16, x16, #1
+    str     x16, [x17, #1384]
+    adrp    x16, lxrt_vk_real
+    add     x16, x16, :lo12:lxrt_vk_real
+    ldr     x16, [x16, #1384]
+    br      x16
+
+.Lcnt174:
+    adrp    x17, lxrt_vk_counts
+    add     x17, x17, :lo12:lxrt_vk_counts
+    ldr     x16, [x17, #1392]
+    add     x16, x16, #1
+    str     x16, [x17, #1392]
+    adrp    x16, lxrt_vk_real
+    add     x16, x16, :lo12:lxrt_vk_real
+    ldr     x16, [x16, #1392]
+    br      x16
+
+.Lcnt175:
+    adrp    x17, lxrt_vk_counts
+    add     x17, x17, :lo12:lxrt_vk_counts
+    ldr     x16, [x17, #1400]
+    add     x16, x16, #1
+    str     x16, [x17, #1400]
+    adrp    x16, lxrt_vk_real
+    add     x16, x16, :lo12:lxrt_vk_real
+    ldr     x16, [x16, #1400]
+    br      x16
+
+.Lcnt176:
+    adrp    x17, lxrt_vk_counts
+    add     x17, x17, :lo12:lxrt_vk_counts
+    ldr     x16, [x17, #1408]
+    add     x16, x16, #1
+    str     x16, [x17, #1408]
+    adrp    x16, lxrt_vk_real
+    add     x16, x16, :lo12:lxrt_vk_real
+    ldr     x16, [x16, #1408]
+    br      x16
+
+.Lcnt177:
+    adrp    x17, lxrt_vk_counts
+    add     x17, x17, :lo12:lxrt_vk_counts
+    ldr     x16, [x17, #1416]
+    add     x16, x16, #1
+    str     x16, [x17, #1416]
+    adrp    x16, lxrt_vk_real
+    add     x16, x16, :lo12:lxrt_vk_real
+    ldr     x16, [x16, #1416]
+    br      x16
+
+.Lcnt178:
+    adrp    x17, lxrt_vk_counts
+    add     x17, x17, :lo12:lxrt_vk_counts
+    ldr     x16, [x17, #1424]
+    add     x16, x16, #1
+    str     x16, [x17, #1424]
+    adrp    x16, lxrt_vk_real
+    add     x16, x16, :lo12:lxrt_vk_real
+    ldr     x16, [x16, #1424]
+    br      x16
+
+.Lcnt179:
+    adrp    x17, lxrt_vk_counts
+    add     x17, x17, :lo12:lxrt_vk_counts
+    ldr     x16, [x17, #1432]
+    add     x16, x16, #1
+    str     x16, [x17, #1432]
+    adrp    x16, lxrt_vk_real
+    add     x16, x16, :lo12:lxrt_vk_real
+    ldr     x16, [x16, #1432]
+    br      x16
+
+.Lcnt180:
+    adrp    x17, lxrt_vk_counts
+    add     x17, x17, :lo12:lxrt_vk_counts
+    ldr     x16, [x17, #1440]
+    add     x16, x16, #1
+    str     x16, [x17, #1440]
+    adrp    x16, lxrt_vk_real
+    add     x16, x16, :lo12:lxrt_vk_real
+    ldr     x16, [x16, #1440]
+    br      x16
+
+.Lcnt181:
+    adrp    x17, lxrt_vk_counts
+    add     x17, x17, :lo12:lxrt_vk_counts
+    ldr     x16, [x17, #1448]
+    add     x16, x16, #1
+    str     x16, [x17, #1448]
+    adrp    x16, lxrt_vk_real
+    add     x16, x16, :lo12:lxrt_vk_real
+    ldr     x16, [x16, #1448]
+    br      x16
+
+.Lcnt182:
+    adrp    x17, lxrt_vk_counts
+    add     x17, x17, :lo12:lxrt_vk_counts
+    ldr     x16, [x17, #1456]
+    add     x16, x16, #1
+    str     x16, [x17, #1456]
+    adrp    x16, lxrt_vk_real
+    add     x16, x16, :lo12:lxrt_vk_real
+    ldr     x16, [x16, #1456]
+    br      x16
+
+.Lcnt183:
+    adrp    x17, lxrt_vk_counts
+    add     x17, x17, :lo12:lxrt_vk_counts
+    ldr     x16, [x17, #1464]
+    add     x16, x16, #1
+    str     x16, [x17, #1464]
+    adrp    x16, lxrt_vk_real
+    add     x16, x16, :lo12:lxrt_vk_real
+    ldr     x16, [x16, #1464]
+    br      x16
+
+.Lcnt184:
+    adrp    x17, lxrt_vk_counts
+    add     x17, x17, :lo12:lxrt_vk_counts
+    ldr     x16, [x17, #1472]
+    add     x16, x16, #1
+    str     x16, [x17, #1472]
+    adrp    x16, lxrt_vk_real
+    add     x16, x16, :lo12:lxrt_vk_real
+    ldr     x16, [x16, #1472]
+    br      x16
+
+.Lcnt185:
+    adrp    x17, lxrt_vk_counts
+    add     x17, x17, :lo12:lxrt_vk_counts
+    ldr     x16, [x17, #1480]
+    add     x16, x16, #1
+    str     x16, [x17, #1480]
+    adrp    x16, lxrt_vk_real
+    add     x16, x16, :lo12:lxrt_vk_real
+    ldr     x16, [x16, #1480]
+    br      x16
+
+.Lcnt186:
+    adrp    x17, lxrt_vk_counts
+    add     x17, x17, :lo12:lxrt_vk_counts
+    ldr     x16, [x17, #1488]
+    add     x16, x16, #1
+    str     x16, [x17, #1488]
+    adrp    x16, lxrt_vk_real
+    add     x16, x16, :lo12:lxrt_vk_real
+    ldr     x16, [x16, #1488]
+    br      x16
+
+.Lcnt187:
+    adrp    x17, lxrt_vk_counts
+    add     x17, x17, :lo12:lxrt_vk_counts
+    ldr     x16, [x17, #1496]
+    add     x16, x16, #1
+    str     x16, [x17, #1496]
+    adrp    x16, lxrt_vk_real
+    add     x16, x16, :lo12:lxrt_vk_real
+    ldr     x16, [x16, #1496]
+    br      x16
+
+.Lcnt188:
+    adrp    x17, lxrt_vk_counts
+    add     x17, x17, :lo12:lxrt_vk_counts
+    ldr     x16, [x17, #1504]
+    add     x16, x16, #1
+    str     x16, [x17, #1504]
+    adrp    x16, lxrt_vk_real
+    add     x16, x16, :lo12:lxrt_vk_real
+    ldr     x16, [x16, #1504]
+    br      x16
+
+.Lcnt189:
+    adrp    x17, lxrt_vk_counts
+    add     x17, x17, :lo12:lxrt_vk_counts
+    ldr     x16, [x17, #1512]
+    add     x16, x16, #1
+    str     x16, [x17, #1512]
+    adrp    x16, lxrt_vk_real
+    add     x16, x16, :lo12:lxrt_vk_real
+    ldr     x16, [x16, #1512]
+    br      x16
+
+.Lcnt190:
+    adrp    x17, lxrt_vk_counts
+    add     x17, x17, :lo12:lxrt_vk_counts
+    ldr     x16, [x17, #1520]
+    add     x16, x16, #1
+    str     x16, [x17, #1520]
+    adrp    x16, lxrt_vk_real
+    add     x16, x16, :lo12:lxrt_vk_real
+    ldr     x16, [x16, #1520]
+    br      x16
+
+.Lcnt191:
+    adrp    x17, lxrt_vk_counts
+    add     x17, x17, :lo12:lxrt_vk_counts
+    ldr     x16, [x17, #1528]
+    add     x16, x16, #1
+    str     x16, [x17, #1528]
+    adrp    x16, lxrt_vk_real
+    add     x16, x16, :lo12:lxrt_vk_real
+    ldr     x16, [x16, #1528]
+    br      x16
+
+.Lcnt192:
+    adrp    x17, lxrt_vk_counts
+    add     x17, x17, :lo12:lxrt_vk_counts
+    ldr     x16, [x17, #1536]
+    add     x16, x16, #1
+    str     x16, [x17, #1536]
+    adrp    x16, lxrt_vk_real
+    add     x16, x16, :lo12:lxrt_vk_real
+    ldr     x16, [x16, #1536]
+    br      x16
+
+.Lcnt193:
+    adrp    x17, lxrt_vk_counts
+    add     x17, x17, :lo12:lxrt_vk_counts
+    ldr     x16, [x17, #1544]
+    add     x16, x16, #1
+    str     x16, [x17, #1544]
+    adrp    x16, lxrt_vk_real
+    add     x16, x16, :lo12:lxrt_vk_real
+    ldr     x16, [x16, #1544]
+    br      x16
+
+.Lcnt194:
+    adrp    x17, lxrt_vk_counts
+    add     x17, x17, :lo12:lxrt_vk_counts
+    ldr     x16, [x17, #1552]
+    add     x16, x16, #1
+    str     x16, [x17, #1552]
+    adrp    x16, lxrt_vk_real
+    add     x16, x16, :lo12:lxrt_vk_real
+    ldr     x16, [x16, #1552]
+    br      x16
+
+.Lcnt195:
+    adrp    x17, lxrt_vk_counts
+    add     x17, x17, :lo12:lxrt_vk_counts
+    ldr     x16, [x17, #1560]
+    add     x16, x16, #1
+    str     x16, [x17, #1560]
+    adrp    x16, lxrt_vk_real
+    add     x16, x16, :lo12:lxrt_vk_real
+    ldr     x16, [x16, #1560]
+    br      x16
+
+.Lcnt196:
+    adrp    x17, lxrt_vk_counts
+    add     x17, x17, :lo12:lxrt_vk_counts
+    ldr     x16, [x17, #1568]
+    add     x16, x16, #1
+    str     x16, [x17, #1568]
+    adrp    x16, lxrt_vk_real
+    add     x16, x16, :lo12:lxrt_vk_real
+    ldr     x16, [x16, #1568]
+    br      x16
+
+.Lcnt197:
+    adrp    x17, lxrt_vk_counts
+    add     x17, x17, :lo12:lxrt_vk_counts
+    ldr     x16, [x17, #1576]
+    add     x16, x16, #1
+    str     x16, [x17, #1576]
+    adrp    x16, lxrt_vk_real
+    add     x16, x16, :lo12:lxrt_vk_real
+    ldr     x16, [x16, #1576]
+    br      x16
+
+.Lcnt198:
+    adrp    x17, lxrt_vk_counts
+    add     x17, x17, :lo12:lxrt_vk_counts
+    ldr     x16, [x17, #1584]
+    add     x16, x16, #1
+    str     x16, [x17, #1584]
+    adrp    x16, lxrt_vk_real
+    add     x16, x16, :lo12:lxrt_vk_real
+    ldr     x16, [x16, #1584]
+    br      x16
+
+.Lcnt199:
+    adrp    x17, lxrt_vk_counts
+    add     x17, x17, :lo12:lxrt_vk_counts
+    ldr     x16, [x17, #1592]
+    add     x16, x16, #1
+    str     x16, [x17, #1592]
+    adrp    x16, lxrt_vk_real
+    add     x16, x16, :lo12:lxrt_vk_real
+    ldr     x16, [x16, #1592]
+    br      x16
+
+.Lcnt200:
+    adrp    x17, lxrt_vk_counts
+    add     x17, x17, :lo12:lxrt_vk_counts
+    ldr     x16, [x17, #1600]
+    add     x16, x16, #1
+    str     x16, [x17, #1600]
+    adrp    x16, lxrt_vk_real
+    add     x16, x16, :lo12:lxrt_vk_real
+    ldr     x16, [x16, #1600]
+    br      x16
+
+.Lcnt201:
+    adrp    x17, lxrt_vk_counts
+    add     x17, x17, :lo12:lxrt_vk_counts
+    ldr     x16, [x17, #1608]
+    add     x16, x16, #1
+    str     x16, [x17, #1608]
+    adrp    x16, lxrt_vk_real
+    add     x16, x16, :lo12:lxrt_vk_real
+    ldr     x16, [x16, #1608]
+    br      x16
+
+.Lcnt202:
+    adrp    x17, lxrt_vk_counts
+    add     x17, x17, :lo12:lxrt_vk_counts
+    ldr     x16, [x17, #1616]
+    add     x16, x16, #1
+    str     x16, [x17, #1616]
+    adrp    x16, lxrt_vk_real
+    add     x16, x16, :lo12:lxrt_vk_real
+    ldr     x16, [x16, #1616]
+    br      x16
+
+.Lcnt203:
+    adrp    x17, lxrt_vk_counts
+    add     x17, x17, :lo12:lxrt_vk_counts
+    ldr     x16, [x17, #1624]
+    add     x16, x16, #1
+    str     x16, [x17, #1624]
+    adrp    x16, lxrt_vk_real
+    add     x16, x16, :lo12:lxrt_vk_real
+    ldr     x16, [x16, #1624]
+    br      x16
+
+.Lcnt204:
+    adrp    x17, lxrt_vk_counts
+    add     x17, x17, :lo12:lxrt_vk_counts
+    ldr     x16, [x17, #1632]
+    add     x16, x16, #1
+    str     x16, [x17, #1632]
+    adrp    x16, lxrt_vk_real
+    add     x16, x16, :lo12:lxrt_vk_real
+    ldr     x16, [x16, #1632]
+    br      x16
+
+.Lcnt205:
+    adrp    x17, lxrt_vk_counts
+    add     x17, x17, :lo12:lxrt_vk_counts
+    ldr     x16, [x17, #1640]
+    add     x16, x16, #1
+    str     x16, [x17, #1640]
+    adrp    x16, lxrt_vk_real
+    add     x16, x16, :lo12:lxrt_vk_real
+    ldr     x16, [x16, #1640]
+    br      x16
+
+.Lcnt206:
+    adrp    x17, lxrt_vk_counts
+    add     x17, x17, :lo12:lxrt_vk_counts
+    ldr     x16, [x17, #1648]
+    add     x16, x16, #1
+    str     x16, [x17, #1648]
+    adrp    x16, lxrt_vk_real
+    add     x16, x16, :lo12:lxrt_vk_real
+    ldr     x16, [x16, #1648]
+    br      x16
+
+.Lcnt207:
+    adrp    x17, lxrt_vk_counts
+    add     x17, x17, :lo12:lxrt_vk_counts
+    ldr     x16, [x17, #1656]
+    add     x16, x16, #1
+    str     x16, [x17, #1656]
+    adrp    x16, lxrt_vk_real
+    add     x16, x16, :lo12:lxrt_vk_real
+    ldr     x16, [x16, #1656]
+    br      x16
+
+.Lcnt208:
+    adrp    x17, lxrt_vk_counts
+    add     x17, x17, :lo12:lxrt_vk_counts
+    ldr     x16, [x17, #1664]
+    add     x16, x16, #1
+    str     x16, [x17, #1664]
+    adrp    x16, lxrt_vk_real
+    add     x16, x16, :lo12:lxrt_vk_real
+    ldr     x16, [x16, #1664]
+    br      x16
+
+.Lcnt209:
+    adrp    x17, lxrt_vk_counts
+    add     x17, x17, :lo12:lxrt_vk_counts
+    ldr     x16, [x17, #1672]
+    add     x16, x16, #1
+    str     x16, [x17, #1672]
+    adrp    x16, lxrt_vk_real
+    add     x16, x16, :lo12:lxrt_vk_real
+    ldr     x16, [x16, #1672]
+    br      x16
+
+.Lcnt210:
+    adrp    x17, lxrt_vk_counts
+    add     x17, x17, :lo12:lxrt_vk_counts
+    ldr     x16, [x17, #1680]
+    add     x16, x16, #1
+    str     x16, [x17, #1680]
+    adrp    x16, lxrt_vk_real
+    add     x16, x16, :lo12:lxrt_vk_real
+    ldr     x16, [x16, #1680]
+    br      x16
+
+.Lcnt211:
+    adrp    x17, lxrt_vk_counts
+    add     x17, x17, :lo12:lxrt_vk_counts
+    ldr     x16, [x17, #1688]
+    add     x16, x16, #1
+    str     x16, [x17, #1688]
+    adrp    x16, lxrt_vk_real
+    add     x16, x16, :lo12:lxrt_vk_real
+    ldr     x16, [x16, #1688]
+    br      x16
+
+.Lcnt212:
+    adrp    x17, lxrt_vk_counts
+    add     x17, x17, :lo12:lxrt_vk_counts
+    ldr     x16, [x17, #1696]
+    add     x16, x16, #1
+    str     x16, [x17, #1696]
+    adrp    x16, lxrt_vk_real
+    add     x16, x16, :lo12:lxrt_vk_real
+    ldr     x16, [x16, #1696]
+    br      x16
+
+.Lcnt213:
+    adrp    x17, lxrt_vk_counts
+    add     x17, x17, :lo12:lxrt_vk_counts
+    ldr     x16, [x17, #1704]
+    add     x16, x16, #1
+    str     x16, [x17, #1704]
+    adrp    x16, lxrt_vk_real
+    add     x16, x16, :lo12:lxrt_vk_real
+    ldr     x16, [x16, #1704]
+    br      x16
+
+.Lcnt214:
+    adrp    x17, lxrt_vk_counts
+    add     x17, x17, :lo12:lxrt_vk_counts
+    ldr     x16, [x17, #1712]
+    add     x16, x16, #1
+    str     x16, [x17, #1712]
+    adrp    x16, lxrt_vk_real
+    add     x16, x16, :lo12:lxrt_vk_real
+    ldr     x16, [x16, #1712]
+    br      x16
+
+.Lcnt215:
+    adrp    x17, lxrt_vk_counts
+    add     x17, x17, :lo12:lxrt_vk_counts
+    ldr     x16, [x17, #1720]
+    add     x16, x16, #1
+    str     x16, [x17, #1720]
+    adrp    x16, lxrt_vk_real
+    add     x16, x16, :lo12:lxrt_vk_real
+    ldr     x16, [x16, #1720]
+    br      x16
+
+.Lcnt216:
+    adrp    x17, lxrt_vk_counts
+    add     x17, x17, :lo12:lxrt_vk_counts
+    ldr     x16, [x17, #1728]
+    add     x16, x16, #1
+    str     x16, [x17, #1728]
+    adrp    x16, lxrt_vk_real
+    add     x16, x16, :lo12:lxrt_vk_real
+    ldr     x16, [x16, #1728]
+    br      x16
+
+.Lcnt217:
+    adrp    x17, lxrt_vk_counts
+    add     x17, x17, :lo12:lxrt_vk_counts
+    ldr     x16, [x17, #1736]
+    add     x16, x16, #1
+    str     x16, [x17, #1736]
+    adrp    x16, lxrt_vk_real
+    add     x16, x16, :lo12:lxrt_vk_real
+    ldr     x16, [x16, #1736]
+    br      x16
+
+.Lcnt218:
+    adrp    x17, lxrt_vk_counts
+    add     x17, x17, :lo12:lxrt_vk_counts
+    ldr     x16, [x17, #1744]
+    add     x16, x16, #1
+    str     x16, [x17, #1744]
+    adrp    x16, lxrt_vk_real
+    add     x16, x16, :lo12:lxrt_vk_real
+    ldr     x16, [x16, #1744]
+    br      x16
+
+.Lcnt219:
+    adrp    x17, lxrt_vk_counts
+    add     x17, x17, :lo12:lxrt_vk_counts
+    ldr     x16, [x17, #1752]
+    add     x16, x16, #1
+    str     x16, [x17, #1752]
+    adrp    x16, lxrt_vk_real
+    add     x16, x16, :lo12:lxrt_vk_real
+    ldr     x16, [x16, #1752]
+    br      x16
+
+.Lcnt220:
+    adrp    x17, lxrt_vk_counts
+    add     x17, x17, :lo12:lxrt_vk_counts
+    ldr     x16, [x17, #1760]
+    add     x16, x16, #1
+    str     x16, [x17, #1760]
+    adrp    x16, lxrt_vk_real
+    add     x16, x16, :lo12:lxrt_vk_real
+    ldr     x16, [x16, #1760]
+    br      x16
+
+.Lcnt221:
+    adrp    x17, lxrt_vk_counts
+    add     x17, x17, :lo12:lxrt_vk_counts
+    ldr     x16, [x17, #1768]
+    add     x16, x16, #1
+    str     x16, [x17, #1768]
+    adrp    x16, lxrt_vk_real
+    add     x16, x16, :lo12:lxrt_vk_real
+    ldr     x16, [x16, #1768]
+    br      x16
+
+.Lcnt222:
+    adrp    x17, lxrt_vk_counts
+    add     x17, x17, :lo12:lxrt_vk_counts
+    ldr     x16, [x17, #1776]
+    add     x16, x16, #1
+    str     x16, [x17, #1776]
+    adrp    x16, lxrt_vk_real
+    add     x16, x16, :lo12:lxrt_vk_real
+    ldr     x16, [x16, #1776]
+    br      x16
+
+.Lcnt223:
+    adrp    x17, lxrt_vk_counts
+    add     x17, x17, :lo12:lxrt_vk_counts
+    ldr     x16, [x17, #1784]
+    add     x16, x16, #1
+    str     x16, [x17, #1784]
+    adrp    x16, lxrt_vk_real
+    add     x16, x16, :lo12:lxrt_vk_real
+    ldr     x16, [x16, #1784]
+    br      x16
+
+.Lcnt224:
+    adrp    x17, lxrt_vk_counts
+    add     x17, x17, :lo12:lxrt_vk_counts
+    ldr     x16, [x17, #1792]
+    add     x16, x16, #1
+    str     x16, [x17, #1792]
+    adrp    x16, lxrt_vk_real
+    add     x16, x16, :lo12:lxrt_vk_real
+    ldr     x16, [x16, #1792]
+    br      x16
+
+.Lcnt225:
+    adrp    x17, lxrt_vk_counts
+    add     x17, x17, :lo12:lxrt_vk_counts
+    ldr     x16, [x17, #1800]
+    add     x16, x16, #1
+    str     x16, [x17, #1800]
+    adrp    x16, lxrt_vk_real
+    add     x16, x16, :lo12:lxrt_vk_real
+    ldr     x16, [x16, #1800]
+    br      x16
+
+.Lcnt226:
+    adrp    x17, lxrt_vk_counts
+    add     x17, x17, :lo12:lxrt_vk_counts
+    ldr     x16, [x17, #1808]
+    add     x16, x16, #1
+    str     x16, [x17, #1808]
+    adrp    x16, lxrt_vk_real
+    add     x16, x16, :lo12:lxrt_vk_real
+    ldr     x16, [x16, #1808]
+    br      x16
+
+.Lcnt227:
+    adrp    x17, lxrt_vk_counts
+    add     x17, x17, :lo12:lxrt_vk_counts
+    ldr     x16, [x17, #1816]
+    add     x16, x16, #1
+    str     x16, [x17, #1816]
+    adrp    x16, lxrt_vk_real
+    add     x16, x16, :lo12:lxrt_vk_real
+    ldr     x16, [x16, #1816]
+    br      x16
+
+.Lcnt228:
+    adrp    x17, lxrt_vk_counts
+    add     x17, x17, :lo12:lxrt_vk_counts
+    ldr     x16, [x17, #1824]
+    add     x16, x16, #1
+    str     x16, [x17, #1824]
+    adrp    x16, lxrt_vk_real
+    add     x16, x16, :lo12:lxrt_vk_real
+    ldr     x16, [x16, #1824]
+    br      x16
+
+.Lcnt229:
+    adrp    x17, lxrt_vk_counts
+    add     x17, x17, :lo12:lxrt_vk_counts
+    ldr     x16, [x17, #1832]
+    add     x16, x16, #1
+    str     x16, [x17, #1832]
+    adrp    x16, lxrt_vk_real
+    add     x16, x16, :lo12:lxrt_vk_real
+    ldr     x16, [x16, #1832]
+    br      x16
+
+.Lcnt230:
+    adrp    x17, lxrt_vk_counts
+    add     x17, x17, :lo12:lxrt_vk_counts
+    ldr     x16, [x17, #1840]
+    add     x16, x16, #1
+    str     x16, [x17, #1840]
+    adrp    x16, lxrt_vk_real
+    add     x16, x16, :lo12:lxrt_vk_real
+    ldr     x16, [x16, #1840]
+    br      x16
+
+.Lcnt231:
+    adrp    x17, lxrt_vk_counts
+    add     x17, x17, :lo12:lxrt_vk_counts
+    ldr     x16, [x17, #1848]
+    add     x16, x16, #1
+    str     x16, [x17, #1848]
+    adrp    x16, lxrt_vk_real
+    add     x16, x16, :lo12:lxrt_vk_real
+    ldr     x16, [x16, #1848]
+    br      x16
+
+.Lcnt232:
+    adrp    x17, lxrt_vk_counts
+    add     x17, x17, :lo12:lxrt_vk_counts
+    ldr     x16, [x17, #1856]
+    add     x16, x16, #1
+    str     x16, [x17, #1856]
+    adrp    x16, lxrt_vk_real
+    add     x16, x16, :lo12:lxrt_vk_real
+    ldr     x16, [x16, #1856]
+    br      x16
+
+.Lcnt233:
+    adrp    x17, lxrt_vk_counts
+    add     x17, x17, :lo12:lxrt_vk_counts
+    ldr     x16, [x17, #1864]
+    add     x16, x16, #1
+    str     x16, [x17, #1864]
+    adrp    x16, lxrt_vk_real
+    add     x16, x16, :lo12:lxrt_vk_real
+    ldr     x16, [x16, #1864]
+    br      x16
+
+.Lcnt234:
+    adrp    x17, lxrt_vk_counts
+    add     x17, x17, :lo12:lxrt_vk_counts
+    ldr     x16, [x17, #1872]
+    add     x16, x16, #1
+    str     x16, [x17, #1872]
+    adrp    x16, lxrt_vk_real
+    add     x16, x16, :lo12:lxrt_vk_real
+    ldr     x16, [x16, #1872]
+    br      x16
+
+.Lcnt235:
+    adrp    x17, lxrt_vk_counts
+    add     x17, x17, :lo12:lxrt_vk_counts
+    ldr     x16, [x17, #1880]
+    add     x16, x16, #1
+    str     x16, [x17, #1880]
+    adrp    x16, lxrt_vk_real
+    add     x16, x16, :lo12:lxrt_vk_real
+    ldr     x16, [x16, #1880]
+    br      x16
+
+.Lcnt236:
+    adrp    x17, lxrt_vk_counts
+    add     x17, x17, :lo12:lxrt_vk_counts
+    ldr     x16, [x17, #1888]
+    add     x16, x16, #1
+    str     x16, [x17, #1888]
+    adrp    x16, lxrt_vk_real
+    add     x16, x16, :lo12:lxrt_vk_real
+    ldr     x16, [x16, #1888]
+    br      x16
+
+.Lcnt237:
+    adrp    x17, lxrt_vk_counts
+    add     x17, x17, :lo12:lxrt_vk_counts
+    ldr     x16, [x17, #1896]
+    add     x16, x16, #1
+    str     x16, [x17, #1896]
+    adrp    x16, lxrt_vk_real
+    add     x16, x16, :lo12:lxrt_vk_real
+    ldr     x16, [x16, #1896]
+    br      x16
+
+.Lcnt238:
+    adrp    x17, lxrt_vk_counts
+    add     x17, x17, :lo12:lxrt_vk_counts
+    ldr     x16, [x17, #1904]
+    add     x16, x16, #1
+    str     x16, [x17, #1904]
+    adrp    x16, lxrt_vk_real
+    add     x16, x16, :lo12:lxrt_vk_real
+    ldr     x16, [x16, #1904]
+    br      x16
+
+.Lcnt239:
+    adrp    x17, lxrt_vk_counts
+    add     x17, x17, :lo12:lxrt_vk_counts
+    ldr     x16, [x17, #1912]
+    add     x16, x16, #1
+    str     x16, [x17, #1912]
+    adrp    x16, lxrt_vk_real
+    add     x16, x16, :lo12:lxrt_vk_real
+    ldr     x16, [x16, #1912]
+    br      x16
+
+.Lcnt240:
+    adrp    x17, lxrt_vk_counts
+    add     x17, x17, :lo12:lxrt_vk_counts
+    ldr     x16, [x17, #1920]
+    add     x16, x16, #1
+    str     x16, [x17, #1920]
+    adrp    x16, lxrt_vk_real
+    add     x16, x16, :lo12:lxrt_vk_real
+    ldr     x16, [x16, #1920]
+    br      x16
+
+.Lcnt241:
+    adrp    x17, lxrt_vk_counts
+    add     x17, x17, :lo12:lxrt_vk_counts
+    ldr     x16, [x17, #1928]
+    add     x16, x16, #1
+    str     x16, [x17, #1928]
+    adrp    x16, lxrt_vk_real
+    add     x16, x16, :lo12:lxrt_vk_real
+    ldr     x16, [x16, #1928]
+    br      x16
+
+.Lcnt242:
+    adrp    x17, lxrt_vk_counts
+    add     x17, x17, :lo12:lxrt_vk_counts
+    ldr     x16, [x17, #1936]
+    add     x16, x16, #1
+    str     x16, [x17, #1936]
+    adrp    x16, lxrt_vk_real
+    add     x16, x16, :lo12:lxrt_vk_real
+    ldr     x16, [x16, #1936]
+    br      x16
+
+.Lcnt243:
+    adrp    x17, lxrt_vk_counts
+    add     x17, x17, :lo12:lxrt_vk_counts
+    ldr     x16, [x17, #1944]
+    add     x16, x16, #1
+    str     x16, [x17, #1944]
+    adrp    x16, lxrt_vk_real
+    add     x16, x16, :lo12:lxrt_vk_real
+    ldr     x16, [x16, #1944]
+    br      x16
+
+.Lcnt244:
+    adrp    x17, lxrt_vk_counts
+    add     x17, x17, :lo12:lxrt_vk_counts
+    ldr     x16, [x17, #1952]
+    add     x16, x16, #1
+    str     x16, [x17, #1952]
+    adrp    x16, lxrt_vk_real
+    add     x16, x16, :lo12:lxrt_vk_real
+    ldr     x16, [x16, #1952]
+    br      x16
+
+.Lcnt245:
+    adrp    x17, lxrt_vk_counts
+    add     x17, x17, :lo12:lxrt_vk_counts
+    ldr     x16, [x17, #1960]
+    add     x16, x16, #1
+    str     x16, [x17, #1960]
+    adrp    x16, lxrt_vk_real
+    add     x16, x16, :lo12:lxrt_vk_real
+    ldr     x16, [x16, #1960]
+    br      x16
+
+.Lcnt246:
+    adrp    x17, lxrt_vk_counts
+    add     x17, x17, :lo12:lxrt_vk_counts
+    ldr     x16, [x17, #1968]
+    add     x16, x16, #1
+    str     x16, [x17, #1968]
+    adrp    x16, lxrt_vk_real
+    add     x16, x16, :lo12:lxrt_vk_real
+    ldr     x16, [x16, #1968]
+    br      x16
+
+.Lcnt247:
+    adrp    x17, lxrt_vk_counts
+    add     x17, x17, :lo12:lxrt_vk_counts
+    ldr     x16, [x17, #1976]
+    add     x16, x16, #1
+    str     x16, [x17, #1976]
+    adrp    x16, lxrt_vk_real
+    add     x16, x16, :lo12:lxrt_vk_real
+    ldr     x16, [x16, #1976]
+    br      x16
+
+.Lcnt248:
+    adrp    x17, lxrt_vk_counts
+    add     x17, x17, :lo12:lxrt_vk_counts
+    ldr     x16, [x17, #1984]
+    add     x16, x16, #1
+    str     x16, [x17, #1984]
+    adrp    x16, lxrt_vk_real
+    add     x16, x16, :lo12:lxrt_vk_real
+    ldr     x16, [x16, #1984]
+    br      x16
+
+.Lcnt249:
+    adrp    x17, lxrt_vk_counts
+    add     x17, x17, :lo12:lxrt_vk_counts
+    ldr     x16, [x17, #1992]
+    add     x16, x16, #1
+    str     x16, [x17, #1992]
+    adrp    x16, lxrt_vk_real
+    add     x16, x16, :lo12:lxrt_vk_real
+    ldr     x16, [x16, #1992]
+    br      x16
+
+.Lcnt250:
+    adrp    x17, lxrt_vk_counts
+    add     x17, x17, :lo12:lxrt_vk_counts
+    ldr     x16, [x17, #2000]
+    add     x16, x16, #1
+    str     x16, [x17, #2000]
+    adrp    x16, lxrt_vk_real
+    add     x16, x16, :lo12:lxrt_vk_real
+    ldr     x16, [x16, #2000]
+    br      x16
+
+.Lcnt251:
+    adrp    x17, lxrt_vk_counts
+    add     x17, x17, :lo12:lxrt_vk_counts
+    ldr     x16, [x17, #2008]
+    add     x16, x16, #1
+    str     x16, [x17, #2008]
+    adrp    x16, lxrt_vk_real
+    add     x16, x16, :lo12:lxrt_vk_real
+    ldr     x16, [x16, #2008]
+    br      x16
+
+.Lcnt252:
+    adrp    x17, lxrt_vk_counts
+    add     x17, x17, :lo12:lxrt_vk_counts
+    ldr     x16, [x17, #2016]
+    add     x16, x16, #1
+    str     x16, [x17, #2016]
+    adrp    x16, lxrt_vk_real
+    add     x16, x16, :lo12:lxrt_vk_real
+    ldr     x16, [x16, #2016]
+    br      x16
+
+.Lcnt253:
+    adrp    x17, lxrt_vk_counts
+    add     x17, x17, :lo12:lxrt_vk_counts
+    ldr     x16, [x17, #2024]
+    add     x16, x16, #1
+    str     x16, [x17, #2024]
+    adrp    x16, lxrt_vk_real
+    add     x16, x16, :lo12:lxrt_vk_real
+    ldr     x16, [x16, #2024]
+    br      x16
+
+.Lcnt254:
+    adrp    x17, lxrt_vk_counts
+    add     x17, x17, :lo12:lxrt_vk_counts
+    ldr     x16, [x17, #2032]
+    add     x16, x16, #1
+    str     x16, [x17, #2032]
+    adrp    x16, lxrt_vk_real
+    add     x16, x16, :lo12:lxrt_vk_real
+    ldr     x16, [x16, #2032]
+    br      x16
+
+.Lcnt255:
+    adrp    x17, lxrt_vk_counts
+    add     x17, x17, :lo12:lxrt_vk_counts
+    ldr     x16, [x17, #2040]
+    add     x16, x16, #1
+    str     x16, [x17, #2040]
+    adrp    x16, lxrt_vk_real
+    add     x16, x16, :lo12:lxrt_vk_real
+    ldr     x16, [x16, #2040]
+    br      x16
+
+.Lcnt256:
+    adrp    x17, lxrt_vk_counts
+    add     x17, x17, :lo12:lxrt_vk_counts
+    ldr     x16, [x17, #2048]
+    add     x16, x16, #1
+    str     x16, [x17, #2048]
+    adrp    x16, lxrt_vk_real
+    add     x16, x16, :lo12:lxrt_vk_real
+    ldr     x16, [x16, #2048]
+    br      x16
+
+.Lcnt257:
+    adrp    x17, lxrt_vk_counts
+    add     x17, x17, :lo12:lxrt_vk_counts
+    ldr     x16, [x17, #2056]
+    add     x16, x16, #1
+    str     x16, [x17, #2056]
+    adrp    x16, lxrt_vk_real
+    add     x16, x16, :lo12:lxrt_vk_real
+    ldr     x16, [x16, #2056]
+    br      x16
+
+.Lcnt258:
+    adrp    x17, lxrt_vk_counts
+    add     x17, x17, :lo12:lxrt_vk_counts
+    ldr     x16, [x17, #2064]
+    add     x16, x16, #1
+    str     x16, [x17, #2064]
+    adrp    x16, lxrt_vk_real
+    add     x16, x16, :lo12:lxrt_vk_real
+    ldr     x16, [x16, #2064]
+    br      x16
+
+.Lcnt259:
+    adrp    x17, lxrt_vk_counts
+    add     x17, x17, :lo12:lxrt_vk_counts
+    ldr     x16, [x17, #2072]
+    add     x16, x16, #1
+    str     x16, [x17, #2072]
+    adrp    x16, lxrt_vk_real
+    add     x16, x16, :lo12:lxrt_vk_real
+    ldr     x16, [x16, #2072]
+    br      x16
+
+.Lcnt260:
+    adrp    x17, lxrt_vk_counts
+    add     x17, x17, :lo12:lxrt_vk_counts
+    ldr     x16, [x17, #2080]
+    add     x16, x16, #1
+    str     x16, [x17, #2080]
+    adrp    x16, lxrt_vk_real
+    add     x16, x16, :lo12:lxrt_vk_real
+    ldr     x16, [x16, #2080]
+    br      x16
+
+.Lcnt261:
+    adrp    x17, lxrt_vk_counts
+    add     x17, x17, :lo12:lxrt_vk_counts
+    ldr     x16, [x17, #2088]
+    add     x16, x16, #1
+    str     x16, [x17, #2088]
+    adrp    x16, lxrt_vk_real
+    add     x16, x16, :lo12:lxrt_vk_real
+    ldr     x16, [x16, #2088]
+    br      x16
+
+.Lcnt262:
+    adrp    x17, lxrt_vk_counts
+    add     x17, x17, :lo12:lxrt_vk_counts
+    ldr     x16, [x17, #2096]
+    add     x16, x16, #1
+    str     x16, [x17, #2096]
+    adrp    x16, lxrt_vk_real
+    add     x16, x16, :lo12:lxrt_vk_real
+    ldr     x16, [x16, #2096]
+    br      x16
+
+.Lcnt263:
+    adrp    x17, lxrt_vk_counts
+    add     x17, x17, :lo12:lxrt_vk_counts
+    ldr     x16, [x17, #2104]
+    add     x16, x16, #1
+    str     x16, [x17, #2104]
+    adrp    x16, lxrt_vk_real
+    add     x16, x16, :lo12:lxrt_vk_real
+    ldr     x16, [x16, #2104]
+    br      x16
+
+.Lcnt264:
+    adrp    x17, lxrt_vk_counts
+    add     x17, x17, :lo12:lxrt_vk_counts
+    ldr     x16, [x17, #2112]
+    add     x16, x16, #1
+    str     x16, [x17, #2112]
+    adrp    x16, lxrt_vk_real
+    add     x16, x16, :lo12:lxrt_vk_real
+    ldr     x16, [x16, #2112]
+    br      x16
+
+.Lcnt265:
+    adrp    x17, lxrt_vk_counts
+    add     x17, x17, :lo12:lxrt_vk_counts
+    ldr     x16, [x17, #2120]
+    add     x16, x16, #1
+    str     x16, [x17, #2120]
+    adrp    x16, lxrt_vk_real
+    add     x16, x16, :lo12:lxrt_vk_real
+    ldr     x16, [x16, #2120]
+    br      x16
+
+.Lcnt266:
+    adrp    x17, lxrt_vk_counts
+    add     x17, x17, :lo12:lxrt_vk_counts
+    ldr     x16, [x17, #2128]
+    add     x16, x16, #1
+    str     x16, [x17, #2128]
+    adrp    x16, lxrt_vk_real
+    add     x16, x16, :lo12:lxrt_vk_real
+    ldr     x16, [x16, #2128]
+    br      x16
+
+.Lcnt267:
+    adrp    x17, lxrt_vk_counts
+    add     x17, x17, :lo12:lxrt_vk_counts
+    ldr     x16, [x17, #2136]
+    add     x16, x16, #1
+    str     x16, [x17, #2136]
+    adrp    x16, lxrt_vk_real
+    add     x16, x16, :lo12:lxrt_vk_real
+    ldr     x16, [x16, #2136]
+    br      x16
+
+.Lcnt268:
+    adrp    x17, lxrt_vk_counts
+    add     x17, x17, :lo12:lxrt_vk_counts
+    ldr     x16, [x17, #2144]
+    add     x16, x16, #1
+    str     x16, [x17, #2144]
+    adrp    x16, lxrt_vk_real
+    add     x16, x16, :lo12:lxrt_vk_real
+    ldr     x16, [x16, #2144]
+    br      x16
+
+.Lcnt269:
+    adrp    x17, lxrt_vk_counts
+    add     x17, x17, :lo12:lxrt_vk_counts
+    ldr     x16, [x17, #2152]
+    add     x16, x16, #1
+    str     x16, [x17, #2152]
+    adrp    x16, lxrt_vk_real
+    add     x16, x16, :lo12:lxrt_vk_real
+    ldr     x16, [x16, #2152]
+    br      x16
+
+.Lcnt270:
+    adrp    x17, lxrt_vk_counts
+    add     x17, x17, :lo12:lxrt_vk_counts
+    ldr     x16, [x17, #2160]
+    add     x16, x16, #1
+    str     x16, [x17, #2160]
+    adrp    x16, lxrt_vk_real
+    add     x16, x16, :lo12:lxrt_vk_real
+    ldr     x16, [x16, #2160]
+    br      x16
+
+.Lcnt271:
+    adrp    x17, lxrt_vk_counts
+    add     x17, x17, :lo12:lxrt_vk_counts
+    ldr     x16, [x17, #2168]
+    add     x16, x16, #1
+    str     x16, [x17, #2168]
+    adrp    x16, lxrt_vk_real
+    add     x16, x16, :lo12:lxrt_vk_real
+    ldr     x16, [x16, #2168]
+    br      x16
+
+.Lcnt272:
+    adrp    x17, lxrt_vk_counts
+    add     x17, x17, :lo12:lxrt_vk_counts
+    ldr     x16, [x17, #2176]
+    add     x16, x16, #1
+    str     x16, [x17, #2176]
+    adrp    x16, lxrt_vk_real
+    add     x16, x16, :lo12:lxrt_vk_real
+    ldr     x16, [x16, #2176]
+    br      x16
+
+.Lcnt273:
+    adrp    x17, lxrt_vk_counts
+    add     x17, x17, :lo12:lxrt_vk_counts
+    ldr     x16, [x17, #2184]
+    add     x16, x16, #1
+    str     x16, [x17, #2184]
+    adrp    x16, lxrt_vk_real
+    add     x16, x16, :lo12:lxrt_vk_real
+    ldr     x16, [x16, #2184]
+    br      x16
+
+.Lcnt274:
+    adrp    x17, lxrt_vk_counts
+    add     x17, x17, :lo12:lxrt_vk_counts
+    ldr     x16, [x17, #2192]
+    add     x16, x16, #1
+    str     x16, [x17, #2192]
+    adrp    x16, lxrt_vk_real
+    add     x16, x16, :lo12:lxrt_vk_real
+    ldr     x16, [x16, #2192]
+    br      x16
+
+.Lcnt275:
+    adrp    x17, lxrt_vk_counts
+    add     x17, x17, :lo12:lxrt_vk_counts
+    ldr     x16, [x17, #2200]
+    add     x16, x16, #1
+    str     x16, [x17, #2200]
+    adrp    x16, lxrt_vk_real
+    add     x16, x16, :lo12:lxrt_vk_real
+    ldr     x16, [x16, #2200]
+    br      x16
+
+.Lcnt276:
+    adrp    x17, lxrt_vk_counts
+    add     x17, x17, :lo12:lxrt_vk_counts
+    ldr     x16, [x17, #2208]
+    add     x16, x16, #1
+    str     x16, [x17, #2208]
+    adrp    x16, lxrt_vk_real
+    add     x16, x16, :lo12:lxrt_vk_real
+    ldr     x16, [x16, #2208]
+    br      x16
+
+.Lcnt277:
+    adrp    x17, lxrt_vk_counts
+    add     x17, x17, :lo12:lxrt_vk_counts
+    ldr     x16, [x17, #2216]
+    add     x16, x16, #1
+    str     x16, [x17, #2216]
+    adrp    x16, lxrt_vk_real
+    add     x16, x16, :lo12:lxrt_vk_real
+    ldr     x16, [x16, #2216]
+    br      x16
+
+.Lcnt278:
+    adrp    x17, lxrt_vk_counts
+    add     x17, x17, :lo12:lxrt_vk_counts
+    ldr     x16, [x17, #2224]
+    add     x16, x16, #1
+    str     x16, [x17, #2224]
+    adrp    x16, lxrt_vk_real
+    add     x16, x16, :lo12:lxrt_vk_real
+    ldr     x16, [x16, #2224]
+    br      x16
+
+.Lcnt279:
+    adrp    x17, lxrt_vk_counts
+    add     x17, x17, :lo12:lxrt_vk_counts
+    ldr     x16, [x17, #2232]
+    add     x16, x16, #1
+    str     x16, [x17, #2232]
+    adrp    x16, lxrt_vk_real
+    add     x16, x16, :lo12:lxrt_vk_real
+    ldr     x16, [x16, #2232]
+    br      x16
+
+.Lcnt280:
+    adrp    x17, lxrt_vk_counts
+    add     x17, x17, :lo12:lxrt_vk_counts
+    ldr     x16, [x17, #2240]
+    add     x16, x16, #1
+    str     x16, [x17, #2240]
+    adrp    x16, lxrt_vk_real
+    add     x16, x16, :lo12:lxrt_vk_real
+    ldr     x16, [x16, #2240]
+    br      x16
+
+.Lcnt281:
+    adrp    x17, lxrt_vk_counts
+    add     x17, x17, :lo12:lxrt_vk_counts
+    ldr     x16, [x17, #2248]
+    add     x16, x16, #1
+    str     x16, [x17, #2248]
+    adrp    x16, lxrt_vk_real
+    add     x16, x16, :lo12:lxrt_vk_real
+    ldr     x16, [x16, #2248]
+    br      x16
+
+.Lcnt282:
+    adrp    x17, lxrt_vk_counts
+    add     x17, x17, :lo12:lxrt_vk_counts
+    ldr     x16, [x17, #2256]
+    add     x16, x16, #1
+    str     x16, [x17, #2256]
+    adrp    x16, lxrt_vk_real
+    add     x16, x16, :lo12:lxrt_vk_real
+    ldr     x16, [x16, #2256]
+    br      x16
+
+.Lcnt283:
+    adrp    x17, lxrt_vk_counts
+    add     x17, x17, :lo12:lxrt_vk_counts
+    ldr     x16, [x17, #2264]
+    add     x16, x16, #1
+    str     x16, [x17, #2264]
+    adrp    x16, lxrt_vk_real
+    add     x16, x16, :lo12:lxrt_vk_real
+    ldr     x16, [x16, #2264]
+    br      x16
+
+.Lcnt284:
+    adrp    x17, lxrt_vk_counts
+    add     x17, x17, :lo12:lxrt_vk_counts
+    ldr     x16, [x17, #2272]
+    add     x16, x16, #1
+    str     x16, [x17, #2272]
+    adrp    x16, lxrt_vk_real
+    add     x16, x16, :lo12:lxrt_vk_real
+    ldr     x16, [x16, #2272]
+    br      x16
+
+.Lcnt285:
+    adrp    x17, lxrt_vk_counts
+    add     x17, x17, :lo12:lxrt_vk_counts
+    ldr     x16, [x17, #2280]
+    add     x16, x16, #1
+    str     x16, [x17, #2280]
+    adrp    x16, lxrt_vk_real
+    add     x16, x16, :lo12:lxrt_vk_real
+    ldr     x16, [x16, #2280]
+    br      x16
+
+.Lcnt286:
+    adrp    x17, lxrt_vk_counts
+    add     x17, x17, :lo12:lxrt_vk_counts
+    ldr     x16, [x17, #2288]
+    add     x16, x16, #1
+    str     x16, [x17, #2288]
+    adrp    x16, lxrt_vk_real
+    add     x16, x16, :lo12:lxrt_vk_real
+    ldr     x16, [x16, #2288]
+    br      x16
+
+.Lcnt287:
+    adrp    x17, lxrt_vk_counts
+    add     x17, x17, :lo12:lxrt_vk_counts
+    ldr     x16, [x17, #2296]
+    add     x16, x16, #1
+    str     x16, [x17, #2296]
+    adrp    x16, lxrt_vk_real
+    add     x16, x16, :lo12:lxrt_vk_real
+    ldr     x16, [x16, #2296]
+    br      x16
+
+.Lcnt288:
+    adrp    x17, lxrt_vk_counts
+    add     x17, x17, :lo12:lxrt_vk_counts
+    ldr     x16, [x17, #2304]
+    add     x16, x16, #1
+    str     x16, [x17, #2304]
+    adrp    x16, lxrt_vk_real
+    add     x16, x16, :lo12:lxrt_vk_real
+    ldr     x16, [x16, #2304]
+    br      x16
+
+.Lcnt289:
+    adrp    x17, lxrt_vk_counts
+    add     x17, x17, :lo12:lxrt_vk_counts
+    ldr     x16, [x17, #2312]
+    add     x16, x16, #1
+    str     x16, [x17, #2312]
+    adrp    x16, lxrt_vk_real
+    add     x16, x16, :lo12:lxrt_vk_real
+    ldr     x16, [x16, #2312]
+    br      x16
+
+.Lcnt290:
+    adrp    x17, lxrt_vk_counts
+    add     x17, x17, :lo12:lxrt_vk_counts
+    ldr     x16, [x17, #2320]
+    add     x16, x16, #1
+    str     x16, [x17, #2320]
+    adrp    x16, lxrt_vk_real
+    add     x16, x16, :lo12:lxrt_vk_real
+    ldr     x16, [x16, #2320]
+    br      x16
+
+.Lcnt291:
+    adrp    x17, lxrt_vk_counts
+    add     x17, x17, :lo12:lxrt_vk_counts
+    ldr     x16, [x17, #2328]
+    add     x16, x16, #1
+    str     x16, [x17, #2328]
+    adrp    x16, lxrt_vk_real
+    add     x16, x16, :lo12:lxrt_vk_real
+    ldr     x16, [x16, #2328]
+    br      x16
+
+.Lcnt292:
+    adrp    x17, lxrt_vk_counts
+    add     x17, x17, :lo12:lxrt_vk_counts
+    ldr     x16, [x17, #2336]
+    add     x16, x16, #1
+    str     x16, [x17, #2336]
+    adrp    x16, lxrt_vk_real
+    add     x16, x16, :lo12:lxrt_vk_real
+    ldr     x16, [x16, #2336]
+    br      x16
+
+.Lcnt293:
+    adrp    x17, lxrt_vk_counts
+    add     x17, x17, :lo12:lxrt_vk_counts
+    ldr     x16, [x17, #2344]
+    add     x16, x16, #1
+    str     x16, [x17, #2344]
+    adrp    x16, lxrt_vk_real
+    add     x16, x16, :lo12:lxrt_vk_real
+    ldr     x16, [x16, #2344]
+    br      x16
+
+.Lcnt294:
+    adrp    x17, lxrt_vk_counts
+    add     x17, x17, :lo12:lxrt_vk_counts
+    ldr     x16, [x17, #2352]
+    add     x16, x16, #1
+    str     x16, [x17, #2352]
+    adrp    x16, lxrt_vk_real
+    add     x16, x16, :lo12:lxrt_vk_real
+    ldr     x16, [x16, #2352]
+    br      x16
+
+.Lcnt295:
+    adrp    x17, lxrt_vk_counts
+    add     x17, x17, :lo12:lxrt_vk_counts
+    ldr     x16, [x17, #2360]
+    add     x16, x16, #1
+    str     x16, [x17, #2360]
+    adrp    x16, lxrt_vk_real
+    add     x16, x16, :lo12:lxrt_vk_real
+    ldr     x16, [x16, #2360]
+    br      x16
+
+.Lcnt296:
+    adrp    x17, lxrt_vk_counts
+    add     x17, x17, :lo12:lxrt_vk_counts
+    ldr     x16, [x17, #2368]
+    add     x16, x16, #1
+    str     x16, [x17, #2368]
+    adrp    x16, lxrt_vk_real
+    add     x16, x16, :lo12:lxrt_vk_real
+    ldr     x16, [x16, #2368]
+    br      x16
+
+.Lcnt297:
+    adrp    x17, lxrt_vk_counts
+    add     x17, x17, :lo12:lxrt_vk_counts
+    ldr     x16, [x17, #2376]
+    add     x16, x16, #1
+    str     x16, [x17, #2376]
+    adrp    x16, lxrt_vk_real
+    add     x16, x16, :lo12:lxrt_vk_real
+    ldr     x16, [x16, #2376]
+    br      x16
+
+.Lcnt298:
+    adrp    x17, lxrt_vk_counts
+    add     x17, x17, :lo12:lxrt_vk_counts
+    ldr     x16, [x17, #2384]
+    add     x16, x16, #1
+    str     x16, [x17, #2384]
+    adrp    x16, lxrt_vk_real
+    add     x16, x16, :lo12:lxrt_vk_real
+    ldr     x16, [x16, #2384]
+    br      x16
+
+.Lcnt299:
+    adrp    x17, lxrt_vk_counts
+    add     x17, x17, :lo12:lxrt_vk_counts
+    ldr     x16, [x17, #2392]
+    add     x16, x16, #1
+    str     x16, [x17, #2392]
+    adrp    x16, lxrt_vk_real
+    add     x16, x16, :lo12:lxrt_vk_real
+    ldr     x16, [x16, #2392]
+    br      x16
+
+.Lcnt300:
+    adrp    x17, lxrt_vk_counts
+    add     x17, x17, :lo12:lxrt_vk_counts
+    ldr     x16, [x17, #2400]
+    add     x16, x16, #1
+    str     x16, [x17, #2400]
+    adrp    x16, lxrt_vk_real
+    add     x16, x16, :lo12:lxrt_vk_real
+    ldr     x16, [x16, #2400]
+    br      x16
+
+.Lcnt301:
+    adrp    x17, lxrt_vk_counts
+    add     x17, x17, :lo12:lxrt_vk_counts
+    ldr     x16, [x17, #2408]
+    add     x16, x16, #1
+    str     x16, [x17, #2408]
+    adrp    x16, lxrt_vk_real
+    add     x16, x16, :lo12:lxrt_vk_real
+    ldr     x16, [x16, #2408]
+    br      x16
+
+.Lcnt302:
+    adrp    x17, lxrt_vk_counts
+    add     x17, x17, :lo12:lxrt_vk_counts
+    ldr     x16, [x17, #2416]
+    add     x16, x16, #1
+    str     x16, [x17, #2416]
+    adrp    x16, lxrt_vk_real
+    add     x16, x16, :lo12:lxrt_vk_real
+    ldr     x16, [x16, #2416]
+    br      x16
+
+.Lcnt303:
+    adrp    x17, lxrt_vk_counts
+    add     x17, x17, :lo12:lxrt_vk_counts
+    ldr     x16, [x17, #2424]
+    add     x16, x16, #1
+    str     x16, [x17, #2424]
+    adrp    x16, lxrt_vk_real
+    add     x16, x16, :lo12:lxrt_vk_real
+    ldr     x16, [x16, #2424]
+    br      x16
+
+.Lcnt304:
+    adrp    x17, lxrt_vk_counts
+    add     x17, x17, :lo12:lxrt_vk_counts
+    ldr     x16, [x17, #2432]
+    add     x16, x16, #1
+    str     x16, [x17, #2432]
+    adrp    x16, lxrt_vk_real
+    add     x16, x16, :lo12:lxrt_vk_real
+    ldr     x16, [x16, #2432]
+    br      x16
+
+.Lcnt305:
+    adrp    x17, lxrt_vk_counts
+    add     x17, x17, :lo12:lxrt_vk_counts
+    ldr     x16, [x17, #2440]
+    add     x16, x16, #1
+    str     x16, [x17, #2440]
+    adrp    x16, lxrt_vk_real
+    add     x16, x16, :lo12:lxrt_vk_real
+    ldr     x16, [x16, #2440]
+    br      x16
+
+.Lcnt306:
+    adrp    x17, lxrt_vk_counts
+    add     x17, x17, :lo12:lxrt_vk_counts
+    ldr     x16, [x17, #2448]
+    add     x16, x16, #1
+    str     x16, [x17, #2448]
+    adrp    x16, lxrt_vk_real
+    add     x16, x16, :lo12:lxrt_vk_real
+    ldr     x16, [x16, #2448]
+    br      x16
+
+.Lcnt307:
+    adrp    x17, lxrt_vk_counts
+    add     x17, x17, :lo12:lxrt_vk_counts
+    ldr     x16, [x17, #2456]
+    add     x16, x16, #1
+    str     x16, [x17, #2456]
+    adrp    x16, lxrt_vk_real
+    add     x16, x16, :lo12:lxrt_vk_real
+    ldr     x16, [x16, #2456]
+    br      x16
+
+.Lcnt308:
+    adrp    x17, lxrt_vk_counts
+    add     x17, x17, :lo12:lxrt_vk_counts
+    ldr     x16, [x17, #2464]
+    add     x16, x16, #1
+    str     x16, [x17, #2464]
+    adrp    x16, lxrt_vk_real
+    add     x16, x16, :lo12:lxrt_vk_real
+    ldr     x16, [x16, #2464]
+    br      x16
+
+.Lcnt309:
+    adrp    x17, lxrt_vk_counts
+    add     x17, x17, :lo12:lxrt_vk_counts
+    ldr     x16, [x17, #2472]
+    add     x16, x16, #1
+    str     x16, [x17, #2472]
+    adrp    x16, lxrt_vk_real
+    add     x16, x16, :lo12:lxrt_vk_real
+    ldr     x16, [x16, #2472]
+    br      x16
+
+.Lcnt310:
+    adrp    x17, lxrt_vk_counts
+    add     x17, x17, :lo12:lxrt_vk_counts
+    ldr     x16, [x17, #2480]
+    add     x16, x16, #1
+    str     x16, [x17, #2480]
+    adrp    x16, lxrt_vk_real
+    add     x16, x16, :lo12:lxrt_vk_real
+    ldr     x16, [x16, #2480]
+    br      x16
+
+.Lcnt311:
+    adrp    x17, lxrt_vk_counts
+    add     x17, x17, :lo12:lxrt_vk_counts
+    ldr     x16, [x17, #2488]
+    add     x16, x16, #1
+    str     x16, [x17, #2488]
+    adrp    x16, lxrt_vk_real
+    add     x16, x16, :lo12:lxrt_vk_real
+    ldr     x16, [x16, #2488]
+    br      x16
+
+.Lcnt312:
+    adrp    x17, lxrt_vk_counts
+    add     x17, x17, :lo12:lxrt_vk_counts
+    ldr     x16, [x17, #2496]
+    add     x16, x16, #1
+    str     x16, [x17, #2496]
+    adrp    x16, lxrt_vk_real
+    add     x16, x16, :lo12:lxrt_vk_real
+    ldr     x16, [x16, #2496]
+    br      x16
+
+.Lcnt313:
+    adrp    x17, lxrt_vk_counts
+    add     x17, x17, :lo12:lxrt_vk_counts
+    ldr     x16, [x17, #2504]
+    add     x16, x16, #1
+    str     x16, [x17, #2504]
+    adrp    x16, lxrt_vk_real
+    add     x16, x16, :lo12:lxrt_vk_real
+    ldr     x16, [x16, #2504]
+    br      x16
+
+.Lcnt314:
+    adrp    x17, lxrt_vk_counts
+    add     x17, x17, :lo12:lxrt_vk_counts
+    ldr     x16, [x17, #2512]
+    add     x16, x16, #1
+    str     x16, [x17, #2512]
+    adrp    x16, lxrt_vk_real
+    add     x16, x16, :lo12:lxrt_vk_real
+    ldr     x16, [x16, #2512]
+    br      x16
+
+.Lcnt315:
+    adrp    x17, lxrt_vk_counts
+    add     x17, x17, :lo12:lxrt_vk_counts
+    ldr     x16, [x17, #2520]
+    add     x16, x16, #1
+    str     x16, [x17, #2520]
+    adrp    x16, lxrt_vk_real
+    add     x16, x16, :lo12:lxrt_vk_real
+    ldr     x16, [x16, #2520]
+    br      x16
+
+.Lcnt316:
+    adrp    x17, lxrt_vk_counts
+    add     x17, x17, :lo12:lxrt_vk_counts
+    ldr     x16, [x17, #2528]
+    add     x16, x16, #1
+    str     x16, [x17, #2528]
+    adrp    x16, lxrt_vk_real
+    add     x16, x16, :lo12:lxrt_vk_real
+    ldr     x16, [x16, #2528]
+    br      x16
+
+.Lcnt317:
+    adrp    x17, lxrt_vk_counts
+    add     x17, x17, :lo12:lxrt_vk_counts
+    ldr     x16, [x17, #2536]
+    add     x16, x16, #1
+    str     x16, [x17, #2536]
+    adrp    x16, lxrt_vk_real
+    add     x16, x16, :lo12:lxrt_vk_real
+    ldr     x16, [x16, #2536]
+    br      x16
+
+.Lcnt318:
+    adrp    x17, lxrt_vk_counts
+    add     x17, x17, :lo12:lxrt_vk_counts
+    ldr     x16, [x17, #2544]
+    add     x16, x16, #1
+    str     x16, [x17, #2544]
+    adrp    x16, lxrt_vk_real
+    add     x16, x16, :lo12:lxrt_vk_real
+    ldr     x16, [x16, #2544]
+    br      x16
+
+.Lcnt319:
+    adrp    x17, lxrt_vk_counts
+    add     x17, x17, :lo12:lxrt_vk_counts
+    ldr     x16, [x17, #2552]
+    add     x16, x16, #1
+    str     x16, [x17, #2552]
+    adrp    x16, lxrt_vk_real
+    add     x16, x16, :lo12:lxrt_vk_real
+    ldr     x16, [x16, #2552]
+    br      x16
+
+.Lcnt320:
+    adrp    x17, lxrt_vk_counts
+    add     x17, x17, :lo12:lxrt_vk_counts
+    ldr     x16, [x17, #2560]
+    add     x16, x16, #1
+    str     x16, [x17, #2560]
+    adrp    x16, lxrt_vk_real
+    add     x16, x16, :lo12:lxrt_vk_real
+    ldr     x16, [x16, #2560]
+    br      x16
+
+.Lcnt321:
+    adrp    x17, lxrt_vk_counts
+    add     x17, x17, :lo12:lxrt_vk_counts
+    ldr     x16, [x17, #2568]
+    add     x16, x16, #1
+    str     x16, [x17, #2568]
+    adrp    x16, lxrt_vk_real
+    add     x16, x16, :lo12:lxrt_vk_real
+    ldr     x16, [x16, #2568]
+    br      x16
+
+.Lcnt322:
+    adrp    x17, lxrt_vk_counts
+    add     x17, x17, :lo12:lxrt_vk_counts
+    ldr     x16, [x17, #2576]
+    add     x16, x16, #1
+    str     x16, [x17, #2576]
+    adrp    x16, lxrt_vk_real
+    add     x16, x16, :lo12:lxrt_vk_real
+    ldr     x16, [x16, #2576]
+    br      x16
+
+.Lcnt323:
+    adrp    x17, lxrt_vk_counts
+    add     x17, x17, :lo12:lxrt_vk_counts
+    ldr     x16, [x17, #2584]
+    add     x16, x16, #1
+    str     x16, [x17, #2584]
+    adrp    x16, lxrt_vk_real
+    add     x16, x16, :lo12:lxrt_vk_real
+    ldr     x16, [x16, #2584]
+    br      x16
+
+.Lcnt324:
+    adrp    x17, lxrt_vk_counts
+    add     x17, x17, :lo12:lxrt_vk_counts
+    ldr     x16, [x17, #2592]
+    add     x16, x16, #1
+    str     x16, [x17, #2592]
+    adrp    x16, lxrt_vk_real
+    add     x16, x16, :lo12:lxrt_vk_real
+    ldr     x16, [x16, #2592]
+    br      x16
+
+.Lcnt325:
+    adrp    x17, lxrt_vk_counts
+    add     x17, x17, :lo12:lxrt_vk_counts
+    ldr     x16, [x17, #2600]
+    add     x16, x16, #1
+    str     x16, [x17, #2600]
+    adrp    x16, lxrt_vk_real
+    add     x16, x16, :lo12:lxrt_vk_real
+    ldr     x16, [x16, #2600]
+    br      x16
+
+.Lcnt326:
+    adrp    x17, lxrt_vk_counts
+    add     x17, x17, :lo12:lxrt_vk_counts
+    ldr     x16, [x17, #2608]
+    add     x16, x16, #1
+    str     x16, [x17, #2608]
+    adrp    x16, lxrt_vk_real
+    add     x16, x16, :lo12:lxrt_vk_real
+    ldr     x16, [x16, #2608]
+    br      x16
+
+.Lcnt327:
+    adrp    x17, lxrt_vk_counts
+    add     x17, x17, :lo12:lxrt_vk_counts
+    ldr     x16, [x17, #2616]
+    add     x16, x16, #1
+    str     x16, [x17, #2616]
+    adrp    x16, lxrt_vk_real
+    add     x16, x16, :lo12:lxrt_vk_real
+    ldr     x16, [x16, #2616]
+    br      x16
+
+.Lcnt328:
+    adrp    x17, lxrt_vk_counts
+    add     x17, x17, :lo12:lxrt_vk_counts
+    ldr     x16, [x17, #2624]
+    add     x16, x16, #1
+    str     x16, [x17, #2624]
+    adrp    x16, lxrt_vk_real
+    add     x16, x16, :lo12:lxrt_vk_real
+    ldr     x16, [x16, #2624]
+    br      x16
+
+.Lcnt329:
+    adrp    x17, lxrt_vk_counts
+    add     x17, x17, :lo12:lxrt_vk_counts
+    ldr     x16, [x17, #2632]
+    add     x16, x16, #1
+    str     x16, [x17, #2632]
+    adrp    x16, lxrt_vk_real
+    add     x16, x16, :lo12:lxrt_vk_real
+    ldr     x16, [x16, #2632]
+    br      x16
+
+.Lcnt330:
+    adrp    x17, lxrt_vk_counts
+    add     x17, x17, :lo12:lxrt_vk_counts
+    ldr     x16, [x17, #2640]
+    add     x16, x16, #1
+    str     x16, [x17, #2640]
+    adrp    x16, lxrt_vk_real
+    add     x16, x16, :lo12:lxrt_vk_real
+    ldr     x16, [x16, #2640]
+    br      x16
+
+.Lcnt331:
+    adrp    x17, lxrt_vk_counts
+    add     x17, x17, :lo12:lxrt_vk_counts
+    ldr     x16, [x17, #2648]
+    add     x16, x16, #1
+    str     x16, [x17, #2648]
+    adrp    x16, lxrt_vk_real
+    add     x16, x16, :lo12:lxrt_vk_real
+    ldr     x16, [x16, #2648]
+    br      x16
+
+.Lcnt332:
+    adrp    x17, lxrt_vk_counts
+    add     x17, x17, :lo12:lxrt_vk_counts
+    ldr     x16, [x17, #2656]
+    add     x16, x16, #1
+    str     x16, [x17, #2656]
+    adrp    x16, lxrt_vk_real
+    add     x16, x16, :lo12:lxrt_vk_real
+    ldr     x16, [x16, #2656]
+    br      x16
+
+.Lcnt333:
+    adrp    x17, lxrt_vk_counts
+    add     x17, x17, :lo12:lxrt_vk_counts
+    ldr     x16, [x17, #2664]
+    add     x16, x16, #1
+    str     x16, [x17, #2664]
+    adrp    x16, lxrt_vk_real
+    add     x16, x16, :lo12:lxrt_vk_real
+    ldr     x16, [x16, #2664]
+    br      x16
+
+.Lcnt334:
+    adrp    x17, lxrt_vk_counts
+    add     x17, x17, :lo12:lxrt_vk_counts
+    ldr     x16, [x17, #2672]
+    add     x16, x16, #1
+    str     x16, [x17, #2672]
+    adrp    x16, lxrt_vk_real
+    add     x16, x16, :lo12:lxrt_vk_real
+    ldr     x16, [x16, #2672]
+    br      x16
+
+.Lcnt335:
+    adrp    x17, lxrt_vk_counts
+    add     x17, x17, :lo12:lxrt_vk_counts
+    ldr     x16, [x17, #2680]
+    add     x16, x16, #1
+    str     x16, [x17, #2680]
+    adrp    x16, lxrt_vk_real
+    add     x16, x16, :lo12:lxrt_vk_real
+    ldr     x16, [x16, #2680]
+    br      x16
+
+.Lcnt336:
+    adrp    x17, lxrt_vk_counts
+    add     x17, x17, :lo12:lxrt_vk_counts
+    ldr     x16, [x17, #2688]
+    add     x16, x16, #1
+    str     x16, [x17, #2688]
+    adrp    x16, lxrt_vk_real
+    add     x16, x16, :lo12:lxrt_vk_real
+    ldr     x16, [x16, #2688]
+    br      x16
+
+.Lcnt337:
+    adrp    x17, lxrt_vk_counts
+    add     x17, x17, :lo12:lxrt_vk_counts
+    ldr     x16, [x17, #2696]
+    add     x16, x16, #1
+    str     x16, [x17, #2696]
+    adrp    x16, lxrt_vk_real
+    add     x16, x16, :lo12:lxrt_vk_real
+    ldr     x16, [x16, #2696]
+    br      x16
+
+.Lcnt338:
+    adrp    x17, lxrt_vk_counts
+    add     x17, x17, :lo12:lxrt_vk_counts
+    ldr     x16, [x17, #2704]
+    add     x16, x16, #1
+    str     x16, [x17, #2704]
+    adrp    x16, lxrt_vk_real
+    add     x16, x16, :lo12:lxrt_vk_real
+    ldr     x16, [x16, #2704]
+    br      x16
+
+.Lcnt339:
+    adrp    x17, lxrt_vk_counts
+    add     x17, x17, :lo12:lxrt_vk_counts
+    ldr     x16, [x17, #2712]
+    add     x16, x16, #1
+    str     x16, [x17, #2712]
+    adrp    x16, lxrt_vk_real
+    add     x16, x16, :lo12:lxrt_vk_real
+    ldr     x16, [x16, #2712]
+    br      x16
+
+.Lcnt340:
+    adrp    x17, lxrt_vk_counts
+    add     x17, x17, :lo12:lxrt_vk_counts
+    ldr     x16, [x17, #2720]
+    add     x16, x16, #1
+    str     x16, [x17, #2720]
+    adrp    x16, lxrt_vk_real
+    add     x16, x16, :lo12:lxrt_vk_real
+    ldr     x16, [x16, #2720]
+    br      x16
+
+.Lcnt341:
+    adrp    x17, lxrt_vk_counts
+    add     x17, x17, :lo12:lxrt_vk_counts
+    ldr     x16, [x17, #2728]
+    add     x16, x16, #1
+    str     x16, [x17, #2728]
+    adrp    x16, lxrt_vk_real
+    add     x16, x16, :lo12:lxrt_vk_real
+    ldr     x16, [x16, #2728]
+    br      x16
+
+.Lcnt342:
+    adrp    x17, lxrt_vk_counts
+    add     x17, x17, :lo12:lxrt_vk_counts
+    ldr     x16, [x17, #2736]
+    add     x16, x16, #1
+    str     x16, [x17, #2736]
+    adrp    x16, lxrt_vk_real
+    add     x16, x16, :lo12:lxrt_vk_real
+    ldr     x16, [x16, #2736]
+    br      x16
+
+.Lcnt343:
+    adrp    x17, lxrt_vk_counts
+    add     x17, x17, :lo12:lxrt_vk_counts
+    ldr     x16, [x17, #2744]
+    add     x16, x16, #1
+    str     x16, [x17, #2744]
+    adrp    x16, lxrt_vk_real
+    add     x16, x16, :lo12:lxrt_vk_real
+    ldr     x16, [x16, #2744]
+    br      x16
+
+.Lcnt344:
+    adrp    x17, lxrt_vk_counts
+    add     x17, x17, :lo12:lxrt_vk_counts
+    ldr     x16, [x17, #2752]
+    add     x16, x16, #1
+    str     x16, [x17, #2752]
+    adrp    x16, lxrt_vk_real
+    add     x16, x16, :lo12:lxrt_vk_real
+    ldr     x16, [x16, #2752]
+    br      x16
+
+.Lcnt345:
+    adrp    x17, lxrt_vk_counts
+    add     x17, x17, :lo12:lxrt_vk_counts
+    ldr     x16, [x17, #2760]
+    add     x16, x16, #1
+    str     x16, [x17, #2760]
+    adrp    x16, lxrt_vk_real
+    add     x16, x16, :lo12:lxrt_vk_real
+    ldr     x16, [x16, #2760]
+    br      x16
+
+.Lcnt346:
+    adrp    x17, lxrt_vk_counts
+    add     x17, x17, :lo12:lxrt_vk_counts
+    ldr     x16, [x17, #2768]
+    add     x16, x16, #1
+    str     x16, [x17, #2768]
+    adrp    x16, lxrt_vk_real
+    add     x16, x16, :lo12:lxrt_vk_real
+    ldr     x16, [x16, #2768]
+    br      x16
+
+.Lcnt347:
+    adrp    x17, lxrt_vk_counts
+    add     x17, x17, :lo12:lxrt_vk_counts
+    ldr     x16, [x17, #2776]
+    add     x16, x16, #1
+    str     x16, [x17, #2776]
+    adrp    x16, lxrt_vk_real
+    add     x16, x16, :lo12:lxrt_vk_real
+    ldr     x16, [x16, #2776]
+    br      x16
+
+.Lcnt348:
+    adrp    x17, lxrt_vk_counts
+    add     x17, x17, :lo12:lxrt_vk_counts
+    ldr     x16, [x17, #2784]
+    add     x16, x16, #1
+    str     x16, [x17, #2784]
+    adrp    x16, lxrt_vk_real
+    add     x16, x16, :lo12:lxrt_vk_real
+    ldr     x16, [x16, #2784]
+    br      x16
+
+.Lcnt349:
+    adrp    x17, lxrt_vk_counts
+    add     x17, x17, :lo12:lxrt_vk_counts
+    ldr     x16, [x17, #2792]
+    add     x16, x16, #1
+    str     x16, [x17, #2792]
+    adrp    x16, lxrt_vk_real
+    add     x16, x16, :lo12:lxrt_vk_real
+    ldr     x16, [x16, #2792]
+    br      x16
+
+.Lcnt350:
+    adrp    x17, lxrt_vk_counts
+    add     x17, x17, :lo12:lxrt_vk_counts
+    ldr     x16, [x17, #2800]
+    add     x16, x16, #1
+    str     x16, [x17, #2800]
+    adrp    x16, lxrt_vk_real
+    add     x16, x16, :lo12:lxrt_vk_real
+    ldr     x16, [x16, #2800]
+    br      x16
+
+.Lcnt351:
+    adrp    x17, lxrt_vk_counts
+    add     x17, x17, :lo12:lxrt_vk_counts
+    ldr     x16, [x17, #2808]
+    add     x16, x16, #1
+    str     x16, [x17, #2808]
+    adrp    x16, lxrt_vk_real
+    add     x16, x16, :lo12:lxrt_vk_real
+    ldr     x16, [x16, #2808]
+    br      x16
+
+.Lcnt352:
+    adrp    x17, lxrt_vk_counts
+    add     x17, x17, :lo12:lxrt_vk_counts
+    ldr     x16, [x17, #2816]
+    add     x16, x16, #1
+    str     x16, [x17, #2816]
+    adrp    x16, lxrt_vk_real
+    add     x16, x16, :lo12:lxrt_vk_real
+    ldr     x16, [x16, #2816]
+    br      x16
+
+.Lcnt353:
+    adrp    x17, lxrt_vk_counts
+    add     x17, x17, :lo12:lxrt_vk_counts
+    ldr     x16, [x17, #2824]
+    add     x16, x16, #1
+    str     x16, [x17, #2824]
+    adrp    x16, lxrt_vk_real
+    add     x16, x16, :lo12:lxrt_vk_real
+    ldr     x16, [x16, #2824]
+    br      x16
+
+.Lcnt354:
+    adrp    x17, lxrt_vk_counts
+    add     x17, x17, :lo12:lxrt_vk_counts
+    ldr     x16, [x17, #2832]
+    add     x16, x16, #1
+    str     x16, [x17, #2832]
+    adrp    x16, lxrt_vk_real
+    add     x16, x16, :lo12:lxrt_vk_real
+    ldr     x16, [x16, #2832]
+    br      x16
+
+.Lcnt355:
+    adrp    x17, lxrt_vk_counts
+    add     x17, x17, :lo12:lxrt_vk_counts
+    ldr     x16, [x17, #2840]
+    add     x16, x16, #1
+    str     x16, [x17, #2840]
+    adrp    x16, lxrt_vk_real
+    add     x16, x16, :lo12:lxrt_vk_real
+    ldr     x16, [x16, #2840]
+    br      x16
+
+.Lcnt356:
+    adrp    x17, lxrt_vk_counts
+    add     x17, x17, :lo12:lxrt_vk_counts
+    ldr     x16, [x17, #2848]
+    add     x16, x16, #1
+    str     x16, [x17, #2848]
+    adrp    x16, lxrt_vk_real
+    add     x16, x16, :lo12:lxrt_vk_real
+    ldr     x16, [x16, #2848]
+    br      x16
+
+.Lcnt357:
+    adrp    x17, lxrt_vk_counts
+    add     x17, x17, :lo12:lxrt_vk_counts
+    ldr     x16, [x17, #2856]
+    add     x16, x16, #1
+    str     x16, [x17, #2856]
+    adrp    x16, lxrt_vk_real
+    add     x16, x16, :lo12:lxrt_vk_real
+    ldr     x16, [x16, #2856]
+    br      x16
+
+.Lcnt358:
+    adrp    x17, lxrt_vk_counts
+    add     x17, x17, :lo12:lxrt_vk_counts
+    ldr     x16, [x17, #2864]
+    add     x16, x16, #1
+    str     x16, [x17, #2864]
+    adrp    x16, lxrt_vk_real
+    add     x16, x16, :lo12:lxrt_vk_real
+    ldr     x16, [x16, #2864]
+    br      x16
+
+.Lcnt359:
+    adrp    x17, lxrt_vk_counts
+    add     x17, x17, :lo12:lxrt_vk_counts
+    ldr     x16, [x17, #2872]
+    add     x16, x16, #1
+    str     x16, [x17, #2872]
+    adrp    x16, lxrt_vk_real
+    add     x16, x16, :lo12:lxrt_vk_real
+    ldr     x16, [x16, #2872]
+    br      x16
+
+.Lcnt360:
+    adrp    x17, lxrt_vk_counts
+    add     x17, x17, :lo12:lxrt_vk_counts
+    ldr     x16, [x17, #2880]
+    add     x16, x16, #1
+    str     x16, [x17, #2880]
+    adrp    x16, lxrt_vk_real
+    add     x16, x16, :lo12:lxrt_vk_real
+    ldr     x16, [x16, #2880]
+    br      x16
+
+.Lcnt361:
+    adrp    x17, lxrt_vk_counts
+    add     x17, x17, :lo12:lxrt_vk_counts
+    ldr     x16, [x17, #2888]
+    add     x16, x16, #1
+    str     x16, [x17, #2888]
+    adrp    x16, lxrt_vk_real
+    add     x16, x16, :lo12:lxrt_vk_real
+    ldr     x16, [x16, #2888]
+    br      x16
+
+.Lcnt362:
+    adrp    x17, lxrt_vk_counts
+    add     x17, x17, :lo12:lxrt_vk_counts
+    ldr     x16, [x17, #2896]
+    add     x16, x16, #1
+    str     x16, [x17, #2896]
+    adrp    x16, lxrt_vk_real
+    add     x16, x16, :lo12:lxrt_vk_real
+    ldr     x16, [x16, #2896]
+    br      x16
+
+.Lcnt363:
+    adrp    x17, lxrt_vk_counts
+    add     x17, x17, :lo12:lxrt_vk_counts
+    ldr     x16, [x17, #2904]
+    add     x16, x16, #1
+    str     x16, [x17, #2904]
+    adrp    x16, lxrt_vk_real
+    add     x16, x16, :lo12:lxrt_vk_real
+    ldr     x16, [x16, #2904]
+    br      x16
+
+.Lcnt364:
+    adrp    x17, lxrt_vk_counts
+    add     x17, x17, :lo12:lxrt_vk_counts
+    ldr     x16, [x17, #2912]
+    add     x16, x16, #1
+    str     x16, [x17, #2912]
+    adrp    x16, lxrt_vk_real
+    add     x16, x16, :lo12:lxrt_vk_real
+    ldr     x16, [x16, #2912]
+    br      x16
+
+.Lcnt365:
+    adrp    x17, lxrt_vk_counts
+    add     x17, x17, :lo12:lxrt_vk_counts
+    ldr     x16, [x17, #2920]
+    add     x16, x16, #1
+    str     x16, [x17, #2920]
+    adrp    x16, lxrt_vk_real
+    add     x16, x16, :lo12:lxrt_vk_real
+    ldr     x16, [x16, #2920]
+    br      x16
+
+.Lcnt366:
+    adrp    x17, lxrt_vk_counts
+    add     x17, x17, :lo12:lxrt_vk_counts
+    ldr     x16, [x17, #2928]
+    add     x16, x16, #1
+    str     x16, [x17, #2928]
+    adrp    x16, lxrt_vk_real
+    add     x16, x16, :lo12:lxrt_vk_real
+    ldr     x16, [x16, #2928]
+    br      x16
+
+.Lcnt367:
+    adrp    x17, lxrt_vk_counts
+    add     x17, x17, :lo12:lxrt_vk_counts
+    ldr     x16, [x17, #2936]
+    add     x16, x16, #1
+    str     x16, [x17, #2936]
+    adrp    x16, lxrt_vk_real
+    add     x16, x16, :lo12:lxrt_vk_real
+    ldr     x16, [x16, #2936]
+    br      x16
+
+.Lcnt368:
+    adrp    x17, lxrt_vk_counts
+    add     x17, x17, :lo12:lxrt_vk_counts
+    ldr     x16, [x17, #2944]
+    add     x16, x16, #1
+    str     x16, [x17, #2944]
+    adrp    x16, lxrt_vk_real
+    add     x16, x16, :lo12:lxrt_vk_real
+    ldr     x16, [x16, #2944]
+    br      x16
+
+.Lcnt369:
+    adrp    x17, lxrt_vk_counts
+    add     x17, x17, :lo12:lxrt_vk_counts
+    ldr     x16, [x17, #2952]
+    add     x16, x16, #1
+    str     x16, [x17, #2952]
+    adrp    x16, lxrt_vk_real
+    add     x16, x16, :lo12:lxrt_vk_real
+    ldr     x16, [x16, #2952]
+    br      x16
+
+.Lcnt370:
+    adrp    x17, lxrt_vk_counts
+    add     x17, x17, :lo12:lxrt_vk_counts
+    ldr     x16, [x17, #2960]
+    add     x16, x16, #1
+    str     x16, [x17, #2960]
+    adrp    x16, lxrt_vk_real
+    add     x16, x16, :lo12:lxrt_vk_real
+    ldr     x16, [x16, #2960]
+    br      x16
+
+.Lcnt371:
+    adrp    x17, lxrt_vk_counts
+    add     x17, x17, :lo12:lxrt_vk_counts
+    ldr     x16, [x17, #2968]
+    add     x16, x16, #1
+    str     x16, [x17, #2968]
+    adrp    x16, lxrt_vk_real
+    add     x16, x16, :lo12:lxrt_vk_real
+    ldr     x16, [x16, #2968]
+    br      x16
+
+.Lcnt372:
+    adrp    x17, lxrt_vk_counts
+    add     x17, x17, :lo12:lxrt_vk_counts
+    ldr     x16, [x17, #2976]
+    add     x16, x16, #1
+    str     x16, [x17, #2976]
+    adrp    x16, lxrt_vk_real
+    add     x16, x16, :lo12:lxrt_vk_real
+    ldr     x16, [x16, #2976]
+    br      x16
+
+.Lcnt373:
+    adrp    x17, lxrt_vk_counts
+    add     x17, x17, :lo12:lxrt_vk_counts
+    ldr     x16, [x17, #2984]
+    add     x16, x16, #1
+    str     x16, [x17, #2984]
+    adrp    x16, lxrt_vk_real
+    add     x16, x16, :lo12:lxrt_vk_real
+    ldr     x16, [x16, #2984]
+    br      x16
+
+.Lcnt374:
+    adrp    x17, lxrt_vk_counts
+    add     x17, x17, :lo12:lxrt_vk_counts
+    ldr     x16, [x17, #2992]
+    add     x16, x16, #1
+    str     x16, [x17, #2992]
+    adrp    x16, lxrt_vk_real
+    add     x16, x16, :lo12:lxrt_vk_real
+    ldr     x16, [x16, #2992]
+    br      x16
+
+.Lcnt375:
+    adrp    x17, lxrt_vk_counts
+    add     x17, x17, :lo12:lxrt_vk_counts
+    ldr     x16, [x17, #3000]
+    add     x16, x16, #1
+    str     x16, [x17, #3000]
+    adrp    x16, lxrt_vk_real
+    add     x16, x16, :lo12:lxrt_vk_real
+    ldr     x16, [x16, #3000]
+    br      x16
+
+.Lcnt376:
+    adrp    x17, lxrt_vk_counts
+    add     x17, x17, :lo12:lxrt_vk_counts
+    ldr     x16, [x17, #3008]
+    add     x16, x16, #1
+    str     x16, [x17, #3008]
+    adrp    x16, lxrt_vk_real
+    add     x16, x16, :lo12:lxrt_vk_real
+    ldr     x16, [x16, #3008]
+    br      x16
+
+.Lcnt377:
+    adrp    x17, lxrt_vk_counts
+    add     x17, x17, :lo12:lxrt_vk_counts
+    ldr     x16, [x17, #3016]
+    add     x16, x16, #1
+    str     x16, [x17, #3016]
+    adrp    x16, lxrt_vk_real
+    add     x16, x16, :lo12:lxrt_vk_real
+    ldr     x16, [x16, #3016]
+    br      x16
+
+.Lcnt378:
+    adrp    x17, lxrt_vk_counts
+    add     x17, x17, :lo12:lxrt_vk_counts
+    ldr     x16, [x17, #3024]
+    add     x16, x16, #1
+    str     x16, [x17, #3024]
+    adrp    x16, lxrt_vk_real
+    add     x16, x16, :lo12:lxrt_vk_real
+    ldr     x16, [x16, #3024]
+    br      x16
+
+.Lcnt379:
+    adrp    x17, lxrt_vk_counts
+    add     x17, x17, :lo12:lxrt_vk_counts
+    ldr     x16, [x17, #3032]
+    add     x16, x16, #1
+    str     x16, [x17, #3032]
+    adrp    x16, lxrt_vk_real
+    add     x16, x16, :lo12:lxrt_vk_real
+    ldr     x16, [x16, #3032]
+    br      x16
+
+.Lcnt380:
+    adrp    x17, lxrt_vk_counts
+    add     x17, x17, :lo12:lxrt_vk_counts
+    ldr     x16, [x17, #3040]
+    add     x16, x16, #1
+    str     x16, [x17, #3040]
+    adrp    x16, lxrt_vk_real
+    add     x16, x16, :lo12:lxrt_vk_real
+    ldr     x16, [x16, #3040]
+    br      x16
+
+.Lcnt381:
+    adrp    x17, lxrt_vk_counts
+    add     x17, x17, :lo12:lxrt_vk_counts
+    ldr     x16, [x17, #3048]
+    add     x16, x16, #1
+    str     x16, [x17, #3048]
+    adrp    x16, lxrt_vk_real
+    add     x16, x16, :lo12:lxrt_vk_real
+    ldr     x16, [x16, #3048]
+    br      x16
+
+.Lcnt382:
+    adrp    x17, lxrt_vk_counts
+    add     x17, x17, :lo12:lxrt_vk_counts
+    ldr     x16, [x17, #3056]
+    add     x16, x16, #1
+    str     x16, [x17, #3056]
+    adrp    x16, lxrt_vk_real
+    add     x16, x16, :lo12:lxrt_vk_real
+    ldr     x16, [x16, #3056]
+    br      x16
+
+.Lcnt383:
+    adrp    x17, lxrt_vk_counts
+    add     x17, x17, :lo12:lxrt_vk_counts
+    ldr     x16, [x17, #3064]
+    add     x16, x16, #1
+    str     x16, [x17, #3064]
+    adrp    x16, lxrt_vk_real
+    add     x16, x16, :lo12:lxrt_vk_real
+    ldr     x16, [x16, #3064]
+    br      x16
+
+.Lcnt384:
+    adrp    x17, lxrt_vk_counts
+    add     x17, x17, :lo12:lxrt_vk_counts
+    ldr     x16, [x17, #3072]
+    add     x16, x16, #1
+    str     x16, [x17, #3072]
+    adrp    x16, lxrt_vk_real
+    add     x16, x16, :lo12:lxrt_vk_real
+    ldr     x16, [x16, #3072]
+    br      x16
+
+.Lcnt385:
+    adrp    x17, lxrt_vk_counts
+    add     x17, x17, :lo12:lxrt_vk_counts
+    ldr     x16, [x17, #3080]
+    add     x16, x16, #1
+    str     x16, [x17, #3080]
+    adrp    x16, lxrt_vk_real
+    add     x16, x16, :lo12:lxrt_vk_real
+    ldr     x16, [x16, #3080]
+    br      x16
+
+.Lcnt386:
+    adrp    x17, lxrt_vk_counts
+    add     x17, x17, :lo12:lxrt_vk_counts
+    ldr     x16, [x17, #3088]
+    add     x16, x16, #1
+    str     x16, [x17, #3088]
+    adrp    x16, lxrt_vk_real
+    add     x16, x16, :lo12:lxrt_vk_real
+    ldr     x16, [x16, #3088]
+    br      x16
+
+.Lcnt387:
+    adrp    x17, lxrt_vk_counts
+    add     x17, x17, :lo12:lxrt_vk_counts
+    ldr     x16, [x17, #3096]
+    add     x16, x16, #1
+    str     x16, [x17, #3096]
+    adrp    x16, lxrt_vk_real
+    add     x16, x16, :lo12:lxrt_vk_real
+    ldr     x16, [x16, #3096]
+    br      x16
+
+.Lcnt388:
+    adrp    x17, lxrt_vk_counts
+    add     x17, x17, :lo12:lxrt_vk_counts
+    ldr     x16, [x17, #3104]
+    add     x16, x16, #1
+    str     x16, [x17, #3104]
+    adrp    x16, lxrt_vk_real
+    add     x16, x16, :lo12:lxrt_vk_real
+    ldr     x16, [x16, #3104]
+    br      x16
+
+.Lcnt389:
+    adrp    x17, lxrt_vk_counts
+    add     x17, x17, :lo12:lxrt_vk_counts
+    ldr     x16, [x17, #3112]
+    add     x16, x16, #1
+    str     x16, [x17, #3112]
+    adrp    x16, lxrt_vk_real
+    add     x16, x16, :lo12:lxrt_vk_real
+    ldr     x16, [x16, #3112]
+    br      x16
+
+.Lcnt390:
+    adrp    x17, lxrt_vk_counts
+    add     x17, x17, :lo12:lxrt_vk_counts
+    ldr     x16, [x17, #3120]
+    add     x16, x16, #1
+    str     x16, [x17, #3120]
+    adrp    x16, lxrt_vk_real
+    add     x16, x16, :lo12:lxrt_vk_real
+    ldr     x16, [x16, #3120]
+    br      x16
+
+.Lcnt391:
+    adrp    x17, lxrt_vk_counts
+    add     x17, x17, :lo12:lxrt_vk_counts
+    ldr     x16, [x17, #3128]
+    add     x16, x16, #1
+    str     x16, [x17, #3128]
+    adrp    x16, lxrt_vk_real
+    add     x16, x16, :lo12:lxrt_vk_real
+    ldr     x16, [x16, #3128]
+    br      x16
+
+.Lcnt392:
+    adrp    x17, lxrt_vk_counts
+    add     x17, x17, :lo12:lxrt_vk_counts
+    ldr     x16, [x17, #3136]
+    add     x16, x16, #1
+    str     x16, [x17, #3136]
+    adrp    x16, lxrt_vk_real
+    add     x16, x16, :lo12:lxrt_vk_real
+    ldr     x16, [x16, #3136]
+    br      x16
+
+.Lcnt393:
+    adrp    x17, lxrt_vk_counts
+    add     x17, x17, :lo12:lxrt_vk_counts
+    ldr     x16, [x17, #3144]
+    add     x16, x16, #1
+    str     x16, [x17, #3144]
+    adrp    x16, lxrt_vk_real
+    add     x16, x16, :lo12:lxrt_vk_real
+    ldr     x16, [x16, #3144]
+    br      x16
+
+.Lcnt394:
+    adrp    x17, lxrt_vk_counts
+    add     x17, x17, :lo12:lxrt_vk_counts
+    ldr     x16, [x17, #3152]
+    add     x16, x16, #1
+    str     x16, [x17, #3152]
+    adrp    x16, lxrt_vk_real
+    add     x16, x16, :lo12:lxrt_vk_real
+    ldr     x16, [x16, #3152]
+    br      x16
+
+.Lcnt395:
+    adrp    x17, lxrt_vk_counts
+    add     x17, x17, :lo12:lxrt_vk_counts
+    ldr     x16, [x17, #3160]
+    add     x16, x16, #1
+    str     x16, [x17, #3160]
+    adrp    x16, lxrt_vk_real
+    add     x16, x16, :lo12:lxrt_vk_real
+    ldr     x16, [x16, #3160]
+    br      x16
+
+.Lcnt396:
+    adrp    x17, lxrt_vk_counts
+    add     x17, x17, :lo12:lxrt_vk_counts
+    ldr     x16, [x17, #3168]
+    add     x16, x16, #1
+    str     x16, [x17, #3168]
+    adrp    x16, lxrt_vk_real
+    add     x16, x16, :lo12:lxrt_vk_real
+    ldr     x16, [x16, #3168]
+    br      x16
+
+.Lcnt397:
+    adrp    x17, lxrt_vk_counts
+    add     x17, x17, :lo12:lxrt_vk_counts
+    ldr     x16, [x17, #3176]
+    add     x16, x16, #1
+    str     x16, [x17, #3176]
+    adrp    x16, lxrt_vk_real
+    add     x16, x16, :lo12:lxrt_vk_real
+    ldr     x16, [x16, #3176]
+    br      x16
+
+.Lcnt398:
+    adrp    x17, lxrt_vk_counts
+    add     x17, x17, :lo12:lxrt_vk_counts
+    ldr     x16, [x17, #3184]
+    add     x16, x16, #1
+    str     x16, [x17, #3184]
+    adrp    x16, lxrt_vk_real
+    add     x16, x16, :lo12:lxrt_vk_real
+    ldr     x16, [x16, #3184]
+    br      x16
+
+.Lcnt399:
+    adrp    x17, lxrt_vk_counts
+    add     x17, x17, :lo12:lxrt_vk_counts
+    ldr     x16, [x17, #3192]
+    add     x16, x16, #1
+    str     x16, [x17, #3192]
+    adrp    x16, lxrt_vk_real
+    add     x16, x16, :lo12:lxrt_vk_real
+    ldr     x16, [x16, #3192]
+    br      x16
+
+.Lcnt400:
+    adrp    x17, lxrt_vk_counts
+    add     x17, x17, :lo12:lxrt_vk_counts
+    ldr     x16, [x17, #3200]
+    add     x16, x16, #1
+    str     x16, [x17, #3200]
+    adrp    x16, lxrt_vk_real
+    add     x16, x16, :lo12:lxrt_vk_real
+    ldr     x16, [x16, #3200]
+    br      x16
+
+.Lcnt401:
+    adrp    x17, lxrt_vk_counts
+    add     x17, x17, :lo12:lxrt_vk_counts
+    ldr     x16, [x17, #3208]
+    add     x16, x16, #1
+    str     x16, [x17, #3208]
+    adrp    x16, lxrt_vk_real
+    add     x16, x16, :lo12:lxrt_vk_real
+    ldr     x16, [x16, #3208]
+    br      x16
+
+.Lcnt402:
+    adrp    x17, lxrt_vk_counts
+    add     x17, x17, :lo12:lxrt_vk_counts
+    ldr     x16, [x17, #3216]
+    add     x16, x16, #1
+    str     x16, [x17, #3216]
+    adrp    x16, lxrt_vk_real
+    add     x16, x16, :lo12:lxrt_vk_real
+    ldr     x16, [x16, #3216]
+    br      x16
+
+.Lcnt403:
+    adrp    x17, lxrt_vk_counts
+    add     x17, x17, :lo12:lxrt_vk_counts
+    ldr     x16, [x17, #3224]
+    add     x16, x16, #1
+    str     x16, [x17, #3224]
+    adrp    x16, lxrt_vk_real
+    add     x16, x16, :lo12:lxrt_vk_real
+    ldr     x16, [x16, #3224]
+    br      x16
+
+.Lcnt404:
+    adrp    x17, lxrt_vk_counts
+    add     x17, x17, :lo12:lxrt_vk_counts
+    ldr     x16, [x17, #3232]
+    add     x16, x16, #1
+    str     x16, [x17, #3232]
+    adrp    x16, lxrt_vk_real
+    add     x16, x16, :lo12:lxrt_vk_real
+    ldr     x16, [x16, #3232]
+    br      x16
+
+.Lcnt405:
+    adrp    x17, lxrt_vk_counts
+    add     x17, x17, :lo12:lxrt_vk_counts
+    ldr     x16, [x17, #3240]
+    add     x16, x16, #1
+    str     x16, [x17, #3240]
+    adrp    x16, lxrt_vk_real
+    add     x16, x16, :lo12:lxrt_vk_real
+    ldr     x16, [x16, #3240]
+    br      x16
+
+.Lcnt406:
+    adrp    x17, lxrt_vk_counts
+    add     x17, x17, :lo12:lxrt_vk_counts
+    ldr     x16, [x17, #3248]
+    add     x16, x16, #1
+    str     x16, [x17, #3248]
+    adrp    x16, lxrt_vk_real
+    add     x16, x16, :lo12:lxrt_vk_real
+    ldr     x16, [x16, #3248]
+    br      x16
+
+.Lcnt407:
+    adrp    x17, lxrt_vk_counts
+    add     x17, x17, :lo12:lxrt_vk_counts
+    ldr     x16, [x17, #3256]
+    add     x16, x16, #1
+    str     x16, [x17, #3256]
+    adrp    x16, lxrt_vk_real
+    add     x16, x16, :lo12:lxrt_vk_real
+    ldr     x16, [x16, #3256]
+    br      x16
+
+.Lcnt408:
+    adrp    x17, lxrt_vk_counts
+    add     x17, x17, :lo12:lxrt_vk_counts
+    ldr     x16, [x17, #3264]
+    add     x16, x16, #1
+    str     x16, [x17, #3264]
+    adrp    x16, lxrt_vk_real
+    add     x16, x16, :lo12:lxrt_vk_real
+    ldr     x16, [x16, #3264]
+    br      x16
+
+.Lcnt409:
+    adrp    x17, lxrt_vk_counts
+    add     x17, x17, :lo12:lxrt_vk_counts
+    ldr     x16, [x17, #3272]
+    add     x16, x16, #1
+    str     x16, [x17, #3272]
+    adrp    x16, lxrt_vk_real
+    add     x16, x16, :lo12:lxrt_vk_real
+    ldr     x16, [x16, #3272]
+    br      x16
+
+.Lcnt410:
+    adrp    x17, lxrt_vk_counts
+    add     x17, x17, :lo12:lxrt_vk_counts
+    ldr     x16, [x17, #3280]
+    add     x16, x16, #1
+    str     x16, [x17, #3280]
+    adrp    x16, lxrt_vk_real
+    add     x16, x16, :lo12:lxrt_vk_real
+    ldr     x16, [x16, #3280]
+    br      x16
+
+.Lcnt411:
+    adrp    x17, lxrt_vk_counts
+    add     x17, x17, :lo12:lxrt_vk_counts
+    ldr     x16, [x17, #3288]
+    add     x16, x16, #1
+    str     x16, [x17, #3288]
+    adrp    x16, lxrt_vk_real
+    add     x16, x16, :lo12:lxrt_vk_real
+    ldr     x16, [x16, #3288]
+    br      x16
+
+.Lcnt412:
+    adrp    x17, lxrt_vk_counts
+    add     x17, x17, :lo12:lxrt_vk_counts
+    ldr     x16, [x17, #3296]
+    add     x16, x16, #1
+    str     x16, [x17, #3296]
+    adrp    x16, lxrt_vk_real
+    add     x16, x16, :lo12:lxrt_vk_real
+    ldr     x16, [x16, #3296]
+    br      x16
+
+.Lcnt413:
+    adrp    x17, lxrt_vk_counts
+    add     x17, x17, :lo12:lxrt_vk_counts
+    ldr     x16, [x17, #3304]
+    add     x16, x16, #1
+    str     x16, [x17, #3304]
+    adrp    x16, lxrt_vk_real
+    add     x16, x16, :lo12:lxrt_vk_real
+    ldr     x16, [x16, #3304]
+    br      x16
+
+.Lcnt414:
+    adrp    x17, lxrt_vk_counts
+    add     x17, x17, :lo12:lxrt_vk_counts
+    ldr     x16, [x17, #3312]
+    add     x16, x16, #1
+    str     x16, [x17, #3312]
+    adrp    x16, lxrt_vk_real
+    add     x16, x16, :lo12:lxrt_vk_real
+    ldr     x16, [x16, #3312]
+    br      x16
+
+.Lcnt415:
+    adrp    x17, lxrt_vk_counts
+    add     x17, x17, :lo12:lxrt_vk_counts
+    ldr     x16, [x17, #3320]
+    add     x16, x16, #1
+    str     x16, [x17, #3320]
+    adrp    x16, lxrt_vk_real
+    add     x16, x16, :lo12:lxrt_vk_real
+    ldr     x16, [x16, #3320]
+    br      x16
+
+.Lcnt416:
+    adrp    x17, lxrt_vk_counts
+    add     x17, x17, :lo12:lxrt_vk_counts
+    ldr     x16, [x17, #3328]
+    add     x16, x16, #1
+    str     x16, [x17, #3328]
+    adrp    x16, lxrt_vk_real
+    add     x16, x16, :lo12:lxrt_vk_real
+    ldr     x16, [x16, #3328]
+    br      x16
+
+.Lcnt417:
+    adrp    x17, lxrt_vk_counts
+    add     x17, x17, :lo12:lxrt_vk_counts
+    ldr     x16, [x17, #3336]
+    add     x16, x16, #1
+    str     x16, [x17, #3336]
+    adrp    x16, lxrt_vk_real
+    add     x16, x16, :lo12:lxrt_vk_real
+    ldr     x16, [x16, #3336]
+    br      x16
+
+.Lcnt418:
+    adrp    x17, lxrt_vk_counts
+    add     x17, x17, :lo12:lxrt_vk_counts
+    ldr     x16, [x17, #3344]
+    add     x16, x16, #1
+    str     x16, [x17, #3344]
+    adrp    x16, lxrt_vk_real
+    add     x16, x16, :lo12:lxrt_vk_real
+    ldr     x16, [x16, #3344]
+    br      x16
+
+.Lcnt419:
+    adrp    x17, lxrt_vk_counts
+    add     x17, x17, :lo12:lxrt_vk_counts
+    ldr     x16, [x17, #3352]
+    add     x16, x16, #1
+    str     x16, [x17, #3352]
+    adrp    x16, lxrt_vk_real
+    add     x16, x16, :lo12:lxrt_vk_real
+    ldr     x16, [x16, #3352]
+    br      x16
+
+.Lcnt420:
+    adrp    x17, lxrt_vk_counts
+    add     x17, x17, :lo12:lxrt_vk_counts
+    ldr     x16, [x17, #3360]
+    add     x16, x16, #1
+    str     x16, [x17, #3360]
+    adrp    x16, lxrt_vk_real
+    add     x16, x16, :lo12:lxrt_vk_real
+    ldr     x16, [x16, #3360]
+    br      x16
+
+.Lcnt421:
+    adrp    x17, lxrt_vk_counts
+    add     x17, x17, :lo12:lxrt_vk_counts
+    ldr     x16, [x17, #3368]
+    add     x16, x16, #1
+    str     x16, [x17, #3368]
+    adrp    x16, lxrt_vk_real
+    add     x16, x16, :lo12:lxrt_vk_real
+    ldr     x16, [x16, #3368]
+    br      x16
+
+.Lcnt422:
+    adrp    x17, lxrt_vk_counts
+    add     x17, x17, :lo12:lxrt_vk_counts
+    ldr     x16, [x17, #3376]
+    add     x16, x16, #1
+    str     x16, [x17, #3376]
+    adrp    x16, lxrt_vk_real
+    add     x16, x16, :lo12:lxrt_vk_real
+    ldr     x16, [x16, #3376]
+    br      x16
+
+.Lcnt423:
+    adrp    x17, lxrt_vk_counts
+    add     x17, x17, :lo12:lxrt_vk_counts
+    ldr     x16, [x17, #3384]
+    add     x16, x16, #1
+    str     x16, [x17, #3384]
+    adrp    x16, lxrt_vk_real
+    add     x16, x16, :lo12:lxrt_vk_real
+    ldr     x16, [x16, #3384]
+    br      x16
+
+.Lcnt424:
+    adrp    x17, lxrt_vk_counts
+    add     x17, x17, :lo12:lxrt_vk_counts
+    ldr     x16, [x17, #3392]
+    add     x16, x16, #1
+    str     x16, [x17, #3392]
+    adrp    x16, lxrt_vk_real
+    add     x16, x16, :lo12:lxrt_vk_real
+    ldr     x16, [x16, #3392]
+    br      x16
+
+.Lcnt425:
+    adrp    x17, lxrt_vk_counts
+    add     x17, x17, :lo12:lxrt_vk_counts
+    ldr     x16, [x17, #3400]
+    add     x16, x16, #1
+    str     x16, [x17, #3400]
+    adrp    x16, lxrt_vk_real
+    add     x16, x16, :lo12:lxrt_vk_real
+    ldr     x16, [x16, #3400]
+    br      x16
+
+.Lcnt426:
+    adrp    x17, lxrt_vk_counts
+    add     x17, x17, :lo12:lxrt_vk_counts
+    ldr     x16, [x17, #3408]
+    add     x16, x16, #1
+    str     x16, [x17, #3408]
+    adrp    x16, lxrt_vk_real
+    add     x16, x16, :lo12:lxrt_vk_real
+    ldr     x16, [x16, #3408]
+    br      x16
+
+.Lcnt427:
+    adrp    x17, lxrt_vk_counts
+    add     x17, x17, :lo12:lxrt_vk_counts
+    ldr     x16, [x17, #3416]
+    add     x16, x16, #1
+    str     x16, [x17, #3416]
+    adrp    x16, lxrt_vk_real
+    add     x16, x16, :lo12:lxrt_vk_real
+    ldr     x16, [x16, #3416]
+    br      x16
+
+.Lcnt428:
+    adrp    x17, lxrt_vk_counts
+    add     x17, x17, :lo12:lxrt_vk_counts
+    ldr     x16, [x17, #3424]
+    add     x16, x16, #1
+    str     x16, [x17, #3424]
+    adrp    x16, lxrt_vk_real
+    add     x16, x16, :lo12:lxrt_vk_real
+    ldr     x16, [x16, #3424]
+    br      x16
+
+.Lcnt429:
+    adrp    x17, lxrt_vk_counts
+    add     x17, x17, :lo12:lxrt_vk_counts
+    ldr     x16, [x17, #3432]
+    add     x16, x16, #1
+    str     x16, [x17, #3432]
+    adrp    x16, lxrt_vk_real
+    add     x16, x16, :lo12:lxrt_vk_real
+    ldr     x16, [x16, #3432]
+    br      x16
+
+.Lcnt430:
+    adrp    x17, lxrt_vk_counts
+    add     x17, x17, :lo12:lxrt_vk_counts
+    ldr     x16, [x17, #3440]
+    add     x16, x16, #1
+    str     x16, [x17, #3440]
+    adrp    x16, lxrt_vk_real
+    add     x16, x16, :lo12:lxrt_vk_real
+    ldr     x16, [x16, #3440]
+    br      x16
+
+    .section .data.rel.ro,"aw"
+    .p2align 3
+    .globl  lxrt_vk_cnt_thunks
+    .hidden lxrt_vk_cnt_thunks
+lxrt_vk_cnt_thunks:
+    .quad   .Lcnt0
+    .quad   .Lcnt1
+    .quad   .Lcnt2
+    .quad   .Lcnt3
+    .quad   .Lcnt4
+    .quad   .Lcnt5
+    .quad   .Lcnt6
+    .quad   .Lcnt7
+    .quad   .Lcnt8
+    .quad   .Lcnt9
+    .quad   .Lcnt10
+    .quad   .Lcnt11
+    .quad   .Lcnt12
+    .quad   .Lcnt13
+    .quad   .Lcnt14
+    .quad   .Lcnt15
+    .quad   .Lcnt16
+    .quad   .Lcnt17
+    .quad   .Lcnt18
+    .quad   .Lcnt19
+    .quad   .Lcnt20
+    .quad   .Lcnt21
+    .quad   .Lcnt22
+    .quad   .Lcnt23
+    .quad   .Lcnt24
+    .quad   .Lcnt25
+    .quad   .Lcnt26
+    .quad   .Lcnt27
+    .quad   .Lcnt28
+    .quad   .Lcnt29
+    .quad   .Lcnt30
+    .quad   .Lcnt31
+    .quad   .Lcnt32
+    .quad   .Lcnt33
+    .quad   .Lcnt34
+    .quad   .Lcnt35
+    .quad   .Lcnt36
+    .quad   .Lcnt37
+    .quad   .Lcnt38
+    .quad   .Lcnt39
+    .quad   .Lcnt40
+    .quad   .Lcnt41
+    .quad   .Lcnt42
+    .quad   .Lcnt43
+    .quad   .Lcnt44
+    .quad   .Lcnt45
+    .quad   .Lcnt46
+    .quad   .Lcnt47
+    .quad   .Lcnt48
+    .quad   .Lcnt49
+    .quad   .Lcnt50
+    .quad   .Lcnt51
+    .quad   .Lcnt52
+    .quad   .Lcnt53
+    .quad   .Lcnt54
+    .quad   .Lcnt55
+    .quad   .Lcnt56
+    .quad   .Lcnt57
+    .quad   .Lcnt58
+    .quad   .Lcnt59
+    .quad   .Lcnt60
+    .quad   .Lcnt61
+    .quad   .Lcnt62
+    .quad   .Lcnt63
+    .quad   .Lcnt64
+    .quad   .Lcnt65
+    .quad   .Lcnt66
+    .quad   .Lcnt67
+    .quad   .Lcnt68
+    .quad   .Lcnt69
+    .quad   .Lcnt70
+    .quad   .Lcnt71
+    .quad   .Lcnt72
+    .quad   .Lcnt73
+    .quad   .Lcnt74
+    .quad   .Lcnt75
+    .quad   .Lcnt76
+    .quad   .Lcnt77
+    .quad   .Lcnt78
+    .quad   .Lcnt79
+    .quad   .Lcnt80
+    .quad   .Lcnt81
+    .quad   .Lcnt82
+    .quad   .Lcnt83
+    .quad   .Lcnt84
+    .quad   .Lcnt85
+    .quad   .Lcnt86
+    .quad   .Lcnt87
+    .quad   .Lcnt88
+    .quad   .Lcnt89
+    .quad   .Lcnt90
+    .quad   .Lcnt91
+    .quad   .Lcnt92
+    .quad   .Lcnt93
+    .quad   .Lcnt94
+    .quad   .Lcnt95
+    .quad   .Lcnt96
+    .quad   .Lcnt97
+    .quad   .Lcnt98
+    .quad   .Lcnt99
+    .quad   .Lcnt100
+    .quad   .Lcnt101
+    .quad   .Lcnt102
+    .quad   .Lcnt103
+    .quad   .Lcnt104
+    .quad   .Lcnt105
+    .quad   .Lcnt106
+    .quad   .Lcnt107
+    .quad   .Lcnt108
+    .quad   .Lcnt109
+    .quad   .Lcnt110
+    .quad   .Lcnt111
+    .quad   .Lcnt112
+    .quad   .Lcnt113
+    .quad   .Lcnt114
+    .quad   .Lcnt115
+    .quad   .Lcnt116
+    .quad   .Lcnt117
+    .quad   .Lcnt118
+    .quad   .Lcnt119
+    .quad   .Lcnt120
+    .quad   .Lcnt121
+    .quad   .Lcnt122
+    .quad   .Lcnt123
+    .quad   .Lcnt124
+    .quad   .Lcnt125
+    .quad   .Lcnt126
+    .quad   .Lcnt127
+    .quad   .Lcnt128
+    .quad   .Lcnt129
+    .quad   .Lcnt130
+    .quad   .Lcnt131
+    .quad   .Lcnt132
+    .quad   .Lcnt133
+    .quad   .Lcnt134
+    .quad   .Lcnt135
+    .quad   .Lcnt136
+    .quad   .Lcnt137
+    .quad   .Lcnt138
+    .quad   .Lcnt139
+    .quad   .Lcnt140
+    .quad   .Lcnt141
+    .quad   .Lcnt142
+    .quad   .Lcnt143
+    .quad   .Lcnt144
+    .quad   .Lcnt145
+    .quad   .Lcnt146
+    .quad   .Lcnt147
+    .quad   .Lcnt148
+    .quad   .Lcnt149
+    .quad   .Lcnt150
+    .quad   .Lcnt151
+    .quad   .Lcnt152
+    .quad   .Lcnt153
+    .quad   .Lcnt154
+    .quad   .Lcnt155
+    .quad   .Lcnt156
+    .quad   .Lcnt157
+    .quad   .Lcnt158
+    .quad   .Lcnt159
+    .quad   .Lcnt160
+    .quad   .Lcnt161
+    .quad   .Lcnt162
+    .quad   .Lcnt163
+    .quad   .Lcnt164
+    .quad   .Lcnt165
+    .quad   .Lcnt166
+    .quad   .Lcnt167
+    .quad   .Lcnt168
+    .quad   .Lcnt169
+    .quad   .Lcnt170
+    .quad   .Lcnt171
+    .quad   .Lcnt172
+    .quad   .Lcnt173
+    .quad   .Lcnt174
+    .quad   .Lcnt175
+    .quad   .Lcnt176
+    .quad   .Lcnt177
+    .quad   .Lcnt178
+    .quad   .Lcnt179
+    .quad   .Lcnt180
+    .quad   .Lcnt181
+    .quad   .Lcnt182
+    .quad   .Lcnt183
+    .quad   .Lcnt184
+    .quad   .Lcnt185
+    .quad   .Lcnt186
+    .quad   .Lcnt187
+    .quad   .Lcnt188
+    .quad   .Lcnt189
+    .quad   .Lcnt190
+    .quad   .Lcnt191
+    .quad   .Lcnt192
+    .quad   .Lcnt193
+    .quad   .Lcnt194
+    .quad   .Lcnt195
+    .quad   .Lcnt196
+    .quad   .Lcnt197
+    .quad   .Lcnt198
+    .quad   .Lcnt199
+    .quad   .Lcnt200
+    .quad   .Lcnt201
+    .quad   .Lcnt202
+    .quad   .Lcnt203
+    .quad   .Lcnt204
+    .quad   .Lcnt205
+    .quad   .Lcnt206
+    .quad   .Lcnt207
+    .quad   .Lcnt208
+    .quad   .Lcnt209
+    .quad   .Lcnt210
+    .quad   .Lcnt211
+    .quad   .Lcnt212
+    .quad   .Lcnt213
+    .quad   .Lcnt214
+    .quad   .Lcnt215
+    .quad   .Lcnt216
+    .quad   .Lcnt217
+    .quad   .Lcnt218
+    .quad   .Lcnt219
+    .quad   .Lcnt220
+    .quad   .Lcnt221
+    .quad   .Lcnt222
+    .quad   .Lcnt223
+    .quad   .Lcnt224
+    .quad   .Lcnt225
+    .quad   .Lcnt226
+    .quad   .Lcnt227
+    .quad   .Lcnt228
+    .quad   .Lcnt229
+    .quad   .Lcnt230
+    .quad   .Lcnt231
+    .quad   .Lcnt232
+    .quad   .Lcnt233
+    .quad   .Lcnt234
+    .quad   .Lcnt235
+    .quad   .Lcnt236
+    .quad   .Lcnt237
+    .quad   .Lcnt238
+    .quad   .Lcnt239
+    .quad   .Lcnt240
+    .quad   .Lcnt241
+    .quad   .Lcnt242
+    .quad   .Lcnt243
+    .quad   .Lcnt244
+    .quad   .Lcnt245
+    .quad   .Lcnt246
+    .quad   .Lcnt247
+    .quad   .Lcnt248
+    .quad   .Lcnt249
+    .quad   .Lcnt250
+    .quad   .Lcnt251
+    .quad   .Lcnt252
+    .quad   .Lcnt253
+    .quad   .Lcnt254
+    .quad   .Lcnt255
+    .quad   .Lcnt256
+    .quad   .Lcnt257
+    .quad   .Lcnt258
+    .quad   .Lcnt259
+    .quad   .Lcnt260
+    .quad   .Lcnt261
+    .quad   .Lcnt262
+    .quad   .Lcnt263
+    .quad   .Lcnt264
+    .quad   .Lcnt265
+    .quad   .Lcnt266
+    .quad   .Lcnt267
+    .quad   .Lcnt268
+    .quad   .Lcnt269
+    .quad   .Lcnt270
+    .quad   .Lcnt271
+    .quad   .Lcnt272
+    .quad   .Lcnt273
+    .quad   .Lcnt274
+    .quad   .Lcnt275
+    .quad   .Lcnt276
+    .quad   .Lcnt277
+    .quad   .Lcnt278
+    .quad   .Lcnt279
+    .quad   .Lcnt280
+    .quad   .Lcnt281
+    .quad   .Lcnt282
+    .quad   .Lcnt283
+    .quad   .Lcnt284
+    .quad   .Lcnt285
+    .quad   .Lcnt286
+    .quad   .Lcnt287
+    .quad   .Lcnt288
+    .quad   .Lcnt289
+    .quad   .Lcnt290
+    .quad   .Lcnt291
+    .quad   .Lcnt292
+    .quad   .Lcnt293
+    .quad   .Lcnt294
+    .quad   .Lcnt295
+    .quad   .Lcnt296
+    .quad   .Lcnt297
+    .quad   .Lcnt298
+    .quad   .Lcnt299
+    .quad   .Lcnt300
+    .quad   .Lcnt301
+    .quad   .Lcnt302
+    .quad   .Lcnt303
+    .quad   .Lcnt304
+    .quad   .Lcnt305
+    .quad   .Lcnt306
+    .quad   .Lcnt307
+    .quad   .Lcnt308
+    .quad   .Lcnt309
+    .quad   .Lcnt310
+    .quad   .Lcnt311
+    .quad   .Lcnt312
+    .quad   .Lcnt313
+    .quad   .Lcnt314
+    .quad   .Lcnt315
+    .quad   .Lcnt316
+    .quad   .Lcnt317
+    .quad   .Lcnt318
+    .quad   .Lcnt319
+    .quad   .Lcnt320
+    .quad   .Lcnt321
+    .quad   .Lcnt322
+    .quad   .Lcnt323
+    .quad   .Lcnt324
+    .quad   .Lcnt325
+    .quad   .Lcnt326
+    .quad   .Lcnt327
+    .quad   .Lcnt328
+    .quad   .Lcnt329
+    .quad   .Lcnt330
+    .quad   .Lcnt331
+    .quad   .Lcnt332
+    .quad   .Lcnt333
+    .quad   .Lcnt334
+    .quad   .Lcnt335
+    .quad   .Lcnt336
+    .quad   .Lcnt337
+    .quad   .Lcnt338
+    .quad   .Lcnt339
+    .quad   .Lcnt340
+    .quad   .Lcnt341
+    .quad   .Lcnt342
+    .quad   .Lcnt343
+    .quad   .Lcnt344
+    .quad   .Lcnt345
+    .quad   .Lcnt346
+    .quad   .Lcnt347
+    .quad   .Lcnt348
+    .quad   .Lcnt349
+    .quad   .Lcnt350
+    .quad   .Lcnt351
+    .quad   .Lcnt352
+    .quad   .Lcnt353
+    .quad   .Lcnt354
+    .quad   .Lcnt355
+    .quad   .Lcnt356
+    .quad   .Lcnt357
+    .quad   .Lcnt358
+    .quad   .Lcnt359
+    .quad   .Lcnt360
+    .quad   .Lcnt361
+    .quad   .Lcnt362
+    .quad   .Lcnt363
+    .quad   .Lcnt364
+    .quad   .Lcnt365
+    .quad   .Lcnt366
+    .quad   .Lcnt367
+    .quad   .Lcnt368
+    .quad   .Lcnt369
+    .quad   .Lcnt370
+    .quad   .Lcnt371
+    .quad   .Lcnt372
+    .quad   .Lcnt373
+    .quad   .Lcnt374
+    .quad   .Lcnt375
+    .quad   .Lcnt376
+    .quad   .Lcnt377
+    .quad   .Lcnt378
+    .quad   .Lcnt379
+    .quad   .Lcnt380
+    .quad   .Lcnt381
+    .quad   .Lcnt382
+    .quad   .Lcnt383
+    .quad   .Lcnt384
+    .quad   .Lcnt385
+    .quad   .Lcnt386
+    .quad   .Lcnt387
+    .quad   .Lcnt388
+    .quad   .Lcnt389
+    .quad   .Lcnt390
+    .quad   .Lcnt391
+    .quad   .Lcnt392
+    .quad   .Lcnt393
+    .quad   .Lcnt394
+    .quad   .Lcnt395
+    .quad   .Lcnt396
+    .quad   .Lcnt397
+    .quad   .Lcnt398
+    .quad   .Lcnt399
+    .quad   .Lcnt400
+    .quad   .Lcnt401
+    .quad   .Lcnt402
+    .quad   .Lcnt403
+    .quad   .Lcnt404
+    .quad   .Lcnt405
+    .quad   .Lcnt406
+    .quad   .Lcnt407
+    .quad   .Lcnt408
+    .quad   .Lcnt409
+    .quad   .Lcnt410
+    .quad   .Lcnt411
+    .quad   .Lcnt412
+    .quad   .Lcnt413
+    .quad   .Lcnt414
+    .quad   .Lcnt415
+    .quad   .Lcnt416
+    .quad   .Lcnt417
+    .quad   .Lcnt418
+    .quad   .Lcnt419
+    .quad   .Lcnt420
+    .quad   .Lcnt421
+    .quad   .Lcnt422
+    .quad   .Lcnt423
+    .quad   .Lcnt424
+    .quad   .Lcnt425
+    .quad   .Lcnt426
+    .quad   .Lcnt427
+    .quad   .Lcnt428
+    .quad   .Lcnt429
+    .quad   .Lcnt430

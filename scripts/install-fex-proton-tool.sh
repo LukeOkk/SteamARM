@@ -58,7 +58,7 @@ DEST="$STEAM_ARM/compatibilitytools.d/steamarm-fex-proton"
 if [ "$UNINSTALL" = 1 ]; then
     [ -d "$DEST" ] || { echo "not installed: $DEST"; exit 0; }
     [ "$DRY" = 1 ] && { echo "would remove $DEST"; exit 0; }
-    rm -rf -- "$DEST"
+    rm -rf -- "$DEST" "${DEST%-proton}-linux"
     echo "removed $DEST"
     exit 0
 fi
@@ -128,4 +128,26 @@ chmod 755 "$DEST/steamarm-fex-proton"
 printf '%s\n' "$conf" > "$DEST/steamarm-fex-proton.conf"
 echo "installed $DEST"
 echo "  x86 $PROTON + $RUNTIME (app $appid) from $X86_LINK, FEX $FEXDIR/$FEXBIN"
+# The same script under its other name: native Linux x86 games (no Proton),
+# in the runtime such games name (sniper), when the x86 root has it.
+LDEST="$STEAM_ARM/compatibilitytools.d/steamarm-fex-linux"
+LRUNTIME=SteamLinuxRuntime_sniper
+if [ -f "$COMMON/$LRUNTIME/_v2-entry-point" ]; then
+    mkdir -p "$LDEST"
+    cp -f tools/steamarm-fex-proton/steamarm-fex-proton "$LDEST/steamarm-fex-linux"
+    cp -f tools/steamarm-fex-linux/toolmanifest.vdf tools/steamarm-fex-linux/compatibilitytool.vdf "$LDEST/"
+    chmod 755 "$LDEST/steamarm-fex-linux"
+    printf '%s\n' "# Written by scripts/install-fex-proton-tool.sh; read by steamarm-fex-linux.
+X86_ROOT=$X86_LINK
+X86_HOME=$X86_HOME
+X86_STEAM=$X86_STEAM
+PROTON=
+RUNTIME=$LRUNTIME
+FEXDIR=$FEXDIR
+FEXBIN=$FEXBIN" > "$LDEST/steamarm-fex-linux.conf"
+    echo "installed $LDEST"
+    echo "  native Linux x86 games: $LRUNTIME from $X86_LINK, FEX $FEXDIR/$FEXBIN"
+else
+    echo "  not installing steamarm-fex-linux: no $LRUNTIME in the x86 Steam root"
+fi
 echo "  restart the client so that it rereads compatibilitytools.d (whether it lists the tool before a sign-in: docs/FEX_GAME_BOUNDARY.md)"

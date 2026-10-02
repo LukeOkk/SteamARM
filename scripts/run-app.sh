@@ -285,8 +285,12 @@ settings = senv.with_overrides(settings, app.get("overrides"))
 settings = senv.with_overrides(settings, senv.fallback_overrides(os.environ))
 # Steam's Linux fossilize replay stalls here while processing Schedule I.
 # This flag affects Valve's pre-cache only; DXVK/VKD3D and Metal cache remain.
+# The ARM64 clients too: their fossilize_replay (aarch64) ends its nine
+# workers and then waits for a SIGCHLD that never reaches its signalfd, and
+# the game waits behind "Processing Vulkan shaders" for good (MEASURED,
+# benchmarks/stage51).
 env = {"STEAM_ENABLE_SHADER_CACHE_MANAGEMENT":
-       os.environ.get("STEAM_ENABLE_SHADER_CACHE_MANAGEMENT", "0")} if app_id == "steam" else {}
+       os.environ.get("STEAM_ENABLE_SHADER_CACHE_MANAGEMENT", "0")} if app.get("kind") == "steam" else {}
 env.update(app.get("env") or {})
 # The launcher's settings (launcher/SETTINGS_SPEC.md) -> environment.
 env.update(senv.env_from_settings(settings))
@@ -605,6 +609,15 @@ if [ "$APP_ARCH" = aarch64 ] && [ "$APP_KIND" = steam ]; then
         case "$kv" in HOME_IN_GUEST=/*) guest_home=${kv#HOME_IN_GUEST=} ;; esac
     done
     scripts/steam-arm64-links.sh "$APP_ROOT" "$guest_home" || true
+    # An installed compatibility tool is a copy of the script
+    # (scripts/install-fex-proton-tool.sh): kept the one this SteamARM ships,
+    # or a fix in it never reaches the games.
+    tooldir="$APP_ROOT$guest_home/.local/share/Steam/compatibilitytools.d"
+    for t in steamarm-fex-proton steamarm-fex-linux; do
+        if [ -f "$tooldir/$t/$t" ] && ! cmp -s "$tooldir/$t/$t" tools/steamarm-fex-proton/steamarm-fex-proton; then
+            install -m 0755 tools/steamarm-fex-proton/steamarm-fex-proton "$tooldir/$t/$t" || true
+        fi
+    done
 fi
 if [ "$APP_ARCH" = aarch64 ]; then
     env ${APP_ENV[@]+"${APP_ENV[@]}"} DISPLAY=$DISP LXRT_ROOT="$APP_ROOT" \

@@ -1,0 +1,470 @@
+diff -ruN b3/src/kosmickrisp/bridge/mtl_encoder.h b4/src/kosmickrisp/bridge/mtl_encoder.h
+--- a/src/kosmickrisp/bridge/mtl_encoder.h	2026-10-02 09:45:29
++++ b/src/kosmickrisp/bridge/mtl_encoder.h	2026-10-02 11:50:45
+@@ -13,6 +13,22 @@
+ 
+ /* Common encoder utils */
+ void mtl_end_encoding(void *encoder);
++
++/* A render pass attachment's store action, for one whose descriptor said
++ * MTL_STORE_ACTION_UNKNOWN: any time before the encoder ends. */
++void mtl_render_set_color_store_action(mtl_render_encoder *encoder,
++                                       uint32_t index,
++                                       enum mtl_store_action action);
++void mtl_render_set_depth_store_action(mtl_render_encoder *encoder,
++                                       enum mtl_store_action action);
++void mtl_render_set_stencil_store_action(mtl_render_encoder *encoder,
++                                         enum mtl_store_action action);
++/* As mtl_barrier_after_stages, flushing caches to the GPU's own coherence
++ * point only (MTL4VisibilityOptionDevice): enough when nothing the encoder
++ * wrote is read through another address of the same memory. */
++void mtl_barrier_after_stages_device(void *encoder,
++                                     enum mtl_stages after_stages,
++                                     enum mtl_stages before_queue_stages);
+ void mtl_barrier_after_stages(void *encoder, enum mtl_stages after_stages,
+                               enum mtl_stages before_queue_stages);
+ void mtl_barrier_after_encoder_stages(void *encoder,
+diff -ruN b3/src/kosmickrisp/bridge/mtl_encoder.m b4/src/kosmickrisp/bridge/mtl_encoder.m
+--- a/src/kosmickrisp/bridge/mtl_encoder.m	2026-10-02 09:45:29
++++ b/src/kosmickrisp/bridge/mtl_encoder.m	2026-10-02 11:50:45
+@@ -23,6 +23,36 @@
+ }
+ 
+ void
++mtl_render_set_color_store_action(mtl_render_encoder *encoder, uint32_t index,
++                                  enum mtl_store_action action)
++{
++   @autoreleasepool {
++      id<MTL4RenderCommandEncoder> enc = (id<MTL4RenderCommandEncoder>)encoder;
++      [enc setColorStoreAction:(MTLStoreAction)action atIndex:index];
++   }
++}
++
++void
++mtl_render_set_depth_store_action(mtl_render_encoder *encoder,
++                                  enum mtl_store_action action)
++{
++   @autoreleasepool {
++      id<MTL4RenderCommandEncoder> enc = (id<MTL4RenderCommandEncoder>)encoder;
++      [enc setDepthStoreAction:(MTLStoreAction)action];
++   }
++}
++
++void
++mtl_render_set_stencil_store_action(mtl_render_encoder *encoder,
++                                    enum mtl_store_action action)
++{
++   @autoreleasepool {
++      id<MTL4RenderCommandEncoder> enc = (id<MTL4RenderCommandEncoder>)encoder;
++      [enc setStencilStoreAction:(MTLStoreAction)action];
++   }
++}
++
++void
+ mtl_barrier_after_stages(void *encoder, enum mtl_stages after_stages,
+                          enum mtl_stages before_queue_stages)
+ {
+@@ -32,6 +62,17 @@
+        * if occlusion queries are used */
+       [enc barrierAfterStages:(MTLStages)after_stages beforeQueueStages:(MTLStages)before_queue_stages
+            visibilityOptions:MTL4VisibilityOptionResourceAlias];
++   }
++}
++
++void
++mtl_barrier_after_stages_device(void *encoder, enum mtl_stages after_stages,
++                                enum mtl_stages before_queue_stages)
++{
++   @autoreleasepool {
++      id<MTL4CommandEncoder> enc = (id<MTL4CommandEncoder>)encoder;
++      [enc barrierAfterStages:(MTLStages)after_stages beforeQueueStages:(MTLStages)before_queue_stages
++           visibilityOptions:MTL4VisibilityOptionDevice];
+    }
+ }
+ 
+diff -ruN b3/src/kosmickrisp/bridge/stubs/mtl_encoder.c b4/src/kosmickrisp/bridge/stubs/mtl_encoder.c
+--- a/src/kosmickrisp/bridge/stubs/mtl_encoder.c	2026-10-02 09:45:29
++++ b/src/kosmickrisp/bridge/stubs/mtl_encoder.c	2026-10-02 11:50:45
+@@ -13,6 +13,30 @@
+ }
+ 
+ void
++mtl_render_set_color_store_action(mtl_render_encoder *encoder, uint32_t index,
++                                  enum mtl_store_action action)
++{
++}
++
++void
++mtl_render_set_depth_store_action(mtl_render_encoder *encoder,
++                                  enum mtl_store_action action)
++{
++}
++
++void
++mtl_render_set_stencil_store_action(mtl_render_encoder *encoder,
++                                    enum mtl_store_action action)
++{
++}
++
++void
++mtl_barrier_after_stages_device(void *encoder, enum mtl_stages after_stages,
++                                enum mtl_stages before_queue_stages)
++{
++}
++
++void
+ mtl_barrier_after_stages(void *encoder, enum mtl_stages after_stages,
+                          enum mtl_stages before_queue_stages)
+ {
+diff -ruN b3/src/kosmickrisp/vulkan/kk_cmd_buffer.c b4/src/kosmickrisp/vulkan/kk_cmd_buffer.c
+--- a/src/kosmickrisp/vulkan/kk_cmd_buffer.c
++++ b/src/kosmickrisp/vulkan/kk_cmd_buffer.c
+@@ -345,6 +345,10 @@
+ {
+    struct kk_device *dev = kk_cmd_buffer_device(cmd);
+    mtl_compute_encoder *encoder;
++   /* Compute work after a render pass whose encoder is still open runs
++    * after that pass: end it now. */
++   if (cmd->state.gfx.pending_end)
++      cs_end(cmd);
+    /* If we are not inside a render, we can just take pre_gfx. */
+    if (!cmd->gfx.encoder || pre_gfx) {
+       if (!cmd->pre_gfx->encoder) {
+@@ -364,8 +368,27 @@
+ static void
+ kk_stop_encoder(struct kk_cmd_buffer *cmd, struct kk_encoder_state *es)
+ {
++   if (es == &cmd->gfx && kk_use_app_load_store())
++      kk_cmd_set_store_actions(cmd);
++
+    /* TODO_KOSMICKRISP This is probably overkill */
+-   mtl_barrier_after_stages(es->encoder, MTL_STAGE_ALL, MTL_STAGE_ALL);
++   /* SteamARM: the barrier that also flushes for aliased addresses costs a
++    * render pass half as much again on an M4 (70 us against 45, and 36
++    * against 20 for a copy; MEASURED with Metal 4 directly), and the driver
++    * ends every encoder with one. Only a pass that wrote visibility results
++    * needs it (the TODO in mtl_barrier_after_stages). KK_BARRIER_ALIAS=1
++    * gives every encoder the old barrier. */
++   static int alias_always = -1;
++   if (alias_always < 0) {
++      const char *e = getenv("KK_BARRIER_ALIAS");
++      alias_always = e && e[0] == '1';
++   }
++   if (alias_always || es->wrote_visibility)
++      mtl_barrier_after_stages(es->encoder, MTL_STAGE_ALL, MTL_STAGE_ALL);
++   else
++      mtl_barrier_after_stages_device(es->encoder, MTL_STAGE_ALL,
++                                      MTL_STAGE_ALL);
++   es->wrote_visibility = false;
+    mtl_end_encoding(es->encoder);
+    mtl_release(es->encoder);
+    es->encoder = NULL;
+@@ -408,6 +431,9 @@
+ 
+    if (cmd->gfx.encoder) {
+       kk_stop_encoder(cmd, &cmd->gfx);
++      /* A pass whose end was put off (pending_end) ends here. */
++      if (cmd->state.gfx.pending_end)
++         kk_cmd_render_ended(cmd);
+    }
+ }
+ 
+@@ -428,7 +454,12 @@
+     * barrier. This requires to read directly from the framebuffer which
+     * requires not reading input attachments as textures.
+     */
+-   if (cmd->gfx.encoder) {
++   if (cmd->state.gfx.pending_end) {
++      /* Between two render passes, with the first one's encoder still open:
++       * nothing to do here. If the next pass continues in that encoder the
++       * barrier was about its own attachments; whatever else comes ends the
++       * encoder, and every encoder ends with a barrier of all stages. */
++   } else if (cmd->gfx.encoder) {
+       cs_end(cmd);
+       cs_start_render(cmd);
+    } else if (cmd->pre_gfx->encoder) {
+diff -ruN b3/src/kosmickrisp/vulkan/kk_cmd_buffer.h b4/src/kosmickrisp/vulkan/kk_cmd_buffer.h
+--- a/src/kosmickrisp/vulkan/kk_cmd_buffer.h
++++ b/src/kosmickrisp/vulkan/kk_cmd_buffer.h
+@@ -137,6 +137,14 @@
+    bool is_depth_stencil_dynamic;
+    bool is_cull_front_and_back;
+    bool need_to_start_render_pass;
++   /* The encoder being ended is the last of its render pass
++    * (kk_CmdEndRendering): the attachments get the store operations the
++    * application gave. Any other end is a restart, and stores them all. */
++   bool render_ending;
++   /* The application ended its render pass, but the Metal encoder is still
++    * open: the next pass continues in it if it has the same attachments
++    * (kk_CmdBeginRendering). Anything else ends it first. */
++   bool pending_end;
+ 
+    enum kk_dirty dirty;
+    uint32_t pipeline_sample_count;
+@@ -209,6 +217,9 @@
+    /* either a mtl_compute_encoder or a mtl_render_encoder */
+    mtl_command_encoder *encoder;
+    mtl_command_buffer *cmd_buf;
++   /* The encoder counted visibility results: they are read back through
++    * the buffer's address, which the barrier at its end has to allow for. */
++   bool wrote_visibility;
+    /* Pending timestamp resolves (struct kk_ts_resolve), flushed at cs_end. */
+    struct util_dynarray ts_resolves;
+ };
+@@ -292,6 +303,9 @@
+ };
+ 
+ void kk_reset_cmd_buffer_internal(struct kk_cmd_buffer *cmd);
++bool kk_use_app_load_store(void);
++void kk_cmd_set_store_actions(struct kk_cmd_buffer *cmd);
++void kk_cmd_render_ended(struct kk_cmd_buffer *cmd);
+ struct kk_retire_slot;
+ mtl_command_buffer **kk_cmd_buffer_retire(struct kk_cmd_buffer *cmd,
+                                           struct kk_retire_slot *slot);
+diff -ruN b3/src/kosmickrisp/vulkan/kk_cmd_draw.c b4/src/kosmickrisp/vulkan/kk_cmd_draw.c
+--- a/src/kosmickrisp/vulkan/kk_cmd_draw.c
++++ b/src/kosmickrisp/vulkan/kk_cmd_draw.c
+@@ -109,6 +109,143 @@
+       descriptor, MTL_STORE_ACTION_DONT_CARE);
+ }
+ 
++/* SteamARM: honour the application's load and store operations.
++ *
++ * The driver loaded every attachment whose load operation was DONT_CARE and
++ * stored every attachment whatever its store operation. On a tile-based GPU
++ * each of those is a full copy between tile memory and the texture, per
++ * sample: a multisampled depth buffer nobody reads again was written out
++ * after every pass. The store action is now left open in the descriptor
++ * (MTL_STORE_ACTION_UNKNOWN) and chosen when the encoder ends: the
++ * application's, if that is the end of its render pass; STORE if the pass is
++ * only being restarted (a pipeline barrier, a state change, a suspended
++ * pass), and for an attachment the resolve pass that follows still reads.
++ * KK_APP_LOAD_STORE=0 restores the old behaviour.
++ */
++bool
++kk_use_app_load_store(void)
++{
++   static int on = -1;
++   if (on < 0) {
++      const char *e = getenv("KK_APP_LOAD_STORE");
++      on = !(e && e[0] == '0');
++   }
++   return on;
++}
++
++static enum mtl_store_action
++kk_end_store_action(const struct kk_attachment *att, bool final)
++{
++   /* Not the end of the pass, or the resolve pass still reads it. */
++   if (!final || att->resolve_mode != VK_RESOLVE_MODE_NONE)
++      return MTL_STORE_ACTION_STORE;
++   return att->store_op == VK_ATTACHMENT_STORE_OP_STORE
++             ? MTL_STORE_ACTION_STORE
++             : MTL_STORE_ACTION_DONT_CARE;
++}
++
++void
++kk_cmd_set_store_actions(struct kk_cmd_buffer *cmd)
++{
++   struct kk_rendering_state *render = &cmd->state.gfx.render;
++   mtl_render_encoder *enc = cmd->gfx.encoder;
++   bool final = (cmd->state.gfx.render_ending || cmd->state.gfx.pending_end) &&
++                !(render->flags & VK_RENDERING_SUSPENDING_BIT);
++
++   for (uint32_t i = 0; i < ARRAY_SIZE(render->color_att); i++) {
++      const struct kk_attachment *att = &render->color_att[i];
++      if (!att->iview || render->color_map[i] == MESA_VK_ATTACHMENT_UNUSED)
++         continue;
++      mtl_render_set_color_store_action(enc, render->color_map[i],
++                                        kk_end_store_action(att, final));
++   }
++   if (render->depth_att.iview)
++      mtl_render_set_depth_store_action(
++         enc, kk_end_store_action(&render->depth_att, final));
++   if (render->stencil_att.iview)
++      mtl_render_set_stencil_store_action(
++         enc, kk_end_store_action(&render->stencil_att, final));
++}
++
++/* SteamARM: consecutive render passes on the same attachments share one
++ * Metal encoder.
++ *
++ * Every Metal render pass on a tile-based GPU loads its attachments into
++ * tile memory and stores them back, whole, per sample. A renderer that ends
++ * and begins a pass between groups of draws on the same targets -- free on
++ * an immediate-mode GPU -- pays for that each time: Source 2 issues about
++ * 200 passes a frame, and the GPU was at 99 % for 50 frames a second at
++ * 857x482 (Counter-Strike 2; MEASURED). So the end of a pass leaves its
++ * encoder open (pending_end), and a pass that begins next with the same
++ * attachments continues in it: a load operation of CLEAR becomes the clear
++ * draw the driver already uses for partial clears, and the store operations
++ * are those of the last pass. Compute or copy work, a pass on other
++ * attachments, a resolve, a timestamp, or the end of the command buffer end
++ * the encoder first. KK_MERGE_PASSES=0 turns it off.
++ */
++static bool
++kk_merge_passes(void)
++{
++   static int on = -1;
++   if (on < 0) {
++      const char *e = getenv("KK_MERGE_PASSES");
++      on = kk_use_app_load_store() && !(e && e[0] == '0');
++   }
++   return on;
++}
++
++static bool
++kk_same_attachment(const struct kk_attachment *att,
++                   const VkRenderingAttachmentInfo *info)
++{
++   VkImageView view = info ? info->imageView : VK_NULL_HANDLE;
++   if (view != kk_image_view_to_handle(att->iview))
++      return false;
++   return view == VK_NULL_HANDLE || info->resolveMode == VK_RESOLVE_MODE_NONE;
++}
++
++/* Can the pass `info` begins go on in the encoder of the pass just ended? */
++static bool
++kk_can_continue_render(struct kk_cmd_buffer *cmd, const VkRenderingInfo *info)
++{
++   const struct kk_rendering_state *render = &cmd->state.gfx.render;
++
++   if (!cmd->gfx.encoder || info->flags != 0 || render->flags != 0 ||
++       info->viewMask != render->view_mask ||
++       info->layerCount != render->layer_count ||
++       info->colorAttachmentCount != render->color_att_count ||
++       render->fsr_att.iview ||
++       vk_find_struct_const(info->pNext,
++                            RENDERING_FRAGMENT_SHADING_RATE_ATTACHMENT_INFO_KHR))
++      return false;
++
++   bool any = false;
++   for (uint32_t i = 0; i < info->colorAttachmentCount; i++) {
++      if (!kk_same_attachment(&render->color_att[i], &info->pColorAttachments[i]))
++         return false;
++      /* The pass before used the default attachment locations. */
++      if (render->color_att[i].iview && render->color_map[i] != i)
++         return false;
++      any |= render->color_att[i].iview != NULL;
++   }
++   if (!kk_same_attachment(&render->depth_att, info->pDepthAttachment) ||
++       !kk_same_attachment(&render->stencil_att, info->pStencilAttachment))
++      return false;
++   any |= render->depth_att.iview || render->stencil_att.iview;
++
++   return any;
++}
++
++/* The encoder of the application's render pass has ended. */
++void
++kk_cmd_render_ended(struct kk_cmd_buffer *cmd)
++{
++   mtl_release(cmd->state.gfx.render_pass_descriptor);
++   cmd->state.gfx.render_pass_descriptor = NULL;
++   cmd->state.gfx.pending_end = false;
++   memset(&cmd->state.gfx.render, 0, sizeof(cmd->state.gfx.render));
++}
++
+ static void
+ kk_fill_common_attachment_description(
+    mtl_render_pass_attachment_descriptor *descriptor,
+@@ -133,7 +270,7 @@
+          : vk_attachment_load_op_to_mtl_load_action(info->load_op);
+ 
+    /* TODO_KOSMICKRISP Need to tackle issue #14344 */
+-   if (load_action == MTL_LOAD_ACTION_DONT_CARE)
++   if (load_action == MTL_LOAD_ACTION_DONT_CARE && !kk_use_app_load_store())
+       load_action = MTL_LOAD_ACTION_LOAD;
+    mtl_render_pass_attachment_descriptor_set_load_action(descriptor,
+                                                          load_action);
+@@ -142,7 +279,9 @@
+     * with the store operation being something else than store. The other reason
+     * being that we break renderpasses when a pipeline barrier is used, so we
+     * need to not loose the information of the attachment when we restart it. */
+-   enum mtl_store_action store_action = MTL_STORE_ACTION_STORE;
++   enum mtl_store_action store_action = kk_use_app_load_store()
++                                           ? MTL_STORE_ACTION_UNKNOWN
++                                           : MTL_STORE_ACTION_STORE;
+    mtl_render_pass_attachment_descriptor_set_store_action(descriptor,
+                                                           store_action);
+ }
+@@ -232,6 +371,16 @@
+ 
+    struct kk_rendering_state *render = &cmd->state.gfx.render;
+ 
++   /* The pass before left its encoder open: go on in it, or end it. */
++   bool merged = false;
++   if (cmd->state.gfx.pending_end) {
++      merged = kk_can_continue_render(cmd, pRenderingInfo);
++      if (merged)
++         cmd->state.gfx.pending_end = false;
++      else
++         cs_end(cmd);
++   }
++
+    memset(render, 0, sizeof(*render));
+ 
+    render->flags = pRenderingInfo->flags;
+@@ -338,7 +487,7 @@
+    bool force_attachment_load =
+       !is_tile_aligned ||
+       (!is_whole_framebuffer && does_any_attachment_clear) ||
+-      (render->flags & VK_RENDERING_RESUMING_BIT);
++      (render->flags & VK_RENDERING_RESUMING_BIT) || merged;
+ 
+    kk_set_color_attachments(pass_descriptor, render, dyn,
+                             force_attachment_load);
+@@ -391,8 +540,10 @@
+ 
+    /* Rendering with no attachments requires pushing the start of the render
+     * pass to first pipeline binding to know sample count. */
++   if (merged)
++      mtl_release(cmd->state.gfx.render_pass_descriptor);
+    cmd->state.gfx.render_pass_descriptor = pass_descriptor;
+-   if (!no_framebuffer)
++   if (!no_framebuffer && !merged)
+       cs_start_render(cmd);
+ 
+    /* Store descriptor in case we need to restart the pass at pipeline barrier,
+@@ -556,8 +707,18 @@
+       .pStencilAttachment = &vk_stencil_att,
+    };
+ 
++   /* Leave the encoder open for a pass on the same attachments
++    * (kk_merge_passes): it ends with whatever else comes next. */
++   if (kk_merge_passes() && !need_resolve && render->flags == 0 &&
++       cmd->gfx.encoder && !cmd->state.gfx.need_to_start_render_pass) {
++      cmd->state.gfx.pending_end = true;
++      return;
++   }
++
+    /* Clean up previous encoder */
++   cmd->state.gfx.render_ending = true;
+    cs_end(cmd);
++   cmd->state.gfx.render_ending = false;
+    mtl_release(cmd->state.gfx.render_pass_descriptor);
+    cmd->state.gfx.render_pass_descriptor = NULL;
+ 
+@@ -1315,6 +1476,8 @@
+    if (gfx->dirty & KK_DIRTY_OCCLUSION) {
+       mtl_set_visibility_result_mode(enc, gfx->occlusion.mode,
+                                      gfx->occlusion.index * sizeof(uint64_t));
++      if (gfx->occlusion.mode != MTL_VISIBILITY_RESULT_MODE_DISABLED)
++         cmd->gfx.wrote_visibility = true;
+    }
+ }
+ 
+diff -ruN b3/src/kosmickrisp/vulkan/kk_query_pool.c b4/src/kosmickrisp/vulkan/kk_query_pool.c
+--- a/src/kosmickrisp/vulkan/kk_query_pool.c
++++ b/src/kosmickrisp/vulkan/kk_query_pool.c
+@@ -360,6 +360,10 @@
+    struct kk_device *dev = kk_cmd_buffer_device(cmd);
+    assert(kk_pool_is_ts(pool) && pool->ts.heap);
+ 
++   /* A timestamp after a render pass is not one inside it. */
++   if (cmd->state.gfx.pending_end)
++      cs_end(cmd);
++
+    uint32_t count = kk_mv_query_count(cmd);
+    enum mtl_render_stages mtl_stage =
+       kk_pipeline_stages_to_mtl_render_stage(stage);

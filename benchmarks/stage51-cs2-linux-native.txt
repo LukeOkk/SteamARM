@@ -1,0 +1,166 @@
+Stage 51 -- Counter-Strike 2 (the native Linux x86-64 build) from the Steam
+Frame client: from no frame at all to a bot match at 72-76 frames a second
+Date: 2026-10-02. Apple M4 (4 performance + 6 efficiency cores, 16 GB),
+macOS 27, display 1920x1080 at 165 Hz. Zero VM. Valve's files unchanged.
+The game: Steam app 730, Linux depot (game/bin/linuxsteamrt64/cs2, ELF
+x86-64 PIE), started by the ARM64 Steam client through the new tool
+tools/steamarm-fex-linux (the x86 Steam Linux Runtime "sniper" under
+SteamARM's FEX; no Wine). Vulkan through the shim on KosmicKrisp 26.2.4.
+Video settings as the game chose them: 1920x1050 fullscreen, the 3D scene at
+857x482 (its own 67 % render scale) with 2x MSAA, upscaled by the game.
+Only local play against bots; nothing of the account was read.
+
+HOW IT WAS MEASURED
+  Frames: the shim's LXRT_VK_TIMING=1 (presents per 2-second window).
+  The match: launch options "+map de_dust2 +fps_max 0", the game assigns the
+  player to a team after 15 s and nine bots play; the window is given the X
+  input focus (tests/x11/xfocus.c); 200 s, of which the last 60 windows
+  (120 s) are reported. The bots make every run different: +-5 fps.
+  A CrossOver process not part of SteamARM used ~295 % CPU (three cores)
+  during every run on this machine. It was not touched.
+  GPU: IOAccelerator "Device Utilization %" (ioreg). Passes: counters in a
+  debug build of the driver, and Metal 4 directly (section 6).
+  Threads: sample(1), and the runtime's LXRT_GUESTPROF=1 for the game's main
+  thread (new: runtime/guestprof.c).
+
+1. NO FRAME: A FUTEX WAIT OF 0xffffffff ms TIMED OUT AT ONCE
+  The game created its window and never presented. Two threads spun:
+  694,592 futex waits by one of them in 30 s, each returning ETIMEDOUT.
+  Source 2's thread pool waits on a condition variable for 0xffffffff ms
+  (FUTEX_WAIT_BITSET, deadline now + 4294967.3 s). __ulock_wait counts
+  32-bit microseconds; runtime/thread.c clamped a longer wait to 0 "for an
+  untimed wait" and then, 0 also being "under a microsecond", to 1 us.
+  Fix: the wait is made in slices of the host's maximum and goes on until the
+  guest's deadline. tests/elf/futex_long.c (6/6, and 6/6 with the spin of
+  section 9).
+
+2. THE DRIVER KEPT 29 GB OF COMMAND MEMORY (patch 01)
+  With frames presented the process was stopped after 20 s by safeguard.sh:
+  "kernel VM.map.entries 1505808 > 1500000". vmmap: 321,150 "IOAccelerator
+  (graphics)" regions, 29.1 GB, physical footprint 34 GB. heap(1): 10,231
+  MTL4CommandAllocator objects, three for each of 3,410 VkCommandBuffers.
+  KosmicKrisp gives every VkCommandBuffer three command allocators for life,
+  and an allocator keeps the memory its command buffers were encoded into
+  (reset only makes it reusable). Source 2 allocates a command buffer
+  whenever its free list is empty (3,446 in 16 s) and resets one only when it
+  is next used. Each submit also added one more feedback handler to the
+  queue's one MTL4CommitOptions.
+  Fix (patches/kosmickrisp-01-command-memory.patch): each Metal command
+  buffer borrows an allocator from the device; the commit's feedback handler
+  (one, on options of its own) resets and returns them when the GPU has
+  finished; at most 384 idle ones are kept.
+  After: footprint 6.7-8.4 GB in the match, VM map entries steady.
+
+3. THE THIRD QUERY POOL COULD NOT BE CREATED (patch 02)
+  SIGSEGV in kk_CmdBeginQuery (pool->bo NULL) when the first round began.
+  The game creates occlusion query pools of 16384 queries; the driver took a
+  slot of Metal's 256 KB visibility buffer (32768 in all) for every query of
+  a pool at creation, so the third pool failed, and the game used it anyway.
+  Fix (patches/kosmickrisp-02-occlusion-query-slots.patch): a query takes its
+  slot when it is begun and returns it when it is reset.
+
+4. PIPELINES REFUSED EVERY FRAME: SUBGROUP OPERATIONS IN A VERTEX SHADER
+   (patch 03)
+  0.5 frames a second from the first round on. The shim's new counters
+  (LXRT_VK_CALLS=1): 48 vkCreateGraphicsPipelines a frame, every frame, all
+  VK_ERROR_INVALID_SHADER_NV, 150 ms each. Metal's compiler, 840 times:
+    "invalid 'thread_index_in_simdgroup' attribute for input declaration in a
+     vertex function"
+  Source 2's light loop merges masks with subgroupOr, and its vertex shaders
+  share that loop. Metal has SIMD-group functions in fragment and compute
+  functions only (the driver lists only those in subgroupSupportedStages).
+  Fix (patches/kosmickrisp-03-vertex-subgroups.patch): in any other stage the
+  operations are lowered for a subgroup of one invocation.
+  After: 0 refused, 383 pipelines created in a 170 s match.
+
+5. THE WINDOW WAS MINIMIZED, AND THE GAME DREW 9.5 FRAMES A SECOND
+  WM_STATE Iconic, _NET_WM_STATE_HIDDEN: SDL minimizes a fullscreen window
+  that has not got the focus, and the game then waits 100 ms per frame in
+  SDL_WaitEventTimeout (the runtime's LXRT_FUTEX_DEBUG=1 names the caller of
+  a long poll). The tool sets SDL_VIDEO_MINIMIZE_ON_FOCUS_LOSS=0; started
+  from the Steam client the window is then viewable, fullscreen and focused.
+  run-app.sh keeps an installed copy of the tool the one SteamARM ships.
+
+6. THE GPU WAS AT 99 % FOR 50 FRAMES A SECOND AT 857x482: THE NUMBER OF
+   RENDER PASSES (patch 04)
+  First match that ran to its end: median 50-53 fps, GPU 98-99 %, and the
+  game's main thread waiting 40-50 % of the time. A 1280x720 window made no
+  difference. The driver's counters: about 200 vkCmdBeginRendering a frame,
+  10,000 Metal command buffers a second, none of them a suspended or resumed
+  pass; 70 % of the passes on a part of their attachments.
+  What a pass costs on this GPU, with Metal directly (2000 passes, each one
+  small triangle, GPU time from the commit feedback):
+    Metal (classic), any size, load/store, MSAA or not      44-53 us
+    Metal 4, one command buffer per pass, barrier of all
+      stages with MTL4VisibilityOptionResourceAlias (as
+      the driver ended every encoder)                       69-70 us
+    the same barrier with MTL4VisibilityOptionDevice        45 us
+    a copy pass: 36 us with ResourceAlias, 20 us with Device
+  So it is the count of passes that costs, not their pixels, and the
+  driver's barrier added half as much again.
+  Fix (patches/kosmickrisp-04-tile-gpu-passes.patch):
+    - a pass that begins on the attachments of the one just ended continues
+      in its Metal encoder (a CLEAR becomes the clear draw the driver already
+      uses for partial clears); anything else ends the encoder first.
+      Counter-Strike 2: 1,624 of 4,000 passes continue the one before; 2,008
+      have other attachments, 185 are the first of their command buffer, 183
+      follow a copy or a dispatch;
+    - the store action is chosen when the encoder ends: the application's
+      store operation at the end of its pass, STORE at a restart; a load
+      operation of DONT_CARE is no longer turned into LOAD;
+    - the barrier at an encoder's end uses MTL4VisibilityOptionDevice unless
+      the encoder counted visibility results.
+  tests/elf/vk_passes.c (pixels read back; MoltenVK, Homebrew's KosmicKrisp,
+  SteamARM's with the merging on, off, and with the old load/store): 5/5.
+
+7. RESULTS (de_dust2, nine bots, last 120 s of 200 s; frames per second)
+                                            median  average  10th pct  minimum
+  before patch 04 (three runs)              53.0    50.4     39.5       1.5
+                                            50.0    47.8     35.5      27.5
+                                            53.0    49.4     38.0      29.0
+  with patch 04 (three runs)                71.0    68.6     60.0      16.5
+                                            72.0    70.8     60.5      35.0
+                                            76.5    74.7     64.0      45.0
+  Main menu, started from the Steam client: 80.5-82 (9.5 while minimized,
+  48 focused before patch 04).
+  Process: 210-240 % CPU, physical footprint 8.1-8.4 GB.
+
+8. WHAT LIMITS IT NOW (not fixed here)
+  a) Presentation is tied to the display: frames stop at 82.5 a second
+     (165 Hz / 2) and vkAcquireNextImageKHR waits 3.3 ms on average in
+     CAMetalLayer nextDrawable, although the swapchain asked for IMMEDIATE
+     and the driver set displaySyncEnabled = NO. The layer is shown by
+     another process (CAContext); a frame that takes 8.8 ms waits for the
+     second refresh. Without that wait the same work would be ~110 fps.
+  b) The GPU is still 81-94 % busy: about 135 Metal passes a frame are left
+     (the interface draws each element into temporary textures between
+     passes on its main target, which cannot continue each other).
+  c) The game's main thread, translated x86: 55 % busy when the GPU limits,
+     88 % (74 % translated code, 10 % __ulock_wake) in the heaviest moments.
+     FEX's memory-order emulation has to stay on: with FEX_TSOENABLED=0 the
+     game died with SIGSEGV when the first round began.
+  170-200 frames a second in this match is beyond a) to c) together on this
+  machine.
+
+9. TRIED, NO MEASURABLE GAIN (kept as options, off by default)
+  LXRT_QOS=interactive (guest threads in the user-interactive QoS class):
+  median 51.5 against 53. LXRT_FUTEX_SPIN_US=50 (spin before parking on a
+  futex): 53.0 against 53. A private futex wake that finds no thread of the
+  process parked now skips the kernel (runtime/thread.c, g_parked): 49.5
+  against 53 -- within the noise of the match; kept, it is two syscalls less
+  per such wake.
+
+10. ALSO FOUND ON THE WAY
+  - A relative symlink of a sandbox into one of its binds (bwrap --symlink
+    ../usr/lib/os-release /etc/os-release) was resolved on the host: cs2.sh
+    could not read /etc/os-release and refused to start. Resolved in guest
+    terms now, where a bind covers the result (runtime/dispatch.c).
+  - Steam's shader pre-caching (fossilize_replay) never finished: its
+    children end and SIGCHLD does not reach its signalfd. Open; the Steam
+    clients run with STEAM_ENABLE_SHADER_CACHE_MANAGEMENT=0.
+  - The driver compiles a pipeline on the render thread at first use
+    (Metal's compiler, ~90 ms each, 383 in a match): the first minute of a
+    map stutters. Open.
+
+Tests: ELF 106/106, Vulkan 11/11, Windows 21/21, FEX rules 8/8, tools 36/36,
+Python 151/151.

@@ -30,6 +30,18 @@
 #   RUNTIME    the Steam Linux Runtime it requires          (SteamLinuxRuntime_4)
 #   FEXDIR     host directory of FEX and FEXServer          (/tmp/lxrt-root/usr/bin)
 #   FEXBIN     the FEX binary in it                         (FEX-gb)
+# Installed under the name steamarm-fex-linux (tools/steamarm-fex-linux, the
+# same script) it is "SteamARM: Linux x86 via FEX": a tool for NATIVE Linux
+# x86 games (from_oslist linux), so that the ARM64 client downloads a game's
+# Linux build and not its Windows one. No Proton in that chain:
+#
+#   <FEX> /bin/bash <SLR>/_v2-entry-point --verb=<verb> -- <game> [args...]
+#
+# with RUNTIME (default SteamLinuxRuntime_sniper) from the x86 root and HOME
+# left the client's own: a native game finds the running client through
+# ~/.steam (steam.pid, sdk64/steamclient.so), which is the ARM64 client's.
+# FEX's configuration still comes from the x86 home (FEX_APP_CONFIG_LOCATION).
+#
 # STEAMARM_FEX_PROTON_DRYRUN=1 prints the checks and the command instead of
 # running them (tests/launcher/fex_proton_tool.sh).
 # STEAMARM_FEX_KEEP_LD_PRELOAD=1 keeps the client's LD_PRELOAD (the Steam
@@ -40,7 +52,8 @@
 # root); otherwise whatever the chain returns.
 set -u
 
-me=steamarm-fex-proton
+me=${0##*/}
+case "$me" in steamarm-fex-linux) linux=1 ;; *) me=steamarm-fex-proton linux=0 ;; esac
 say() { echo "$me: $*" >&2; }
 die() { local rc=$1; shift; say "$*"; exit "$rc"; }
 
@@ -60,6 +73,7 @@ X86_HOME=/tmp/fexhome
 X86_STEAM=/tmp/fexhome/.local/share/Steam
 PROTON="Proton - Experimental"
 RUNTIME=SteamLinuxRuntime_4
+[ "$linux" = 0 ] || { PROTON=""; RUNTIME=SteamLinuxRuntime_sniper; }
 FEXDIR=/tmp/lxrt-root/usr/bin
 FEXBIN=FEX-gb
 conf="$here/$me.conf"
@@ -79,6 +93,7 @@ for p in "$X86_ROOT" "$X86_HOME" "$X86_STEAM" "$FEXDIR"; do
 done
 case "$PROTON$RUNTIME$FEXBIN" in */*) die 3 "$conf: PROTON, RUNTIME and FEXBIN are names, not paths" ;; esac
 case "$PROTON" in *ARM64*|*arm64*) die 6 "refusing $PROTON: Proton ARM64 cannot run on macOS (benchmarks/stage18)" ;; esac
+[ "$linux" = 1 ] || [ -n "$PROTON" ] || die 3 "$conf: PROTON is empty"
 
 # ------------------------------------------ where this ARM64 root lives
 # The runtime hands every guest its root (LXRT_ROOT) in the environment.
@@ -139,9 +154,11 @@ check_mounts="$x86$RS${X86_ROOT}${RS}1$US$fex$RS${FEXDIR}${RS}1$US$sock$RS/tmp/l
 # bind table of its own (runtime/mounts.c reads LXRT_MOUNTS at start-up).
 check_script='
 m=""
+if [ -n "$7" ]; then
 [ -f "$1$3/proton" ]             || m="$m proton:$3"
 [ -f "$1$3/files/bin/wine" ]     || m="$m wine:$3/files/bin/wine"
 [ ! -d "$1$3/files/bin-arm64" ]  || m="$m arm64:$3"
+fi
 [ -f "$1$4/_v2-entry-point" ]    || m="$m runtime:$4"
 [ -f "$2/$5" ]                   || m="$m fex:$5"
 [ -S "$6" ]                      || m="$m fexserver"
@@ -151,14 +168,14 @@ if [ "${STEAMARM_FEX_PROTON_DRYRUN:-}" = 1 ]; then
     missing=""
 else
     out=$(LXRT_MOUNTS="$check_mounts" /bin/bash -c "$check_script" check "$x86" "$fex" \
-          "$proton_dir" "$slr_dir" "$FEXBIN" "$sock/$uid.FEXServer.Socket" 2>/dev/null)
+          "$proton_dir" "$slr_dir" "$FEXBIN" "$sock/$uid.FEXServer.Socket" "$PROTON" 2>/dev/null)
     case "$out" in missing:*) missing=${out#missing:} ;; *) die 4 "could not check the x86 side (output: '$out')" ;; esac
 fi
 for m in $missing; do
     case "$m" in
         proton:*|wine:*) die 4 "x86 $PROTON is not installed in the x86 Steam root ($X86_ROOT: ${m#*:}); install it from the x86 Steam client's library" ;;
         arm64:*) die 6 "$PROTON in the x86 root is an ARM64 build: Proton ARM64 cannot run on macOS (benchmarks/stage18)" ;;
-        runtime:*) die 4 "$RUNTIME is not installed in the x86 Steam root ($X86_ROOT: ${m#*:}); $PROTON requires it" ;;
+        runtime:*) die 4 "$RUNTIME is not installed in the x86 Steam root ($X86_ROOT: ${m#*:}); ${PROTON:-a native Linux game} requires it" ;;
         fex:*) die 4 "no FEX at $FEXDIR/$FEXBIN (scripts/setup.sh builds it)" ;;
         fexserver) die 5 "FEXServer is not running (no /tmp/lxrt-abstract-$uid/$uid.FEXServer.Socket): start SteamARM's x86 side first (scripts/run-fex.sh /bin/true, or the launcher's Steam entry). Not starting one from here: a FEXServer started with a game's environment serves the wrong x86 root to every later FEX program (scripts/run-fex.sh)" ;;
     esac
@@ -175,7 +192,18 @@ for v in $(compgen -e); do
 done
 # What scripts/run-fex.sh gives a Steam-root program, plus the binds.
 export LXRT_ROOT="$X86_ROOT" LXRT_MOUNTS="$mounts"
-export FEX_ROOTFS=/ HOME="$X86_HOME" TMPDIR=/tmp
+export FEX_ROOTFS=/ TMPDIR=/tmp
+if [ "$linux" = 1 ]; then
+    # HOME stays the client's (bound above); FEX's own files are the x86 home's.
+    export FEX_APP_CONFIG_LOCATION="$X86_HOME/.fex-emu/" FEX_APP_DATA_LOCATION="$X86_HOME/.fex-emu/"
+    # A fullscreen SDL window that starts without the focus minimizes itself,
+    # and the game then draws ten frames a second for nobody (Counter-Strike
+    # 2: iconic, 100 ms in SDL_WaitEventTimeout per frame; MEASURED,
+    # benchmarks/stage51). It stays mapped.
+    export SDL_VIDEO_MINIMIZE_ON_FOCUS_LOSS="${SDL_VIDEO_MINIMIZE_ON_FOCUS_LOSS:-0}"
+else
+    export HOME="$X86_HOME"
+fi
 export FEX_GUESTBASE=1 FEX_SMCCHECKS="${FEX_SMCCHECKS:-mtrack}" FEX_SILENTLOG=0 FEX_OUTPUTLOG=stderr
 export OBJC_DISABLE_INITIALIZE_FORK_SAFETY=YES
 export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
@@ -183,7 +211,7 @@ export DISPLAY="${DISPLAY:-:2}"
 # SteamARM's PulseAudio socket lives in the x86 Steam root (scripts/audio.sh).
 export PULSE_SERVER="${PULSE_SERVER:-unix:/tmp/pulse/native}"
 # The tools of this chain, as the x86 client names them for pressure-vessel.
-export STEAM_COMPAT_TOOL_PATHS="$proton_dir:$slr_dir"
+if [ "$linux" = 1 ]; then export STEAM_COMPAT_TOOL_PATHS="$slr_dir"; else export STEAM_COMPAT_TOOL_PATHS="$proton_dir:$slr_dir"; fi
 # The ARM64 client's own settings for itself (4 KiB guest pages, libcef's
 # x18 pass, its aarch64 libraries) mean nothing to FEX and x86 programs, and
 # an emulator or machine architecture from an arm64 client would send
@@ -213,8 +241,12 @@ fi
 [ -z "${dropped[*]-}" ] || say "not passing on the ARM64 root's own guest environment: ${dropped[*]}"
 
 first=${1:-}
-say "$verb ${first##*/} (app ${SteamAppId:-${STEAM_COMPAT_APP_ID:-?}}) via x86 $PROTON + $RUNTIME under FEX (root $X86_ROOT); client paths bound from $arm_root: ${binds[*]-none}"
-cmd=("$FEXDIR/$FEXBIN" /bin/bash "$slr_dir/_v2-entry-point" "--verb=$verb" -- "$proton_dir/proton" "$verb" "$@")
+say "$verb ${first##*/} (app ${SteamAppId:-${STEAM_COMPAT_APP_ID:-?}}) via x86 ${PROTON:+$PROTON + }$RUNTIME under FEX (root $X86_ROOT); client paths bound from $arm_root: ${binds[*]-none}"
+if [ "$linux" = 1 ]; then
+    cmd=("$FEXDIR/$FEXBIN" /bin/bash "$slr_dir/_v2-entry-point" "--verb=$verb" -- "$@")
+else
+    cmd=("$FEXDIR/$FEXBIN" /bin/bash "$slr_dir/_v2-entry-point" "--verb=$verb" -- "$proton_dir/proton" "$verb" "$@")
+fi
 if [ "${STEAMARM_FEX_PROTON_DRYRUN:-}" = 1 ]; then
     for v in LXRT_ROOT FEX_ROOTFS HOME TMPDIR FEX_GUESTBASE DISPLAY PULSE_SERVER STEAM_COMPAT_TOOL_PATHS ${fexopts[@]+"${fexopts[@]}"}; do
         echo "env: $v=${!v}"

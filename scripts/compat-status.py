@@ -30,6 +30,14 @@ SHIM_KK_PATHS = ("/opt/homebrew/lib/libvulkan_kosmickrisp.dylib",
                  "/usr/local/lib/libvulkan_kosmickrisp.dylib")
 
 
+def shim_kk_paths(own=None):
+    """SHIM_KK_PATHS behind SteamARM's own build (scripts/build-kosmickrisp.sh),
+    which the shim tries first when settings-env.py names its directory
+    (STEAMARM_KK_DIR)."""
+    own = settings_env.kosmickrisp_build_dir() if own is None else own
+    return ((os.path.join(own, "libvulkan_kosmickrisp.dylib"),) if own else ()) + SHIM_KK_PATHS
+
+
 def icd_manifests(icd_dirs=ICD_DIRS):
     """(manifest, ICD object, library path it names) for every KosmicKrisp ICD
     manifest; the path resolved as the Vulkan loader would, None when it does
@@ -203,7 +211,7 @@ def inventory(state):
                       "source": source, **proton_sync(folder)})
     return {
         "moltenvk": moltenvk(),
-        "kosmickrisp": kosmickrisp(),
+        "kosmickrisp": kosmickrisp(shim_paths=shim_kk_paths()),
         "shim": shim(state),
         "presentation": presentation(state),
         "opengl": opengl(state),

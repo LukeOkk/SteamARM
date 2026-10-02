@@ -19,6 +19,7 @@
 #define LERR(e) (-lxrt_errno_to_linux(e))
 #include <limits.h>
 #include <pthread.h>
+#include <pthread/qos.h>
 #include <stdatomic.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -358,9 +359,95 @@ long lxrt_set_tid_address(uint32_t *ctid)
 // queue was empty -- the same rule futex_ops.c settled on, so both halves of
 // the futex family answer alike. A low count is a value Linux itself can
 // return; an inflated one is not.
-static int wake_waiters(uint32_t *addr, int32_t budget)
+// Who is parked, counted in user space, so that a private wake nobody is
+// waiting for costs no syscall, and a short spin before parking so that many
+// waits never park at all.
+//
+// Waking a parked thread is far dearer on Darwin than on Linux: the emulated
+// main thread of Counter-Strike 2 spent 13 % of its time inside __ulock_wake
+// handing jobs to its worker pool, and then waited for them to wake
+// (MEASURED, benchmarks/stage51). A waiter that spins a few tens of
+// microseconds on the word first is usually still spinning when the next job
+// or the answer arrives, and is then "woken" by the store alone.
+//
+// A waiter counts itself in its word's bucket, THEN reads the word, and parks
+// only if it still holds the expected value; a waker's store to the word came
+// before its wake, which reads the bucket after a full barrier. One of the
+// two always sees the other (the store-then-load pattern on both sides), so a
+// wake skips the kernel only when no thread of this process is parked or
+// about to park. Both parking paths count (here, and the shared form in
+// futex_ops.c); futex_waitv has its own notification. A wake that is not
+// private may be for another process and always goes to the kernel.
+// LXRT_FUTEX_SPIN_US=N: spin up to N microseconds before parking (0, the
+// default: park at once, as before).
+#define PARK_BUCKETS 4096
+static _Atomic uint32_t g_parked[PARK_BUCKETS];
+
+static inline _Atomic uint32_t *park_slot(const void *addr)
+{
+    uintptr_t a = (uintptr_t)addr >> 2;
+    return &g_parked[(a ^ (a >> 12)) & (PARK_BUCKETS - 1)];
+}
+
+void lxrt_futex_park_enter(const void *addr)
+{
+    atomic_fetch_add_explicit(park_slot(addr), 1, memory_order_seq_cst);
+    atomic_thread_fence(memory_order_seq_cst);
+}
+
+void lxrt_futex_park_leave(const void *addr)
+{
+    atomic_fetch_sub_explicit(park_slot(addr), 1, memory_order_seq_cst);
+}
+
+// After fork the child has one thread: the counts of the parent's others
+// would only cost it syscalls, for as long as it lives.
+void lxrt_futex_park_reset(void)
+{
+    for (unsigned i = 0; i < PARK_BUCKETS; i++)
+        atomic_store_explicit(&g_parked[i], 0, memory_order_relaxed);
+}
+
+static bool nobody_parked(const void *addr)
+{
+    atomic_thread_fence(memory_order_seq_cst);
+    return atomic_load_explicit(park_slot(addr), memory_order_seq_cst) == 0;
+}
+
+static uint32_t futex_spin_us(void)
+{
+    static _Atomic int spin = -1;
+    int v = atomic_load_explicit(&spin, memory_order_relaxed);
+    if (v < 0) {
+        const char *e = getenv("LXRT_FUTEX_SPIN_US");
+        v = e ? atoi(e) : 0;
+        if (v < 0 || v > 10000)
+            v = 0;
+        atomic_store_explicit(&spin, v, memory_order_relaxed);
+    }
+    return (uint32_t)v;
+}
+
+// Spin on the word for up to `us` microseconds. True if it changed.
+static bool futex_spin(const uint32_t *uaddr, uint32_t val, uint32_t us)
+{
+    uint64_t end = clock_gettime_nsec_np(CLOCK_UPTIME_RAW) + (uint64_t)us * 1000;
+    for (;;) {
+        for (int i = 0; i < 24; i++) {
+            if (atomic_load_explicit((const _Atomic uint32_t *)uaddr, memory_order_relaxed) != val)
+                return true;
+            __asm__ volatile("isb");
+        }
+        if (clock_gettime_nsec_np(CLOCK_UPTIME_RAW) >= end)
+            return false;
+    }
+}
+
+static int wake_waiters(uint32_t *addr, int32_t budget, bool private_wake)
 {
     lxrt_futex_waitv_notify(addr);      // futex_waitv callers parked on this word
+    if (private_wake && nobody_parked(addr))
+        return 0;
     uint32_t flags = ULF_NO_ERRNO;
     // futex_wake() tests its budget only AFTER releasing a waiter
     // (`if (++ret >= nr_wake) break;`), so val 0 still releases exactly one.
@@ -375,6 +462,32 @@ static int wake_waiters(uint32_t *addr, int32_t budget)
     if (__ulock_wake(flags | UL_COMPARE_AND_WAIT_SHARED, addr, 0) == 0)
         return 1;
     return 0;
+}
+
+// LXRT_FUTEX_DEBUG: under FEX, where in the x86 program a wait came from (a
+// futex here, a long poll in dispatch.c) --
+// FEX's CPU state (x28 at the syscall) holds rip and rsp; the stack words
+// that look like code addresses follow, to be matched against the guest
+// loader's own list of libraries (LD_DEBUG=files).
+void lxrt_debug_x86_stack(void)
+{
+    extern uint64_t lxrt_last_guest_x28(void);
+    const uint64_t *st = (const uint64_t *)(uintptr_t)lxrt_last_guest_x28();
+    if (!st || (uint64_t)(uintptr_t)st < (1ull << 32))
+        return;
+    uint64_t rip = st[3], rsp = st[8];
+    char line[1200];
+    int n = snprintf(line, sizeof line, "[lxrt]   x86 tid %d rip 0x%llx rsp 0x%llx stack:", lxrt_gettid(),
+                     (unsigned long long)rip, (unsigned long long)rsp);
+    int shown = 0;
+    for (int k = 0; k < 600 && shown < 28 && rsp > (1ull << 32) && n < (int)sizeof line - 24; k++) {
+        uint64_t v = ((const uint64_t *)(uintptr_t)rsp)[k];
+        if (v < 0x7e0000000000ull || v > (1ull << 47) || (v >> 12) == (rsp >> 12) || v - rsp < 0x100000)
+            continue;
+        n += snprintf(line + n, sizeof line - (size_t)n, " %llx", (unsigned long long)v);
+        shown++;
+    }
+    fprintf(lxrt_trace_stream(), "%s\n", line);
 }
 
 long lxrt_futex(uint32_t *uaddr, int op, uint32_t val, uint64_t timeout_or_val2,
@@ -455,21 +568,66 @@ long lxrt_futex(uint32_t *uaddr, int op, uint32_t val, uint64_t timeout_or_val2,
             }
         }
         int r;
+        bool spun = false;
+        if (ts && getenv("LXRT_FUTEX_DEBUG")) {
+            static _Atomic int longs;
+            int64_t ahead = deadline - (int64_t)lxrt_guest_clock_ns(clk);
+            if (ahead > 2000000000LL && atomic_fetch_add(&longs, 1) < 10) {
+                fprintf(lxrt_trace_stream(), "[lxrt] futex op 0x%x on %p: a wait of %.1f s\n", (unsigned)op, (void *)uaddr, (double)ahead / 1e9);
+                lxrt_debug_x86_stack();
+            }
+        }
         for (;;) {
             if (ts) {
                 int64_t ns = deadline - (int64_t)lxrt_guest_clock_ns(clk);
-                if (ns <= 0)
+                if (ns <= 0) {
+                    static _Atomic int said;            // LXRT_FUTEX_DEBUG=1: the first deadlines already past
+                    static int dbg = -1;
+                    if (dbg < 0) dbg = getenv("LXRT_FUTEX_DEBUG") != NULL;
+                    if (dbg && atomic_fetch_add(&said, 1) < 12)
+                        fprintf(lxrt_trace_stream(), "[lxrt] futex op 0x%x: deadline %lld.%09lld already past by %lld ns "
+                                "(clock %ld now %lld, timespec %lld.%09lld)\n", (unsigned)op,
+                                (long long)(deadline / 1000000000LL), (long long)(deadline % 1000000000LL),
+                                (long long)-ns, clk, (long long)lxrt_guest_clock_ns(clk),
+                                (long long)ts->tv_sec, (long long)ts->tv_nsec);
+                    if (dbg && atomic_load(&said) <= 12)
+                        lxrt_debug_x86_stack();
                     return LERR(ETIMEDOUT);
-                // Clamp rather than overflow: a wait longer than ~71 minutes
-                // becomes an untimed wait, which is closer to the intent than a
-                // wrapped short one.
-                int64_t clamped = ns / 1000;
-                us = clamped > 0 && clamped < UINT32_MAX ? (uint32_t)clamped : 0;
-                if (us == 0)
-                    us = 1;
+                }
+                // __ulock_wait counts 32-bit microseconds (~71 minutes). A
+                // longer wait is made in slices, each ending in the check
+                // above. It used to be clamped to 0 "for an untimed wait" and
+                // then, because 0 also meant "under a microsecond", to 1 us:
+                // Source 2's thread pool waits on its condition variable for
+                // 0xffffffff ms, got ETIMEDOUT at once and spun -- 694,592
+                // waits by one thread in 30 s, and Counter-Strike 2 never
+                // presented a frame (MEASURED, benchmarks/stage51).
+                int64_t left = ns / 1000;
+                us = left < 1 ? 1 : left >= UINT32_MAX ? UINT32_MAX - 1 : (uint32_t)left;
+            }
+            // Spin first (once, and never past a deadline nearer than the
+            // spin), then count this thread as parked and look at the word
+            // again before parking: see g_parked.
+            if (!spun) {
+                spun = true;
+                uint32_t spin = futex_spin_us();
+                if (spin && ts && us < spin)
+                    spin = us;
+                if (spin && futex_spin(uaddr, val, spin))
+                    return LERR(EAGAIN);
+            }
+            lxrt_futex_park_enter(uaddr);
+            if (atomic_load_explicit((_Atomic uint32_t *)uaddr, memory_order_seq_cst) != val) {
+                lxrt_futex_park_leave(uaddr);
+                return LERR(EAGAIN);
             }
             r = __ulock_wait(UL_COMPARE_AND_WAIT | ULF_NO_ERRNO, uaddr, val, us);
+            lxrt_futex_park_leave(uaddr);
             if (r == -EINTR && lxrt_interrupted_internally())
+                continue;
+            // The host's timer ran out before the guest's deadline: a slice
+            // of a long wait, or the two clocks a little apart.
+            if (r == -ETIMEDOUT && ts && deadline - (int64_t)lxrt_guest_clock_ns(clk) > 0)
                 continue;
             break;
         }
@@ -500,7 +658,7 @@ long lxrt_futex(uint32_t *uaddr, int op, uint32_t val, uint64_t timeout_or_val2,
         // waiter instead; they re-check, which Linux futex users must anyway.
         if (base == FUTEX_WAKE_BITSET && val3 != FUTEX_BITSET_MATCH_ANY)
             nr = INT32_MAX;
-        return wake_waiters(uaddr, nr <= 0 ? 1 : nr);
+        return wake_waiters(uaddr, nr <= 0 ? 1 : nr, (op & FUTEX_PRIVATE_FLAG) != 0);
     }
 
     default:
@@ -525,10 +683,29 @@ struct clone_ctx {
     bool      clear_ctid;
 };
 
+// LXRT_QOS=interactive: every guest thread runs in the user-interactive QoS
+// class, as a native game's threads do. Threads of the default class share
+// the performance cores with whatever else is running at that class; a
+// game's emulated main thread is what its frame rate hangs on (Counter-Strike
+// 2 under FEX: that thread 86 % busy, benchmarks/stage51). A guest that sets
+// a scheduling policy or a nice value of its own still gets what it asks for
+// (fileops2.c). Unset: the default class, as before.
+void lxrt_qos_apply(void)
+{
+    static int mode = -1;
+    if (mode < 0) {
+        const char *e = getenv("LXRT_QOS");
+        mode = e && !strcmp(e, "interactive") ? 1 : 0;
+    }
+    if (mode == 1)
+        pthread_set_qos_class_self_np(QOS_CLASS_USER_INTERACTIVE, 0);
+}
+
 static void *thread_start(void *arg)
 {
     struct clone_ctx ctx = *(struct clone_ctx *)arg;
     free(arg);
+    lxrt_qos_apply();
 
     struct guest_thread *gt = gt_self();
     if (gt) {

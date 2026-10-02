@@ -8,6 +8,13 @@
 __attribute__((visibility("hidden")))
 void *lxrt_vk_table[431];
 
+// LXRT_VK_CALLS=1 (vulkan_shim.S): the driver's entry points while the table
+// holds the counting thunks, and how often each was called.
+__attribute__((visibility("hidden"))) void *lxrt_vk_real[431];
+__attribute__((visibility("hidden"))) unsigned long long lxrt_vk_counts[431];
+__attribute__((visibility("hidden"))) int lxrt_vk_calls_on;
+extern void *const lxrt_vk_cnt_thunks[431] __attribute__((visibility("hidden")));
+
 static const char *const k_names[] = {
     "vk_icdGetInstanceProcAddr",
     "vk_icdGetPhysicalDeviceProcAddr",
@@ -456,7 +463,8 @@ static const char *const k_paths[] = {
 };
 
 // STEAMARM_VK_ICD picks another driver: "kosmickrisp" (Mesa's Vulkan-on-Metal
-// driver, Homebrew's mesa), or the absolute path of a dylib. Unset or
+// driver: the one in STEAMARM_KK_DIR if that is set and holds one, else
+// Homebrew's mesa), or the absolute path of a dylib. Unset or
 // "moltenvk": MoltenVK as above. A driver that cannot be used falls back to
 // MoltenVK, and says so on stderr.
 static const char *const k_kk_paths[] = {
@@ -586,9 +594,24 @@ static void lxrt_vk_init(void)
     const char *why = 0;
     void *h = 0;
     if (req && *req && !s_eq(req, "moltenvk")) {
-        if (s_eq(req, "kosmickrisp"))
+        if (s_eq(req, "kosmickrisp")) {
+            // SteamARM's own build first (scripts/build-kosmickrisp.sh: the
+            // driver with patches/kosmickrisp-*.patch), where the launcher
+            // says it is; Homebrew's otherwise.
+            const char *dir = henv ? henv("STEAMARM_KK_DIR") : 0;
+            static char own[512];
+            if (dir && *dir == '/') {
+                unsigned n = 0;
+                for (const char *p = dir; *p && n < sizeof own - 40; p++)
+                    own[n++] = *p;
+                for (const char *p = "/libvulkan_kosmickrisp.dylib"; *p; p++)
+                    own[n++] = *p;
+                own[n] = 0;
+                h = lxrt_host_dlopen(own, 0);
+            }
             for (unsigned i = 0; i < sizeof(k_kk_paths) / sizeof(k_kk_paths[0]) && !h; i++)
                 h = lxrt_host_dlopen(k_kk_paths[i], 0);
+        }
         else if (req[0] == '/')
             h = lxrt_host_dlopen(req, 0);
         else
@@ -609,6 +632,15 @@ static void lxrt_vk_init(void)
             lxrt_vk_driver = "moltenvk";
             bind(h);
         }
+    }
+    const char *calls = henv ? henv("LXRT_VK_CALLS") : 0;
+    if (calls && *calls == '1') {
+        lxrt_vk_calls_on = 1;
+        for (unsigned i = 0; i < N_NAMES; i++)
+            if (lxrt_vk_table[i]) {
+                lxrt_vk_real[i] = lxrt_vk_table[i];
+                lxrt_vk_table[i] = lxrt_vk_cnt_thunks[i];
+            }
     }
     if (why || (dbg && *dbg == '1'))
         say((const char *const[]){ "[shim] vk driver requested=", req && *req ? req : "moltenvk",
@@ -633,6 +665,10 @@ void lxrt_vk_icd_fill(void *instance)
     for (unsigned i = 0; i < N_NAMES; i++)
         if (!lxrt_vk_table[i]) {
             void *f = g_gipa(instance, k_names[i]);
+            if (f && lxrt_vk_calls_on) {
+                lxrt_vk_real[i] = f;
+                f = lxrt_vk_cnt_thunks[i];
+            }
             if (f)
                 __atomic_store_n(&lxrt_vk_table[i], f, __ATOMIC_RELEASE);
         }
@@ -652,4 +688,42 @@ int lxrt_vk_missing(const char *name)
         if (s_eq(name, k_names[i]))
             return !__atomic_load_n(&lxrt_vk_table[i], __ATOMIC_ACQUIRE);
     return 0;
+}
+
+// LXRT_VK_CALLS=1: the entry points called most since the last report, as
+// "name=count" pairs in `out` (shim/scaler.c prints them with its timing).
+__attribute__((visibility("hidden")))
+unsigned lxrt_vk_calls_top(char *out, unsigned cap, unsigned top)
+{
+    static unsigned long long last[N_NAMES];
+    unsigned long long d[N_NAMES];
+    unsigned n = 0;
+    for (unsigned i = 0; i < N_NAMES; i++) {
+        unsigned long long c = lxrt_vk_counts[i];
+        d[i] = c - last[i];
+        last[i] = c;
+    }
+    for (unsigned k = 0; k < top; k++) {
+        unsigned best = 0;
+        for (unsigned i = 1; i < N_NAMES; i++)
+            if (d[i] > d[best])
+                best = i;
+        if (!d[best])
+            break;
+        if (n && n < cap - 1)
+            out[n++] = ' ';
+        for (const char *p = k_names[best] + 2; *p && n < cap - 1; p++)   // without "vk"
+            out[n++] = *p;
+        if (n < cap - 1)
+            out[n++] = '=';
+        char num[24];
+        unsigned m = 0;
+        for (unsigned long long v = d[best]; v; v /= 10)
+            num[m++] = (char)('0' + v % 10);
+        while (m && n < cap - 1)
+            out[n++] = num[--m];
+        d[best] = 0;
+    }
+    out[n] = 0;
+    return n;
 }

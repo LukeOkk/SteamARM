@@ -1,0 +1,13 @@
+"compatibilitytools"
+{
+  "compat_tools"
+  {
+    "steamarm-fex-linux"
+    {
+      "install_path" "."
+      "display_name" "SteamARM: Linux x86 via FEX (experimental)"
+      "from_oslist" "linux"
+      "to_oslist" "linux"
+    }
+  }
+}

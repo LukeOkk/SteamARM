@@ -1,0 +1,491 @@
+diff -ruN a/src/kosmickrisp/vulkan/kk_cmd_buffer.c b1/src/kosmickrisp/vulkan/kk_cmd_buffer.c
+--- a/src/kosmickrisp/vulkan/kk_cmd_buffer.c
++++ b/src/kosmickrisp/vulkan/kk_cmd_buffer.c
+@@ -49,6 +49,13 @@
+    }
+    util_dynarray_clear(&cmd->submit_cmd_bufs);
+ 
++   /* Still here: this recording was never committed (a commit takes the
++    * allocators with it, kk_cmd_buffer_retire). */
++   util_dynarray_foreach(&cmd->allocators, mtl_command_allocator *, allocator) {
++      kk_device_put_allocator(dev, *allocator);
++   }
++   util_dynarray_clear(&cmd->allocators);
++
+    /* Release all BOs used as descriptor buffers for submissions */
+    util_dynarray_foreach(&cmd->large_bos, struct kk_bo *, bo) {
+       kk_destroy_bo(dev, *bo);
+@@ -62,9 +69,6 @@
+    assert(es->encoder == NULL);
+    assert(es->cmd_buf == NULL);
+ 
+-   mtl_release(es->allocator);
+-   es->allocator = NULL;
+-
+    util_dynarray_fini(&es->ts_resolves);
+ }
+ 
+@@ -85,6 +89,7 @@
+ 
+    kk_cmd_release_resources(dev, cmd);
+    util_dynarray_fini(&cmd->submit_cmd_bufs);
++   util_dynarray_fini(&cmd->allocators);
+    util_dynarray_fini(&cmd->large_bos);
+ 
+    vk_free(&pool->vk.alloc, cmd);
+@@ -93,9 +98,8 @@
+ static bool
+ kk_init_encoder_state(struct kk_encoder_state *es, mtl_device *handle)
+ {
+-   es->allocator = mtl_new_command_allocator(handle);
+    es->ts_resolves = UTIL_DYNARRAY_INIT;
+-   return es->allocator != NULL;
++   return true;
+ }
+ 
+ static VkResult
+@@ -144,6 +148,7 @@
+    }
+ 
+    cmd->submit_cmd_bufs = UTIL_DYNARRAY_INIT;
++   cmd->allocators = UTIL_DYNARRAY_INIT;
+    cmd->large_bos = UTIL_DYNARRAY_INIT;
+ 
+    cmd->vk.dynamic_graphics_state.vi = &cmd->state.gfx._dynamic_vi;
+@@ -168,12 +173,42 @@
+    return result;
+ }
+ 
+-static void
+-kk_reset_encoder_state(struct kk_encoder_state *es)
++/* A Metal command buffer begun with an allocator of its own, borrowed from
++ * the device. One allocator for all the Metal command buffers of a
++ * VkCommandBuffer (one per render pass, and more around each) grew by a
++ * command buffer storage for each of them and kept them all: ~120 MB per
++ * allocator under Source 2 (MEASURED).
++ */
++static mtl_command_buffer *
++kk_cmd_buffer_begin_mtl(struct kk_cmd_buffer *cmd)
+ {
+-   mtl_command_allocator_reset(es->allocator);
++   struct kk_device *dev = kk_cmd_buffer_device(cmd);
++   mtl_command_allocator *allocator = kk_device_get_allocator(dev);
++   mtl_command_buffer *cmd_buf = mtl_new_command_buffer(dev->mtl_handle);
++
++   util_dynarray_append(&cmd->allocators, allocator);
++   mtl_begin_command_buffer(cmd_buf, allocator);
++   return cmd_buf;
+ }
+ 
++/* The command buffer was committed: what the GPU still uses goes to `slot`,
++ * whose feedback handler releases it. Returns the Metal command buffers to
++ * commit.
++ */
++mtl_command_buffer **
++kk_cmd_buffer_retire(struct kk_cmd_buffer *cmd, struct kk_retire_slot *slot)
++{
++   struct util_dynarray empty = slot->cmd_bufs;
++   slot->cmd_bufs = cmd->submit_cmd_bufs;
++   cmd->submit_cmd_bufs = empty;
++
++   empty = slot->allocators;
++   slot->allocators = cmd->allocators;
++   cmd->allocators = empty;
++
++   return util_dynarray_begin(&slot->cmd_bufs);
++}
++
+ void
+ kk_reset_cmd_buffer_internal(struct kk_cmd_buffer *cmd)
+ {
+@@ -185,10 +220,6 @@
+    cs_end(cmd);
+    kk_cmd_release_resources(dev, cmd);
+ 
+-   kk_reset_encoder_state(cmd->pre_gfx);
+-   kk_reset_encoder_state(&cmd->gfx);
+-   kk_reset_encoder_state(cmd->post_gfx);
+-
+    cmd->uploader.bo = NULL;
+    cmd->uploader.offset = 0;
+ 
+@@ -261,8 +292,7 @@
+    uint32_t view_mask = state->render.view_mask;
+    assert(state->render_pass_descriptor);
+ 
+-   cmd->gfx.cmd_buf = mtl_new_command_buffer(dev->mtl_handle);
+-   mtl_begin_command_buffer(cmd->gfx.cmd_buf, cmd->gfx.allocator);
++   cmd->gfx.cmd_buf = kk_cmd_buffer_begin_mtl(cmd);
+    cmd->gfx.encoder = mtl_new_render_command_encoder_with_descriptor(
+       cmd->gfx.cmd_buf, state->render_pass_descriptor);
+ 
+@@ -300,11 +330,10 @@
+ }
+ 
+ static void
+-kk_start_compute_encoder(struct kk_encoder_state *es, mtl_device *handle,
++kk_start_compute_encoder(struct kk_cmd_buffer *cmd, struct kk_encoder_state *es,
+                          mtl_argument_table *argument_table)
+ {
+-   es->cmd_buf = mtl_new_command_buffer(handle);
+-   mtl_begin_command_buffer(es->cmd_buf, es->allocator);
++   es->cmd_buf = kk_cmd_buffer_begin_mtl(cmd);
+    es->encoder = mtl_new_compute_command_encoder(es->cmd_buf);
+ 
+    /* Argument table won't ever change */
+@@ -319,14 +348,12 @@
+    /* If we are not inside a render, we can just take pre_gfx. */
+    if (!cmd->gfx.encoder || pre_gfx) {
+       if (!cmd->pre_gfx->encoder) {
+-         kk_start_compute_encoder(cmd->pre_gfx, dev->mtl_handle,
+-                                  cmd->argument_table);
++         kk_start_compute_encoder(cmd, cmd->pre_gfx, cmd->argument_table);
+       }
+       encoder = cmd->pre_gfx->encoder;
+    } else {
+       if (!cmd->post_gfx->encoder) {
+-         kk_start_compute_encoder(cmd->post_gfx, dev->mtl_handle,
+-                                  cmd->argument_table);
++         kk_start_compute_encoder(cmd, cmd->post_gfx, cmd->argument_table);
+       }
+       encoder = cmd->post_gfx->encoder;
+    }
+diff -ruN a/src/kosmickrisp/vulkan/kk_cmd_buffer.h b1/src/kosmickrisp/vulkan/kk_cmd_buffer.h
+--- a/src/kosmickrisp/vulkan/kk_cmd_buffer.h
++++ b/src/kosmickrisp/vulkan/kk_cmd_buffer.h
+@@ -208,7 +208,6 @@
+ struct kk_encoder_state {
+    /* either a mtl_compute_encoder or a mtl_render_encoder */
+    mtl_command_encoder *encoder;
+-   mtl_command_allocator *allocator;
+    mtl_command_buffer *cmd_buf;
+    /* Pending timestamp resolves (struct kk_ts_resolve), flushed at cs_end. */
+    struct util_dynarray ts_resolves;
+@@ -242,6 +241,12 @@
+ 
+    struct util_dynarray submit_cmd_bufs;
+ 
++   /* The command allocator of every Metal command buffer begun since the
++
++    * last reset, borrowed from the device (mtl_command_allocator *). */
++
++   struct util_dynarray allocators;
++
+    /* Owned large BOs */
+    struct util_dynarray large_bos;
+ 
+@@ -287,6 +292,9 @@
+ };
+ 
+ void kk_reset_cmd_buffer_internal(struct kk_cmd_buffer *cmd);
++struct kk_retire_slot;
++mtl_command_buffer **kk_cmd_buffer_retire(struct kk_cmd_buffer *cmd,
++                                          struct kk_retire_slot *slot);
+ void cs_start_render(struct kk_cmd_buffer *cmd);
+ mtl_render_encoder *cs_get_render(struct kk_cmd_buffer *cmd);
+ mtl_compute_encoder *cs_get_compute(struct kk_cmd_buffer *cmd, bool pre_gfx);
+diff -ruN a/src/kosmickrisp/vulkan/kk_device.c b1/src/kosmickrisp/vulkan/kk_device.c
+--- a/src/kosmickrisp/vulkan/kk_device.c
++++ b/src/kosmickrisp/vulkan/kk_device.c
+@@ -15,6 +15,7 @@
+ 
+ #include "kosmickrisp/bridge/mtl_bridge.h"
+ #include "kosmickrisp/bridge/mtl_device.h"
++#include "kosmickrisp/bridge/vk_to_mtl_map.h"
+ #include "kosmickrisp/bridge/ns_process_info.h"
+ 
+ #include "kk_dispatch_cmd.h"
+@@ -313,6 +314,7 @@
+ 
+    /* We need to initialize the device residency set before any bo is created. */
+    simple_mtx_init(&dev->residency_set.mutex, mtx_plain);
++   kk_device_init_cmd_mem(dev);
+    dev->residency_set.handle = mtl_new_residency_set(dev->mtl_handle);
+    if (dev->residency_set.handle == NULL)
+       goto fail_compiler;
+@@ -359,8 +361,9 @@
+    }
+ fail_vab_memory:
+    mtl_release(dev->residency_set.handle);
+-   simple_mtx_destroy(&dev->residency_set.mutex);
+ fail_compiler:
++   kk_device_finish_cmd_mem(dev);
++   simple_mtx_destroy(&dev->residency_set.mutex);
+    kk_release_compiler(dev);
+ fail_init:
+    vk_device_finish(&dev->vk);
+@@ -369,6 +372,158 @@
+    return result;
+ }
+ 
++void
++kk_device_init_cmd_mem(struct kk_device *dev)
++{
++   simple_mtx_init(&dev->cmd_mem.lock, mtx_plain);
++   dev->cmd_mem.idle_count = 0;
++   dev->cmd_mem.free_slots = NULL;
++   dev->cmd_mem.in_flight = 0;
++}
++
++mtl_command_allocator *
++kk_device_get_allocator(struct kk_device *dev)
++{
++   mtl_command_allocator *allocator = NULL;
++
++   simple_mtx_lock(&dev->cmd_mem.lock);
++   if (dev->cmd_mem.idle_count > 0)
++      allocator = dev->cmd_mem.idle[--dev->cmd_mem.idle_count];
++   simple_mtx_unlock(&dev->cmd_mem.lock);
++
++   return allocator ? allocator : mtl_new_command_allocator(dev->mtl_handle);
++}
++
++/* Every command buffer begun with `allocator` has finished on the GPU, or was
++ * never committed. */
++void
++kk_device_put_allocator(struct kk_device *dev, mtl_command_allocator *allocator)
++{
++   mtl_command_allocator_reset(allocator);
++
++   simple_mtx_lock(&dev->cmd_mem.lock);
++   if (dev->cmd_mem.idle_count < KK_ALLOCATOR_POOL_SIZE) {
++      /* Last in, first out: the allocator whose memory is warm goes next. */
++      dev->cmd_mem.idle[dev->cmd_mem.idle_count++] = allocator;
++      allocator = NULL;
++   }
++   simple_mtx_unlock(&dev->cmd_mem.lock);
++
++   if (allocator)
++      mtl_release(allocator);
++}
++
++static void
++kk_retire_slot_done(struct mtl_feedback_data *data)
++{
++   struct kk_retire_slot *slot = data->user_data;
++   struct kk_device *dev = slot->dev;
++
++   if (data->error != MTL_COMMAND_QUEUE_ERROR_NONE) {
++      vk_device_set_lost(
++         &dev->vk, "Command queue error: %s, with message \"%s\"",
++         mtl_command_queue_error_to_string(data->error), data->error_message);
++   }
++
++   util_dynarray_foreach(&slot->cmd_bufs, mtl_command_buffer *, cmd_buf) {
++      mtl_release(*cmd_buf);
++   }
++   util_dynarray_clear(&slot->cmd_bufs);
++
++   util_dynarray_foreach(&slot->allocators, mtl_command_allocator *, allocator) {
++      kk_device_put_allocator(dev, *allocator);
++   }
++   util_dynarray_clear(&slot->allocators);
++
++   simple_mtx_lock(&dev->cmd_mem.lock);
++   slot->next = dev->cmd_mem.free_slots;
++   dev->cmd_mem.free_slots = slot;
++   dev->cmd_mem.in_flight--;
++   simple_mtx_unlock(&dev->cmd_mem.lock);
++}
++
++/* A slot for one commit, counted as in flight until its handler has run.
++ * NULL if there is no memory for one. */
++struct kk_retire_slot *
++kk_device_get_retire_slot(struct kk_device *dev)
++{
++   struct kk_retire_slot *slot;
++
++   simple_mtx_lock(&dev->cmd_mem.lock);
++   slot = dev->cmd_mem.free_slots;
++   if (slot)
++      dev->cmd_mem.free_slots = slot->next;
++   simple_mtx_unlock(&dev->cmd_mem.lock);
++
++   if (!slot) {
++      slot = vk_zalloc(&dev->vk.alloc, sizeof(*slot), 8,
++                       VK_SYSTEM_ALLOCATION_SCOPE_DEVICE);
++      if (!slot)
++         return NULL;
++      slot->dev = dev;
++      slot->cmd_bufs = UTIL_DYNARRAY_INIT;
++      slot->allocators = UTIL_DYNARRAY_INIT;
++   }
++
++   /* Options with exactly one handler, for exactly one commit. The options
++    * of the slot's last commit are released only now, long after their
++    * handler returned. */
++   if (slot->options)
++      mtl_release(slot->options);
++   slot->options = mtl_new_commit_options();
++   if (!slot->options) {
++      util_dynarray_fini(&slot->cmd_bufs);
++      util_dynarray_fini(&slot->allocators);
++      vk_free(&dev->vk.alloc, slot);
++      return NULL;
++   }
++   mtl_commit_options_add_feedback_handler(slot->options, kk_retire_slot_done,
++                                           slot);
++
++   slot->next = NULL;
++   simple_mtx_lock(&dev->cmd_mem.lock);
++   dev->cmd_mem.in_flight++;
++   simple_mtx_unlock(&dev->cmd_mem.lock);
++
++   return slot;
++}
++
++void
++kk_device_finish_cmd_mem(struct kk_device *dev)
++{
++   /* The application has waited for its submissions; their feedback handlers
++    * run on Metal's thread a moment later. */
++   for (unsigned tries = 0; tries < 400; tries++) {
++      simple_mtx_lock(&dev->cmd_mem.lock);
++      uint32_t in_flight = dev->cmd_mem.in_flight;
++      simple_mtx_unlock(&dev->cmd_mem.lock);
++      if (!in_flight)
++         break;
++      struct timespec ts = {.tv_nsec = 5 * 1000 * 1000};
++      nanosleep(&ts, NULL);
++   }
++
++   simple_mtx_lock(&dev->cmd_mem.lock);
++   for (uint32_t i = 0; i < dev->cmd_mem.idle_count; i++)
++      mtl_release(dev->cmd_mem.idle[i]);
++   dev->cmd_mem.idle_count = 0;
++   struct kk_retire_slot *slot = dev->cmd_mem.free_slots;
++   dev->cmd_mem.free_slots = NULL;
++   simple_mtx_unlock(&dev->cmd_mem.lock);
++
++   while (slot) {
++      struct kk_retire_slot *next = slot->next;
++      if (slot->options)
++         mtl_release(slot->options);
++      util_dynarray_fini(&slot->cmd_bufs);
++      util_dynarray_fini(&slot->allocators);
++      vk_free(&dev->vk.alloc, slot);
++      slot = next;
++   }
++
++   simple_mtx_destroy(&dev->cmd_mem.lock);
++}
++
+ VKAPI_ATTR void VKAPI_CALL
+ kk_DestroyDevice(VkDevice _device, const VkAllocationCallbacks *pAllocator)
+ {
+@@ -392,6 +547,10 @@
+    /* Geometry heap */
+    if (dev->heap)
+       kk_destroy_bo(dev, dev->heap);
++
++   /* Before the queue goes: the commits still in flight hand their
++    * allocators back from Metal's feedback thread. */
++   kk_device_finish_cmd_mem(dev);
+ 
+    if (dev->has_queue) {
+       kk_queue_finish(dev, &dev->queue);
+diff -ruN a/src/kosmickrisp/vulkan/kk_device.h b1/src/kosmickrisp/vulkan/kk_device.h
+--- a/src/kosmickrisp/vulkan/kk_device.h
++++ b/src/kosmickrisp/vulkan/kk_device.h
+@@ -24,6 +24,10 @@
+ #include "vk_meta.h"
+ #include "vk_queue.h"
+ 
++/* Idle command allocators kept for reuse, each with the memory of one Metal
++ * command buffer; more than this are released. */
++#define KK_ALLOCATOR_POOL_SIZE 384
++
+ struct kk_bo;
+ struct kk_physical_device;
+ struct vk_pipeline_cache;
+@@ -105,7 +109,45 @@
+ 
+    uint64_t disabled_workarounds;
+    bool gpu_capture_enabled;
++
++   /* Command allocators and what a submission leaves behind.
++    *
++    * A MTL4CommandAllocator keeps the memory its command buffers were encoded
++    * into (a few MB for each Metal command buffer), and -reset only makes
++    * that memory reusable. When every VkCommandBuffer owned three of them for
++    * life, an application with thousands of command buffers (Source 2
++    * allocates one whenever its free list is empty and resets it only when
++    * it is next used) pinned that memory in every one of them: 29 GB in half
++    * a minute of Counter-Strike 2. So each Metal command buffer borrows an
++    * allocator from the device, and it is handed back when the GPU has
++    * finished the submission (or at reset, if never submitted).
++    */
++   struct {
++      simple_mtx_t lock;
++      mtl_command_allocator *idle[KK_ALLOCATOR_POOL_SIZE];
++      uint32_t idle_count;
++      struct kk_retire_slot *free_slots;
++      uint32_t in_flight;
++   } cmd_mem;
+ };
++
++/* What one committed VkCommandBuffer left with the GPU: released from the
++ * commit's feedback handler, the one handler of `options`.
++ */
++struct kk_retire_slot {
++   struct kk_device *dev;
++   mtl_commit_options *options;
++   struct util_dynarray cmd_bufs;   /* mtl_command_buffer * */
++   struct util_dynarray allocators; /* mtl_command_allocator * */
++   struct kk_retire_slot *next;
++};
++
++mtl_command_allocator *kk_device_get_allocator(struct kk_device *dev);
++void kk_device_put_allocator(struct kk_device *dev,
++                             mtl_command_allocator *allocator);
++struct kk_retire_slot *kk_device_get_retire_slot(struct kk_device *dev);
++void kk_device_init_cmd_mem(struct kk_device *dev);
++void kk_device_finish_cmd_mem(struct kk_device *dev);
+ 
+ VK_DEFINE_HANDLE_CASTS(kk_device, vk.base, VkDevice, VK_OBJECT_TYPE_DEVICE)
+ 
+diff -ruN a/src/kosmickrisp/vulkan/kk_queue.c b1/src/kosmickrisp/vulkan/kk_queue.c
+--- a/src/kosmickrisp/vulkan/kk_queue.c
++++ b/src/kosmickrisp/vulkan/kk_queue.c
+@@ -18,17 +18,6 @@
+ #include "vk_cmd_queue.h"
+ 
+ static void
+-commit_callback(struct mtl_feedback_data *data)
+-{
+-   if (data->error != MTL_COMMAND_QUEUE_ERROR_NONE) {
+-      struct kk_device *dev = (struct kk_device *)data->user_data;
+-      vk_device_set_lost(
+-         &dev->vk, "Command queue error: %s, with message \"%s\"",
+-         mtl_command_queue_error_to_string(data->error), data->error_message);
+-   }
+-}
+-
+-static void
+ rerecord_cmd_buffer(struct kk_cmd_buffer *cmd)
+ {
+    struct kk_device *dev = kk_cmd_buffer_device(cmd);
+@@ -83,10 +72,19 @@
+ 
+       /* Metal complains with empty submissions. */
+       if (count > 0u) {
+-         mtl_commit_options_add_feedback_handler(queue->commit_options,
+-                                                 commit_callback, dev);
+-         mtl_command_queue_commit(queue->mtl_handle, cmds, count,
+-                                  queue->commit_options);
++         /* One feedback handler per commit, on the slot's own options: it
++          * reports an error and takes back what the commit used. (A handler
++          * added to the queue's options at every submit stayed there, and
++          * each commit then ran all of them.) */
++         struct kk_retire_slot *slot = kk_device_get_retire_slot(dev);
++         if (slot) {
++            cmds = kk_cmd_buffer_retire(cmd_buffer, slot);
++            mtl_command_queue_commit(queue->mtl_handle, cmds, count,
++                                     slot->options);
++         } else {
++            mtl_command_queue_commit(queue->mtl_handle, cmds, count,
++                                     queue->commit_options);
++         }
+       }
+ 
+       if (cmd_buffer->drawable) {

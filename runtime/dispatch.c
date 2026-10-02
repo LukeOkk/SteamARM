@@ -285,6 +285,51 @@ static const char *guest_resolve(const char *path, bool follow_last, char *out, 
                         u = uv;
                     }
                     g = u ? u : target;
+                } else if (lxrt_mounts_active()) {
+                    // A relative link in a sandbox: bwrap's --symlink makes
+                    // /etc/os-release -> ../usr/lib/os-release in the
+                    // sandbox's own root, and /usr is a bind. The host would
+                    // resolve it against the empty directory standing in for
+                    // the bind ("cat /etc/os-release: No such file" in the
+                    // sniper container; CS2's cs2.sh reads it and refused to
+                    // start, MEASURED, benchmarks/stage51). In guest terms:
+                    // the link's directory, then the target, "." and ".."
+                    // folded -- every component before the link has already
+                    // been found not to be a link.
+                    char joined[1024];
+                    char *dirend = p - 1;
+                    while (dirend > cur && *dirend != '/') dirend--;
+                    if (snprintf(joined, sizeof joined, "%.*s/%s", (int)(dirend - cur), cur, target) < (int)sizeof joined) {
+                        size_t o = 0;
+                        uv[0] = '\0';
+                        for (char *c = joined; *c;) {
+                            while (*c == '/') c++;
+                            char *e = c;
+                            while (*e && *e != '/') e++;
+                            size_t l = (size_t)(e - c);
+                            if (l == 2 && c[0] == '.' && c[1] == '.') {
+                                while (o > 0 && uv[--o] != '/')
+                                    ;
+                            } else if (l && !(l == 1 && c[0] == '.') && o + l + 2 < sizeof uv) {
+                                uv[o++] = '/';
+                                memcpy(uv + o, c, l);
+                                o += l;
+                            }
+                            uv[o] = '\0';
+                            c = e;
+                        }
+                        if (!o) { uv[0] = '/'; uv[1] = '\0'; }
+                        // Only where a bind decides the answer. A link of the
+                        // host's own that no bind covers is the host's to
+                        // follow: /tmp -> private/tmp became /private/tmp
+                        // here, and a mount made at /tmp/... was no longer
+                        // found (tests/elf android_ids: the tmpfs and bind
+                        // checks).
+                        char whole[1100], hb[PATH_MAX];
+                        snprintf(whole, sizeof whole, "%s%s", uv, save ? p : "");
+                        if (lxrt_mounts_translate(whole, hb, sizeof hb))
+                            g = uv;
+                    }
                 }
                 if (g) {
                     char next[1024];
@@ -337,7 +382,7 @@ static const char *translate(const char *path) { return translate_ex(path, false
 // Returns the host path the bind table gives <dirfd's guest path>/<path>, to
 // use with AT_FDCWD, or NULL when no bind deeper than the descriptor's own
 // place covers it (then (dirfd, path) is right as it is).
-static const char *at_through_mounts(int ldirfd, const char *path)
+static const char *at_through_mounts(int ldirfd, const char *path, bool follow_last)
 {
     if (!lxrt_mounts_active() || !path || !path[0] || path[0] == '/' || ldirfd == -100 || ldirfd < 0)
         return NULL;
@@ -359,8 +404,12 @@ static const char *at_through_mounts(int ldirfd, const char *path)
     char full[PATH_MAX];
     if (snprintf(full, sizeof full, "%s%s%s", g, g[strlen(g) - 1] == '/' ? "" : "/", path) >= (int)sizeof full)
         return NULL;
+    // Links on the way (and the last one, for a caller that follows it) are
+    // resolved in guest terms first, as for an absolute path.
+    char rb[1024];
+    const char *res = guest_resolve(full, follow_last, rb, sizeof rb);
     static _Thread_local char mb[PATH_MAX];
-    if (!lxrt_mounts_translate(full, mb, sizeof mb))
+    if (!lxrt_mounts_translate(res, mb, sizeof mb))
         return NULL;
     // The descriptor's own mapping reaching the same place: nothing to change.
     char plain[PATH_MAX];
@@ -2001,6 +2050,19 @@ static long do_getitimer(int which, void *oldp)
 // because closing it needs kernel support we do not have.
 static long do_ppoll(uint64_t fds, uint64_t nfds, uint64_t ts, uint64_t sigmask)
 {
+    // LXRT_FUTEX_DEBUG=1: the first polls of 50 ms to a second, with the x86
+    // caller under FEX (a game sleeping in its event loop: Counter-Strike 2
+    // waits 100 ms per frame while its window has no focus).
+    if (ts && getenv("LXRT_FUTEX_DEBUG")) {
+        extern void lxrt_debug_x86_stack(void);
+        static _Atomic int said;
+        const struct linux_timespec *t = (const struct linux_timespec *)(uintptr_t)ts;
+        if (!t->tv_sec && t->tv_nsec >= 50000000 && atomic_fetch_add(&said, 1) < 6) {
+            fprintf(lxrt_trace_stream(), "[lxrt] ppoll of %lld.%03lld s on %llu fds\n", (long long)t->tv_sec,
+                    (long long)(t->tv_nsec / 1000000), (unsigned long long)nfds);
+            lxrt_debug_x86_stack();
+        }
+    }
     int timeout_ms = -1;
     if (ts) {
         const struct linux_timespec *t = (const struct linux_timespec *)ts;
@@ -2558,7 +2620,7 @@ static long do_fstatat(int dirfd, const char *path, uint64_t out, int flags)
         stat_to_linux(&d, (struct linux_stat *)out);
         return 0;
     }
-    const char *mp = at_through_mounts(dirfd, path);
+    const char *mp = at_through_mounts(dirfd, path, !(flags & 0x100));
     if (mp)
         dirfd = -100;
     const char *hp = mp ? mp : (flags & 0x100) ? translate(path) : translate_follow(path);  // AT_SYMLINK_NOFOLLOW
@@ -2689,6 +2751,8 @@ static long do_uname(uint64_t buf)
 static _Thread_local uint64_t g_guest_lr;
 static _Thread_local uint64_t g_robust_head, g_robust_len;
 uint64_t lxrt_last_guest_lr(void) { return g_guest_lr; }
+static _Thread_local uint64_t g_guest_x28;
+uint64_t lxrt_last_guest_x28(void) { return g_guest_x28; }   // FEX's CPU state, for diagnostics
 // A process sending itself SIGABRT is almost always glibc's abort() in the
 // guest's own (aarch64) code -- in FEX, that is the emulator's heap, which no
 // guest-level handler sees ("corrupted double-linked list" from wineserver's
@@ -2743,6 +2807,9 @@ void lxrt_dispatch(struct lxrt_regs *r)
 {
     long nr = (long)r->x[8];
     g_guest_lr = r->x[30];
+    g_guest_x28 = r->x[28];
+    if (__builtin_expect(lxrt_guestprof_on, 0))
+        lxrt_guestprof_note(r->x[28]);
     // A 32-bit guest's pointer arguments arrive as guest addresses; the
     // kernel is us, so we add the base (runtime/gbase.c).
     // On a COPY: the argument registers are the caller's live registers, and
@@ -3041,7 +3108,7 @@ restart:
         // Flag values differ; see fsflags.c. Passing Linux O_APPEND straight
         // through would ask Darwin for O_TRUNC|O_EXCL.
         {
-            const char *mp = at_through_mounts((int)a0, (const char *)a1);
+            const char *mp = at_through_mounts((int)a0, (const char *)a1, !((int)a2 & 0x8000));
             int ddir = mp ? AT_FDCWD : lxrt_dirfd_to_darwin((int)a0);
             const char *hp = mp ? mp : ((int)a2 & 0x8000) ? translate((const char *)a1)
                                                           : translate_follow((const char *)a1);
@@ -3080,7 +3147,7 @@ restart:
             break;
         }
         {
-            const char *mp = at_through_mounts((int)a0, (const char *)a1);
+            const char *mp = at_through_mounts((int)a0, (const char *)a1, true);
             ret = ret_of(faccessat(mp ? AT_FDCWD : lxrt_dirfd_to_darwin((int)a0),
                                    mp ? mp : translate_follow((const char *)a1), (int)a2, 0));
         }
@@ -3097,7 +3164,7 @@ restart:
             if (n < 0 && errno == EINVAL) errno = ENOENT;
             if (n >= 0) looked = self;
         } else {
-            const char *mp = at_through_mounts((int)a0, (const char *)a1);
+            const char *mp = at_through_mounts((int)a0, (const char *)a1, false);
             looked = mp ? mp : translate((const char *)a1);
             n = readlinkat(mp ? AT_FDCWD : lxrt_dirfd_to_darwin((int)a0), looked, tmp, sizeof tmp);
         }
@@ -4228,7 +4295,8 @@ restart:
             }
         }
         {
-            const char *mp = at_through_mounts((int)a0, (const char *)a1);
+            const char *mp = at_through_mounts((int)a0, (const char *)a1,
+                                               !(a2 && a3 >= 8 && (*(const uint64_t *)a2 & 0x8000)));
             if (mp && a2 && a3 >= 24) {
                 // The bind already placed it; the walk inside the descriptor's
                 // tree that RESOLVE_IN_ROOT/BENEATH ask for does not apply.
@@ -4244,7 +4312,7 @@ restart:
         break;
     case LNR_statx:
         {
-            const char *mp = at_through_mounts((int)a0, (const char *)a1);
+            const char *mp = at_through_mounts((int)a0, (const char *)a1, !((int)a2 & 0x100));
             ret = lxrt_statx(mp ? -100 : (int)a0, mp ? mp : translate((const char *)a1), (int)a2,
                              (unsigned)a3, (void *)a4);
         }
@@ -4276,7 +4344,7 @@ restart:
             break;
         }
         {
-            const char *mp = at_through_mounts((int)a0, (const char *)a1);
+            const char *mp = at_through_mounts((int)a0, (const char *)a1, !((int)a3 & 0x100));
             ret = lxrt_faccessat2(mp ? -100 : (int)a0, mp ? mp : translate((const char *)a1), (int)a2,
                                   (int)a3);
         }

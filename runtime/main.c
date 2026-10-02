@@ -39,6 +39,8 @@ struct guest_start { uint64_t entry; void *sp; };
 
 static void *guest_thread(void *arg)
 {
+    lxrt_qos_apply();
+    lxrt_guestprof_start();
     struct guest_start *gs = arg;
     // Registered before any guest code runs, with tid == pid, so the thread
     // table always holds the initial thread (lxrt_thread_exit counts it).

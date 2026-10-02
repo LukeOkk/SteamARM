@@ -153,6 +153,26 @@ between them and the x86 root is not modified.
    socket (exit 5). That refusal was not exercised: the shared FEXServer ran
    throughout (VERIFIED IN SOURCE only).
 
+## Native Linux x86 games: `steamarm-fex-linux`
+
+The same script under a second name (`tools/steamarm-fex-linux`,
+`from_oslist linux`, display name "SteamARM: Linux x86 via FEX
+(experimental)"). Forced on a game, the ARM64 client downloads the game's
+Linux depot and starts
+
+```
+<FEX> /bin/bash <SteamLinuxRuntime_sniper>/_v2-entry-point --verb=<verb> -- <game> [args...]
+```
+
+with no Proton in the chain. `HOME` stays the client's (the game finds the
+running client through `~/.steam`); FEX's own files come from the x86 home
+(`FEX_APP_CONFIG_LOCATION`, `FEX_APP_DATA_LOCATION`). The tool sets
+`SDL_VIDEO_MINIMIZE_ON_FOCUS_LOSS=0`: a fullscreen SDL window that starts
+without the focus minimized itself and the game drew 10 frames a second
+(MEASURED). Counter-Strike 2's Linux build runs this way
+(`benchmarks/stage51-cs2-linux-native.txt`). `scripts/run-app.sh` keeps the
+installed copies of both tools the script SteamARM ships.
+
 ## Install
 
 ```sh

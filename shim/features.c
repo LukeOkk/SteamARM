@@ -461,13 +461,43 @@ VkResult lxrt_inner_vkCreateDevice(VkPhysicalDevice pd, const VkDeviceCreateInfo
     return r;
 }
 
+// LXRT_VK_CALLS=1: what creating graphics pipelines cost and returned since
+// the last report (shim/scaler.c prints it with the call counts): a game that
+// compiles on its render thread shows here, and so does one that asks again
+// every frame for pipelines it was refused.
+struct lxrt_pipe_stats { unsigned ok, failed, cache_only; int last_error; unsigned long long ns; };
+struct lxrt_pipe_stats lxrt_pipe_stats;
+extern int lxrt_vk_calls_on;
+struct lxrt_ts2 { long tv_sec, tv_nsec; };
+extern int clock_gettime(int, struct lxrt_ts2 *);
+
+static VkResult create_pipelines_counted(VkDevice dev, VkPipelineCache cache, uint32_t n,
+                                         const VkGraphicsPipelineCreateInfo *cis, const void *alloc, VkPipeline *out)
+{
+    if (!lxrt_vk_calls_on)
+        return lxrt_mvk_vkCreateGraphicsPipelines(dev, cache, n, cis, alloc, out);
+    struct lxrt_ts2 a, b;
+    clock_gettime(1, &a);
+    VkResult r = lxrt_mvk_vkCreateGraphicsPipelines(dev, cache, n, cis, alloc, out);
+    clock_gettime(1, &b);
+    __atomic_fetch_add(&lxrt_pipe_stats.ns, (unsigned long long)((b.tv_sec - a.tv_sec) * 1000000000ll + (b.tv_nsec - a.tv_nsec)),
+                       __ATOMIC_RELAXED);
+    __atomic_fetch_add(r == VK_SUCCESS ? &lxrt_pipe_stats.ok : &lxrt_pipe_stats.failed, n, __ATOMIC_RELAXED);
+    if (r != VK_SUCCESS)
+        lxrt_pipe_stats.last_error = r;
+    for (uint32_t i = 0; i < n; i++)
+        if (cis[i].flags & 0x100 /* FAIL_ON_PIPELINE_COMPILE_REQUIRED */)
+            __atomic_fetch_add(&lxrt_pipe_stats.cache_only, 1, __ATOMIC_RELAXED);
+    return r;
+}
+
 // Depth clip state -> depth clamp, per pipeline, then restore.
 VkResult lxrt_inner_vkCreateGraphicsPipelines(VkDevice dev, VkPipelineCache cache, uint32_t n,
                                    const VkGraphicsPipelineCreateInfo *cis, const void *alloc, VkPipeline *out)
 {
     enum { MAXP = 64 };
     if (!spoof_on() || n > MAXP)
-        return lxrt_mvk_vkCreateGraphicsPipelines(dev, cache, n, cis, alloc, out);
+        return create_pipelines_counted(dev, cache, n, cis, alloc, out);
     struct { VkRasterizationState *rs; VkBool32 clamp; struct unlink undo[2]; int nundo; } fix[MAXP];
     for (uint32_t i = 0; i < n; i++) {
         fix[i].rs = (VkRasterizationState *)cis[i].pRasterizationState;
@@ -486,7 +516,7 @@ VkResult lxrt_inner_vkCreateGraphicsPipelines(VkDevice dev, VkPipelineCache cach
                                         STYPE_PIPELINE_RASTERIZATION_DEPTH_CLIP_STATE, fix[i].undo, 2);
         }
     }
-    VkResult r = lxrt_mvk_vkCreateGraphicsPipelines(dev, cache, n, cis, alloc, out);
+    VkResult r = create_pipelines_counted(dev, cache, n, cis, alloc, out);
     for (uint32_t i = 0; i < n; i++) {
         if (!fix[i].rs)
             continue;

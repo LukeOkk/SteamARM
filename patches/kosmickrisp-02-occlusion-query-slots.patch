@@ -1,0 +1,156 @@
+diff -ruN b1/src/kosmickrisp/vulkan/kk_device.c b2/src/kosmickrisp/vulkan/kk_device.c
+--- a/src/kosmickrisp/vulkan/kk_device.c
++++ b/src/kosmickrisp/vulkan/kk_device.c
+@@ -336,6 +336,11 @@
+    if (result != VK_SUCCESS)
+       goto fail_meta;
+ 
++   result =
++      kk_query_table_add(dev, &dev->occlusion_queries, 0, &dev->oq_scratch);
++   if (result != VK_SUCCESS)
++      goto fail_query_table;
++
+    result = kk_init_sampler_heap(dev, &dev->samplers);
+    if (result != VK_SUCCESS)
+       goto fail_query_table;
+diff -ruN b1/src/kosmickrisp/vulkan/kk_device.h b2/src/kosmickrisp/vulkan/kk_device.h
+--- a/src/kosmickrisp/vulkan/kk_device.h
++++ b/src/kosmickrisp/vulkan/kk_device.h
+@@ -91,6 +91,9 @@
+ 
+    struct kk_sampler_heap samplers;
+    struct kk_query_table occlusion_queries;
++   /* The slot of every occlusion query that has none of its own yet
++    * (kk_query_pool.c). */
++   uint32_t oq_scratch;
+ 
+    /* Track all heaps the user allocated so we can set them all as resident when
+     * recording as required by Metal. */
+diff -ruN b1/src/kosmickrisp/vulkan/kk_query_pool.c b2/src/kosmickrisp/vulkan/kk_query_pool.c
+--- a/src/kosmickrisp/vulkan/kk_query_pool.c
++++ b/src/kosmickrisp/vulkan/kk_query_pool.c
+@@ -98,7 +98,31 @@
+    return (struct kk_query_report *)&queries[remap_index[query]];
+ }
+ 
++/* Occlusion results live in one visibility buffer per device, which Metal
++ * limits to 256 KB: KK_MAX_OCCLUSION_QUERIES slots for every pool together.
++ * A pool used to take a slot for each of its queries when it was created, so
++ * the third pool of 16384 queries failed -- Source 2 creates them that size
++ * and uses a few queries of each (Counter-Strike 2 then died in
++ * kk_CmdBeginQuery on the pool it never got; MEASURED). A query now takes its
++ * slot when it is first begun and gives it back when it is reset; until then
++ * its index is the device's scratch slot, which the reset and copy shaders
++ * may read and write like any other.
++ */
+ static void
++kk_oq_release_slots(struct kk_device *dev, struct kk_query_pool *pool,
++                    uint32_t first_query, uint32_t num_queries)
++{
++   uint16_t *remap_index = kk_pool_index_ptr(pool);
++
++   for (uint32_t i = first_query; i < first_query + num_queries; i++) {
++      if (remap_index[i] == dev->oq_scratch)
++         continue;
++      kk_query_table_remove(dev, &dev->occlusion_queries, remap_index[i]);
++      remap_index[i] = dev->oq_scratch;
++   }
++}
++
++static void
+ host_zero_queries(struct kk_device *dev, struct kk_query_pool *pool,
+                   uint32_t first_index, uint32_t num_queries,
+                   bool set_available)
+@@ -160,23 +184,10 @@
+ 
+    uint16_t *remap_index = kk_pool_index_ptr(pool);
+    if (kk_pool_is_oq(pool)) {
+-
+-      for (unsigned i = 0; i < pool->vk.query_count; ++i) {
+-         uint64_t zero = 0;
+-         unsigned index;
+-
+-         VkResult result =
+-            kk_query_table_add(dev, &dev->occlusion_queries, zero, &index);
+-
+-         if (result != VK_SUCCESS) {
+-            kk_DestroyQueryPool(device, kk_query_pool_to_handle(pool),
+-                                pAllocator);
+-            return vk_error(dev, VK_ERROR_OUT_OF_DEVICE_MEMORY);
+-         }
+-
+-         /* We increment as we go so we can clean up properly if we run out */
+-         remap_index[pool->oq.queries++] = index;
+-      }
++      /* Slots are taken when a query is begun (kk_oq_release_slots). */
++      for (unsigned i = 0; i < pool->vk.query_count; ++i)
++         remap_index[i] = dev->oq_scratch;
++      pool->oq.queries = pool->vk.query_count;
+    } else if (kk_pool_is_ts(pool)) {
+       /* Timestamps are sampled into a Metal counter heap (one entry per query)
+        * and resolved into `bo` after the GPU writes them. */
+@@ -213,17 +224,17 @@
+       return;
+ 
+    if (kk_pool_is_oq(pool)) {
+-      uint16_t *remap_index = kk_pool_index_ptr(pool);
+-      for (unsigned i = 0; i < pool->oq.queries; ++i) {
+-         kk_query_table_remove(dev, &dev->occlusion_queries, remap_index[i]);
+-      }
++      /* No BO: the pool is being destroyed because creating it failed. */
++      if (pool->bo)
++         kk_oq_release_slots(dev, pool, 0, pool->oq.queries);
+    } else if (kk_pool_is_ts(pool)) {
+       if (pool->ts.heap)
+          mtl_release(pool->ts.heap);
+       util_dynarray_fini(&pool->ts.stage_map);
+    }
+ 
+-   kk_destroy_bo(dev, pool->bo);
++   if (pool->bo)
++      kk_destroy_bo(dev, pool->bo);
+ 
+    vk_query_pool_destroy(&dev->vk, pAllocator, &pool->vk);
+ }
+@@ -236,6 +247,8 @@
+    VK_FROM_HANDLE(kk_query_pool, pool, queryPool);
+ 
+    host_zero_queries(dev, pool, firstQuery, queryCount, false);
++   if (kk_pool_is_oq(pool))
++      kk_oq_release_slots(dev, pool, firstQuery, queryCount);
+ }
+ 
+ static void
+@@ -285,6 +298,11 @@
+       cs_end(cmd);
+ 
+    emit_zero_queries(cmd, pool, firstQuery, queryCount, false);
++   /* The shader above then clears the scratch slot for them; the slots
++    * themselves are cleared as they are freed. */
++   if (kk_pool_is_oq(pool))
++      kk_oq_release_slots(kk_cmd_buffer_device(cmd), pool, firstQuery,
++                          queryCount);
+ }
+ 
+ typedef struct {
+@@ -412,11 +430,20 @@
+ {
+    VK_FROM_HANDLE(kk_cmd_buffer, cmd, commandBuffer);
+    VK_FROM_HANDLE(kk_query_pool, pool, queryPool);
++   struct kk_device *dev = kk_cmd_buffer_device(cmd);
+    cmd->state.gfx.occlusion.mode = flags & VK_QUERY_CONTROL_PRECISE_BIT
+                                       ? MTL_VISIBILITY_RESULT_MODE_COUNTING
+                                       : MTL_VISIBILITY_RESULT_MODE_BOOLEAN;
+    cmd->state.gfx.dirty |= KK_DIRTY_OCCLUSION;
+    uint16_t *remap_index = kk_pool_index_ptr(pool);
++   if (remap_index[query] == dev->oq_scratch) {
++      /* If the visibility buffer is full the query stays on the scratch
++       * slot: a wrong count, and nothing worse. */
++      uint32_t index;
++      if (kk_query_table_add(dev, &dev->occlusion_queries, 0, &index) ==
++          VK_SUCCESS)
++         remap_index[query] = index;
++   }
+    cmd->state.gfx.occlusion.index = remap_index[query];
+ }
+ 

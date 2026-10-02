@@ -120,6 +120,7 @@ long lxrt_fork(void)
         return LERR(e);
     }
     if (pid == 0) {
+        lxrt_futex_park_reset();    // the parent's other threads are not here
         lxrt_ids_child_after_fork(child_id);
         // The child is a new process: new pid, one thread, its own /proc.
         // Without this the child's /proc regeneration landed in the PARENT's

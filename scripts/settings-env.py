@@ -52,6 +52,14 @@ def file_contains(path, needle):
         return False
 
 
+def kosmickrisp_build_dir(build=None):
+    """The directory of SteamARM's own KosmicKrisp build
+    (scripts/build-kosmickrisp.sh), or "" if there is none."""
+    root = build or os.environ.get("STEAMARM_BUILD") or os.path.expanduser("~/SteamARM-build")
+    out = os.path.join(root, "mesa-kk", "out")
+    return out if os.path.isfile(os.path.join(out, "libvulkan_kosmickrisp.dylib")) else ""
+
+
 def shim_selects_icd(path=None):
     """True when the installed Vulkan shim reads STEAMARM_VK_ICD (it can load an ICD such as
     KosmicKrisp); an older shim only knows MoltenVK and ignores the variable."""
@@ -185,6 +193,12 @@ def env_from_settings(s, total=None):
     # use those two formats see a difference.
     if gfx == "vulkanKosmicKrisp" and shim_selects_icd():
         env["STEAMARM_VK_ICD"] = "kosmickrisp"
+        # SteamARM's patched build, when scripts/build-kosmickrisp.sh made
+        # one: the shim loads it instead of Homebrew's (Source 2 needs the
+        # patches, benchmarks/stage51-cs2-linux-native.txt).
+        own = kosmickrisp_build_dir()
+        if own:
+            env["STEAMARM_KK_DIR"] = own
     elif gfx == "openGLWineD3D":
         env["PROTON_USE_WINED3D"] = "1"
         env["GALLIUM_DRIVER"] = "zink"

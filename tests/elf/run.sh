@@ -824,10 +824,14 @@ fi
 # keeps the runtime's settings and /proc; pseudo-terminals the Linux way
 # (Termux's terminal).
 if [ -f "$STAGE/usr/lib64/libc.a" ] && [ -n "$GCCDIR" ]; then
-    for t in memfd_seal_xproc readonly_efault exec_env pty unlink_dir fd_scan_threads futex_waitv eventfd_scm ntsync; do
-        if err=$(glibc_cc -static-pie -O2 -o build/$t tests/elf/$t.c 2>&1); then
+    for t in memfd_seal_xproc readonly_efault exec_env pty unlink_dir fd_scan_threads futex_waitv futex_long futex_long_spin eventfd_scm ntsync; do
+        src=$t; [ "$t" = futex_long_spin ] && src=futex_long     # the same program with the runtime's spin on
+        if err=$(glibc_cc -static-pie -O2 -o build/$t tests/elf/$src.c 2>&1); then
             env=""
-            if [ "$t" = readonly_efault ]; then
+            if [ "$t" = futex_long_spin ]; then
+                env="LXRT_FUTEX_SPIN_US=50"
+                out=$(LXRT_FUTEX_SPIN_US=50 deadline 60 ./build/lxrun "$PWD/build/$t" 2>&1); rc=$?
+            elif [ "$t" = readonly_efault ]; then
                 env="LXRT_GUEST_PAGE=4096"
                 out=$(LXRT_GUEST_PAGE=4096 deadline 30 ./build/lxrun "$PWD/build/$t" 2>&1); rc=$?
             elif [ "$t" = exec_env ]; then

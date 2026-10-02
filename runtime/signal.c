@@ -866,6 +866,28 @@ static void host_handler(int dsig, siginfo_t *dinfo, void *uap)
             for (int i = 0; i < 29 && n < (int)sizeof b - 40; i++)
                 n += snprintf(b + n, sizeof b - n, " x%d=%llx", i, (unsigned long long)ts->__x[i]);
             n += snprintf(b + n, sizeof b - n, " fp=%llx\n", (unsigned long long)ts->__fp);
+            // In host code (a thunk's library, a driver): which image, and
+            // the return addresses up the frame chain.
+            Dl_info di;
+            if (dsig != SIGTRAP && dladdr((void *)(uintptr_t)ts->__pc, &di) && di.dli_fname && n < (int)sizeof b - 400) {
+                n += snprintf(b + n, sizeof b - n, "[lxrt]   host pc in %s +0x%llx (%s)\n", di.dli_fname,
+                              (unsigned long long)(ts->__pc - (uint64_t)(uintptr_t)di.dli_fbase),
+                              di.dli_sname ? di.dli_sname : "?");
+                uint64_t fp = ts->__fp, lr = ts->__lr;
+                for (int k = 0; k < 8 && n < (int)sizeof b - 300; k++) {
+                    Dl_info dl;
+                    if (!dladdr((void *)(uintptr_t)lr, &dl) || !dl.dli_fname)
+                        break;
+                    const char *base = strrchr(dl.dli_fname, '/');
+                    n += snprintf(b + n, sizeof b - n, "[lxrt]     from %s +0x%llx (%s)\n", base ? base + 1 : dl.dli_fname,
+                                  (unsigned long long)(lr - (uint64_t)(uintptr_t)dl.dli_fbase),
+                                  dl.dli_sname ? dl.dli_sname : "?");
+                    uint64_t pair[2]; mach_vm_size_t g2 = 0;
+                    if (!fp || mach_vm_read_overwrite(mach_task_self(), fp, sizeof pair, (mach_vm_address_t)(uintptr_t)pair, &g2) != KERN_SUCCESS)
+                        break;
+                    fp = pair[0]; lr = pair[1] & 0x0000007fffffffffull;
+                }
+            }
             write(2, b, (size_t)n);
         }
     }
@@ -1288,6 +1310,32 @@ static void host_handler(int dsig, siginfo_t *dinfo, void *uap)
                 mach_vm_read_overwrite(mach_task_self(), (mach_vm_address_t)mc->regs[28], sizeof st,
                                        (mach_vm_address_t)(uintptr_t)st, &got) == KERN_SUCCESS) {
                 uint64_t gbase = lxrt_gbase();
+                // An x86-64 guest: the frame is [ret][ucontext][siginfo], and
+                // in uc_mcontext.gregs (at +40) RSP is index 15, RIP 16, CR2 22.
+                // Printed in the form the futex diagnostic uses (thread.c), with
+                // the stack words that look like code addresses, to be matched
+                // against the guest loader's list of libraries.
+                uint64_t g64[23] = {0};
+                if ((st[4 + 4] >> 32) &&
+                    mach_vm_read_overwrite(mach_task_self(), st[4 + 4] + 8 + 40, sizeof g64,
+                                           (mach_vm_address_t)(uintptr_t)g64, &got) == KERN_SUCCESS) {
+                    char line[1400];
+                    int n = snprintf(line, sizeof line, "[lxrt] guest fault x86-64: cr2 0x%llx rax 0x%llx rdi 0x%llx rsi 0x%llx\n"
+                                     "[lxrt]   x86 tid %d rip 0x%llx rsp 0x%llx stack:",
+                                     (unsigned long long)g64[22], (unsigned long long)g64[13],
+                                     (unsigned long long)g64[8], (unsigned long long)g64[9], lxrt_gettid(),
+                                     (unsigned long long)g64[16], (unsigned long long)g64[15]);
+                    uint64_t w[512] = {0};
+                    if (mach_vm_read_overwrite(mach_task_self(), g64[15], sizeof w, (mach_vm_address_t)(uintptr_t)w,
+                                               &got) == KERN_SUCCESS)
+                        for (int k = 0, shown = 0; k < 512 && shown < 30 && n < (int)sizeof line - 24; k++) {
+                            if (w[k] < 0x7e0000000000ull || w[k] > (1ull << 47) || w[k] - g64[15] < 0x100000)
+                                continue;
+                            n += snprintf(line + n, sizeof line - (size_t)n, " %llx", (unsigned long long)w[k]);
+                            shown++;
+                        }
+                    fprintf(lxrt_trace_stream(), "%s\n", line);
+                } else
                 if (mach_vm_read_overwrite(mach_task_self(), gbase + (uint32_t)st[4 + 4], sizeof fr,
                                            (mach_vm_address_t)(uintptr_t)fr, &got) == KERN_SUCCESS) {
                     uint32_t g[19] = {0};

@@ -75,6 +75,14 @@ step_xquartz() {
     fi
 }
 
+step_kosmickrisp() {
+    # Mesa's Vulkan-on-Metal driver with SteamARM's patches, for the
+    # "KosmicKrisp" graphics setting. Not required: without it the shim loads
+    # Homebrew's unpatched driver, so a failure here only warns.
+    log "KosmicKrisp with SteamARM's patches (scripts/build-kosmickrisp.sh)"
+    scripts/build-kosmickrisp.sh || log "WARNING: KosmicKrisp was not built; Homebrew's driver stays in use"
+}
+
 step_roots() {
     mkdir -p "$STATE/logs"
     if [ ! -d "$STATE/lxrt-root/usr" ]; then
@@ -157,7 +165,7 @@ step_done() {
     echo "The first Steam start updates the client (several minutes)."
 }
 
-STEPS=(check brew make fex thunks xquartz roots steam frameroot test done)
+STEPS=(check brew make fex thunks xquartz kosmickrisp roots steam frameroot test done)
 if [ "${1:-}" = --list ]; then
     printf '%s\n' "${STEPS[@]}"
     exit 0

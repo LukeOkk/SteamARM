@@ -90,6 +90,28 @@ class SettingsEnvironmentTests(unittest.TestCase):
             self.assertNotIn("STEAMARM_VK_ICD", self.env({
                 "graphicsBackend": "vulkanKosmicKrisp"}))
 
+    def test_kosmickrisp_prefers_the_steamarm_build(self):
+        # scripts/build-kosmickrisp.sh's driver, when there is one: the shim
+        # is told its directory. Without one, only the name (Homebrew's).
+        chosen = {"graphicsBackend": "vulkanKosmicKrisp"}
+        with patch.object(self.settings, "shim_selects_icd", return_value=True):
+            with patch.object(self.settings, "kosmickrisp_build_dir", return_value="/b/mesa-kk/out"):
+                env = self.env(chosen)
+                self.assertEqual(env["STEAMARM_VK_ICD"], "kosmickrisp")
+                self.assertEqual(env["STEAMARM_KK_DIR"], "/b/mesa-kk/out")
+                self.assertNotIn("STEAMARM_KK_DIR", self.env({"graphicsBackend": "vulkanMoltenVK"}))
+            with patch.object(self.settings, "kosmickrisp_build_dir", return_value=""):
+                self.assertNotIn("STEAMARM_KK_DIR", self.env(chosen))
+
+    def test_kosmickrisp_build_dir_needs_the_driver_file(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as build:
+            self.assertEqual(self.settings.kosmickrisp_build_dir(build), "")
+            out = os.path.join(build, "mesa-kk", "out")
+            os.makedirs(out)
+            open(os.path.join(out, "libvulkan_kosmickrisp.dylib"), "w").close()
+            self.assertEqual(self.settings.kosmickrisp_build_dir(build), out)
+
     def test_emulate_modeset_flag(self):
         import io, contextlib, json, tempfile, os
         for value, want in ((True, "on"), (False, "off"), (None, "off")):

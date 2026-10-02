@@ -125,6 +125,14 @@ class CompatibilityInventoryTests(unittest.TestCase):
         block = block[:block.index("};")]
         self.assertEqual(tuple(re.findall(r'"([^"]+)"', block)), compat.SHIM_KK_PATHS)
 
+    def test_steamarm_kosmickrisp_build_comes_first(self):
+        # scripts/build-kosmickrisp.sh's driver is what the shim loads when
+        # there is one (STEAMARM_KK_DIR), ahead of Homebrew's.
+        self.assertEqual(compat.shim_kk_paths(own=""), compat.SHIM_KK_PATHS)
+        paths = compat.shim_kk_paths(own="/b/mesa-kk/out")
+        self.assertEqual(paths[0], "/b/mesa-kk/out/libvulkan_kosmickrisp.dylib")
+        self.assertEqual(paths[1:], compat.SHIM_KK_PATHS)
+
     def test_shim_marker(self):
         with tempfile.TemporaryDirectory(prefix="steamarm-compat-test-") as temp:
             state = Path(temp)

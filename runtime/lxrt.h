@@ -451,6 +451,13 @@ unsigned long lxrt_tlskeep_fixups(void);
 
 // thread.c -- guest threads and futexes.
 int  lxrt_gettid(void);
+void lxrt_qos_apply(void);            // LXRT_QOS=interactive (thread.c)
+void lxrt_futex_park_enter(const void *addr);   // a thread about to park on a futex word (thread.c)
+void lxrt_futex_park_leave(const void *addr);
+void lxrt_futex_park_reset(void);               // in a fork child
+extern int lxrt_guestprof_on;                   // LXRT_GUESTPROF=1 (guestprof.c)
+void lxrt_guestprof_start(void);
+void lxrt_guestprof_note(uint64_t x28);
 long lxrt_set_tid_address(uint32_t *ctid);
 long lxrt_futex(uint32_t *uaddr, int op, uint32_t val, uint64_t timeout_or_val2,
                 uint32_t *uaddr2, uint32_t val3);

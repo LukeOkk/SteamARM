@@ -38,5 +38,39 @@ for mode in plain fork zygote; do
         fi
     done
 done
+# vk_passes: consecutive render passes on the same attachments, a clear
+# inside one, a return to a target after another one, and a copy out. On
+# MoltenVK, on Homebrew's KosmicKrisp, and on SteamARM's own KosmicKrisp
+# (scripts/build-kosmickrisp.sh: patches/kosmickrisp-04 draws them in one
+# Metal encoder) with the merging on and off.
+exe2="$ROOT/tmp/vktest/vk_passes"
+OWN="${STEAMARM_BUILD:-$HOME/SteamARM-build}/mesa-kk/out"
+if ! "$CLANG" --target=aarch64-redhat-linux-gnu --sysroot="$STAGE" --gcc-install-dir="$GCCDIR" -fuse-ld=lld \
+        --ld-path=/opt/homebrew/opt/lld/bin/ld.lld -w -O2 -I/opt/homebrew/include -o "$exe2" \
+        tests/elf/vk_passes.c "$ROOT/usr/lib/libvulkan.so.1"; then
+    echo "  FAIL  vk_passes (build)"; fail=$((fail + 1))
+else
+    run_passes() { # label, then environment assignments
+        local label=$1; shift
+        local log="$ROOT/tmp/vktest/vk_passes_${label// /_}.log"
+        env OBJC_DISABLE_INITIALIZE_FORK_SAFETY=YES LXRT_ROOT="$ROOT" "$@" \
+            perl -e 'alarm 60; exec @ARGV' ./build/lxrun /tmp/vktest/vk_passes > "$log" 2>&1
+        if [ "$(grep -E '^== vk_passes' "$log" | tail -1)" = "== vk_passes: ok" ]; then
+            printf '  ok    vk_passes %s\n' "$label"; pass=$((pass + 1))
+        else
+            printf '  FAIL  vk_passes %s: %s (log %s)\n' "$label" "$(grep -B1 '^== vk_passes' "$log" | head -1)" "$log"
+            fail=$((fail + 1))
+        fi
+    }
+    run_passes moltenvk STEAMARM_VK_ICD=moltenvk
+    run_passes "kosmickrisp homebrew" STEAMARM_VK_ICD=kosmickrisp
+    if [ -f "$OWN/libvulkan_kosmickrisp.dylib" ]; then
+        run_passes "kosmickrisp steamarm" STEAMARM_VK_ICD=kosmickrisp STEAMARM_KK_DIR="$OWN"
+        run_passes "kosmickrisp steamarm unmerged" STEAMARM_VK_ICD=kosmickrisp STEAMARM_KK_DIR="$OWN" KK_MERGE_PASSES=0
+        run_passes "kosmickrisp steamarm old load-store" STEAMARM_VK_ICD=kosmickrisp STEAMARM_KK_DIR="$OWN" KK_APP_LOAD_STORE=0
+    else
+        echo "  skip  vk_passes kosmickrisp steamarm (no $OWN: scripts/build-kosmickrisp.sh)"
+    fi
+fi
 echo "== $pass passed, $fail failed"
 [ "$fail" -eq 0 ]

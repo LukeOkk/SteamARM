@@ -87,6 +87,24 @@ stream output fails or draws wrong (HYPOTHESIS: few games do;
 
 Mesa's Vulkan-on-Metal driver.
 
+- **SteamARM's own build** (`scripts/build-kosmickrisp.sh`, a step of
+  `scripts/setup.sh`): Mesa 26.2.4's driver alone, with
+  `patches/kosmickrisp-*.patch`, at
+  `~/SteamARM-build/mesa-kk/out/libvulkan_kosmickrisp.dylib`. When it exists
+  `scripts/settings-env.py` gives the shim its directory (`STEAMARM_KK_DIR`)
+  and the shim loads it instead of Homebrew's; the name stays `kosmickrisp`.
+  The patches are what Source 2 needed (MEASURED,
+  `benchmarks/stage51-cs2-linux-native.txt`):
+  | patch | what it changes | switch back |
+  |---|---|---|
+  | 01 command memory | a Metal command buffer borrows its allocator from the device and returns it when the GPU has finished (was: three per `VkCommandBuffer` for life, 29 GB with Counter-Strike 2) | - |
+  | 02 occlusion query slots | a query takes its slot of the 32768 in Metal's visibility buffer when it is begun (was: every query of a pool at creation; the third pool of 16384 failed) | - |
+  | 03 vertex subgroups | subgroup operations outside fragment and compute shaders act on a subgroup of one (Metal has no SIMD groups there; the pipelines were refused) | - |
+  | 04 tile GPU passes | a pass on the attachments of the one just ended continues in its encoder; store actions chosen at the encoder's end; the cheaper barrier at encoder ends | `KK_MERGE_PASSES=0`, `KK_APP_LOAD_STORE=0`, `KK_BARRIER_ALIAS=1` |
+
+  `tests/elf/run_vk_arm64.sh` runs `vk_passes` on MoltenVK, Homebrew's
+  driver and this one (merging on and off).
+
 - **Installed on this Mac** (MEASURED, 2026-09-29): Homebrew `mesa` 26.2.3;
   ICD JSON `/opt/homebrew/share/vulkan/icd.d/kosmickrisp_mesa_icd.aarch64.json`,
   API 1.4.354; the dylib's minimum OS is macOS 27.0 (`otool -l`).

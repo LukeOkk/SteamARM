@@ -491,7 +491,16 @@ static long shared_wait(uint32_t *uaddr, uint32_t val, uint64_t utime,
                                                  : (uint32_t)left_us;
         }
 
+        // Counted as parked for thread.c's private wakes, which skip the
+        // kernel when nobody of this process is (g_parked there): glibc
+        // waits with the shared form on words that are woken privately.
+        lxrt_futex_park_enter(uaddr);
+        if (atomic_load_explicit((_Atomic uint32_t *)uaddr, memory_order_seq_cst) != val) {
+            lxrt_futex_park_leave(uaddr);
+            return LERR(EAGAIN);
+        }
         int r = __ulock_wait(flavour, uaddr, val, us);
+        lxrt_futex_park_leave(uaddr);
         if (r >= 0)
             return 0;
         // A chunk expiring is not the deadline expiring: a timeout beyond

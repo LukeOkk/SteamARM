@@ -2026,8 +2026,37 @@ long lxrt_epoll_pwait(int epfd, void *levents, int maxevents, int timeout_ms,
         rel.tv_sec = timeout_ms / 1000;
         rel.tv_nsec = (long)(timeout_ms % 1000) * 1000000L;
     }
-    return pwait_common(epfd, levents, maxevents, &rel, infinite,
-                        lsigmask, sigsetsize);
+    // LXRT_FUTEX_DEBUG=1: the waits of the process's first thread, by
+    // timeout asked: how many, how many timed out, and how long they took
+    // (a game's main loop sleeping in its event pump).
+    static int dbg = -1;
+    if (dbg < 0) dbg = getenv("LXRT_FUTEX_DEBUG") != NULL;
+    if (!dbg)
+        return pwait_common(epfd, levents, maxevents, &rel, infinite, lsigmask, sigsetsize);
+    static struct { unsigned n, timed_out; uint64_t ns, worst; } st[4];   // 0 ms, 1 ms, 2-15 ms, more or forever
+    static uint64_t last_report;
+    int me = lxrt_gettid();
+    uint64_t t0 = lxrt_guest_clock_ns(1);
+    long r = pwait_common(epfd, levents, maxevents, &rel, infinite, lsigmask, sigsetsize);
+    uint64_t t1 = lxrt_guest_clock_ns(1);
+    if (me == (int)getpid()) {
+        int k = timeout_ms == 0 ? 0 : timeout_ms == 1 ? 1 : timeout_ms > 0 && timeout_ms < 16 ? 2 : 3;
+        st[k].n++;
+        st[k].timed_out += r == 0;
+        st[k].ns += t1 - t0;
+        if (t1 - t0 > st[k].worst) st[k].worst = t1 - t0;
+        if (t1 - last_report > 4000000000ull) {
+            static const char *const what[4] = {"0 ms", "1 ms", "2-15 ms", "longer"};
+            for (k = 0; k < 4; k++)
+                if (st[k].n)
+                    fprintf(lxrt_trace_stream(), "[lxrt] epoll_pwait tid %d, timeout %s: %u calls, %u timed out, "
+                            "avg %.2f ms, worst %.1f ms\n", me, what[k], st[k].n, st[k].timed_out,
+                            (double)st[k].ns / st[k].n / 1e6, (double)st[k].worst / 1e6);
+            memset(st, 0, sizeof st);
+            last_report = t1;
+        }
+    }
+    return r;
 }
 
 long lxrt_epoll_pwait2(int epfd, void *levents, int maxevents,

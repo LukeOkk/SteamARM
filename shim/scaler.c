@@ -1158,6 +1158,10 @@ static int timing_on(void)
     }
     return on;
 }
+extern int lxrt_vk_calls_on;
+unsigned lxrt_vk_calls_top(char *out, unsigned cap, unsigned top);
+struct lxrt_pipe_stats { unsigned ok, failed, cache_only; int last_error; unsigned long long ns; };
+extern struct lxrt_pipe_stats lxrt_pipe_stats;   // features.c
 static struct { uint64_t start, acq_ns, acq_max, pres_ns, pres_max; unsigned acq, pres; } g_t;
 static void timing_note(int present, uint64_t ns)
 {
@@ -1172,6 +1176,17 @@ static void timing_note(int present, uint64_t ns)
                 lxrt_vk_driver, g_t.acq, g_t.acq ? g_t.acq_ns / 1e6 / g_t.acq : 0.0, g_t.acq_max / 1e6, g_t.pres,
                 g_t.pres ? g_t.pres_ns / 1e6 / g_t.pres : 0.0, g_t.pres_max / 1e6);
         g_t.start = t; g_t.acq = g_t.pres = 0; g_t.acq_ns = g_t.pres_ns = g_t.acq_max = g_t.pres_max = 0;
+        // LXRT_VK_CALLS=1 as well: the entry points called most in the window.
+        if (lxrt_vk_calls_on) {
+            static char top[8000];
+            if (lxrt_vk_calls_top(top, sizeof top, 200))
+                dprintf(2, "[shim] calls: %s\n", top);
+            struct lxrt_pipe_stats ps = lxrt_pipe_stats;
+            lxrt_pipe_stats = (struct lxrt_pipe_stats){0};
+            if (ps.ok || ps.failed)
+                dprintf(2, "[shim] graphics pipelines: %u created, %u refused (last result %d), %u cache-only requests, %.0f ms\n",
+                        ps.ok, ps.failed, ps.last_error, ps.cache_only, (double)ps.ns / 1e6);
+        }
     }
     unlock();
 }
