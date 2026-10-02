@@ -188,6 +188,19 @@ _Thread_local int lxrt_sig_during_syscall;   // see dispatch.c, SA_RESTART
 static struct guest_sigaction g_actions[LINUX_NSIG + 1];
 static pthread_mutex_t g_actions_lock = PTHREAD_MUTEX_INITIALIZER;
 LXRT_FORK_SAFE(signal_g_actions_lock, g_actions_lock)
+// How many signalfds watch each signal (lxrt_signal_keep, timerfd_signalfd.h).
+// Above zero, a signal the guest left at SIG_DFL or SIG_IGN still gets the
+// runtime's host handler: Darwin drops a blocked signal whose disposition
+// ignores it (SIGCHLD, SIGWINCH, SIGURG at SIG_DFL) at post time, and leaves
+// one at SIG_DFL-terminate pending on the thread it chose with no way for
+// another thread to take it; Linux keeps both in the shared pending set for
+// the signalfd (kernel/signal.c sig_ignored: "blocked signals are never
+// ignored"). Under g_actions_lock.
+static int g_keep[LINUX_NSIG + 1];
+static bool default_ignores(int lsig)
+{
+    return lsig == 17 /*CHLD*/ || lsig == 18 /*CONT*/ || lsig == 23 /*URG*/ || lsig == 28 /*WINCH*/;
+}
 
 // Per-thread alternate signal stack, as the guest declared it.
 struct guest_altstack { uint64_t sp; uint64_t flags; uint64_t size; };
@@ -691,14 +704,60 @@ static bool is_sync_dsig(int d)
     return d == SIGSEGV || d == SIGBUS || d == SIGILL || d == SIGFPE || d == SIGTRAP || d == SIGSYS;
 }
 static _Atomic uint32_t g_forwarded;
-static void forward_stray(int dsig)
+// The record a signalfd read returns for a signal that reached the runtime
+// with Darwin's siginfo (SIGCHLD: the child's pid and status, CLD_* codes are
+// the same numbers on both) or none (sent from within the process).
+static void signalfd_record(int lsig, const siginfo_t *dinfo, struct signalfd_siginfo *out)
+{
+    memset(out, 0, sizeof *out);
+    out->ssi_signo = (uint32_t)lsig;
+    if (!dinfo) {
+        out->ssi_code = 0;                                   // SI_USER
+        out->ssi_pid = (uint32_t)(lxrt_ids_on() ? lxrt_ids_pid() : getpid());
+        out->ssi_uid = (uint32_t)getuid();
+        return;
+    }
+    int pid = dinfo->si_pid;
+    if (lxrt_ids_on() && pid > 0) {
+        int g = lsig == 17 ? lxrt_ids_reaped_child(pid, false) : lxrt_ids_to_guest(pid, 0);
+        pid = g > 0 ? g : 1;
+    }
+    out->ssi_pid = (uint32_t)(pid > 0 ? pid : 0);
+    out->ssi_uid = (uint32_t)dinfo->si_uid;
+    if (lsig == 17) {
+        out->ssi_code = dinfo->si_code;                      // CLD_EXITED .. CLD_CONTINUED
+        out->ssi_status = dinfo->si_status;
+    } else {
+        out->ssi_code = dinfo->si_code == SI_USER ? 0 : 0x80; // SI_USER / SI_KERNEL
+    }
+}
+static void forward_stray(int dsig, const siginfo_t *dinfo)
 {
     int lsig = dsig == LXRT_RT_CARRIER ? 0 : lxrt_signo_to_linux(dsig);
     pthread_t t;
+    // Every guest thread blocks it and a signalfd watches it: that is where
+    // it goes, as from Linux's shared pending set (timerfd_signalfd.h).
+    if (lsig && !lxrt_thread_accepting(lsig, &t)) {
+        struct signalfd_siginfo rec;
+        signalfd_record(lsig, dinfo, &rec);
+        if (lxrt_signalfd_take(&rec)) {
+            atomic_fetch_add(&g_forwarded, 1);
+            if (lxrt_trace_on()) {
+                char b[160];
+                int n = snprintf(b, sizeof b, "[lxrt] pid %d: darwin signal %d reached a non-guest thread; a signalfd took it\n",
+                                 (int)getpid(), dsig);
+                write(2, b, (size_t)(n > 0 && n < (int)sizeof b ? n : 0));
+            }
+            return;
+        }
+    }
     bool have = lsig ? lxrt_thread_signal_target(lsig, &t) : lxrt_main_guest_thread(&t);
     atomic_fetch_add(&g_forwarded, 1);
-    if (have && !pthread_equal(t, pthread_self()))
+    if (have && !pthread_equal(t, pthread_self())) {
         pthread_kill(t, dsig);
+        if (lsig)
+            lxrt_signalfd_notify(lsig);   // a signalfd read on that thread sees it now
+    }
     if (lxrt_trace_on()) {
         char b[160];
         int n = snprintf(b, sizeof b, "[lxrt] pid %d: darwin signal %d reached a non-guest thread; %s\n",
@@ -740,7 +799,7 @@ static void host_handler(int dsig, siginfo_t *dinfo, void *uap)
     // Not a guest thread (the host main thread, see above): hand an
     // asynchronous signal on. Guest handlers never run on these threads.
     if (!is_sync_dsig(dsig) && !lxrt_thread_is_guest()) {
-        forward_stray(dsig);
+        forward_stray(dsig, dinfo);
         return;
     }
     sigstats_note(dsig);
@@ -978,6 +1037,26 @@ static void host_handler(int dsig, siginfo_t *dinfo, void *uap)
             fprintf(lxrt_trace_stream(), "[lxrt] host_handler: signal %d has no guest handler "
                             "(disposition %llu)\n", lsig,
                     (unsigned long long)act.handler);
+        // Kept on this handler only because a signalfd watches it (g_keep):
+        // delivered unblocked, the guest's SIG_DFL means its default action
+        // -- terminate or stop, as Linux does when no thread blocks it; a
+        // signalfd takes only blocked ones.
+        pthread_mutex_lock(&g_actions_lock);
+        bool kept_default = act.handler == 0 && g_keep[lsig] > 0 && !default_ignores(lsig) &&
+                            lsig != 9 && lsig != 19;
+        pthread_mutex_unlock(&g_actions_lock);
+        if (kept_default && !is_rt(lsig)) {
+            signal(dsig, SIG_DFL);
+            raise(dsig);
+            // A stop signal: continued, the keep goes back on.
+            struct sigaction ka;
+            memset(&ka, 0, sizeof ka);
+            ka.sa_sigaction = host_handler;
+            ka.sa_flags = SA_SIGINFO | SA_ONSTACK | SA_RESTART;
+            sigemptyset(&ka.sa_mask);
+            sigaction(dsig, &ka, NULL);
+            return;
+        }
         // SIG_DFL / SIG_IGN: Darwin's own disposition already applied -- or,
         // for SIGSEGV/SIGBUS/SIGTRAP under SIG_IGN (kept on this handler),
         // a sent signal ignored here.
@@ -1548,6 +1627,7 @@ struct linux_sigaction_arg {
     uint64_t mask;
 };
 
+static long apply_host_action(int lsig, int dsig);
 long lxrt_rt_sigaction(int lsig, const void *uact, void *uoldact, size_t sigsetsize)
 {
     if (lsig <= 0 || lsig > LINUX_NSIG)
@@ -1605,11 +1685,29 @@ long lxrt_rt_sigaction(int lsig, const void *uact, void *uoldact, size_t sigsets
     if (dsig == SIGKILL || dsig == SIGSTOP)
         return 0;   // Linux refuses to let these be caught; so does Darwin
 
+    return apply_host_action(lsig, dsig);
+}
+
+// The host disposition of `lsig` (Darwin `dsig`) for the guest's current
+// action and the signalfds watching it.
+static long apply_host_action(int lsig, int dsig)
+{
     struct sigaction sa;
     memset(&sa, 0, sizeof sa);
     // SIG_DFL or SIG_IGN, as the guest sees it.
+    pthread_mutex_lock(&g_actions_lock);
+    bool kept = g_keep[lsig] > 0;
+    pthread_mutex_unlock(&g_actions_lock);
     bool no_handler = g_actions[lsig].handler == 0 || g_actions[lsig].handler == 1;
-    if (no_handler && dsig == SIGTRAP) {
+    if (no_handler && kept && dsig != SIGSEGV && dsig != SIGBUS && dsig != SIGTRAP) {
+        // A signalfd watches it (g_keep): the runtime's handler, so a blocked
+        // one stays pending on the host for the signalfd to take; delivered
+        // unblocked, host_handler ignores it or applies the default action.
+        // SA_RESTART: no guest handler runs, so Linux would not have
+        // interrupted the call at all (dispatch.c restarts the rest).
+        sa.sa_sigaction = host_handler;
+        sa.sa_flags = SA_SIGINFO | SA_ONSTACK | SA_RESTART;
+    } else if (no_handler && dsig == SIGTRAP) {
         // The runtime's JIT execute-mode stub ends in brk (jit.c): keep a
         // handler that recognises it; host_handler applies the guest's
         // disposition to any other SIGTRAP. (Ignored on the host, the stub's
@@ -1660,6 +1758,24 @@ long lxrt_rt_sigaction(int lsig, const void *uact, void *uoldact, size_t sigsets
     return sigaction(dsig, &sa, NULL) != 0 ? LERR(errno) : 0;
 }
 
+void lxrt_signal_keep(int lsig, int delta)
+{
+    if (lsig <= 0 || lsig > LINUX_NSIG || is_rt(lsig))
+        return;
+    int dsig = lxrt_signo_to_darwin(lsig);
+    if (!dsig || dsig == SIGKILL || dsig == SIGSTOP)
+        return;
+    pthread_mutex_lock(&g_actions_lock);
+    int before = g_keep[lsig];
+    g_keep[lsig] += delta;
+    if (g_keep[lsig] < 0)
+        g_keep[lsig] = 0;
+    bool changed = (before > 0) != (g_keep[lsig] > 0);
+    pthread_mutex_unlock(&g_actions_lock);
+    if (changed)
+        apply_host_action(lsig, dsig);
+}
+
 #define LINUX_SIG_BLOCK   0
 #define LINUX_SIG_UNBLOCK 1
 #define LINUX_SIG_SETMASK 2
@@ -1708,6 +1824,15 @@ long lxrt_rt_sigpending(uint64_t *uset, size_t sigsetsize)
     return 0;
 }
 
+static void raise_unqueued(uint64_t unblocked)
+{
+    uint64_t q = unblocked ? lxrt_signalfd_unqueue(unblocked & ~RT_BITS & ~SYNC_BITS) : 0;
+    for (int l = 1; l <= 31 && q; l++, q >>= 1) {
+        int d = (q & 1) ? lxrt_signo_to_darwin(l) : 0;
+        if (d)
+            pthread_kill(pthread_self(), d);
+    }
+}
 long lxrt_rt_sigprocmask(int how, const uint64_t *uset, uint64_t *uoldset,
                          size_t sigsetsize)
 {
@@ -1740,6 +1865,7 @@ long lxrt_rt_sigprocmask(int how, const uint64_t *uset, uint64_t *uoldset,
         uint64_t n = how == LINUX_SIG_BLOCK ? (old_l | *uset)
                    : how == LINUX_SIG_UNBLOCK ? (old_l & ~*uset) : *uset;
         lxrt_thread_note_mask(n & ~((1ull << (9 - 1)) | (1ull << (19 - 1))));   // never KILL, STOP
+        raise_unqueued(old_l & ~n);
     }
     if (uoldset)
         *uoldset = old_l;
@@ -1747,6 +1873,10 @@ long lxrt_rt_sigprocmask(int how, const uint64_t *uset, uint64_t *uoldset,
         rt_kick_if_pending();
     return 0;
 }
+// Signals a signalfd's shared queue holds (timerfd_signalfd.c) that this
+// thread now lets through: Linux would deliver them to it -- raised here,
+// where host_handler applies the guest's disposition.
+void lxrt_signal_raise_unqueued(uint64_t unblocked) { raise_unqueued(unblocked); }
 
 long lxrt_sigaltstack(const void *uss, void *uoss)
 {
@@ -1824,6 +1954,15 @@ long lxrt_kill(int pid, int lsig)
             extern int lxrt_gettid(void);
             (void)lxrt_gettid();
             return lxrt_tgkill(0, lxrt_gettid(), lsig);
+        }
+        // Every guest thread blocks it and a signalfd watches it: Linux's
+        // shared pending set, readable from any thread (forward_stray).
+        pthread_t acc;
+        if (!lxrt_thread_accepting(lsig, &acc)) {
+            struct signalfd_siginfo rec;
+            signalfd_record(lsig, NULL, &rec);
+            if (lxrt_signalfd_take(&rec))
+                return 0;
         }
         int rc = pthread_kill(target, d);
         if (rc == 0)

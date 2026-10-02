@@ -23,7 +23,11 @@
 #       it samples a texture or the pass's shaders write memory
 #       (benchmarks/stage53-fullscreen-layer-order.txt);
 #   06  KK_PRESENT_LOG=1: when the GPU finished each presented frame and when
-#       the display showed it; KK_PRESENT=1|2|3: other orders of a present.
+#       the display showed it; KK_PRESENT=1|2|3: other orders of a present;
+#   07  the retain taken on every drawable presented, or acquired and never
+#       presented, is given back: after two swapchains with an image in hand
+#       the layer had no drawable left (a game changing its video settings:
+#       black, a second per frame; benchmarks/stage54). KK_DRAWABLE_LOG=1.
 #
 # Only Homebrew formulae and a Python virtualenv are installed. Re-running is
 # safe: the download is cached and the build is incremental. Needs macOS 26.

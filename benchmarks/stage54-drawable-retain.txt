@@ -1,0 +1,61 @@
+Stage 54 -- "The window freezes or goes black whenever I change the video
+settings, and only comes back when I switch windows": a drawable retained
+for good by the driver at every present, and V-Sync through the mailbox
+Date: 2026-10-02 (evening). Apple M4, macOS 27, 1920x1080 at 165 Hz. Zero
+VM. Valve's files unchanged. Steam Frame client, Counter-Strike 2's native
+Linux build, KosmicKrisp 26.2.4 with SteamARM's patches 01-07.
+
+HOW IT WAS MEASURED
+  tests/elf/vk_x11_modes.c (new): an X window that goes fullscreen
+  (_NET_WM_STATE_FULLSCREEN, as SDL does), back, borderless at the display's
+  size, resized, and that makes its swapchain again (oldSwapchain) at every
+  change, presenting FIFO frames; a phase whose frames stall fails.
+  KK_DRAWABLE_LOG=1 (new, patch 07): every nextDrawable with its wait and
+  the drawable's retain count, every release, every configuration of the
+  layer. The shim's LXRT_VK_TIMING now also prints how long the mailbox's
+  thread waited in the driver's acquire. The X server's XQUARTZ_RL_DEBUG=1.
+
+1. REPRODUCED WITHOUT THE GAME
+  Every sequence failed at its THIRD swapchain, even "the same size again,
+  a new swapchain only": frames of 1000 ms (nextDrawable's timeout), the
+  mailbox's thread waiting 1014 ms for a drawable. With the mailbox off
+  (LXRT_VK_MAILBOX=0) and on MoltenVK with it on: every phase at 6 ms.
+  So: the driver, with a swapchain that is replaced while it holds an
+  acquired image -- what the mailbox always does, one image ahead.
+
+2. CAUSE (KosmicKrisp, Mesa 26.2.4)
+  kk_encode_drawable_present retains the drawable for the command buffer
+  that presents it; kk_queue presents and sets the field to NULL without a
+  release, and a command buffer freed with a present recorded and never
+  submitted (the acquired image of a destroyed swapchain) never releases it
+  either; nor does wsi_metal_destroy_image give back the retain of the
+  acquire. A drawable with a retain outstanding never returns to the
+  layer's pool of three. One is lost at every swapchain made with an image
+  in hand: after two, one drawable serves a FIFO swapchain that needs two.
+  With the user: every change of the video settings (a new swapchain), and
+  "switching windows" made SDL remake the swapchain yet again.
+
+3. FIX (patches/kosmickrisp-07-release-acquired-drawable.patch)
+  The retain is released after the present (the layer keeps what the
+  presentation needs), on a command buffer reset or destroyed with a
+  present still recorded, and on a swapchain image destroyed while
+  acquired.
+  After: vk_x11_modes, eight phases (window, resize, two remakes at the
+  same size, fullscreen on, off, borderless, decorated): every phase 5.9-
+  6.1 ms a frame, no stall. Added to tests/elf/run_vk_arm64.sh (SteamARM's
+  driver and MoltenVK; Homebrew's driver is known to fail it).
+
+4. THE GAME, SAME SETTINGS AS STAGE 53 (highest, 1920x1080, V-Sync on)
+  de_dust2, nine bots, 200 s, last 120 s: median 80.0 fps (average 78.4,
+  10th percentile 56.5, min 49, max 122.5) against 35.0 before the fix in
+  the same configuration; 9404 frames shown, 0 dropped, the driver's
+  acquire 13 ms on average (the display's turn). The leaked drawables had
+  cost the game more than half its rate as well as its picture.
+
+5. V-SYNC THROUGH THE MAILBOX (shim/mailbox.c, earlier the same day)
+  A FIFO swapchain of the game's takes the mailbox path and never drops a
+  frame: a slow game shows every frame on a refresh, a fast one is held to
+  the display. The driver's own FIFO made a GPU-bound game wait at every
+  acquire until the frame before had been shown: 23.5 fps against 35 then.
+
+Tests: Vulkan 20/20 (vk_x11_modes 2 new), Python 151/151.

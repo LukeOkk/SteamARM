@@ -134,6 +134,33 @@ else
     present kosmickrisp i below 3
     present kosmickrisp f above 3
     present moltenvk f above 3
+    # vk_x11_modes: the swapchain made again and again (a game changing its
+    # video settings): fullscreen on and off, borderless, resizes. Homebrew's
+    # KosmicKrisp keeps a retain on every drawable and stops after the second
+    # swapchain (patches/kosmickrisp-07); SteamARM's and MoltenVK must not.
+    exe5="$ROOT/tmp/vktest/vk_x11_modes"
+    if ! "$CLANG" --target=aarch64-redhat-linux-gnu --sysroot="$STAGE" --gcc-install-dir="$GCCDIR" -fuse-ld=lld \
+            --ld-path=/opt/homebrew/opt/lld/bin/ld.lld -w -O2 -I/opt/homebrew/include -o "$exe5" \
+            tests/elf/vk_x11_modes.c "$ROOT/usr/lib/libvulkan.so.1" "$(ls "$ROOT"/usr/lib/libxcb.so.1* | head -1)"; then
+        echo "  FAIL  vk_x11_modes (build)"; fail=$((fail + 1))
+    else
+        modes() { # label, then environment assignments
+            local label=$1; shift
+            local log="$ROOT/tmp/vktest/vk_x11_modes_${label// /_}.log"
+            env OBJC_DISABLE_INITIALIZE_FORK_SAFETY=YES LXRT_ROOT="$ROOT" DISPLAY=$XDISP "$@" \
+                perl -e 'alarm 150; exec @ARGV' ./build/lxrun /tmp/vktest/vk_x11_modes 60 wrssfubd > "$log" 2>&1
+            if grep -q '^== vk x11 modes: ok' "$log"; then
+                printf '  ok    vk_x11_modes %s\n' "$label"; pass=$((pass + 1))
+            else
+                printf '  FAIL  vk_x11_modes %s: %s (log %s)\n' "$label" "$(grep -c 'picture stopped' "$log") phases stopped" "$log"
+                fail=$((fail + 1))
+            fi
+        }
+        modes moltenvk STEAMARM_VK_ICD=moltenvk
+        if [ -f "$OWN/libvulkan_kosmickrisp.dylib" ]; then
+            modes "kosmickrisp steamarm" STEAMARM_VK_ICD=kosmickrisp STEAMARM_KK_DIR="$OWN"
+        fi
+    fi
 fi
 echo "== $pass passed, $fail failed"
 [ "$fail" -eq 0 ]

@@ -1,0 +1,122 @@
+diff -ruN -x __pycache__ b6/src/kosmickrisp/vulkan/kk_cmd_buffer.c b7/src/kosmickrisp/vulkan/kk_cmd_buffer.c
+--- a/src/kosmickrisp/vulkan/kk_cmd_buffer.c	2026-10-02 16:16:00
++++ b/src/kosmickrisp/vulkan/kk_cmd_buffer.c	2026-10-02 20:22:38
+@@ -83,6 +83,13 @@
+    kk_destroy_encoder_state(&cmd->cmp[0]);
+    kk_destroy_encoder_state(&cmd->cmp[1]);
+    kk_destroy_encoder_state(&cmd->gfx);
++   /* A present recorded (kk_encode_drawable_present) and never submitted:
++    * the swapchain image was acquired and not presented. The retain it took
++    * kept the drawable out of the layer's pool for good. */
++   if (cmd->drawable) {
++      mtl_release(cmd->drawable);
++      cmd->drawable = NULL;
++   }
+ 
+    vk_command_buffer_finish(&cmd->vk);
+    struct kk_device *dev = kk_cmd_buffer_device(cmd);
+@@ -219,6 +226,10 @@
+    cs_end(cmd);
+    cs_end(cmd);
+    kk_cmd_release_resources(dev, cmd);
++   if (cmd->drawable) {
++      mtl_release(cmd->drawable);
++      cmd->drawable = NULL;
++   }
+ 
+    cmd->uploader.bo = NULL;
+    cmd->uploader.offset = 0;
+diff -ruN -x __pycache__ b6/src/kosmickrisp/vulkan/kk_device.c b7/src/kosmickrisp/vulkan/kk_device.c
+--- a/src/kosmickrisp/vulkan/kk_device.c	2026-10-02 16:16:00
++++ b/src/kosmickrisp/vulkan/kk_device.c	2026-10-02 20:22:38
+@@ -436,6 +436,7 @@
+    if (slot->drawable) {
+       mtl_drawable_present_seq(slot->drawable, slot->present_seq,
+                                slot->present_log);
++      mtl_release(slot->drawable);
+       slot->drawable = NULL;
+    }
+    slot->present_log = false;
+diff -ruN -x __pycache__ b6/src/kosmickrisp/vulkan/kk_queue.c b7/src/kosmickrisp/vulkan/kk_queue.c
+--- a/src/kosmickrisp/vulkan/kk_queue.c	2026-10-02 16:16:00
++++ b/src/kosmickrisp/vulkan/kk_queue.c	2026-10-02 20:22:38
+@@ -107,6 +107,7 @@
+                   mtl_command_queue_signal_drawable(queue->mtl_handle,
+                                                     cmd_buffer->drawable);
+                   mtl_drawable_present_seq(cmd_buffer->drawable, slot->present_seq, true);
++                  mtl_release(cmd_buffer->drawable);
+                   cmd_buffer->drawable = NULL;
+                   continue;
+                }
+@@ -123,6 +124,9 @@
+          mtl_command_queue_signal_drawable(queue->mtl_handle,
+                                            cmd_buffer->drawable);
+          mtl_drawable_present(cmd_buffer->drawable);
++         /* The retain of kk_encode_drawable_present: the layer keeps what
++          * it needs for the presentation. */
++         mtl_release(cmd_buffer->drawable);
+          cmd_buffer->drawable = NULL;
+       }
+    }
+diff -ruN -x __pycache__ b6/src/vulkan/wsi/wsi_common_metal.c b7/src/vulkan/wsi/wsi_common_metal.c
+--- a/src/vulkan/wsi/wsi_common_metal.c	2026-10-02 20:22:38
++++ b/src/vulkan/wsi/wsi_common_metal.c	2026-10-02 20:22:38
+@@ -611,6 +611,17 @@
+       return;
+    }
+ 
++   /* An image acquired and never presented still holds its drawable (the
++    * retain of wsi_metal_layer_acquire_drawable is given up only by a
++    * present). Destroying such a swapchain leaked one drawable of the
++    * layer's pool each time: a game that remade its swapchain twice with an
++    * image in hand -- SteamARM's mailbox keeps one acquired -- then found no
++    * drawable at all (nextDrawable's one-second timeout at every frame). */
++   if (metal_image->drawable) {
++      wsi_metal_release_drawable(metal_image->drawable);
++      metal_image->drawable = NULL;
++   }
++
+    /* Required since we allocate 2 per queue, stored with the following layout:
+     * cmd_pool 0: 0, queue_count
+     * cmd_pool 1: 1, 1 + queue_count
+diff -ruN -x __pycache__ b6/src/vulkan/wsi/wsi_common_metal_layer.m b7/src/vulkan/wsi/wsi_common_metal_layer.m
+--- a/src/vulkan/wsi/wsi_common_metal_layer.m	2026-10-02 20:22:38
++++ b/src/vulkan/wsi/wsi_common_metal_layer.m	2026-10-02 20:22:38
+@@ -166,6 +166,9 @@
+       /* So we can blit to the drawable */
+       metal_layer.framebufferOnly = NO;
+ 
++      if (getenv("KK_DRAWABLE_LOG"))
++         fprintf(stderr, "[kk] layer %p configured: %u drawables, %ux%u (was %lu, %gx%g)\n", metal_layer, image_count, width, height,
++                 (unsigned long)metal_layer.maximumDrawableCount, metal_layer.drawableSize.width, metal_layer.drawableSize.height);
+       metal_layer.maximumDrawableCount = image_count;
+       metal_layer.drawableSize = (CGSize){.width = width, .height = height};
+       metal_layer.opaque = enable_opaque;
+@@ -270,7 +273,15 @@
+ wsi_metal_layer_acquire_drawable(const CAMetalLayer *metal_layer)
+ {
+    @autoreleasepool {
++      static int log = -1;
++      if (log < 0) log = getenv("KK_DRAWABLE_LOG") != NULL;
++      double t0 = CACurrentMediaTime();
+       id<CAMetalDrawable> drawable = [metal_layer nextDrawable];
++      if (log)
++         fprintf(stderr, "[kk] nextDrawable on layer %p (max %lu, %gx%g): %s after %.1f ms, drawable id %lu rc %lu\n",
++                 metal_layer, (unsigned long)metal_layer.maximumDrawableCount, metal_layer.drawableSize.width,
++                 metal_layer.drawableSize.height, drawable ? "got" : "NIL", (CACurrentMediaTime() - t0) * 1000,
++                 drawable ? (unsigned long)drawable.drawableID : 0, drawable ? (unsigned long)CFGetRetainCount((__bridge CFTypeRef)drawable) : 0);
+       return (CAMetalDrawable *)[drawable retain];
+    }
+ }
+@@ -278,6 +289,11 @@
+ void
+ wsi_metal_release_drawable(CAMetalDrawable *drawable_ptr)
+ {
++   static int log = -1;
++   if (log < 0) log = getenv("KK_DRAWABLE_LOG") != NULL;
++   if (log)
++      fprintf(stderr, "[kk] release drawable id %lu rc %lu\n", (unsigned long)((id<CAMetalDrawable>)drawable_ptr).drawableID,
++              (unsigned long)CFGetRetainCount((__bridge CFTypeRef)drawable_ptr));
+    [(id<CAMetalDrawable>)drawable_ptr release];
+ }
+ 

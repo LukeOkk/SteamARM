@@ -479,7 +479,11 @@ bool lxrt_thread_is_guest(void);
 void lxrt_thread_note_mask(uint64_t lmask);
 uint64_t lxrt_thread_noted_mask(void);
 bool lxrt_thread_signal_target(int lsig, pthread_t *out);
+// The first guest thread whose noted mask does not block `lsig`; false when
+// every guest thread blocks it.
+bool lxrt_thread_accepting(int lsig, pthread_t *out);
 void lxrt_signal_rescue_stranded(void);
+void lxrt_signal_raise_unqueued(uint64_t unblocked);
 bool lxrt_rt_enqueue(int tid, int lsig);
 int  lxrt_rt_dequeue_self(void);
 int  lxrt_rt_dequeue_self_mask(uint64_t blocked);

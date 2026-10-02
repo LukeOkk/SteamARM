@@ -801,7 +801,7 @@ int lxrt_mailbox_destroy(VkDevice dev, VkSwapchainKHR sc, const VkAllocationCall
 VkResult lxrt_mailbox_acquire(VkSwapchainKHR sc, VkSemaphore sem, VkFence fence, uint32_t *index);
 VkResult lxrt_mailbox_present(VkQueue q, VkSwapchainKHR sc, uint32_t i, const VkSemaphore *waits, uint32_t nwaits,
                               int *shown);
-void lxrt_mailbox_stats(unsigned *shown, unsigned *dropped);
+void lxrt_mailbox_stats(unsigned *shown, unsigned *dropped, unsigned *acq_avg_us, unsigned *acq_max_us);
 
 VkResult lxrt_inner_vkGetSwapchainImagesKHR(VkDevice dev, VkSwapchainKHR sc, uint32_t *count, VkImage *images)
 {
@@ -1203,10 +1203,11 @@ static void timing_note(int present, uint64_t ns)
                 lxrt_vk_driver, g_t.acq, g_t.acq ? g_t.acq_ns / 1e6 / g_t.acq : 0.0, g_t.acq_max / 1e6, g_t.pres,
                 g_t.pres ? g_t.pres_ns / 1e6 / g_t.pres : 0.0, g_t.pres_max / 1e6);
         g_t.start = t; g_t.acq = g_t.pres = 0; g_t.acq_ns = g_t.pres_ns = g_t.acq_max = g_t.pres_max = 0;
-        unsigned shown, dropped;
-        lxrt_mailbox_stats(&shown, &dropped);
+        unsigned shown, dropped, acq_avg, acq_max;
+        lxrt_mailbox_stats(&shown, &dropped, &acq_avg, &acq_max);
         if (shown || dropped)
-            dprintf(2, "[shim] mailbox: %u of those presents shown, %u dropped\n", shown, dropped);
+            dprintf(2, "[shim] mailbox: %u of those presents shown, %u dropped; the driver's acquire avg %u.%u ms max %u.%u ms\n",
+                    shown, dropped, acq_avg / 1000, acq_avg % 1000 / 100, acq_max / 1000, acq_max % 1000 / 100);
         // LXRT_VK_CALLS=1 as well: the entry points called most in the window.
         if (lxrt_vk_calls_on) {
             static char top[8000];

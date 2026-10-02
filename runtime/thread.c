@@ -225,7 +225,8 @@ uint64_t lxrt_thread_noted_mask(void)
 // through; if every one blocks it, the first guest thread, where it stays
 // pending until that thread unblocks it (Linux would keep it for whichever
 // thread unblocks first).
-bool lxrt_thread_signal_target(int lsig, pthread_t *out)
+// The first guest thread whose noted mask lets `lsig` through, if any.
+bool lxrt_thread_accepting(int lsig, pthread_t *out)
 {
     bool found = false;
     uint64_t bit = (lsig >= 1 && lsig <= 64) ? 1ull << (lsig - 1) : 0;
@@ -238,7 +239,11 @@ bool lxrt_thread_signal_target(int lsig, pthread_t *out)
             break;
         }
     threads_unlock();
-    return found || lxrt_main_guest_thread(out);
+    return found;
+}
+bool lxrt_thread_signal_target(int lsig, pthread_t *out)
+{
+    return lxrt_thread_accepting(lsig, out) || lxrt_main_guest_thread(out);
 }
 
 static void gt_free(void *p)

@@ -1552,6 +1552,24 @@ if err=$(/opt/homebrew/opt/llvm/bin/clang --target=aarch64-linux-gnu -O2 -ffrees
     else bad "SIG_STRANDED" "rc=$rc $(grep -E 'MAL|==' <<<"$out" | tr '\n' ' ')"; fi
 else bad "build sig_stranded" "$err"; fi
 
+# SIGCHLD_SIGNALFD: a parent that blocks SIGCHLD (disposition SIG_DFL) and
+# reads it from a signalfd, through epoll, ppoll, a blocking read, from a
+# second thread, and with three children ending -- Steam's fossilize_replay
+# master (benchmarks/stage51 section 10: the shader pre-cache never ended).
+# Darwin drops a blocked SIGCHLD at SIG_DFL at post time and binds a kept one
+# to the host main thread; the runtime keeps a host handler on every signal a
+# signalfd watches and routes what reaches the main thread into the
+# signalfd's shared queue (runtime/timerfd_signalfd.c, lxrt_signalfd_take).
+# Freestanding.
+if err=$(/opt/homebrew/opt/llvm/bin/clang --target=aarch64-linux-gnu -O2 -ffreestanding -fno-stack-protector \
+             -fno-builtin -nostdlib -static-pie -fPIE -fuse-ld=lld --ld-path=$CROSS_LD \
+             -o build/sigchld_signalfd tests/elf/sigchld_signalfd.c 2>&1); then
+    out=$(deadline 60 ./build/lxrun build/sigchld_signalfd 2>&1); rc=$?
+    if [ "$rc" -eq 0 ] && grep -q '== sigchld_signalfd: 6 ok, 0 mal' <<<"$out"; then
+        ok "SIGCHLD_SIGNALFD: a blocked SIGCHLD at SIG_DFL reaches a signalfd (epoll, ppoll, blocking read, second thread, three children)"
+    else bad "SIGCHLD_SIGNALFD" "rc=$rc $(grep -E 'MAL|==' <<<"$out" | tr '\n' ' ')"; fi
+else bad "build sigchld_signalfd" "$err"; fi
+
 # SHM_MREMAP: growing a MAP_SHARED file mapping maps more of the file
 # (runtime/mremap.c, remap_shared_file): a Wayland compositor's wl_shm pool
 # grown with MREMAP_MAYMOVE sees what the client writes past the old end.

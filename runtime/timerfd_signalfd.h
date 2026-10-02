@@ -62,3 +62,28 @@ int lxrt_signal_dequeue_pending(uint64_t lmask, struct signalfd_siginfo *out)
 // (and the epoll sets watching them) wake up: kqueue's signal filter does not
 // see pthread_kill().
 void lxrt_signalfd_notify(int lsig);
+
+// The process's shared pending set, for the signals a signalfd watches
+// (Linux: a blocked process-directed signal is pending for the whole process
+// and a signalfd read on ANY thread dequeues it). Darwin instead binds such a
+// signal to one thread -- the host main thread, when every guest thread
+// blocks it -- and discards one whose disposition ignores it (SIGCHLD at
+// SIG_DFL) at post time, blocked or not. So signal.c keeps a host handler on
+// every signal a signalfd watches (lxrt_signal_keep) and, when one reaches
+// a non-guest thread (the main thread's rescue, signal.c forward_stray) or is
+// sent process-directed from within the process while every guest thread
+// blocks it (lxrt_kill), offers it here. Returns true when a signalfd
+// watches rec->ssi_signo: the record is queued (one per standard signal, as
+// Linux merges them) and every such signalfd becomes readable; the caller
+// then delivers it nowhere else. Takes the registry lock: not for a handler
+// running on a guest thread.
+bool lxrt_signalfd_take(const struct signalfd_siginfo *rec);
+bool lxrt_signalfd_watched(int lsig);
+// signal.c, when a thread unblocks signals: the queued ones among `lmask`,
+// removed from the queue, for the caller to raise on that thread.
+uint64_t lxrt_signalfd_unqueue(uint64_t lmask);
+// signal.c: +1 while a signalfd watches `lsig`, -1 when it stops. While the
+// count is above zero the host disposition of a signal the guest left at
+// SIG_DFL or SIG_IGN is the runtime's handler, so Darwin keeps a blocked one
+// pending instead of dropping it.
+void lxrt_signal_keep(int lsig, int delta);

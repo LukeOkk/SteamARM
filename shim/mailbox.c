@@ -145,6 +145,10 @@ typedef struct mailbox {
     VkResult acquire_result, sticky;   // sticky: what the game is told at its next acquire
     unsigned shown, dropped;
     uint64_t last_shown_ns;
+    // The thread's waits in the driver's acquire (LXRT_VK_TIMING): a layer
+    // nobody shows gets no drawable for a second at a time.
+    uint64_t acquire_ns, acquire_max_ns;
+    unsigned acquires;
     int fifo;               // the game's mode: no frame is dropped
     // LXRT_VK_PROBE: a buffer a shown frame is read back into.
     VkPhysicalDevice pd;
@@ -334,8 +338,14 @@ static void *acquirer(void *arg)
             return 0;
         uint32_t index = 0;
         // Waits for the display: up to a refresh, or the driver's own limit.
+        uint64_t t0 = now_ns();
         VkResult r = lxrt_mvk_vkAcquireNextImageKHR(m->dev, m->sc, UINT64_MAX, m->acq[slot], VK_NULL_HANDLE, &index);
+        uint64_t dt = now_ns() - t0;
         pthread_mutex_lock(&m->lock);
+        m->acquire_ns += dt;
+        m->acquires++;
+        if (dt > m->acquire_max_ns)
+            m->acquire_max_ns = dt;
         m->acquire_result = r;
         m->real_index = index;
         if (r == VK_SUCCESS || r == VK_SUBOPTIMAL_KHR)
@@ -759,21 +769,39 @@ VkResult lxrt_mailbox_present(VkQueue q, VkSwapchainKHR sc, uint32_t i, const Vk
     return r;
 }
 
-// LXRT_VK_TIMING: frames shown and dropped by every mailbox since the last call.
-void lxrt_mailbox_stats(unsigned *shown, unsigned *dropped)
+// LXRT_VK_TIMING: frames shown and dropped by every mailbox since the last
+// call, and the thread's waits in the driver's acquire (average and longest,
+// microseconds).
+void lxrt_mailbox_stats(unsigned *shown, unsigned *dropped, unsigned *acq_avg_us, unsigned *acq_max_us)
 {
-    static unsigned last_shown[16], last_dropped[16];
+    static unsigned last_shown[16], last_dropped[16], last_acquires[16];
+    static uint64_t last_acquire_ns[16];
+    uint64_t ns = 0, max = 0;
+    unsigned n = 0;
     *shown = *dropped = 0;
     lock();
     for (int i = 0; i < 16; i++) {
-        if (!g_mb[i]) {
-            last_shown[i] = last_dropped[i] = 0;
+        mailbox *m = g_mb[i];
+        if (!m) {
+            last_shown[i] = last_dropped[i] = last_acquires[i] = 0;
+            last_acquire_ns[i] = 0;
             continue;
         }
-        *shown += g_mb[i]->shown - last_shown[i];
-        *dropped += g_mb[i]->dropped - last_dropped[i];
-        last_shown[i] = g_mb[i]->shown;
-        last_dropped[i] = g_mb[i]->dropped;
+        *shown += m->shown - last_shown[i];
+        *dropped += m->dropped - last_dropped[i];
+        last_shown[i] = m->shown;
+        last_dropped[i] = m->dropped;
+        pthread_mutex_lock(&m->lock);
+        n += m->acquires - last_acquires[i];
+        ns += m->acquire_ns - last_acquire_ns[i];
+        last_acquires[i] = m->acquires;
+        last_acquire_ns[i] = m->acquire_ns;
+        if (m->acquire_max_ns > max)
+            max = m->acquire_max_ns;
+        m->acquire_max_ns = 0;
+        pthread_mutex_unlock(&m->lock);
     }
     unlock();
+    *acq_avg_us = n ? (unsigned)(ns / n / 1000) : 0;
+    *acq_max_us = (unsigned)(max / 1000);
 }

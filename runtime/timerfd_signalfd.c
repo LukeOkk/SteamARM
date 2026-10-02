@@ -7,6 +7,7 @@
 #include <pthread.h>
 #include <poll.h>
 #include <signal.h>
+#include <stdatomic.h>
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
@@ -48,23 +49,47 @@ static bool is_kind(int fd, int kind)
 }
 bool lxrt_timerfd_is(int fd) { return is_kind(fd, 1); }
 bool lxrt_signalfd_is(int fd) { return is_kind(fd, 2); }
-static void drop(int fd, int kind)
+/* The shared pending set for the signals a signalfd watches (header): one
+ * record per standard signal, the lowest number first on a read, as Linux
+ * dequeues them. Under `lock`. */
+static struct signalfd_siginfo q_rec[65];
+static _Atomic uint64_t q_mask;   // written under `lock`; read lock-free by lxrt_signalfd_unqueue
+static void q_wake_all(uint64_t bits);
+/* A fork child starts with nothing pending (Linux); the parent's queue is
+ * the parent's. */
+static void q_child(void) { q_mask = 0; }
+__attribute__((constructor(201))) static void q_fork_register(void)
+{
+    pthread_atfork(NULL, NULL, q_child);
+}
+/* Returns the mask of the signalfd state this call freed (0 if none), for the
+ * caller to release with lxrt_signal_keep once the registry lock is dropped:
+ * signal.c takes its own lock and calls sigaction() in there. */
+static uint64_t drop(int fd, int kind)
 {
     struct alias **p = &aliases;
     while (*p) {
         struct alias *a = *p;
         if (a->fd == fd && a->s->kind == kind) {
+            uint64_t freed = 0;
             *p = a->next;
-            if (!--a->s->refs) free(a->s);
+            if (!--a->s->refs) { freed = kind == 2 ? a->s->mask : 0; free(a->s); }
             free(a);
-            return;
+            return freed;
         }
         p = &a->next;
     }
+    return 0;
+}
+static void keep_bits(uint64_t bits, int delta)
+{
+    for (int l = 1; l <= 64 && bits; l++, bits >>= 1)
+        if (bits & 1) lxrt_signal_keep(l, delta);
 }
 static void close_kind(int fd, int kind)
 {
-    pthread_mutex_lock(&lock); drop(fd, kind); pthread_mutex_unlock(&lock);
+    pthread_mutex_lock(&lock); uint64_t freed = drop(fd, kind); pthread_mutex_unlock(&lock);
+    if (freed) keep_bits(freed, -1);
 }
 void lxrt_timerfd_close(int fd) { close_kind(fd, 1); }
 void lxrt_signalfd_close(int fd) { close_kind(fd, 2); }
@@ -73,13 +98,14 @@ static void dup_kind(int oldfd, int newfd, int kind)
     if (oldfd == newfd) return;
     pthread_mutex_lock(&lock);
     struct state *s = lookup(oldfd, kind);
-    drop(newfd, kind);
+    uint64_t freed = drop(newfd, kind);
     if (s) {
         struct alias *a = malloc(sizeof(*a));
         /* The void hook cannot report allocation failure. No fixed alias cap. */
         if (a) { *a = (struct alias){newfd, s, aliases}; aliases = a; s->refs++; }
     }
     pthread_mutex_unlock(&lock);
+    if (freed) keep_bits(freed, -1);
 }
 void lxrt_timerfd_dup(int a, int b) { dup_kind(a, b, 1); }
 void lxrt_signalfd_dup(int a, int b) { dup_kind(a, b, 2); }
@@ -244,6 +270,12 @@ static int signal_changes(int fd, uint64_t before, uint64_t after)
  * expose signals that were already pending when the descriptor was created. */
 static void signal_ready(int fd, uint64_t mask)
 {
+    if (q_mask & mask) {
+        struct kevent e;
+        EV_SET(&e, 2, EVFILT_USER, EV_ADD | EV_CLEAR, NOTE_TRIGGER, 0, NULL);
+        (void)kevent(fd, &e, 1, NULL, 0, NULL);
+        return;
+    }
     sigset_t p;
     if (sigpending(&p) < 0) return;
     for (int l = 1; l <= 64; l++) {
@@ -262,18 +294,78 @@ static void signal_ready(int fd, uint64_t mask)
 // delivers self-directed signals thread-directed on purpose, so a signalfd
 // watched through epoll never became readable although read() found the
 // signal pending. This is the wake-up Linux performs at enqueue time.
-void lxrt_signalfd_notify(int lsig)
+static void q_wake_all(uint64_t bits)
 {
-    if (lsig < 1 || lsig > 64) return;
-    uint64_t bit = UINT64_C(1) << (lsig - 1);
-    pthread_mutex_lock(&lock);
     for (struct alias *a = aliases; a; a = a->next) {
-        if (a->s->kind != 2 || !(a->s->mask & bit)) continue;
+        if (a->s->kind != 2 || !(a->s->mask & bits)) continue;
         struct kevent e;
         EV_SET(&e, 2, EVFILT_USER, EV_ADD | EV_CLEAR, NOTE_TRIGGER, 0, NULL);
         (void)kevent(a->fd, &e, 1, NULL, 0, NULL);
     }
+}
+void lxrt_signalfd_notify(int lsig)
+{
+    if (lsig < 1 || lsig > 64) return;
+    pthread_mutex_lock(&lock);
+    q_wake_all(UINT64_C(1) << (lsig - 1));
     pthread_mutex_unlock(&lock);
+}
+static bool watched_locked(uint64_t bit)
+{
+    for (struct alias *a = aliases; a; a = a->next)
+        if (a->s->kind == 2 && (a->s->mask & bit)) return true;
+    return false;
+}
+bool lxrt_signalfd_watched(int lsig)
+{
+    if (lsig < 1 || lsig > 64) return false;
+    pthread_mutex_lock(&lock);
+    bool yes = watched_locked(UINT64_C(1) << (lsig - 1));
+    pthread_mutex_unlock(&lock);
+    return yes;
+}
+// A process-directed signal every guest thread blocks, offered by signal.c
+// (header). Steam's fossilize_replay: SIGCHLD blocked, left at SIG_DFL, a
+// blocking signalfd read after epoll says readable -- the kqueue's signal
+// filter fired at post time (it does, even for a signal Darwin then drops),
+// the read found nothing pending on its thread and slept for good; the
+// shader pre-cache never ended (benchmarks/stage51, section 10).
+bool lxrt_signalfd_take(const struct signalfd_siginfo *rec)
+{
+    int lsig = (int)rec->ssi_signo;
+    if (lsig < 1 || lsig > 64) return false;
+    uint64_t bit = UINT64_C(1) << (lsig - 1);
+    pthread_mutex_lock(&lock);
+    bool yes = watched_locked(bit);
+    if (yes) {
+        if (!(q_mask & bit)) { q_rec[lsig] = *rec; q_mask |= bit; }
+        q_wake_all(bit);
+    }
+    pthread_mutex_unlock(&lock);
+    return yes;
+}
+static int q_take(uint64_t mask, struct signalfd_siginfo *out)
+{
+    uint64_t have = q_mask & mask;
+    if (!have) return 0;
+    int l = __builtin_ctzll(have) + 1;
+    *out = q_rec[l];
+    q_mask &= ~(UINT64_C(1) << (l - 1));
+    return 1;
+}
+// A thread unblocks `lmask` (rt_sigprocmask, rt_sigsuspend): what the queue
+// holds of it is that thread's now, as Linux's dequeue of the shared pending
+// set on the first thread to unblock; the caller raises each on itself. The
+// records are dropped (a handler's siginfo loses the sender; the sigframe
+// fills si_pid as it always did).
+uint64_t lxrt_signalfd_unqueue(uint64_t lmask)
+{
+    if (!(atomic_load_explicit(&q_mask, memory_order_relaxed) & lmask)) return 0;
+    pthread_mutex_lock(&lock);
+    uint64_t got = q_mask & lmask;
+    q_mask &= ~got;
+    pthread_mutex_unlock(&lock);
+    return got;
 }
 
 long lxrt_signalfd4(int fd, const uint64_t *mask, size_t size, int flags)
@@ -296,9 +388,15 @@ long lxrt_signalfd4(int fd, const uint64_t *mask, size_t size, int flags)
         if (fresh) { drop(fd, 2); close(fd); }
         pthread_mutex_unlock(&lock); return LERR(e);
     }
+    uint64_t added = m & ~s->mask, removed = s->mask & ~m;
     s->mask = m;
     signal_ready(fd, m);
-    pthread_mutex_unlock(&lock); return fd;
+    pthread_mutex_unlock(&lock);
+    /* The host keeps a handler on each watched signal (lxrt_signal_keep);
+     * after the registry lock, signal.c locks and calls sigaction(). */
+    if (added) keep_bits(added, +1);
+    if (removed) keep_bits(removed, -1);
+    return fd;
 }
 __attribute__((weak))
 int lxrt_signal_dequeue_pending(uint64_t mask, struct signalfd_siginfo *out)
@@ -337,9 +435,11 @@ long lxrt_signalfd_read(int fd, void *buf, size_t len)
         int n = kevent(fd, NULL, 0, events, 32, &zero);
         uint64_t mask = s->mask;
         int error = n < 0 ? (int)LERR(errno) : 0;
-        pthread_mutex_unlock(&lock);
         struct signalfd_siginfo info;
-        int rc = error ? error : lxrt_signal_dequeue_pending(mask, &info);
+        /* The shared pending set first (any thread), then this thread's own. */
+        int rc = error ? error : q_take(mask, &info);
+        pthread_mutex_unlock(&lock);
+        if (!rc) rc = lxrt_signal_dequeue_pending(mask, &info);
         if (rc > 0) {
             pthread_mutex_lock(&lock);
             s = lookup(fd, 2);
