@@ -105,7 +105,19 @@ HOW IT WAS MEASURED
     624,000 passes: 395,577 with one draw, 94,900 with only a clear, 19,946
     with neither.
 
-6. OPEN: 32-BIT WINED3D ON OPENGL HANGS WITH THE FULL-DISPLAY SCREEN
+6. V-SYNC THROUGH THE MAILBOX
+  With mat_vsync 1 the game asks for FIFO. Through the driver's own FIFO it
+  waited at every acquire until the frame before had been shown (acquire
+  31 ms on average: the GPU, the limit, is a frame behind, and nothing of
+  the next frame is submitted while the game waits): 23.5 frames a second
+  against 33 without V-Sync. A FIFO swapchain now goes through the mailbox
+  (shim/mailbox.c) with no frame dropped: 35.0 median (30.0 10th
+  percentile) in the 60 s match, 1467 shown and 0 dropped in 40 s, every
+  interval a whole number of refreshes, presents 3.7 ms on average.
+  vk_x11_present FIFO: 6.11 ms a frame (held to the display); IMMEDIATE
+  0.35 ms. LXRT_VK_MAILBOX=immediate: the driver's FIFO, as before.
+
+7. OPEN: 32-BIT WINED3D ON OPENGL HANGS WITH THE FULL-DISPLAY SCREEN
   tests/win/run.sh d3d9_32_wined3d (a 32-bit program, Wine's Direct3D on
   OpenGL from Zink) does not get as far as its window on the 1920x1080
   screen and is killed by its time limit, four times of four, with the
@@ -117,4 +129,4 @@ HOW IT WAS MEASURED
 
 Tests: Vulkan 18/18 (vk_pipeline 6, vk_passes 5, vk_vtxread 4 new,
 vk_x11_present 3: KosmicKrisp IMMEDIATE 0.35 ms, FIFO 6.03 ms, MoltenVK FIFO
-6.07 ms), ELF 106/106, Python 151/151, Windows 20/21 (section 6).
+6.07 ms), ELF 106/106, Python 151/151, Windows 20/21 (section 7).

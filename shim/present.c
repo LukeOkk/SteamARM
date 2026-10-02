@@ -162,8 +162,9 @@ static int needs_stretch(VkDevice dev, const VkSwapchainCreateInfoKHR *ci, VkExt
 // is to stretch.
 VkResult lxrt_scaler_create(VkDevice, VkPhysicalDevice, const VkSwapchainCreateInfoKHR *, VkExtent2D,
                             const VkAllocationCallbacks *, VkSwapchainKHR *);
-// shim/mailbox.c: an IMMEDIATE or MAILBOX swapchain that does not wait for
-// the display.
+// shim/mailbox.c: a swapchain that does not wait for the display (IMMEDIATE,
+// MAILBOX; FIFO holds the game to the display's rate without the wait at
+// every acquire).
 int lxrt_mailbox_wanted(const VkSwapchainCreateInfoKHR *);
 VkResult lxrt_mailbox_create(VkDevice, VkPhysicalDevice, const VkSwapchainCreateInfoKHR *,
                              const VkAllocationCallbacks *, VkSwapchainKHR *);

@@ -170,6 +170,15 @@ of 6.06 (MEASURED, `benchmarks/stage52-mailbox-present.txt`;
 `tests/elf/run_vk_arm64.sh`). `LXRT_VK_MAILBOX=0` leaves such swapchains to
 the driver; FIFO swapchains and scaled ones are not touched.
 
+A FIFO swapchain of the game's (V-Sync on) goes through the mailbox too
+since stage 53, with no frame ever dropped: the game waits for a driver
+image, one of which comes back per refresh, so a fast game is held to the
+display's rate and a slow one shows every frame on a refresh. The driver's
+own FIFO made a GPU-bound game wait at every acquire until the frame before
+had been shown: Counter-Strike 2 at its highest settings 23.5 frames a
+second against 35 through the mailbox (MEASURED, stage 53).
+`LXRT_VK_MAILBOX=immediate` leaves FIFO swapchains to the driver.
+
 The driver's swapchain under the mailbox is FIFO with three images since
 stage 53: with the game's IMMEDIATE, a layer covering the display was
 flipped outside the display's refreshes (times between shown frames

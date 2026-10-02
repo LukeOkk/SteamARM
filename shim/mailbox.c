@@ -11,7 +11,8 @@
 // in vkAcquireNextImageKHR.
 //
 // For a swapchain created with IMMEDIATE or MAILBOX the game therefore gets
-// images of the shim's own ("virtual", as shim/scaler.c's), and never waits:
+// images of the shim's own ("virtual", as shim/scaler.c's), and never waits
+// (a FIFO one too, since stage 53: see "V-Sync" below):
 //   - vkAcquireNextImageKHR hands out the next virtual image at once;
 //   - a thread of the shim's acquires the driver's image (that is the call
 //     that waits for the display) and says when it has one;
@@ -23,9 +24,18 @@
 // Everything on the queue is done by the game's own thread, in its own
 // vkAcquireNextImageKHR and vkQueuePresentKHR, as the driver's would be.
 //
-// LXRT_VK_MAILBOX=0 leaves such swapchains to the driver. FIFO swapchains,
-// and those the scaler takes (a picture smaller than its window), are not
-// touched. LXRT_VK_DEBUG=1 reports frames shown and dropped.
+// V-Sync: a FIFO swapchain of the game's goes the same way, with one
+// difference: a frame that finds no driver image is never dropped, the game
+// waits for the image, and so it is held to the display's rate when it is
+// faster, and shows every frame, in step with the display, when it is
+// slower -- without the driver's own FIFO, where a game whose GPU work is
+// the limit waited at every acquire until the frame before had been shown
+// and lost a third of its rate (Counter-Strike 2: 23.5 against 33 frames a
+// second; MEASURED, benchmarks/stage53).
+// LXRT_VK_MAILBOX=0 leaves every swapchain to the driver; =immediate only
+// takes IMMEDIATE and MAILBOX ones (as before stage 53). Those the scaler
+// takes (a picture smaller than its window) are not touched.
+// LXRT_VK_DEBUG=1 reports frames shown and dropped.
 // LXRT_VK_PROBE=1 reads back one shown frame in every 120 and prints the
 // mean colour of eight zones of it (4 x 2): what the game drew, without a
 // capture of the screen ("the picture is white": is it the game's image?).
@@ -135,6 +145,7 @@ typedef struct mailbox {
     VkResult acquire_result, sticky;   // sticky: what the game is told at its next acquire
     unsigned shown, dropped;
     uint64_t last_shown_ns;
+    int fifo;               // the game's mode: no frame is dropped
     // LXRT_VK_PROBE: a buffer a shown frame is read back into.
     VkPhysicalDevice pd;
     VkFormat format;
@@ -287,7 +298,10 @@ int lxrt_mailbox_wanted(const VkSwapchainCreateInfoKHR *ci)
     if (!pthread_create || !pthread_join || !pthread_mutex_lock || !pthread_mutex_unlock || !pthread_cond_wait ||
         !pthread_cond_signal)
         return 0;
-    return (ci->presentMode == VK_PRESENT_MODE_IMMEDIATE_KHR || ci->presentMode == VK_PRESENT_MODE_MAILBOX_KHR) &&
+    int fifo = ci->presentMode == VK_PRESENT_MODE_FIFO_KHR || ci->presentMode == VK_PRESENT_MODE_FIFO_RELAXED_KHR;
+    if (fifo && e && *e == 'i')
+        return 0;
+    return (fifo || ci->presentMode == VK_PRESENT_MODE_IMMEDIATE_KHR || ci->presentMode == VK_PRESENT_MODE_MAILBOX_KHR) &&
            ci->imageArrayLayers == 1 && ci->imageExtent.width && ci->imageExtent.height;
 }
 
@@ -385,6 +399,7 @@ VkResult lxrt_mailbox_create(VkDevice dev, VkPhysicalDevice pd, const VkSwapchai
     m->pd = pd;
     m->format = ci->imageFormat;
     m->ext = ci->imageExtent;
+    m->fifo = ci->presentMode == VK_PRESENT_MODE_FIFO_KHR || ci->presentMode == VK_PRESENT_MODE_FIFO_RELAXED_KHR;
     VkSwapchainCreateInfoKHR c = *ci;
     c.imageUsage |= VK_IMAGE_USAGE_TRANSFER_DST_BIT;
     // The driver's own swapchain is FIFO: its presents follow the display.
@@ -497,8 +512,8 @@ VkResult lxrt_mailbox_create(VkDevice dev, VkPhysicalDevice pd, const VkSwapchai
     m->started = 1;
     __atomic_add_fetch(&g_active, 1, __ATOMIC_RELAXED);
     if (debug())
-        dprintf(2, "[shim] mailbox: %ux%u, %u images for the game over %u of the driver's\n", m->ext.width,
-                m->ext.height, m->nvirt, m->nreal);
+        dprintf(2, "[shim] mailbox: %ux%u, %u images for the game over %u of the driver's%s\n", m->ext.width,
+                m->ext.height, m->nvirt, m->nreal, m->fifo ? ", FIFO (every frame shown)" : "");
     *out = m->sc;
     return VK_SUCCESS;
 fail:
@@ -634,8 +649,12 @@ VkResult lxrt_mailbox_present(VkQueue q, VkSwapchainKHR sc, uint32_t i, const Vk
     // present -- waits for it instead: every one of its frames is shown,
     // and the wait is time its GPU is busy anyway (MEASURED: 34 frames a
     // second drawn, 22 shown without the wait).
-    if (!ready && now_ns() - m->last_shown_ns > 13000000ull) {
-        const uint64_t deadline = now_ns() + 30000000ull;
+    // With the game's own FIFO (V-Sync) the wait is for as long as it takes:
+    // one driver image comes back per refresh, so this is what holds a fast
+    // game to the display's rate. (Up to a second: the thread may have met
+    // an error, which the game hears of at its next acquire.)
+    if (!ready && (m->fifo || now_ns() - m->last_shown_ns > 13000000ull)) {
+        const uint64_t deadline = now_ns() + (m->fifo ? 1000000000ull : 30000000ull);
         const struct lx_timespec nap = { 0, 250000 };
         while (!ready && now_ns() < deadline) {
             nanosleep(&nap, 0);
