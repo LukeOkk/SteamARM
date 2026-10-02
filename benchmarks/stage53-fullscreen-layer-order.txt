@@ -105,7 +105,16 @@ HOW IT WAS MEASURED
     624,000 passes: 395,577 with one draw, 94,900 with only a clear, 19,946
     with neither.
 
+6. OPEN: 32-BIT WINED3D ON OPENGL HANGS WITH THE FULL-DISPLAY SCREEN
+  tests/win/run.sh d3d9_32_wined3d (a 32-bit program, Wine's Direct3D on
+  OpenGL from Zink) does not get as far as its window on the 1920x1080
+  screen and is killed by its time limit, four times of four, with the
+  mailbox on, off, and with its old presents; on the same server started
+  with STEAMARM_X11_FULL_DISPLAY=0 (1920x1050) it passes (1616 fps). Its
+  thread waits on a futex; explorer.exe /desktop has Zink's threads and is
+  idle. The 64-bit one (1631 fps) and the 32-bit ones on DXVK pass. Cause
+  not found.
+
 Tests: Vulkan 18/18 (vk_pipeline 6, vk_passes 5, vk_vtxread 4 new,
 vk_x11_present 3: KosmicKrisp IMMEDIATE 0.35 ms, FIFO 6.03 ms, MoltenVK FIFO
-6.07 ms), Python 151/151. The runtime itself did not change; its suites
-(ELF, Windows) were not run again.
+6.07 ms), ELF 106/106, Python 151/151, Windows 20/21 (section 6).
