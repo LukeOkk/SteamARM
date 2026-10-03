@@ -172,16 +172,75 @@ struct linux_timespec { int64_t tv_sec; int64_t tv_nsec; };
 #define MAX_EPOLL   256
 #define MAX_EVENTFD 256
 
-// kevent() is asked for at most this many events per call regardless of the
+// kevent64() is asked for at most this many events per call regardless of the
 // guest's maxevents. Returning fewer events than asked for is always legal --
 // level-triggered readiness is still there on the next call -- and it bounds
-// the transient allocation at 4096 * (32 + 24) bytes.
+// the transient allocation at 4096 * (48 + 24) bytes.
 #define KEV_BATCH_MAX 4096
 
 // The most kqueue filters one interest can ever occupy: read, write, except.
 // The changelists below are sized 2 * this because EPOLL_CTL_MOD submits a
 // delete list and an add list as one atomic changelist.
 #define EP_MAX_CH 3
+
+// ---------------------------------------------------------------- kevent64
+//
+// Every call on an epoll kqueue is a kevent64(), never a kevent(), because of
+// what a zero timeout costs. MEASURED on this machine (macOS 27, M4), 20000
+// calls each, nothing ready, one or eight pipe knotes alike:
+//
+//     kevent(ts = {0, 0})                       median 12000 ns, p99 14.7 us
+//     kevent(ts = {0, 1 ns})                    median 12000 ns
+//     kevent64(flags = 0, ts = {0, 0})          median 12000 ns
+//     kevent64(KEVENT_FLAG_IMMEDIATE, ts NULL)  median   250 ns, p99 334 ns
+//     kevent(ts = {0, 0}), one knote READY      median   167 ns
+//
+// A timespec of zero is not "do not wait": the kernel turns it into a deadline
+// of now and parks the thread until the timer fires, 12 us later on an idle
+// machine and far longer on a busy one (about 90 us on the main thread of
+// Counter-Strike 2, which polls its event queue with epoll_wait(0) every
+// frame, benchmarks/stage52 section 4). Only KEVENT_FLAG_IMMEDIATE, which the
+// legacy kevent() cannot pass, skips the sleep.
+//
+// And a kqueue is bound to the first interface used on it: MEASURED, kevent()
+// on a queue that has seen a kevent64() returns EINVAL, and kevent64() on one
+// that has seen a kevent() returns EINVAL too. Hence all of them, including
+// the changelists, go through here; the EV_SET builders keep struct kevent
+// and are converted at the call.
+static void kev_to64(const struct kevent *k, struct kevent64_s *o)
+{
+    o->ident = k->ident;
+    o->filter = k->filter;
+    o->flags = k->flags;
+    o->fflags = k->fflags;
+    o->data = k->data;
+    o->udata = (uint64_t)(uintptr_t)k->udata;
+    o->ext[0] = o->ext[1] = 0;
+}
+
+static void kev_from64(const struct kevent64_s *k, struct kevent *o)
+{
+    EV_SET(o, (uintptr_t)k->ident, k->filter, k->flags, k->fflags,
+           (intptr_t)k->data, (void *)(uintptr_t)k->udata);
+}
+
+// Submit a changelist of at most 2 * EP_MAX_CH entries and collect up to
+// `nout` receipts (EV_RECEIPT) without waiting. Returns what kevent64 did.
+static int ep_kevent_now(int kq, const struct kevent *ch, int n,
+                         struct kevent *out, int nout)
+{
+    struct kevent64_s c[2 * EP_MAX_CH], o[2 * EP_MAX_CH];
+    if (n < 0 || n > 2 * EP_MAX_CH || nout < 0 || nout > 2 * EP_MAX_CH) {
+        errno = EINVAL;
+        return -1;
+    }
+    for (int i = 0; i < n; i++)
+        kev_to64(&ch[i], &c[i]);
+    int r = kevent64(kq, c, n, o, nout, KEVENT_FLAG_IMMEDIATE, NULL);
+    for (int i = 0; i < r && i < nout; i++)
+        kev_from64(&o[i], &out[i]);
+    return r;
+}
 
 // ---------------------------------------------------------------- guest memory
 //
@@ -1254,12 +1313,12 @@ static int ep_submit(int kq, struct kevent *ch, int n, int nsoft)
     struct kevent out[2 * EP_MAX_CH];
     if (n > (int)(sizeof out / sizeof out[0]))
         return EINVAL;   // unreachable: every caller builds at most 2*EP_MAX_CH
-    // A zero timeout, not NULL. Every change carries EV_RECEIPT, so kevent()
-    // fills the output array with one receipt per change and returns without
-    // waiting -- but this runs with g_ep_lock held, and "cannot block" is not a
-    // property worth betting every epoll instance in the process on.
-    struct timespec zero = { 0, 0 };
-    int r = kevent(kq, ch, n, out, n, &zero);
+    // KEVENT_FLAG_IMMEDIATE, not a NULL timeout. Every change carries
+    // EV_RECEIPT, so the call fills the output array with one receipt per
+    // change and returns without waiting -- but this runs with g_ep_lock held,
+    // and "cannot block" is not a property worth betting every epoll instance
+    // in the process on.
+    int r = ep_kevent_now(kq, ch, n, out, n);
     if (r < 0)
         return errno;
     for (int i = 0; i < r; i++) {
@@ -1318,10 +1377,9 @@ static bool ep_entry_stale(const struct ep_interest *in, const struct stat *st)
 static bool ep_knote_gone(int kq, const struct ep_interest *in)
 {
     struct kevent ch, out;
-    struct timespec zero = { 0, 0 };
     EV_SET(&ch, (uintptr_t)in->fd, EVFILT_READ, EV_ENABLE | EV_RECEIPT, 0, 0,
            (void *)(uintptr_t)in->data);
-    int r = kevent(kq, &ch, 1, &out, 1, &zero);
+    int r = ep_kevent_now(kq, &ch, 1, &out, 1);
     if (r <= 0)
         return false;            // no answer: keep the entry rather than guess
     return (out.flags & EV_ERROR) != 0 && out.data == ENOENT;
@@ -1342,8 +1400,7 @@ static void ep_drop_at(struct ep_inst *ep, int idx, bool alive)
         struct kevent ch[1];
         EV_SET(&ch[0], (uintptr_t)ep->v[idx].wfd, EVFILT_WRITE, EV_DELETE | EV_RECEIPT, 0, 0, 0);
         struct kevent out;
-        struct timespec zero = { 0, 0 };
-        kevent(ep->kq, ch, 1, &out, 1, &zero);
+        ep_kevent_now(ep->kq, ch, 1, &out, 1);
         // Tolerate ENOENT: wfd may have been closed alongside fd.
     }
     ep->v[idx] = ep->v[ep->n - 1];
@@ -1618,7 +1675,7 @@ struct out_slot {
 // bit that survives `allowed` below, so it can never drive the caller's re-wait
 // loop round a second time with nothing to show. Breaking that invariant is
 // what the measured 100%-CPU livelock was.
-static uint32_t kev_to_epoll(const struct kevent *k, const struct ep_interest *in,
+static uint32_t kev_to_epoll(const struct kevent64_s *k, const struct ep_interest *in,
                              bool *eof_read, bool *eof_write)
 {
     uint32_t m = 0;
@@ -1761,11 +1818,11 @@ static long pwait_common(int epfd, void *uevents, int maxevents,
     pthread_mutex_unlock(&g_ep_lock);
 
     // 64 covers the maxevents the measured loops actually pass, so the hot path
-    // makes no allocation at all: 64 * (32 + 24) bytes of stack.
+    // makes no allocation at all: 64 * (48 + 24) bytes of stack.
     int kn = maxevents > KEV_BATCH_MAX ? KEV_BATCH_MAX : maxevents;
-    struct kevent kstack[64];
+    struct kevent64_s kstack[64];
     struct out_slot ostack[64];
-    struct kevent *kv = kstack;
+    struct kevent64_s *kv = kstack;
     struct out_slot *os = ostack;
     if (kn > (int)(sizeof kstack / sizeof kstack[0])) {
         kv = malloc((size_t)kn * sizeof *kv);
@@ -1828,7 +1885,15 @@ static long pwait_common(int epfd, void *uevents, int maxevents,
             tsp = &left;
         }
 
-        int n = kevent(kq, NULL, 0, kv, kn, tsp);
+        // No time left (a poll, epoll_wait(0): the commonest call of a game's
+        // main loop) is KEVENT_FLAG_IMMEDIATE, never a zero timespec, which
+        // sleeps until the next timer deadline -- 12 us idle, ~90 us under a
+        // game: see kev_to64() for the measurements.
+        int n;
+        if (tsp && tsp->tv_sec == 0 && tsp->tv_nsec == 0)
+            n = kevent64(kq, NULL, 0, kv, kn, KEVENT_FLAG_IMMEDIATE, NULL);
+        else
+            n = kevent64(kq, NULL, 0, kv, kn, 0, tsp);
         if (n < 0) {
             // EINTR is not restarted: epoll_pwait exists precisely so the guest
             // can see the signal, and Linux does not set SA_RESTART semantics

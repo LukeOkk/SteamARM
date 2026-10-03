@@ -2048,6 +2048,60 @@ static long do_getitimer(int which, void *oldp)
 // Darwin has poll but not ppoll. The mask swap around it is not atomic, which
 // is the whole reason ppoll exists; the window is documented rather than hidden
 // because closing it needs kernel support we do not have.
+// poll(2) with a zero timeout is not free of sleeping on this kernel. MEASURED
+// on this machine (macOS 27, M4), 20000 calls each, nothing ready: poll(pf, 1,
+// 0) median 1.6 us but mean 5.4 us, 37 % of the calls over 8 us (12 us: the
+// next timer deadline, as a kqueue wait of zero -- see runtime/epoll_eventfd.c
+// kev_to64); poll(NULL, 0, 0) the same. select() with a zero timeval never
+// sleeps: 170 ns for one fd, 300 ns for eight. So "anything now?" is asked of
+// select first, and poll only spells out the revents of what select found,
+// which it does at once (1.1 us) because something IS ready. What select
+// cannot express is left to poll: an fd of FD_SETSIZE or more, an interest in
+// nothing but POLLHUP/POLLERR (events = 0), and a descriptor select refuses
+// (EBADF is POLLNVAL). EOF and errors count as readable or writable for
+// select, as for poll, so a zero from select is a zero from poll.
+// LXRT_POLL0_SELECT=0 turns it off.
+static bool poll0_select_empty(struct pollfd *pf, nfds_t nfds)
+{
+    static int on = -1;
+    if (on < 0) {
+        const char *e = getenv("LXRT_POLL0_SELECT");
+        on = !e || atoi(e) != 0;
+    }
+    if (!on || nfds > 1024)
+        return false;
+    fd_set rs, ws, es;
+    FD_ZERO(&rs);
+    FD_ZERO(&ws);
+    FD_ZERO(&es);
+    int maxfd = -1;
+    for (nfds_t i = 0; i < nfds; i++) {
+        int fd = pf[i].fd;
+        if (fd < 0)
+            continue;       // poll skips it and reports revents 0
+        if (fd >= FD_SETSIZE)
+            return false;
+        short ev = pf[i].events;
+        if (!(ev & (POLLIN | POLLRDNORM | POLLRDBAND | POLLPRI |
+                    POLLOUT | POLLWRNORM | POLLWRBAND)))
+            return false;
+        if (ev & (POLLIN | POLLRDNORM | POLLRDBAND))
+            FD_SET(fd, &rs);
+        if (ev & (POLLOUT | POLLWRNORM | POLLWRBAND))
+            FD_SET(fd, &ws);
+        if (ev & POLLPRI)
+            FD_SET(fd, &es);
+        if (fd > maxfd)
+            maxfd = fd;
+    }
+    struct timeval zero = { 0, 0 };
+    if (select(maxfd + 1, &rs, &ws, &es, &zero) != 0)
+        return false;
+    for (nfds_t i = 0; i < nfds; i++)
+        pf[i].revents = 0;
+    return true;
+}
+
 static long do_ppoll(uint64_t fds, uint64_t nfds, uint64_t ts, uint64_t sigmask)
 {
     // LXRT_FUTEX_DEBUG=1: the first polls of 50 ms to a second, with the x86
@@ -2092,7 +2146,9 @@ static long do_ppoll(uint64_t fds, uint64_t nfds, uint64_t ts, uint64_t sigmask)
         for (uint64_t i = 0; i < nfds && i < 64 && !sliced; i++)
             sliced = (pf[i].events & POLLIN) && lxrt_is_seqpacket(pf[i].fd);
     int r;
-    if (!sliced) {
+    if (timeout_ms == 0 && poll0_select_empty(pf, (nfds_t)nfds)) {
+        r = 0;
+    } else if (!sliced) {
         r = poll(pf, (nfds_t)nfds, timeout_ms);
     } else {
         int left = timeout_ms;

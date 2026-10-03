@@ -17,6 +17,7 @@ DIR="$ROOT/tmp/pulse"
 SOCK="$DIR/native"
 LOG="$STATE/logs/pulseaudio.log"
 CONF="$STATE/launcher/pulse.pa"
+DAEMONCONF="$STATE/launcher/pulse-daemon.conf"
 SRVFILE="$STATE/launcher/pulse.socket"     # the socket the server was started with
 
 live() { [ -S "$1" ] && "$PA/pactl" -s "unix:$1" info >/dev/null 2>&1; }
@@ -47,7 +48,24 @@ load-module module-coreaudio-detect
 load-module module-native-protocol-unix socket=$SOCK auth-anonymous=1
 load-module module-always-sink
 EOF
-            "$PA/pulseaudio" --daemonize=yes --exit-idle-time=-1 --use-pid-file=no \
+            # The daemon's own settings (PULSE_CONFIG names the file). Games
+            # and the Mac's devices run at 48 kHz: the server's default
+            # format is that, so that nothing is resampled on the way when
+            # it need not be (avoid-resampling lets a device follow a lone
+            # stream's rate), and when it is, soxr-hq instead of the default
+            # speex-float-1, whose aliasing is audible on voice. Buffers of
+            # the device side: 4 x 20 ms.
+            cat > "$DAEMONCONF" <<EOF
+default-sample-format = float32le
+default-sample-rate = 48000
+alternate-sample-rate = 44100
+resample-method = soxr-hq
+avoid-resampling = yes
+flat-volumes = no
+default-fragments = 4
+default-fragment-size-msec = 20
+EOF
+            PULSE_CONFIG="$DAEMONCONF" "$PA/pulseaudio" --daemonize=yes --exit-idle-time=-1 --use-pid-file=no \
                 --disallow-exit --disable-shm=yes -n -F "$CONF" --log-target=file:"$LOG" \
                 || { echo "audio: PulseAudio did not start (log $LOG)" >&2; return 1; }
             echo "$SOCK" > "$SRVFILE"
