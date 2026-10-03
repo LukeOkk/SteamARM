@@ -1098,6 +1098,24 @@ else
     echo "  skip  ARM64_INITIAL_STACK_BOUNDS (no $STAGE)"
 fi
 
+# /proc/<pid>/root of another guest process: that process's "/" (PipeWire's
+# Flatpak check opens it, and took every client for a Flatpak app while it
+# was missing; runtime/procpid.c).
+if [ -f "$STAGE/usr/lib64/libc.a" ] && [ -n "$GCCDIR" ]; then
+    if err=$(glibc_cc -static-pie -O2 -o build/proc_pid_root tests/elf/proc_pid_root.c); then
+        PR_ROOT="$PWD/build/exe-root"
+        mkdir -p "$PR_ROOT/tmp" && cp build/proc_pid_root "$PR_ROOT/tmp/"
+        r=$(LXRT_ROOT="$PR_ROOT" deadline 20 ./build/lxrun /tmp/proc_pid_root /tmp/proc_pid_root.marker 2>&1)
+        if grep -q '^== proc_pid_root: ok' <<<"$r"; then
+            ok "/proc/<pid>/root of another guest process: its \"/\", .flatpak-info absent"
+        else
+            bad "/proc/<pid>/root" "$(grep -E 'FAIL' <<<"$r" | head -3)"
+        fi
+    else bad "build proc_pid_root" "$err"; fi
+else
+    echo "  skip  /proc/<pid>/root (no $STAGE)"
+fi
+
 # /proc/self/exe as Linux has it, however the program was named: absolute, in
 # guest terms, equal through readlink and realpath, and open()able. Relative,
 # with "..", absolute (the control: named as the host path already), and

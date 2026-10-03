@@ -489,6 +489,43 @@ static void gen_pid_fds(int pid, const char *pd)
 
 bool lxrt_procpid_environ(int pid, const char *out_path);
 
+// The guest root of another guest process: LXRT_ROOT in the environment its
+// runtime was started with (KERN_PROCARGS2, as lxrt_procpid_environ), "" (the
+// host's "/") without one.
+static bool pid_root(int pid, char *out, size_t n)
+{
+    int mib[3] = { CTL_KERN, KERN_PROCARGS2, pid };
+    size_t sz = 0;
+    if (sysctl(mib, 3, NULL, &sz, NULL, 0) != 0 || sz < sizeof(int))
+        return false;
+    char *b = malloc(sz);
+    if (!b)
+        return false;
+    if (sysctl(mib, 3, b, &sz, NULL, 0) != 0) {
+        free(b);
+        return false;
+    }
+    int argc;
+    memcpy(&argc, b, sizeof argc);
+    char *p = b + sizeof argc, *end = b + sz;
+    p += strnlen(p, (size_t)(end - p));
+    while (p < end && *p == '\0')
+        p++;
+    for (int i = 0; i < argc && p < end; i++)
+        p += strnlen(p, (size_t)(end - p)) + 1;
+    out[0] = '\0';
+    while (p < end && *p) {
+        size_t l = strnlen(p, (size_t)(end - p));
+        if (l > 10 && strncmp(p, "LXRT_ROOT=", 10) == 0) {
+            snprintf(out, n, "%.*s", (int)(l - 10), p + 10);
+            break;
+        }
+        p += l + 1;
+    }
+    free(b);
+    return true;
+}
+
 // /proc/<pid>[/...] for a guest process other than the caller. `rest` is the
 // part after "/proc/". NULL when <pid> is not one.
 const char *lxrt_procpid_translate(const char *rest, const char *dir)
@@ -511,6 +548,23 @@ const char *lxrt_procpid_translate(const char *rest, const char *dir)
     const char *net = lxrt_procnet_translate(sub, dir);
     if (net)
         return net;
+    // /proc/<pid>/root: that process's "/", as procfs.c gives /proc/self/root.
+    // It was missing (ENOENT), and PipeWire takes a client whose
+    // /proc/<pid>/root cannot be opened for a Flatpak app: every client,
+    // WirePlumber included, then got only read and execute (SteamOS's access
+    // rules), WirePlumber's own requests were refused (EACCES) and no stream
+    // was linked to the Mac's sink unless it won a race (MEASURED,
+    // pipewire.sec.flatpak = true on all clients).
+    if (strncmp(sub, "root", 4) == 0 && (sub[4] == '\0' || sub[4] == '/')) {
+        static _Thread_local char rootbuf[1300];
+        char root[1024];
+        if (!pid_root((int)pid, root, sizeof root))
+            return NULL;
+        int n = snprintf(rootbuf, sizeof rootbuf, "%s%s", root, sub[4] ? sub + 4 : "/");
+        if (n <= 0 || (size_t)n >= sizeof rootbuf)
+            return NULL;
+        return rootbuf;
+    }
     // Generate only what was asked for: lsof readlink()s and stat()s every
     // /proc/<pid>/fd/<n> of every process, and rebuilding the whole fd
     // directory (or the stat/status files) per lookup made one lsof run take
