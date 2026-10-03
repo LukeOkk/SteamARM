@@ -249,8 +249,20 @@ static int union_prot(uint64_t hpage)
 // A failed query used to read as "not a file": the page was then made
 // writable in place and the copy into it raised SIGBUS when it was a file
 // page past the end of its file.
-// What the last page_file_state() saw, for the repair note below.
-static _Thread_local char g_region_seen[160];
+// What the last page_file_state() saw, for the repair note below: raw fields
+// only (callers hold the page-protection lock). Formatting here, on every
+// query, put a vfprintf on whatever stack the guest's mmap ran on -- a signal
+// handler's alternate stack among them -- and Steam's client then died in
+// most starts, its crash handler's forked child recursing in signal frames.
+struct region_seen { kern_return_t kr; uint64_t ra, rs; int prot, share, pager, refs, tag; unsigned resident; };
+static struct region_seen g_region_seen;
+
+static void format_seen(char *buf, size_t n, const struct region_seen *r)
+{
+    snprintf(buf, n, "kr %d region 0x%llx+0x%llx prot %d share %d pager %d refs %d tag %d resident %u",
+             r->kr, (unsigned long long)r->ra, (unsigned long long)r->rs, r->prot, r->share,
+             r->pager, r->refs, r->tag, r->resident);
+}
 
 static int page_file_state(uint64_t p, kern_return_t *why)
 {
@@ -263,10 +275,8 @@ static int page_file_state(uint64_t p, kern_return_t *why)
     kern_return_t kr = mach_vm_region(mach_task_self(), &ra, &rs, VM_REGION_EXTENDED_INFO,
                                       (vm_region_info_t)&ri, &rc, &obj);
     if (why) *why = kr;
-    snprintf(g_region_seen, sizeof g_region_seen,
-             "kr %d region 0x%llx+0x%llx prot %d share %d pager %d refs %d tag %d resident %u",
-             kr, (unsigned long long)ra, (unsigned long long)rs, ri.protection, ri.share_mode,
-             ri.external_pager, ri.ref_count, ri.user_tag, ri.pages_resident);
+    g_region_seen = (struct region_seen){ kr, ra, rs, ri.protection, ri.share_mode,
+                                          ri.external_pager, ri.ref_count, ri.user_tag, ri.pages_resident };
     if (kr != KERN_SUCCESS)
         return -1;
     if (ra > p)
@@ -353,14 +363,14 @@ static bool back_range(uint64_t hstart, uint64_t hend)
         // faults, on the part past EOF, and that part reads as zeros on Linux.
         int state = 0, tries = 0;
         kern_return_t why = KERN_SUCCESS;
-        char before[160] = "";
+        struct region_seen before = { 0 };
         if (kr == KERN_NO_SPACE) {
             // Asked again when the kernel does not answer; still no answer:
             // treated as a file page (an anonymous copy is right for any
             // private page; making it writable in place is not).
             while ((state = page_file_state(p, &why)) < 0 && ++tries < 4)
                 ;
-            memcpy(before, g_region_seen, sizeof before);
+            before = g_region_seen;
             if (state < 0) {
                 static _Atomic int said;
                 if (atomic_fetch_add(&said, 1) < 4)
@@ -387,8 +397,16 @@ static bool back_range(uint64_t hstart, uint64_t hend)
             // 0x82318-byte span, from a 0x52320-byte file) was still in the
             // host page its last segment was mapped into, and this branch had
             // taken it for anonymous memory (once in ten Steam starts,
-            // 2026-10-03; /tmp/lxrt-faults.log). Whatever the reason, a page
-            // that cannot be read in full is replaced by an anonymous copy.
+            // 2026-10-03; /tmp/lxrt-faults.log). What the region query had
+            // seen (four cases, all in forked web-helper children): the
+            // page's entry read-execute or read-only, copy-on-write, with an
+            // INTERNAL object holding one resident page and ~10 references
+            // -- "pager 0" -- and, after the mprotect below, the file's own
+            // object (pager 1, no resident page, one reference more). The
+            // query reports the object on top, and here that was a shadow
+            // (the rewrite of the code in this page, or the fork) over the
+            // file. So a page that cannot be read in full after being made
+            // writable is replaced by an anonymous copy of what can.
             static _Thread_local uint8_t probe[LXRT_HOST_PAGE];
             mach_vm_size_t got = 0;
             if (mach_vm_read_overwrite(mach_task_self(), p, LXRT_HOST_PAGE,
@@ -398,9 +416,12 @@ static bool back_range(uint64_t hstart, uint64_t hend)
                 if (atomic_fetch_add(&said, 1) < 4) {
                     kern_return_t k2 = KERN_SUCCESS;
                     int st2 = page_file_state(p, &k2);
+                    char now_s[160], before_s[160];
+                    format_seen(now_s, sizeof now_s, &g_region_seen);
+                    format_seen(before_s, sizeof before_s, &before);
                     lxrt_fault_note("subpage: host page 0x%llx was writable but not readable in full "
                                     "(file state now %d [%s]; before %d [%s], %d tries); made anonymous",
-                                    (unsigned long long)p, st2, g_region_seen, state, before, tries);
+                                    (unsigned long long)p, st2, now_s, state, before_s, tries);
                 }
                 if (!make_page_anonymous(p))
                     return false;

@@ -35,6 +35,7 @@
 #include <mach/mach_vm.h>
 #include <stdatomic.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <time.h>
 
 #define LERR(e) (-lxrt_errno_to_linux(e))
@@ -821,6 +822,16 @@ static long pi_unsupported(void)
     return LERR(ENOSYS);
 }
 
+// LXRT_NO_PI=1: the PI operations answer ENOSYS again (glibc then refuses
+// PTHREAD_PRIO_INHERIT mutexes and programs fall back to plain ones).
+static bool pi_off(void)
+{
+    static int off = -1;
+    if (off < 0)
+        off = getenv("LXRT_NO_PI") && *getenv("LXRT_NO_PI") == '1';
+    return off;
+}
+
 static long pi_lock(uint32_t *uaddr, uint64_t utime, bool realtime, bool shared, bool try_only)
 {
     if (!aligned(uaddr))
@@ -1030,12 +1041,16 @@ long lxrt_futex_ext(uint32_t *uaddr, int op, uint32_t val, uint64_t val2,
         return wake_op(uaddr, val, val2, uaddr2, val3, shared);
 
     case FUTEX_LOCK_PI:
+        if (pi_off()) return pi_unsupported();
         return pi_lock(uaddr, val2, true, shared, false);
     case FUTEX_LOCK_PI2:
+        if (pi_off()) return pi_unsupported();
         return pi_lock(uaddr, val2, (op & FUTEX_CLOCK_REALTIME) != 0, shared, false);
     case FUTEX_TRYLOCK_PI:
+        if (pi_off()) return pi_unsupported();
         return pi_lock(uaddr, 0, false, shared, true);
     case FUTEX_UNLOCK_PI:
+        if (pi_off()) return pi_unsupported();
         return pi_unlock(uaddr, shared);
     case FUTEX_WAIT_REQUEUE_PI:
     case FUTEX_CMP_REQUEUE_PI:

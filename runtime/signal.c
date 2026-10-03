@@ -28,6 +28,7 @@ static _Atomic int g_xsig_sender[65536];
 #include <fcntl.h>
 #include <pthread.h>
 #include <signal.h>
+#include <libproc.h>
 #include <stdatomic.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -1289,6 +1290,34 @@ static void host_handler(int dsig, siginfo_t *dinfo, void *uap)
         if (is_rt(lsig) && !(act.flags & LINUX_SA_NODEFER))
             g_rt_blocked |= 1ull << (lsig - 1);
         pthread_sigmask(SIG_BLOCK, &during, &before);
+        // A synchronous fault handed to the guest's own handler (a crash
+        // reporter, usually): one line in /tmp/lxrt-faults.log naming where,
+        // so a crash that the guest's reporter then swallows is not silent.
+        // The first eight per process.
+        if ((lsig == 4 || lsig == 7 || lsig == 8 || lsig == 11) && dinfo &&
+            (dinfo->si_code > 0)) {
+            static _Atomic int noted;
+            if (atomic_fetch_add(&noted, 1) < 8) {
+                char where[300] = "?";
+                mach_vm_address_t ra = saved_pc;
+                mach_vm_size_t rs = 0;
+                vm_region_basic_info_data_64_t ri;
+                mach_msg_type_number_t rc = VM_REGION_BASIC_INFO_COUNT_64;
+                mach_port_t obj = MACH_PORT_NULL;
+                char fname[256] = "";
+                if (mach_vm_region(mach_task_self(), &ra, &rs, VM_REGION_BASIC_INFO_64,
+                                   (vm_region_info_t)&ri, &rc, &obj) == KERN_SUCCESS && ra <= saved_pc &&
+                    proc_regionfilename(getpid(), ra, fname, sizeof fname) > 0) {
+                    const char *b = strrchr(fname, '/');
+                    snprintf(where, sizeof where, "%s+0x%llx", b ? b + 1 : fname,
+                             (unsigned long long)(saved_pc - ra + ri.offset));
+                }
+                lxrt_fault_note("guest signal %d (code %d) at pc 0x%llx [%s], address 0x%llx, lr 0x%llx",
+                                lsig, dinfo->si_code, (unsigned long long)saved_pc, where,
+                                (unsigned long long)(uintptr_t)dinfo->si_addr,
+                                (unsigned long long)saved_regs[30]);
+            }
+        }
         if (lxrt_trace_on() && (lsig == 4 || lsig == 7 || lsig == 11)) {
             // A fault: the registers and the top of the interrupted stack are
             // the evidence. Symbolise offline against the guest images.
