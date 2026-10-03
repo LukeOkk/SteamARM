@@ -1,18 +1,20 @@
 SteamARM: Fill, Center and Move & Resize in XQuartz's Window menu
 
-macOS 15's tiling commands for X windows, which are not NSWindows: Fill
-(Globe-Control-F), Center (Globe-Control-C) and a "Mover y redimensionar"
-(Move & Resize) submenu with the halves, the quarters and Return to
-Previous Size (Globe-Control-R), after Zoom and before the list of windows.
-They go to the window manager as an AppleWMControllerNotify of kind 32
-with the action in its argument (quartz-wm-tiling.patch); the wire format
-already carries any kind and argument. Built in code, Spanish or English
-from the user's first language: the menus live in compiled nibs. No arrow
-shortcuts: arrow keys always carry the Function flag, and Control-arrow
-belongs to terminals. XQUARTZ_NO_TILING_MENU=1 leaves the menu as it was.
+macOS 15's tiling commands for X windows, which are not NSWindows: Fill,
+Center and a Move & Resize submenu with the halves, the quarters and
+Return to Previous Size, after Zoom and before the list of windows. They
+go to the window manager as an AppleWMControllerNotify of kind 32 with the
+action in its argument (quartz-wm-tiling.patch); the wire format already
+carries any kind and argument. Titled from AppKit's MenuCommands table, so
+they read as the system's own in the app's language. AppKit's own items
+(Fill, Center, Move & Resize, Full Screen Tile, Remove Window from Set)
+only act on NSWindows, always off for X windows: hidden. No shortcuts:
+AppKit keeps the Globe modifier for its own items only, and Control-F, C
+and R alone belong to the X clients. XQUARTZ_NO_TILING_MENU=1 leaves the
+menu as it was.
 diff -ruN a/hw/xquartz/X11Controller.h b/hw/xquartz/X11Controller.h
---- a/hw/xquartz/X11Controller.h	2026-10-03 15:04:33
-+++ b/hw/xquartz/X11Controller.h	2026-10-03 15:04:33
+--- a/hw/xquartz/X11Controller.h	2026-10-03 15:33:42
++++ b/hw/xquartz/X11Controller.h	2026-10-03 15:33:42
 @@ -104,6 +104,7 @@
  - (IBAction)close_window:(id)sender;
  - (IBAction)minimize_window:(id)sender;
@@ -22,8 +24,8 @@ diff -ruN a/hw/xquartz/X11Controller.h b/hw/xquartz/X11Controller.h
  - (IBAction)previous_window:(id)sender;
  - (IBAction)enable_fullscreen_changed:(id)sender;
 diff -ruN a/hw/xquartz/X11Controller.m b/hw/xquartz/X11Controller.m
---- a/hw/xquartz/X11Controller.m	2026-10-03 15:04:33
-+++ b/hw/xquartz/X11Controller.m	2026-10-03 15:04:33
+--- a/hw/xquartz/X11Controller.m	2026-10-03 15:33:42
++++ b/hw/xquartz/X11Controller.m	2026-10-03 16:25:52
 @@ -46,6 +46,18 @@
  #include <X11/extensions/applewmconst.h>
  #include "applewmExt.h"
@@ -43,7 +45,7 @@ diff -ruN a/hw/xquartz/X11Controller.m b/hw/xquartz/X11Controller.m
  #include <stdio.h>
  #include <unistd.h>
  #include <fcntl.h>
-@@ -113,8 +125,88 @@
+@@ -113,8 +125,134 @@
                                             selector:@selector(apps_table_done:)
                                                 name:NSWindowWillCloseNotification
                                               object:self.apps_table.window];
@@ -54,17 +56,47 @@ diff -ruN a/hw/xquartz/X11Controller.m b/hw/xquartz/X11Controller.m
 +    });
  }
  
++/* SteamARM: AppKit puts its own Fill, Center, Move & Resize, Full Screen
++ * Tile and Remove Window from Set at the top of the Window menu, above the
++ * nib's Close. They act on NSWindows only: always off for X windows, next
++ * to ours. Hide everything above the first item of ours, and any other item
++ * with a private AppKit action; then the separators that leaves leading or
++ * doubled. AppKit finds its items again
++ * by tag, so they stay in place. */
++- (void) hide_appkit_window_items
++{
++    NSMenu * const menu = X11App.windowsMenu;
++    BOOL ours_yet = NO, after_item = NO;
++
++    for (NSMenuItem *item in menu.itemArray) {
++        if (item.target == self)
++            ours_yet = YES;
++        if (item.isSeparatorItem || item.target == self)
++            continue;
++        if (!ours_yet
++            || (item.action != NULL && [NSStringFromSelector(item.action) hasPrefix:@"_"]))
++            item.hidden = YES;
++    }
++    for (NSMenuItem *item in menu.itemArray) {
++        if (item.isSeparatorItem) {
++            item.hidden = !after_item;
++            after_item = NO;
++        } else if (!item.isHidden)
++            after_item = YES;
++    }
++}
++
 +/* SteamARM: Fill, Center and Move & Resize in the Window menu, after Zoom
 + * and before the list of windows (set_window_menu counts that list from the
-+ * menu's end). Spanish or English, as the nibs are, from the user's first
-+ * language; Globe-Control-F, C and R as on macOS 15 (no arrows: they always
-+ * carry the Function flag, and Control-arrow belongs to terminals). */
++ * menu's end), titled from AppKit's own table so they read as the system's
++ * do in the app's language. No shortcuts: AppKit keeps the Globe modifier
++ * of Globe-Control-F, C and R for its own items only ("only supported for
++ * system-provided menu items"), and Control-F, C and R alone belong to the
++ * X clients (Control-C in a terminal). */
 +- (void) install_tiling_menu
 +{
 +    NSMenu * const menu = X11App.windowsMenu;
-+    NSString * const lang = NSLocale.preferredLanguages.firstObject ?: @"en";
-+    BOOL const es = [lang hasPrefix:@"es"];
-+    NSUInteger const globe_ctrl = NSEventModifierFlagFunction | NSEventModifierFlagControl;
++    NSBundle * const ak = [NSBundle bundleForClass:NSApplication.class];
 +    NSInteger at;
 +    NSMenu *sub;
 +    NSMenuItem *item;
@@ -74,48 +106,53 @@ diff -ruN a/hw/xquartz/X11Controller.m b/hw/xquartz/X11Controller.m
 +        return;
 +    done = YES;
 +
++#define L(k) [ak localizedStringForKey:(k) value:(k) table:@"MenuCommands"]
 +    at = [menu indexOfItemWithTarget:self andAction:@selector(zoom_window:)];
 +    at = at >= 0 ? at + 1 : 0;
 +
-+    struct { NSString *es, *en; NSInteger tag; NSString *key; } const top[] = {
-+        { @"Rellenar", @"Fill", SteamARMTileFill, @"f" },
-+        { @"Centrar", @"Center", SteamARMTileCenter, @"c" },
++    struct { NSString *key; NSInteger tag; } const top[] = {
++        { @"Fill", SteamARMTileFill },
++        { @"Center", SteamARMTileCenter },
 +    };
 +    for (size_t i = 0; i < sizeof top / sizeof top[0]; i++) {
-+        item = [[NSMenuItem alloc] initWithTitle:es ? top[i].es : top[i].en
++        item = [[NSMenuItem alloc] initWithTitle:L(top[i].key)
 +                                          action:@selector(tile_window:)
-+                                   keyEquivalent:top[i].key];
-+        item.keyEquivalentModifierMask = globe_ctrl;
++                                   keyEquivalent:@""];
 +        item.target = self;
 +        item.tag = top[i].tag;
 +        [menu insertItem:item atIndex:at++];
 +        [item release];
 +    }
 +
-+    struct { NSString *es, *en; NSInteger tag; } const moves[] = {
-+        { @"Mitad izquierda", @"Left", SteamARMTileLeft },
-+        { @"Mitad derecha", @"Right", SteamARMTileRight },
-+        { @"Mitad superior", @"Top", SteamARMTileTop },
-+        { @"Mitad inferior", @"Bottom", SteamARMTileBottom },
-+        { nil, nil, 0 },
-+        { @"Arriba a la izquierda", @"Top Left", SteamARMTileTopLeft },
-+        { @"Arriba a la derecha", @"Top Right", SteamARMTileTopRight },
-+        { @"Abajo a la izquierda", @"Bottom Left", SteamARMTileBottomLeft },
-+        { @"Abajo a la derecha", @"Bottom Right", SteamARMTileBottomRight },
-+        { nil, nil, 0 },
-+        { @"Volver al tamaño anterior", @"Return to Previous Size", SteamARMTileRestore },
++    /* tag -1: a section header */
++    struct { NSString *key; NSInteger tag; } const moves[] = {
++        { @"Halves", -1 },
++        { @"Left", SteamARMTileLeft },
++        { @"Right", SteamARMTileRight },
++        { @"Top", SteamARMTileTop },
++        { @"Bottom", SteamARMTileBottom },
++        { @"Quarters_Header", -1 },
++        { @"Top Left", SteamARMTileTopLeft },
++        { @"Top Right", SteamARMTileTopRight },
++        { @"Bottom Left", SteamARMTileBottomLeft },
++        { @"Bottom Right", SteamARMTileBottomRight },
++        { nil, 0 },
++        { @"Return to Previous Size", SteamARMTileRestore },
 +    };
-+    sub = [[NSMenu alloc] initWithTitle:es ? @"Mover y redimensionar" : @"Move & Resize"];
++    sub = [[NSMenu alloc] initWithTitle:L(@"Move & Resize")];
 +    for (size_t i = 0; i < sizeof moves / sizeof moves[0]; i++) {
 +        if (moves[i].tag == 0) {
 +            [sub addItem:[NSMenuItem separatorItem]];
 +            continue;
 +        }
-+        item = [[NSMenuItem alloc] initWithTitle:es ? moves[i].es : moves[i].en
++        if (moves[i].tag < 0) {
++            if (@available(macOS 14, *))
++                [sub addItem:[NSMenuItem sectionHeaderWithTitle:L(moves[i].key)]];
++            continue;
++        }
++        item = [[NSMenuItem alloc] initWithTitle:L(moves[i].key)
 +                                          action:@selector(tile_window:)
-+                                   keyEquivalent:moves[i].tag == SteamARMTileRestore ? @"r" : @""];
-+        if (moves[i].tag == SteamARMTileRestore)
-+            item.keyEquivalentModifierMask = globe_ctrl;
++                                   keyEquivalent:@""];
 +        item.target = self;
 +        item.tag = moves[i].tag;
 +        [sub addItem:item];
@@ -126,13 +163,24 @@ diff -ruN a/hw/xquartz/X11Controller.m b/hw/xquartz/X11Controller.m
 +    [menu insertItem:item atIndex:at++];
 +    [item release];
 +    [sub release];
-+    ErrorF("window menu: tiling commands added (%s)\n", es ? "es" : "en");
++#undef L
++
++    [self hide_appkit_window_items];
++    /* AppKit may add (or add again) its items later on. */
++    [[NSNotificationCenter defaultCenter] addObserverForName:NSMenuDidAddItemNotification
++                                                      object:menu
++                                                       queue:nil
++                                                  usingBlock:^(NSNotification *n) {
++        (void) n;
++        [self hide_appkit_window_items];
++    }];
++    ErrorF("window menu: tiling commands added (%s)\n", ak.preferredLocalizations.firstObject.UTF8String ?: "?");
 +}
 +
  - (void) item_selected:sender
  {
      [NSApp activateIgnoringOtherApps:YES];
-@@ -665,6 +757,12 @@
+@@ -665,6 +803,12 @@
          [[NSApp keyWindow] performZoom:sender];
  }
  
@@ -145,7 +193,7 @@ diff -ruN a/hw/xquartz/X11Controller.m b/hw/xquartz/X11Controller.m
  - (IBAction) next_window:sender
  {
      DarwinSendDDXEvent(kXquartzControllerNotify, 1, AppleWMNextWindow);
-@@ -822,6 +920,7 @@
+@@ -822,6 +966,7 @@
      if (item == self.toggle_fullscreen_item)
          return !XQuartzIsRootless;
      else if (menu == [X11App windowsMenu] || menu == dock_menu
