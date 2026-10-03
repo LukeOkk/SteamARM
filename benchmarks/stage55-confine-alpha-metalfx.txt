@@ -1,0 +1,111 @@
+Stage 55 -- Mouse-look confined on macOS, cut-out foliage fixed, MetalFX on
+KosmicKrisp with a render scale, a pipeline cache that hits, and less
+command memory. Also: a correction of stage 54.
+Date: 2026-10-02/03. Apple M4 (10 GPU cores), 16 GB, macOS 27, 1920x1080 at
+165 Hz. Zero VM. Valve's files unchanged. Steam Frame client, Counter-Strike
+2's native Linux build, KosmicKrisp 26.2.4 with patches 01-13.
+Work found by four parallel investigations (MetalFX, the palm texture,
+KosmicKrisp performance, MoltenVK), each checked by a second reviewer, then
+measured here.
+
+1. THE MOUSE LEFT THE WINDOW WHILE AIMING (patches/xquartz-pointer-confine)
+  SDL 3 grabs the pointer with confine_to = its window for mouse-look and
+  hides the cursor with an empty pixmap cursor; it reads the motion from the
+  pointer's XInput 2 raw "Rel X"/"Rel Y" valuators, which XQuartz fills with
+  the mouse's deltas (SDL main, src/video/x11/SDL_x11xinput2.c). The DIX
+  confined only the X sprite; the macOS cursor went on and left the window.
+  Now: confined and hidden -> the macOS cursor sits at the window's centre,
+  dissociated from the mouse; confined and shown -> kept in the box.
+  MEASURED (tests/x11/run-confine.sh, the mouse unused): 100 deltas of 6,3
+  at a fixed location: cursor unmoved, raw Rel X 600, Rel Y 300; a visible
+  cursor pushed 1200 px right stopped at the window's edge (639). In the
+  game: "pointer: locked at 960,562" on entering mouse-look, released when
+  the cursor is shown.
+
+2. A PALE OPAQUE RECTANGLE UNDER THE PALM FRONDS (kosmickrisp-08, -09)
+  KosmicKrisp blends, masks and trims the colour in the fragment shader;
+  Metal's hardware alpha-to-coverage reads the alpha the function returns,
+  after all that. A depth prepass with colour writes off covered every
+  sample, and the opaque pass with depth EQUAL drew the card's transparent
+  part. 08 computes the coverage in the shader from the original alpha in
+  those cases (hardware A2C otherwise, and kept when the shader cannot be
+  lowered) and puts A2C in the shader-cache key. 09: a pipeline with no
+  fragment shader hashed only its vertex state, so through a VkPipelineCache
+  two depth prepasses shared one depth state.
+  tests/elf/vk_alphamask.c (29 cases at 4x MSAA): 9 failing before (12
+  through a cache), 0 after; MoltenVK passes. tests/elf/vk_vsonly.c: fails
+  before with a cache, passes after. In the game: not yet seen by eye.
+
+3. EXCLUSIVE FULLSCREEN LEFT A BLACK SCREEN (xquartz-rootless-modeset)
+  For any RandR mode but the rootless one XQuartz captured every display
+  (CGCaptureAllDisplays: a black shield) and switched to the rooted X screen,
+  where no Vulkan layer is shown. The display's own size at any rate is now
+  taken as done; another size is refused.
+
+4. METALFX ON KOSMICKRISP, AND A RENDER SCALE (kosmickrisp-10; shim)
+  On KosmicKrisp the shim's "metalfx" filter had silently been a bilinear
+  blit: the driver had no VK_EXT_metal_objects. Patch 10 exports images,
+  timeline semaphores and the device; runtime/metalfx.m encodes on a queue
+  of its own. tests/elf/vk_metalfx.c: pixel-correct on both drivers, 0.6 ms
+  per 960x540 -> 1080p frame.
+  Render scale (launcher "Escala de render", default auto = the chip's
+  recommendation, 1280x720 for this M4 at 1080p): the game tool passes it to
+  the game only; the shim reports that much smaller an extent for a window
+  that covers its screen. Counter-Strike 2 follows it ("[shim] render scale
+  0.67: 1280x720 for a 1920x1080 window", "vkCreateSwapchainKHR extent
+  1280x720") and the scaler enlarges with MetalFX through the mailbox.
+
+5. KOSMICKRISP: PIPELINE CACHE AND COMMAND MEMORY (kosmickrisp-11, -12, -13)
+  11: Mesa's disk cache and a device mem_cache; Metal's compiled-shader
+  cache moved per application (its default is split into one slot per
+  process holding it, and a game landing on an empty slot recompiled every
+  pipeline, ~160 ms each). Benchmark: 0.25 ms per pipeline in a second
+  launch against 3.1 ms.
+  12: one Metal command buffer per render pass, each keeping ~2.3 MB that
+  reset never returns, and 384 idle allocators: now shared command buffers,
+  pooled upload memory, a size cap. Benchmark: 814 MB -> 32 MB of driver GPU
+  memory, 0.74 -> 0.33 us per draw recorded. tests/elf/vk_resubmit.c covers
+  re-recording and secondaries.
+
+6. THE GAME (de_dust2, nine bots; maximum settings: MSAA 4x, everything at
+  its highest, FSR off; V-Sync on; frames per second, median of the last
+  120 s of 200 s unless noted)
+    native 1920x1080, patches 01-13            33.5  30.5  29.5   (28.6 in a
+                                                                   40 s sample)
+    native, 01-09 (cold cache, 120 s)           28.0
+    render scale auto (1280x720) + MetalFX      42.0 (cold caches)  46.5 (warm)
+    native swapchain, the game's own FSR
+      "quality" (its 3D scene at ~67 %, 120 s)  45.0
+  The GPU is 98 % busy with the game's own work (AGX AppUsage: the game
+  97.8 %, WindowServer 3 %). Footprint 7.4 GB (8.9 before 11-13), GPU
+  regions 2.8 GB (3.6). The Mac swaps 3-5 GB during a match: Steam's
+  processes hold ~3 GB.
+  So MetalFX at the automatic scale gives the frame rate of the game's own
+  FSR "quality" with Apple's upscaler on the whole frame; at native maximum
+  settings this M4 runs the match at about 30 fps.
+
+7. CORRECTION OF STAGE 54
+  Stage 54 reported 80 fps at the highest settings after patch 07, "against
+  35 in the same configuration". Every later run at the saved highest
+  settings measured 28-34, also with 01-07's successors that contain 07 and
+  with the runtime and X server changes compared one by one (epoll,
+  composition). The settings were being changed in the game when the 80 was
+  measured. Patch 07 restored the picture after a change of video settings;
+  its effect on the frame rate is not established.
+
+8. OPEN
+  - Steam's web helper GPU process (ANGLE on KosmicKrisp) crashes now and
+    then (vk_queue_submit_alloc, mtl_residency_set_commit; crash reports
+    through the day, before and after this stage).
+  - The first launch after the driver change, with every cache cold, drove
+    free memory to 0 % and the safeguard stopped everything; the second one
+    peaked at 19 % free.
+  - Whether render passes share Metal command buffers in the game (barriers
+    close them) is not measured.
+  - MoltenVK: the shim can split binds of null descriptor sets (MoltenVK
+    1.4.2 crashes on them; fixed upstream after 1.4.2), but MoltenVK rejects
+    the game's vertex shaders that use subgroup built-ins, so it cannot run
+    the game either way: not shipped.
+
+Tests: Vulkan 27/27 headless (cold, warm caches, KK_CMDBUF_PER_PASS=1), Python
+152/152, launcher 36/36, confinement 2/2 (idle mouse).

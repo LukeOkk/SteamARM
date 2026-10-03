@@ -45,7 +45,10 @@ HOW IT WAS MEASURED
   6.1 ms a frame, no stall. Added to tests/elf/run_vk_arm64.sh (SteamARM's
   driver and MoltenVK; Homebrew's driver is known to fail it).
 
-4. THE GAME, SAME SETTINGS AS STAGE 53 (highest, 1920x1080, V-Sync on)
+4. THE GAME (CORRECTED IN STAGE 55: the 80 below was measured while the
+   game's settings were being changed in the game; later runs at the saved
+   highest settings measured 28-34. Not a comparison with the 35.)
+   SAME SETTINGS AS STAGE 53 (highest, 1920x1080, V-Sync on)
   de_dust2, nine bots, 200 s, last 120 s: median 80.0 fps (average 78.4,
   10th percentile 56.5, min 49, max 122.5) against 35.0 before the fix in
   the same configuration; 9404 frames shown, 0 dropped, the driver's
