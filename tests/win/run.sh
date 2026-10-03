@@ -39,7 +39,16 @@ cp -f "$PROTON"/lib/vkd3d/x86_64-windows/*.dll "$SYS32/"
 cp -f "$PROTON"/lib/vkd3d/i386-windows/*.dll "$SYS32/../syswow64/"
 
 PASS=0 FAIL=0
+# A failed test's log is kept as win-<test>.fail.log: the next run (the
+# setup's, then a rerun by hand) overwrote it, and a failure seen once at an
+# install could not be looked at afterwards (sync_ntsync, 0.3.38).
+keep_failed() {
+    [ -n "${prev_t:-}" ] && [ "$FAIL" -gt "${prev_fail:-0}" ] && [ -f "$LOGS/win-$prev_t.log" ] &&
+        cp "$LOGS/win-$prev_t.log" "$LOGS/win-$prev_t.fail.log"
+    return 0
+}
 for t in ${@:-tick tick_32 tone tone_32 regwin d3d11 d3d12 d3d9 d3d9_32 d3d11_32 d3d12_32 d3d9_wined3d d3d11_wined3d d3d9_32_wined3d modeset modeset_fsr modeset_nearest modeset_metalfx sync sync_fsync sync_ntsync}; do
+    keep_failed; prev_t=$t; prev_fail=$FAIL
     # <api>_wined3d: Wine's builtin D3D on OpenGL from Mesa's Zink, on the same
     # Vulkan thunk (the launcher's "OpenGL (WineD3D)"; stage38-opengl-zink).
     wined3d=0
@@ -225,6 +234,7 @@ for t in ${@:-tick tick_32 tone tone_32 regwin d3d11 d3d12 d3d9 d3d9_32 d3d11_32
         FAIL=$((FAIL + 1))
     fi
 done
+keep_failed
 # Nothing of the test prefix stays behind: its services (services.exe,
 # winedevice, rpcss...) outlived the suite and kept running for hours.
 for p in $(pgrep -f "build/lxrun /tmp/lxrt-root/usr/bin/FEX-gb"); do
