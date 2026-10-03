@@ -222,6 +222,34 @@ else
         run_metalfx "kosmickrisp steamarm temporal" STEAMARM_VK_ICD=kosmickrisp STEAMARM_KK_DIR="$OWN" VK_METALFX_TEMPORAL=1
     fi
 fi
+# vk_fsr: a game's FSR 1 upscale (EASU) replaced by MetalFX inside the driver
+# (patches/kosmickrisp-14): a shader with EASU's constants that paints
+# magenta; SteamARM's KosmicKrisp must give the input enlarged instead,
+# MoltenVK and KK_FSR_METALFX=0 the shader's own magenta.
+exe9="$ROOT/tmp/vktest/vk_fsr"
+if ! "$CLANG" --target=aarch64-redhat-linux-gnu --sysroot="$STAGE" --gcc-install-dir="$GCCDIR" -fuse-ld=lld \
+        --ld-path=/opt/homebrew/opt/lld/bin/ld.lld -w -O2 -I/opt/homebrew/include -o "$exe9" \
+        tests/elf/vk_fsr.c "$ROOT/usr/lib/libvulkan.so.1"; then
+    echo "  FAIL  vk_fsr (build)"; fail=$((fail + 1))
+else
+    run_fsr() { # label, expected result (metalfx|shader), then environment assignments
+        local label=$1 want=$2; shift 2
+        local log="$ROOT/tmp/vktest/vk_fsr_${label// /_}.log"
+        env OBJC_DISABLE_INITIALIZE_FORK_SAFETY=YES LXRT_ROOT="$ROOT" "$@" \
+            perl -e 'alarm 60; exec @ARGV' ./build/lxrun /tmp/vktest/vk_fsr "$want" > "$log" 2>&1
+        if [ "$(grep -E '^== vk_fsr' "$log" | tail -1)" = "== vk_fsr: ok" ]; then
+            printf '  ok    vk_fsr %s (%s)\n' "$label" "$(grep -m1 '^result:' "$log" | cut -d' ' -f2)"; pass=$((pass + 1))
+        else
+            printf '  FAIL  vk_fsr %s: %s (log %s)\n' "$label" "$(grep -m1 '^result:' "$log")" "$log"
+            fail=$((fail + 1))
+        fi
+    }
+    run_fsr moltenvk shader STEAMARM_VK_ICD=moltenvk
+    if [ -f "$OWN/libvulkan_kosmickrisp.dylib" ]; then
+        run_fsr "kosmickrisp steamarm" metalfx STEAMARM_VK_ICD=kosmickrisp STEAMARM_KK_DIR="$OWN"
+        run_fsr "kosmickrisp steamarm off" shader STEAMARM_VK_ICD=kosmickrisp STEAMARM_KK_DIR="$OWN" KK_FSR_METALFX=0
+    fi
+fi
 # vk_x11_present: a swapchain on an X window of SteamARM's X server. With
 # IMMEDIATE the shim's mailbox (shim/mailbox.c) must not wait for the display
 # (the layer is shown by another process and takes one drawable per refresh:

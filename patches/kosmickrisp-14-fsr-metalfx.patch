@@ -1,0 +1,638 @@
+SteamARM: a game's FSR 1 upscale done by MetalFX
+
+FSR 1 enlarges a game's 3D picture in two passes, EASU (the upscale) and
+RCAS (a sharpening). A fragment shader with the two constants of EASU's
+approximations (0x7ef07ebb, 0x5f347d74) is marked when it is compiled
+(kk_shader_info.fsr_easu, kept by the pipeline caches); its draw is then
+replaced by MetalFX's spatial scaler (MTL4FXSpatialScaler) from the
+shader's input texture into the pass's colour attachment, in the same
+Metal command buffer: the pass's encoder ends first (its clears and stores
+happen), MetalFX follows, and the next encoder waits for all the work
+before it (a queue barrier, after_metalfx). RCAS still runs on MetalFX's
+result; the HUD drawn afterwards stays at the display's resolution.
+
+The input is found from the descriptor (set 1 binding 30 in Counter-Strike
+2's EASU, the sampler at binding 14, the constants at binding 1): image
+views register the resource id of their sampled texture. Formats or texture
+usage MetalFX cannot take, or no Metal 4 MetalFX: the game's own pass.
+KK_FSR_METALFX=0: the game's own pass always. tests/elf/vk_fsr.c checks the
+replacement with a shader of its own (magenta when drawn, the input
+enlarged when MetalFX takes it).
+diff -ruN -x *.orig -x *.rej a/src/kosmickrisp/bridge/meson.build b/src/kosmickrisp/bridge/meson.build
+--- a/src/kosmickrisp/bridge/meson.build	2026-10-03 07:31:39
++++ b/src/kosmickrisp/bridge/meson.build	2026-10-03 07:31:39
+@@ -19,6 +19,7 @@
+     'mtl_device.m',
+     'mtl_encoder.m',
+     'mtl_heap.m',
++    'mtl_metalfx.m',
+     'mtl_render_state.m',
+     'mtl_residency_set.m',
+     'mtl_sampler.m',
+@@ -37,6 +38,7 @@
+     'stubs/mtl_device.c',
+     'stubs/mtl_encoder.c',
+     'stubs/mtl_heap.c',
++    'stubs/mtl_metalfx.c',
+     'stubs/mtl_render_state.c',
+     'stubs/mtl_residency_set.c',
+     'stubs/mtl_sampler.c',
+diff -ruN -x *.orig -x *.rej a/src/kosmickrisp/bridge/mtl_metalfx.h b/src/kosmickrisp/bridge/mtl_metalfx.h
+--- a/src/kosmickrisp/bridge/mtl_metalfx.h	1969-12-31 21:00:00
++++ b/src/kosmickrisp/bridge/mtl_metalfx.h	2026-10-03 07:31:39
+@@ -0,0 +1,23 @@
++/*
++ * Copyright 2026 SteamARM contributors
++ * SPDX-License-Identifier: MIT
++ */
++
++#ifndef MTL_METALFX_H
++#define MTL_METALFX_H 1
++
++#include "mtl_types.h"
++
++#include <stdbool.h>
++#include <stdint.h>
++
++/* SteamARM: MetalFX's spatial upscale of `in` (its content: the top left
++ * in_w x in_h, or the whole texture for 0) into the whole of `out`, encoded
++ * into `cmd_buf` (a Metal 4 command buffer with no encoder open). False when
++ * MetalFX cannot do it (formats, texture usage, no Metal 4 MetalFX): the
++ * caller draws the game's own pass instead. */
++bool mtl_metalfx_spatial_encode(mtl_device *device, mtl_compiler *compiler,
++                                mtl_command_buffer *cmd_buf, mtl_texture *in,
++                                mtl_texture *out, uint32_t in_w, uint32_t in_h);
++
++#endif /* MTL_METALFX_H */
+diff -ruN -x *.orig -x *.rej a/src/kosmickrisp/bridge/mtl_metalfx.m b/src/kosmickrisp/bridge/mtl_metalfx.m
+--- a/src/kosmickrisp/bridge/mtl_metalfx.m	1969-12-31 21:00:00
++++ b/src/kosmickrisp/bridge/mtl_metalfx.m	2026-10-03 07:31:39
+@@ -0,0 +1,125 @@
++/*
++ * Copyright 2026 SteamARM contributors
++ * SPDX-License-Identifier: MIT
++ */
++
++#include "mtl_metalfx.h"
++
++#include <Metal/Metal.h>
++#include <MetalFX/MetalFX.h>
++
++#include <pthread.h>
++#include <stdio.h>
++
++/* A game's FSR pass runs at one size or two (the menu and the match, a
++ * resolution changed): a few scalers kept, the oldest made again. */
++#define MFX_SCALERS 4
++
++struct mfx_scaler {
++   MTLPixelFormat in_format, out_format;
++   NSUInteger in_w, in_h, out_w, out_h;
++   id<MTL4FXSpatialScaler> scaler;
++};
++
++static struct mfx_scaler scalers[MFX_SCALERS];
++static unsigned scaler_next;
++static pthread_mutex_t scaler_lock = PTHREAD_MUTEX_INITIALIZER;
++
++static id<MTL4FXSpatialScaler>
++mfx_scaler_get(id<MTLDevice> dev, id<MTL4Compiler> compiler, id<MTLTexture> in,
++               id<MTLTexture> out)
++{
++   for (unsigned i = 0; i < MFX_SCALERS; i++) {
++      struct mfx_scaler *s = &scalers[i];
++      if (s->scaler && s->in_format == in.pixelFormat &&
++          s->out_format == out.pixelFormat && s->in_w == in.width &&
++          s->in_h == in.height && s->out_w == out.width &&
++          s->out_h == out.height)
++         return s->scaler;
++   }
++
++   MTLFXSpatialScalerDescriptor *desc = [MTLFXSpatialScalerDescriptor new];
++   desc.inputWidth = in.width;
++   desc.inputHeight = in.height;
++   desc.outputWidth = out.width;
++   desc.outputHeight = out.height;
++   desc.colorTextureFormat = in.pixelFormat;
++   desc.outputTextureFormat = out.pixelFormat;
++   /* FSR 1 is given the picture after tone mapping, as MetalFX's
++    * perceptual mode expects. */
++   desc.colorProcessingMode = MTLFXSpatialScalerColorProcessingModePerceptual;
++   id<MTL4FXSpatialScaler> scaler =
++      [desc newSpatialScalerWithDevice:dev compiler:compiler];
++   [desc release];
++   fprintf(stderr,
++           "kk: FSR by MetalFX spatial: %lux%lu (format %lu) -> %lux%lu "
++           "(format %lu)%s\n",
++           (unsigned long)in.width, (unsigned long)in.height,
++           (unsigned long)in.pixelFormat, (unsigned long)out.width,
++           (unsigned long)out.height, (unsigned long)out.pixelFormat,
++           scaler ? "" : ": MetalFX has no scaler for it, the game's own pass");
++   if (!scaler)
++      return nil;
++
++   struct mfx_scaler *s = &scalers[scaler_next++ % MFX_SCALERS];
++   [s->scaler release];
++   *s = (struct mfx_scaler){
++      .in_format = in.pixelFormat,
++      .out_format = out.pixelFormat,
++      .in_w = in.width,
++      .in_h = in.height,
++      .out_w = out.width,
++      .out_h = out.height,
++      .scaler = scaler,
++   };
++   return scaler;
++}
++
++bool
++mtl_metalfx_spatial_encode(mtl_device *device, mtl_compiler *compiler,
++                           mtl_command_buffer *cmd_buf, mtl_texture *in_tex,
++                           mtl_texture *out_tex, uint32_t in_w, uint32_t in_h)
++{
++   static int supported = -1;
++   bool ok = false;
++
++   @autoreleasepool {
++      id<MTLDevice> dev = (id<MTLDevice>)device;
++      id<MTLTexture> in = (id<MTLTexture>)in_tex;
++      id<MTLTexture> out = (id<MTLTexture>)out_tex;
++
++      if (supported < 0)
++         supported = [MTLFXSpatialScalerDescriptor supportsMetal4FX:dev];
++      if (!supported || !in || !out || in.width > out.width ||
++          in.height > out.height)
++         return false;
++
++      pthread_mutex_lock(&scaler_lock);
++      id<MTL4FXSpatialScaler> scaler =
++         mfx_scaler_get(dev, (id<MTL4Compiler>)compiler, in, out);
++      if (scaler) {
++         MTLTextureUsage need_in = scaler.colorTextureUsage;
++         MTLTextureUsage need_out = scaler.outputTextureUsage;
++         if ((in.usage & need_in) != need_in ||
++             (out.usage & need_out) != need_out) {
++            static bool told;
++            if (!told)
++               fprintf(stderr,
++                       "kk: FSR by MetalFX: texture usage 0x%lx/0x%lx, MetalFX "
++                       "needs 0x%lx/0x%lx: the game's own pass\n",
++                       (unsigned long)in.usage, (unsigned long)out.usage,
++                       (unsigned long)need_in, (unsigned long)need_out);
++            told = true;
++         } else {
++            scaler.colorTexture = in;
++            scaler.outputTexture = out;
++            scaler.inputContentWidth = in_w ? in_w : in.width;
++            scaler.inputContentHeight = in_h ? in_h : in.height;
++            [scaler encodeToCommandBuffer:(id<MTL4CommandBuffer>)cmd_buf];
++            ok = true;
++         }
++      }
++      pthread_mutex_unlock(&scaler_lock);
++   }
++   return ok;
++}
+diff -ruN -x *.orig -x *.rej a/src/kosmickrisp/bridge/stubs/mtl_metalfx.c b/src/kosmickrisp/bridge/stubs/mtl_metalfx.c
+--- a/src/kosmickrisp/bridge/stubs/mtl_metalfx.c	1969-12-31 21:00:00
++++ b/src/kosmickrisp/bridge/stubs/mtl_metalfx.c	2026-10-03 07:31:39
+@@ -0,0 +1,14 @@
++/*
++ * Copyright 2026 SteamARM contributors
++ * SPDX-License-Identifier: MIT
++ */
++
++#include "mtl_metalfx.h"
++
++bool
++mtl_metalfx_spatial_encode(mtl_device *device, mtl_compiler *compiler,
++                           mtl_command_buffer *cmd_buf, mtl_texture *in,
++                           mtl_texture *out, uint32_t in_w, uint32_t in_h)
++{
++   return false;
++}
+Binary files a/src/kosmickrisp/util/__pycache__/vk_entrypoints.cpython-314.pyc and b/src/kosmickrisp/util/__pycache__/vk_entrypoints.cpython-314.pyc differ
+Binary files a/src/kosmickrisp/util/__pycache__/vk_extensions.cpython-314.pyc and b/src/kosmickrisp/util/__pycache__/vk_extensions.cpython-314.pyc differ
+diff -ruN -x *.orig -x *.rej a/src/kosmickrisp/vulkan/kk_cmd_buffer.c b/src/kosmickrisp/vulkan/kk_cmd_buffer.c
+--- a/src/kosmickrisp/vulkan/kk_cmd_buffer.c	2026-10-03 07:31:39
++++ b/src/kosmickrisp/vulkan/kk_cmd_buffer.c	2026-10-03 07:31:39
+@@ -301,6 +301,29 @@
+    return cmd_buf;
+ }
+ 
++mtl_command_buffer *
++kk_cmd_buffer_take_gfx_mtl(struct kk_cmd_buffer *cmd)
++{
++   return kk_cmd_buffer_begin_mtl(cmd, &cmd->gfx);
++}
++
++/* Left open, as kk_stop_encoder leaves it, for the next render pass. */
++void
++kk_cmd_buffer_return_gfx_mtl(struct kk_cmd_buffer *cmd,
++                             mtl_command_buffer *cmd_buf)
++{
++   if (!kk_cmd_buf_per_pass() && !cmd->open_gfx_cmd_buf) {
++      cmd->open_gfx_cmd_buf = cmd_buf;
++      cmd->open_gfx_allocator = cmd->gfx.allocator;
++      cmd->gfx.allocator = NULL;
++      return;
++   }
++   mtl_end_command_buffer(cmd_buf);
++   util_dynarray_append(&cmd->ended_allocators, cmd->gfx.allocator);
++   cmd->gfx.allocator = NULL;
++   util_dynarray_append(&cmd->submit_cmd_bufs, cmd_buf);
++}
++
+ /* The command buffer was committed: what the GPU still uses goes to `slot`,
+  * whose feedback handler releases it. Returns the Metal command buffers to
+  * commit.
+@@ -445,6 +468,12 @@
+       cmd->gfx.encoder, cmd->argument_table,
+       MTL_RENDER_STAGE_VERTEX | MTL_RENDER_STAGE_FRAGMENT);
+ 
++   if (cmd->after_metalfx) {
++      mtl_barrier_after_queue_stages_device(cmd->gfx.encoder, MTL_STAGE_ALL,
++                                            MTL_STAGE_ALL);
++      cmd->after_metalfx = false;
++   }
++
+    kk_cmd_buffer_dirty_all_gfx(cmd);
+ }
+ 
+@@ -473,6 +502,12 @@
+ 
+    /* Argument table won't ever change */
+    mtl_compute_set_argument_table(es->encoder, argument_table);
++
++   if (cmd->after_metalfx) {
++      mtl_barrier_after_queue_stages_device(es->encoder, MTL_STAGE_ALL,
++                                            MTL_STAGE_ALL);
++      cmd->after_metalfx = false;
++   }
+ }
+ 
+ mtl_compute_encoder *
+diff -ruN -x *.orig -x *.rej a/src/kosmickrisp/vulkan/kk_cmd_buffer.h b/src/kosmickrisp/vulkan/kk_cmd_buffer.h
+--- a/src/kosmickrisp/vulkan/kk_cmd_buffer.h	2026-10-03 07:31:39
++++ b/src/kosmickrisp/vulkan/kk_cmd_buffer.h	2026-10-03 07:31:39
+@@ -264,6 +264,9 @@
+    /* A dependency of that kind was recorded inside the current render
+     * pass: the encoder's command buffer is closed when it ends. */
+    bool close_gfx_cmd_buf;
++   /* MetalFX encoded work into the command buffer (kk_fsr_metalfx_draw):
++    * the next encoder waits for all that came before it. */
++   bool after_metalfx;
+ 
+    void *drawable;
+    mtl_argument_table *argument_table;
+@@ -351,6 +354,11 @@
+ mtl_render_encoder *cs_get_render(struct kk_cmd_buffer *cmd);
+ mtl_compute_encoder *cs_get_compute(struct kk_cmd_buffer *cmd, bool pre_gfx);
+ void cs_end(struct kk_cmd_buffer *cmd);
++/* The render passes' Metal command buffer, for work encoded with no encoder
++ * of the driver's open (MetalFX), and its return. */
++mtl_command_buffer *kk_cmd_buffer_take_gfx_mtl(struct kk_cmd_buffer *cmd);
++void kk_cmd_buffer_return_gfx_mtl(struct kk_cmd_buffer *cmd,
++                                  mtl_command_buffer *cmd_buf);
+ void kk_cmd_buffer_close_mtl(struct kk_cmd_buffer *cmd);
+ void kk_cmd_buffer_dependency(struct kk_cmd_buffer *cmd, uint32_t count,
+                               const VkDependencyInfo *deps);
+diff -ruN -x *.orig -x *.rej a/src/kosmickrisp/vulkan/kk_cmd_draw.c b/src/kosmickrisp/vulkan/kk_cmd_draw.c
+--- a/src/kosmickrisp/vulkan/kk_cmd_draw.c	2026-10-03 07:31:39
++++ b/src/kosmickrisp/vulkan/kk_cmd_draw.c	2026-10-03 07:31:39
+@@ -11,6 +11,9 @@
+ 
+ #include "kk_buffer.h"
+ #include "kk_cmd_buffer.h"
++#include "kk_fsr_metalfx.h"
++#include "kk_shader.h"
++#include "kosmickrisp/bridge/mtl_metalfx.h"
+ #include "kk_format.h"
+ #include "kk_image_view.h"
+ #include "kk_query_pool.h"
+@@ -2082,9 +2085,53 @@
+    return draw;
+ }
+ 
++static void kk_force_attachment_load(struct kk_cmd_buffer *cmd);
++
++/* SteamARM: an FSR 1 upscale (EASU) draw done by MetalFX instead
++ * (kk_fsr_metalfx.c). The pass's encoder, begun with the pass, is ended
++ * (its clears and stores happen first), MetalFX goes into the same Metal
++ * command buffer, and what the pass draws afterwards restarts it with its
++ * attachments loaded. False: the game's draw is made. */
++static bool
++kk_fsr_metalfx_draw(struct kk_cmd_buffer *cmd)
++{
++   struct kk_shader *fs = cmd->state.shaders[MESA_SHADER_FRAGMENT];
++   struct kk_rendering_state *render = &cmd->state.gfx.render;
++
++   if (!fs || !fs->info.fsr_easu || render->color_att_count < 1 ||
++       !render->color_att[0].iview || render->view_mask ||
++       render->layer_count > 1 || cmd->state.cond_render.enabled)
++      return false;
++
++   mtl_texture *in = kk_fsr_easu_input(cmd);
++   mtl_texture *out = render->color_att[0].iview->planes[0].mtl_handle_render;
++   if (!in || !out)
++      return false;
++
++   struct kk_device *dev = kk_cmd_buffer_device(cmd);
++   /* Twice: compute work open beside the pass is closed as well. */
++   cs_end(cmd);
++   cs_end(cmd);
++   cmd->state.gfx.need_to_start_render_pass = true;
++   kk_force_attachment_load(cmd);
++   kk_cmd_buffer_dirty_all_gfx(cmd);
++
++   mtl_command_buffer *cmd_buf = kk_cmd_buffer_take_gfx_mtl(cmd);
++   bool done = mtl_metalfx_spatial_encode(dev->mtl_handle,
++                                          dev->mtl_compiler_handle, cmd_buf,
++                                          in, out, 0, 0);
++   kk_cmd_buffer_return_gfx_mtl(cmd, cmd_buf);
++   if (done)
++      cmd->after_metalfx = true;
++   return done;
++}
++
+ static void
+ kk_draw(struct kk_cmd_buffer *cmd, struct kk_draw_command *data)
+ {
++   if (kk_fsr_metalfx_draw(cmd))
++      return;
++
+    kk_flush_gfx_state(cmd);
+ 
+    data->restart = cmd->vk.dynamic_graphics_state.ia.primitive_restart_enable;
+diff -ruN -x *.orig -x *.rej a/src/kosmickrisp/vulkan/kk_fsr_metalfx.c b/src/kosmickrisp/vulkan/kk_fsr_metalfx.c
+--- a/src/kosmickrisp/vulkan/kk_fsr_metalfx.c	1969-12-31 21:00:00
++++ b/src/kosmickrisp/vulkan/kk_fsr_metalfx.c	2026-10-03 07:31:39
+@@ -0,0 +1,124 @@
++/*
++ * Copyright 2026 SteamARM contributors
++ * SPDX-License-Identifier: MIT
++ */
++
++/* SteamARM: a game's FSR 1 upscale done by MetalFX.
++ *
++ * FSR 1 enlarges a game's 3D picture in two passes: EASU, the upscale, and
++ * RCAS, a sharpening of its result. When the game draws with an EASU
++ * fragment shader (found at compile time by the two constants of its
++ * approximations, 0x7ef07ebb and 0x5f347d74), the draw is replaced by
++ * MetalFX's spatial scaler from the shader's input texture into the pass's
++ * colour attachment, in the same Metal command buffer (kk_cmd_draw.c,
++ * kk_fsr_metalfx_draw). RCAS still runs on MetalFX's result. The HUD the
++ * game draws afterwards stays at the display's resolution, as with FSR.
++ *
++ * Counter-Strike 2 ("FidelityFX Super Resolution" in its video settings):
++ * EASU samples set 1 binding 30 with the sampler at binding 14 and its
++ * constants at binding 1. The input is found by the resource id in the
++ * descriptor: image views register theirs here. */
++
++#include "kk_fsr_metalfx.h"
++
++#include "kk_cmd_buffer.h"
++#include "kk_descriptor_set.h"
++#include "kk_descriptor_set_layout.h"
++#include "kk_descriptor_types.h"
++
++#include "nir.h"
++#include "util/hash_table.h"
++#include "util/simple_mtx.h"
++
++#include <stdlib.h>
++
++#define FSR_EASU_BINDING 30
++
++bool
++kk_fsr_metalfx_enabled(void)
++{
++   static int on = -1;
++   if (on < 0) {
++      const char *e = getenv("KK_FSR_METALFX");
++      on = !(e && e[0] == '0');
++   }
++   return on;
++}
++
++bool
++kk_nir_is_fsr_easu(nir_shader *nir)
++{
++   bool a = false, b = false;
++
++   if (nir->info.stage != MESA_SHADER_FRAGMENT || !kk_fsr_metalfx_enabled())
++      return false;
++
++   nir_foreach_function_impl(impl, nir) {
++      nir_foreach_block(block, impl) {
++         nir_foreach_instr(instr, block) {
++            if (instr->type != nir_instr_type_load_const)
++               continue;
++            nir_load_const_instr *lc = nir_instr_as_load_const(instr);
++            if (lc->def.bit_size != 32)
++               continue;
++            for (unsigned c = 0; c < lc->def.num_components; c++) {
++               a |= lc->value[c].u32 == 0x7ef07ebb;
++               b |= lc->value[c].u32 == 0x5f347d74;
++            }
++         }
++      }
++   }
++   return a && b;
++}
++
++static simple_mtx_t textures_lock = SIMPLE_MTX_INITIALIZER;
++static struct hash_table_u64 *textures;
++
++void
++kk_fsr_register_texture(uint64_t gpu_resource_id, mtl_texture *texture)
++{
++   if (!gpu_resource_id || !kk_fsr_metalfx_enabled())
++      return;
++   simple_mtx_lock(&textures_lock);
++   if (!textures)
++      textures = _mesa_hash_table_u64_create(NULL);
++   _mesa_hash_table_u64_insert(textures, gpu_resource_id, texture);
++   simple_mtx_unlock(&textures_lock);
++}
++
++void
++kk_fsr_unregister_texture(uint64_t gpu_resource_id)
++{
++   if (!gpu_resource_id || !kk_fsr_metalfx_enabled())
++      return;
++   simple_mtx_lock(&textures_lock);
++   if (textures)
++      _mesa_hash_table_u64_remove(textures, gpu_resource_id);
++   simple_mtx_unlock(&textures_lock);
++}
++
++mtl_texture *
++kk_fsr_easu_input(struct kk_cmd_buffer *cmd)
++{
++   struct kk_descriptor_set *set = cmd->state.gfx.descriptors.sets[1];
++   if (!set || !set->layout ||
++       set->layout->binding_count <= FSR_EASU_BINDING)
++      return NULL;
++
++   const struct kk_descriptor_set_binding_layout *bl =
++      &set->layout->binding[FSR_EASU_BINDING];
++   if ((bl->type != VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE &&
++        bl->type != VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER) ||
++       bl->offset + sizeof(struct kk_sampled_image_descriptor) > set->size)
++      return NULL;
++
++   const struct kk_sampled_image_descriptor *desc =
++      (const void *)((const char *)set->mapped_ptr + bl->offset);
++   mtl_texture *texture = NULL;
++   simple_mtx_lock(&textures_lock);
++   if (textures)
++      texture = _mesa_hash_table_u64_search(textures,
++                                            desc->image_gpu_resource_id);
++   simple_mtx_unlock(&textures_lock);
++   return texture;
++}
+diff -ruN -x *.orig -x *.rej a/src/kosmickrisp/vulkan/kk_fsr_metalfx.h b/src/kosmickrisp/vulkan/kk_fsr_metalfx.h
+--- a/src/kosmickrisp/vulkan/kk_fsr_metalfx.h	1969-12-31 21:00:00
++++ b/src/kosmickrisp/vulkan/kk_fsr_metalfx.h	2026-10-03 07:31:39
+@@ -0,0 +1,33 @@
++/*
++ * Copyright 2026 SteamARM contributors
++ * SPDX-License-Identifier: MIT
++ */
++
++#ifndef KK_FSR_METALFX_H
++#define KK_FSR_METALFX_H 1
++
++#include "kosmickrisp/bridge/mtl_types.h"
++
++#include <stdbool.h>
++#include <stdint.h>
++
++typedef struct nir_shader nir_shader;
++struct kk_cmd_buffer;
++
++/* SteamARM: a game's FSR 1 upscale (the EASU pass) done by MetalFX.
++ * KK_FSR_METALFX=0 leaves the game's own pass. */
++bool kk_fsr_metalfx_enabled(void);
++
++/* The fragment shader is FSR 1's EASU (its two constants). */
++bool kk_nir_is_fsr_easu(nir_shader *nir);
++
++/* Sampled texture of an image view, by the resource id its descriptors
++ * hold. */
++void kk_fsr_register_texture(uint64_t gpu_resource_id, mtl_texture *texture);
++void kk_fsr_unregister_texture(uint64_t gpu_resource_id);
++
++/* The EASU draw about to be made: its input texture (set 1, binding 30, the
++ * first image of the pass's descriptors), or NULL. */
++mtl_texture *kk_fsr_easu_input(struct kk_cmd_buffer *cmd);
++
++#endif /* KK_FSR_METALFX_H */
+diff -ruN -x *.orig -x *.rej a/src/kosmickrisp/vulkan/kk_image_view.c b/src/kosmickrisp/vulkan/kk_image_view.c
+--- a/src/kosmickrisp/vulkan/kk_image_view.c	2026-10-03 07:31:39
++++ b/src/kosmickrisp/vulkan/kk_image_view.c	2026-10-03 07:31:39
+@@ -6,6 +6,7 @@
+  */
+ 
+ #include "kk_image_view.h"
++#include "kk_fsr_metalfx.h"
+ 
+ #include "kk_device.h"
+ #include "kk_entrypoints.h"
+@@ -181,6 +182,8 @@
+          view->planes[view_plane].sampled_gpu_resource_id =
+             mtl_texture_get_gpu_resource_id(
+                view->planes[view_plane].mtl_handle_sampled);
++         kk_fsr_register_texture(view->planes[view_plane].sampled_gpu_resource_id,
++                                 view->planes[view_plane].mtl_handle_sampled);
+       }
+ 
+       if (view->vk.usage & VK_IMAGE_USAGE_STORAGE_BIT) {
+@@ -238,6 +241,7 @@
+ kk_image_view_finish(struct kk_device *dev, struct kk_image_view *view)
+ {
+    for (uint8_t plane = 0; plane < view->plane_count; plane++) {
++      kk_fsr_unregister_texture(view->planes[plane].sampled_gpu_resource_id);
+       if (view->planes[plane].mtl_handle_sampled)
+          mtl_release(view->planes[plane].mtl_handle_sampled);
+ 
+diff -ruN -x *.orig -x *.rej a/src/kosmickrisp/vulkan/kk_shader.c b/src/kosmickrisp/vulkan/kk_shader.c
+--- a/src/kosmickrisp/vulkan/kk_shader.c	2026-10-03 07:31:39
++++ b/src/kosmickrisp/vulkan/kk_shader.c	2026-10-03 07:31:39
+@@ -6,6 +6,7 @@
+  */
+ 
+ #include "kk_shader.h"
++#include "kk_fsr_metalfx.h"
+ 
+ #include "kk_cmd_buffer.h"
+ #include "kk_debug.h"
+@@ -1597,10 +1598,20 @@
+     * optimization. */
+    const struct vk_pipeline_robustness_state *vertex_robustness = &rs_none;
+    bool a2c_lowered = false;
++   bool fsr_easu = false;
+    for (uint32_t i = 0u; i < shader_count; ++i) {
+       const struct vk_shader_compile_info *info = &infos[i];
+       nir_shader *nir = info->nir;
+ 
++      /* Before the lowering, while the shader's constants are its own. */
++      if (nir->info.stage == MESA_SHADER_FRAGMENT && kk_nir_is_fsr_easu(nir)) {
++         fsr_easu = true;
++         static bool told;
++         if (!told)
++            fprintf(stderr, "kk: FSR 1 upscale (EASU) found: MetalFX draws it\n");
++         told = true;
++      }
++
+       /* For tessellation pipelines, some stages may be emulated in compute */
+       bool emulated_stage = tess && (nir->info.stage == MESA_SHADER_VERTEX ||
+                                      nir->info.stage == MESA_SHADER_TESS_CTRL);
+@@ -1658,8 +1669,10 @@
+    }
+ 
+    for (uint32_t i = 0; i < total_shaders; i++) {
+-      if (shaders[i]->info.stage == MESA_SHADER_FRAGMENT)
++      if (shaders[i]->info.stage == MESA_SHADER_FRAGMENT) {
+          shaders[i]->info.a2c_lowered = a2c_lowered;
++         shaders[i]->info.fsr_easu = fsr_easu && i < shader_count;
++      }
+    }
+ 
+    /* Compile pipeline:
+diff -ruN -x *.orig -x *.rej a/src/kosmickrisp/vulkan/kk_shader.h b/src/kosmickrisp/vulkan/kk_shader.h
+--- a/src/kosmickrisp/vulkan/kk_shader.h	2026-10-03 07:31:39
++++ b/src/kosmickrisp/vulkan/kk_shader.h	2026-10-03 07:31:39
+@@ -59,6 +59,10 @@
+     * kk_nir_lower_alpha_to_coverage), Metal's hardware one stays off. */
+    bool a2c_lowered;
+ 
++   /* Fragment: FSR 1's EASU, whose draws MetalFX replaces
++    * (kk_fsr_metalfx.c). */
++   bool fsr_easu;
++
+    /* Required for fragment shader cull distance discards. */
+    uint8_t num_cull_distances;
+ 
+diff -ruN -x *.orig -x *.rej a/src/kosmickrisp/vulkan/meson.build b/src/kosmickrisp/vulkan/meson.build
+--- a/src/kosmickrisp/vulkan/meson.build	2026-10-03 07:31:39
++++ b/src/kosmickrisp/vulkan/meson.build	2026-10-03 07:31:39
+@@ -88,6 +88,7 @@
+   'kk_image.c',
+   'kk_instance.h',
+   'kk_instance.c',
++  'kk_fsr_metalfx.c',
+   'kk_metal_objects.c',
+   'kk_nir_lower_descriptors.c',
+   'kk_nir_lower_multiview.c',
+@@ -162,7 +163,8 @@
+ libvulkan_kosmickrisp = shared_library(
+   'vulkan_kosmickrisp',
+   link_whole: [libkk],
+-  link_args: [ld_args_build_id, '-Wl,-undefined,dynamic_lookup'],
++  link_args: [ld_args_build_id, '-Wl,-undefined,dynamic_lookup',
++              '-Wl,-framework,MetalFX'],
+   gnu_symbol_visibility : 'hidden',
+   install : true,
+ )

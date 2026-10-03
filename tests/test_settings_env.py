@@ -148,6 +148,10 @@ class SettingsEnvironmentTests(unittest.TestCase):
         self.assertNotIn("STEAMARM_RENDER_SCALE", env)
         env = self.settings.env_from_settings({"scalingFilter": "metalfx", "renderScale": "1.0"})
         self.assertNotIn("STEAMARM_MFX_NATIVE", env)
+        # A game's own FSR: MetalFX draws it unless another filter was chosen.
+        self.assertEqual(self.settings.env_from_settings({})["KK_FSR_METALFX"], "1")
+        self.assertEqual(self.settings.env_from_settings({"scalingFilter": "metalfx-temporal"})["KK_FSR_METALFX"], "1")
+        self.assertEqual(self.settings.env_from_settings({"scalingFilter": "fsr"})["KK_FSR_METALFX"], "0")
         env = self.settings.env_from_settings({"scalingFilter": "fsr", "fsrSharpness": 40})
         self.assertEqual((env["LXRT_VK_SCALER"], env["LXRT_VK_FSR_SHARPNESS"]), ("fsr", "40"))
         env = self.settings.env_from_settings({"scalingFilter": "fsr", "fsrSharpness": 500})

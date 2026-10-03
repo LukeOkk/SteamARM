@@ -351,6 +351,10 @@ def env_from_settings(s, total=None, chip=None, display=None):
     flt = s.get("scalingFilter") or "auto"
     if flt in SCALING_FILTERS and flt != "linear":
         env["LXRT_VK_SCALER"] = flt
+    # A game's own FSR 1 upscale (its EASU pass) is drawn by MetalFX in
+    # SteamARM's KosmicKrisp (patches/kosmickrisp-14) unless another filter
+    # than MetalFX was chosen: "FSR" keeps the game's FSR as it is.
+    env["KK_FSR_METALFX"] = "1" if flt in ("auto", "metalfx", "metalfx-temporal") else "0"
     # "Escala de render": games whose window covers the screen render at this
     # fraction of it (the game tool passes STEAMARM_RENDER_SCALE to the game
     # only as LXRT_VK_RENDER_SCALE; shim/wsi.c render_scale) and the shim
