@@ -1,0 +1,303 @@
+SteamARM: a fullscreen game over the menu bar and the Dock, still drawn
+
+A game's overlay (the NSWindow that hosts its layer, remoteLayerCocoa.m)
+that covers a display used to hide the menu bar and the Dock through the
+application's presentation options (xquartz-ui-fullscreen-dock.patch).
+MEASURED with the user on 2026-10-03 (Counter-Strike 2, M4, macOS 27):
+with HideDock|HideMenuBar the window server stopped drawing the overlay --
+the plain desktop, grey, where the game was, its frames still arriving and
+the overlay on top -- until an app switch, and again after a click; with
+AutoHideDock|AutoHideMenuBar the frames came out of order (the picture
+jumped back and forth); with neither the game was fluid under the Dock.
+The same grey came back with the overlay raised above the menu bar, and
+at 0.999 opacity: a window that covers a display exactly is taken for a
+fullscreen one, and the layer hosted from the game's process is not drawn.
+
+Now (XQUARTZ_RL_PRESENTATION=cover, the default): no presentation options;
+while X11 is the active application and the game is on top of the X stack,
+its overlay goes above the menu bar and the Dock (NSMainMenuWindowLevel+2)
+and is one column wider than the display, the column off an edge with no
+other display next to it (XQUARTZ_RL_OUTSET, default 1; one column short
+worked too but showed the X window under it as a white line). The overlay
+then takes the pointer itself and X11Application sends its events to X,
+so a click at the bottom of the game never lands on the Dock under it.
+XQUARTZ_RL_PRESENTATION=hide or auto keeps the old ways, 0 none.
+diff -ruN a/hw/xquartz/X11Application.m b/hw/xquartz/X11Application.m
+--- a/hw/xquartz/X11Application.m	2026-10-03 18:47:28
++++ b/hw/xquartz/X11Application.m	2026-10-03 18:47:28
+@@ -243,6 +243,8 @@
+     [self activateX:NO];
+ }
+ 
++extern int XQRemoteLayerIsOverlay(id window);   /* remoteLayerCocoa.m */
++
+ - (void) sendEvent:(NSEvent *)e
+ {
+     /* Don't try sending to X if we haven't initialized.  This can happen if AppKit takes over
+@@ -255,6 +257,7 @@
+ 
+     OSX_BOOL for_appkit, for_x;
+     OSX_BOOL const x_active = self.x_active;
++    int overlay = 0;
+ 
+     /* By default pass down the responder chain and to X. */
+     for_appkit = YES;
+@@ -269,7 +272,10 @@
+     case NSOtherMouseUp:
+     case NSScrollWheel:
+ 
+-        if ([e window] != nil) {
++        /* SteamARM: a game's overlay that covers the menu bar and the Dock
++         * takes the pointer for its X window (remoteLayerCocoa.m). */
++        overlay = [e window] != nil && XQRemoteLayerIsOverlay([e window]);
++        if ([e window] != nil && !overlay) {
+             /* Pointer event has an (AppKit) window. Probably something for the kit. */
+             for_x = NO;
+             if (x_active) [self activateX:NO];
+@@ -278,7 +284,7 @@
+             /* Must be an X window. Tell appkit windows to resign main/key */
+             for_appkit = NO;
+ 
+-            if (!x_active && quartzProcs->IsX11Window([e windowNumber])) {
++            if (!x_active && (overlay || quartzProcs->IsX11Window([e windowNumber]))) {
+                 if ([self respondsToSelector:@selector(_setKeyWindow:)] && [self respondsToSelector:@selector(_setMainWindow:)]) {
+                     NSWindow *keyWindow = [self keyWindow];
+                     if (keyWindow) {
+@@ -304,8 +310,9 @@
+             }
+         }
+ 
+-        /* We want to force sending to appkit if we're over the menu bar */
+-        if (!for_appkit) {
++        /* We want to force sending to appkit if we're over the menu bar
++         * (SteamARM: not when a game's overlay covers it) */
++        if (!for_appkit && !overlay) {
+             NSPoint NSlocation = [e locationInWindow];
+             NSWindow *window = [e window];
+             NSRect NSframe, NSvisibleFrame;
+diff -ruN a/hw/xquartz/remoteLayerCocoa.m b/hw/xquartz/remoteLayerCocoa.m
+--- a/hw/xquartz/remoteLayerCocoa.m	2026-10-03 18:47:28
++++ b/hw/xquartz/remoteLayerCocoa.m	2026-10-03 18:47:28
+@@ -10,6 +10,8 @@
+  * the visible (clipped) part of the X window; the CALayerHost keeps the full
+  * X window size and is offset inside it, the root layer clips.
+  */
++#include <string.h>
++#include <stdlib.h>
+ #import <Cocoa/Cocoa.h>
+ #import <QuartzCore/QuartzCore.h>
+ #include "xpr/xprRemoteLayer.h"
+@@ -75,23 +77,104 @@
+     return e[0] != '0';
+ }
+ 
++static int rl_presentation_mode(void);
++
++/* A game covering a display, on top of the X stack, while this application
++ * is the active one: its overlay goes above the menu bar and the Dock
++ * (XQUARTZ_RL_PRESENTATION cover, the default). Hiding them through the
++ * application's presentation options instead made the window server stop
++ * compositing the overlay (HideDock|HideMenuBar: the plain desktop where the
++ * game was) or show its frames out of order (AutoHide: the picture jumped
++ * back and forth); with neither, the game was fluid under the Dock (MEASURED
++ * with the user, 2026-10-03, Counter-Strike 2). The overlay then takes the
++ * pointer itself -- X11Application sends its events to X -- or a click at
++ * the bottom of the game would land on the Dock hidden under it. */
++static BOOL
++rl_covering(XQRemoteLayerWindow *w)
++{
++    return rl_presentation_mode() == 3 && w.coversScreen && w.top && NSApp.active;
++}
++
+ static NSInteger
+ rl_level(XQRemoteLayerWindow *w)
+ {
+     static int on = -1;
+     if (on < 0)
+         on = rl_switch("XQUARTZ_RL_LEVEL", 1);
++    if (rl_covering(w))
++        return NSMainMenuWindowLevel + 2;   /* above the menu bar's status items too */
+     return w.baseLevel + (on && w.top && NSApp.active ? 1 : 0);
+ }
+ 
++/* A covering overlay is one column wider than its display, the column off
++ * its edge (one with no other display next to it): a window that covers a
++ * display exactly is taken by the window server for a fullscreen one, and
++ * then the layer it hosts from the game's process is not drawn at all -- the
++ * desktop, grey, where the game was, whatever its level or opacity. One
++ * column short worked but showed the X window under it, a white line; one
++ * column over shows nothing (MEASURED with the user, 2026-10-03).
++ * XQUARTZ_RL_OUTSET: columns (default 1; 0 covers the display exactly). */
++static NSRect
++rl_cover_frame(XQRemoteLayerWindow *w, NSRect r)
++{
++    static int outset = -1;
++    if (outset < 0) {
++        const char *e = getenv("XQUARTZ_RL_OUTSET");
++        outset = e && e[0] ? atoi(e) : 1;
++        if (outset < 0 || outset > 64)
++            outset = 1;
++    }
++    if (!outset || !w.coversScreen || rl_presentation_mode() != 3)
++        return r;
++    BOOL left = NO, right = NO;
++    for (NSScreen *sc in NSScreen.screens) {
++        NSRect f = sc.frame;
++        if (NSEqualRects(f, r))
++            continue;
++        if (NSMaxX(f) == NSMinX(r) && NSMaxY(f) > NSMinY(r) && NSMinY(f) < NSMaxY(r))
++            left = YES;
++        if (NSMinX(f) == NSMaxX(r) && NSMaxY(f) > NSMinY(r) && NSMinY(f) < NSMaxY(r))
++            right = YES;
++    }
++    if (!left) {
++        r.origin.x -= outset;
++        r.size.width += outset;
++    } else if (!right)
++        r.size.width += outset;
++    else {
++        /* Displays on both sides: the column goes off the top instead. */
++        r.size.height += outset;
++    }
++    return r;
++}
++
++/* The level and whether the overlay takes the pointer go together. */
+ static void
++rl_set_level(XQRemoteLayerWindow *w)
++{
++    NSInteger level = rl_level(w);
++    if (w.level != level)
++        w.level = level;
++    BOOL ignore = !rl_covering(w);
++    if (w.ignoresMouseEvents != ignore)
++        w.ignoresMouseEvents = ignore;
++}
++
++/* For X11Application: pointer events in a covering overlay are the X
++ * window's under it. */
++int
++XQRemoteLayerIsOverlay(id window)
++{
++    return [window isKindOfClass:XQRemoteLayerWindow.class];
++}
++
++static void
+ rl_relevel_all(void)
+ {
+     for (XQRemoteLayerWindow *w in overlays.allValues) {
+-        NSInteger level = rl_level(w);
+-        if (w.level == level)
++        if (w.level == rl_level(w) && w.ignoresMouseEvents == !rl_covering(w))
+             continue;
+-        w.level = level;
++        rl_set_level(w);
+         if (w.isVisible && w.nativeBelow)
+             [w orderWindow:NSWindowAbove relativeTo:w.nativeBelow];
+     }
+@@ -161,9 +244,37 @@
+  * user, with Counter-Strike 2). The blinking measured on 2026-10-02 came with
+  * the 100 ms watch on as well; the watch stays off. A layer that leaves for a
+  * moment -- a swapchain made again, a mode change -- does not bring the Dock
+- * back: the return is checked again 400 ms later. */
++ * back: the return is checked again 400 ms later.
++ *
++ * Auto-hidden, not hidden (XQUARTZ_RL_PRESENTATION: auto, the default; hide;
++ * 0): with HideDock|HideMenuBar the window server stopped compositing the
++ * overlay -- the user saw the plain desktop, grey, where the game's picture
++ * was, while its frames kept arriving and the overlay was on top (MEASURED
++ * with the user, 2026-10-03, Counter-Strike 2; fine with hiding off). With
++ * AutoHideDock|AutoHideMenuBar they stay out of the way and come back only at
++ * the screen's edge, as in other macOS fullscreen apps. */
+ static void rl_presentation_apply(BOOL full);
+ 
++/* 0 off, 1 hidden, 2 auto-hidden, 3 covered (the default): see
++ * rl_cover_level. */
++static int
++rl_presentation_mode(void)
++{
++    static int mode = -1;
++    if (mode < 0) {
++        const char *e = getenv("XQUARTZ_RL_PRESENTATION");
++        if (!e || !e[0] || !strcmp(e, "cover") || !strcmp(e, "3"))
++            mode = 3;
++        else if (!strcmp(e, "auto") || !strcmp(e, "2"))
++            mode = 2;
++        else if (!strcmp(e, "hide") || !strcmp(e, "1"))
++            mode = 1;
++        else
++            mode = e[0] == '0' ? 0 : 3;
++    }
++    return mode;
++}
++
+ static BOOL
+ rl_presentation_wanted(void)
+ {
+@@ -184,7 +295,7 @@
+      * time it leaves gets its full 400 ms (a swapchain made twice in a row). */
+     static unsigned generation;
+     if (on < 0)
+-        on = rl_switch("XQUARTZ_RL_PRESENTATION", 1);
++        on = rl_presentation_mode() == 1 || rl_presentation_mode() == 2;
+     if (!on)
+         return;
+     BOOL full = rl_presentation_wanted();
+@@ -211,12 +322,14 @@
+ static void
+ rl_presentation_apply(BOOL full)
+ {
+-    NSApplicationPresentationOptions want = full
+-        ? NSApplicationPresentationHideDock | NSApplicationPresentationHideMenuBar
+-        : NSApplicationPresentationDefault;
++    NSApplicationPresentationOptions want = !full ? NSApplicationPresentationDefault
++        : rl_presentation_mode() == 1 ? NSApplicationPresentationHideDock | NSApplicationPresentationHideMenuBar
++        : NSApplicationPresentationAutoHideDock | NSApplicationPresentationAutoHideMenuBar;
+     if (NSApp.presentationOptions != want) {
+         NSApp.presentationOptions = want;
+-        ErrorF("remote layer: menu bar and Dock %s\n", full ? "hidden (a layer covers a display)" : "back");
++        ErrorF("remote layer: menu bar and Dock %s\n", !full ? "back"
++               : rl_presentation_mode() == 1 ? "hidden (a layer covers a display)"
++               : "auto-hidden (a layer covers a display)");
+     }
+ }
+ 
+@@ -322,24 +435,25 @@
+              * the primary screen, y up). */
+             CGFloat H = NSScreen.screens.firstObject.frame.size.height;
+             NSRect r = NSMakeRect(st->cx, H - (st->cy + st->ch), st->cw, st->ch);
+-            if (!NSEqualRects(w.frame, r))
+-                [w setFrame:r display:NO animate:NO];
+-            /* Layer position inside the (unflipped) root layer: bottom-left
+-             * origin, so measure from the bottom edges. */
+-            CGRect hf = CGRectMake(st->lx - st->cx,
+-                                   (st->cy + st->ch) - (st->ly + st->lh),
+-                                   st->lw, st->lh);
+-            if (!CGRectEqualToRect(w.host.frame, hf))
+-                w.host.frame = hf;
+-            w.baseLevel = st->level;
+-            w.top = st->top != 0;
+-            if (w.level != rl_level(w))
+-                w.level = rl_level(w);
+             BOOL covers = NO;
+             for (NSScreen *sc in NSScreen.screens)
+                 if (NSEqualRects(sc.frame, r) && st->lw == st->cw && st->lh == st->ch)
+                     covers = YES;
+             w.coversScreen = covers;
++            w.baseLevel = st->level;
++            w.top = st->top != 0;
++            NSRect wr = rl_cover_frame(w, r);
++            if (!NSEqualRects(w.frame, wr))
++                [w setFrame:wr display:NO animate:NO];
++            /* Layer position inside the (unflipped) root layer: bottom-left
++             * origin, so measure from the bottom edges (and from the
++             * window's own left edge, which rl_cover_frame may move). */
++            CGRect hf = CGRectMake(st->lx - st->cx - (NSMinX(wr) - NSMinX(r)),
++                                   (st->cy + st->ch) - (st->ly + st->lh),
++                                   st->lw, st->lh);
++            if (!CGRectEqualToRect(w.host.frame, hf))
++                w.host.frame = hf;
++            rl_set_level(w);
+         }
+         [CATransaction commit];
+ 

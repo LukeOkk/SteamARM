@@ -25,6 +25,7 @@
 #import <MetalFX/MetalFX.h>
 #include <os/lock.h>
 #include <stdint.h>
+#include <stdio.h>
 
 struct lxrt_mfx_run {
     void *scaler;           // in/out: id<MTLFXSpatialScaler> or a SteamARMMfxTemporal, 0 the first time
@@ -222,6 +223,18 @@ static id<MTLCommandQueue> own_queue(id<MTLDevice> dev)
     return q;
 }
 
+// A pass that failed or ran long, on stderr (a GPU timeout here makes macOS
+// ignore the process's later command buffers: the game goes black).
+static void mfx_watch(id<MTLCommandBuffer> cb, uint64_t wait)
+{
+    [cb addCompletedHandler:^(id<MTLCommandBuffer> done) {
+        double ms = (done.GPUEndTime - done.GPUStartTime) * 1000.0;
+        if (done.status != MTLCommandBufferStatusCompleted || ms > 100.0)
+            fprintf(stderr, "[lxrt] metalfx pass (wait %llu): status %ld error %ld, %.1f ms on the GPU\n",
+                    (unsigned long long)wait, (long)done.status, (long)(done.error ? done.error.code : 0), ms);
+    }];
+}
+
 long lxrt_mfx_encode(struct lxrt_mfx_run *r)
 {
     if (!r || !r->in || !r->out || !r->event)
@@ -248,6 +261,7 @@ long lxrt_mfx_encode(struct lxrt_mfx_run *r)
                 [cb encodeWaitForEvent:ev value:r->wait];
                 temporal_encode(t, cb, in, out);
                 [cb encodeSignalEvent:ev value:r->signal];
+                mfx_watch(cb, r->wait);
                 [cb commit];
                 return 0;
             }
