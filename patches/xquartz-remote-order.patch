@@ -113,7 +113,7 @@
  @property (nonatomic, retain) CALayerHost *host;
  @end
  
-@@ -41,7 +44,98 @@
+@@ -41,7 +44,140 @@
  static NSMutableDictionary<NSNumber *, XQRemoteLayerWindow *> *overlays;
  static id observerActive, observerUnhide;
  
@@ -132,10 +132,29 @@
 + * stacked over the layer (st->top, xprRemoteLayer.c), the overlay sits one
 + * window level above its frame: nothing done to the frames can cover it.
 + * Otherwise it is at the frame's level, directly above it, as before. */
++/* XQUARTZ_RL_LEVEL (default 1): the overlay one level above its frame while
++ * its window is on top. XQUARTZ_RL_WATCH (default 0): the 100 ms check that
++ * an overlay is above its frame. XQUARTZ_RL_PRESENTATION (default 0): hide
++ * the menu bar and the Dock under a layer that covers a display. With the
++ * last two on, Counter-Strike 2's picture blinked every few hundred
++ * milliseconds by itself; with the first alone it did not, and a click no
++ * longer shows the window (MEASURED with the user, 2026-10-02). */
++static int
++rl_switch(const char *name, int def)
++{
++    const char *e = getenv(name);
++    if (!e || !e[0])
++        return def;
++    return e[0] != '0';
++}
++
 +static NSInteger
 +rl_level(XQRemoteLayerWindow *w)
 +{
-+    return w.baseLevel + (w.top && NSApp.active ? 1 : 0);
++    static int on = -1;
++    if (on < 0)
++        on = rl_switch("XQUARTZ_RL_LEVEL", 1);
++    return w.baseLevel + (on && w.top && NSApp.active ? 1 : 0);
 +}
 +
  static void
@@ -151,12 +170,30 @@
 +    }
 +}
 +
++/* Is the overlay in front of the window `native` for the window server? */
++static BOOL
++rl_is_above(XQRemoteLayerWindow *w, uint32_t native)
++{
++    CFArrayRef above = CGWindowListCreate(kCGWindowListOptionOnScreenAboveWindow, native);
++    if (!above)
++        return NO;
++    uintptr_t wid = (uintptr_t)w.windowNumber;
++    BOOL ok = CFArrayContainsValue(above, CFRangeMake(0, CFArrayGetCount(above)), (const void *)wid);
++    CFRelease(above);
++    return ok;
++}
++
 +/* And what that does not catch (an overlay at its frame's level): every
 + * 100 ms, an overlay that is on screen but not above its frame is put back. */
 +static void
 +rl_watch(void)
 +{
 +    static unsigned fixed;
++    static int on = -1;
++    if (on < 0)
++        on = rl_switch("XQUARTZ_RL_WATCH", 0);
++    if (!on)
++        return;
 +    /* Only while this application is the active one: otherwise Stage Manager
 +     * or Mission Control may hold the frames as miniatures, and an overlay
 +     * ordered in over one of those lands in the middle of the screen. */
@@ -195,6 +232,11 @@
 +static void
 +rl_presentation(void)
 +{
++    static int on = -1;
++    if (on < 0)
++        on = rl_switch("XQUARTZ_RL_PRESENTATION", 0);
++    if (!on)
++        return;
 +    BOOL full = NO;
 +    for (XQRemoteLayerWindow *w in overlays.allValues)
 +        if (w.isVisible && w.coversScreen)
@@ -212,7 +254,7 @@
  reorder_all(void)
  {
      for (XQRemoteLayerWindow *w in overlays.allValues) {
-@@ -93,6 +187,15 @@
+@@ -93,6 +229,15 @@
                                       usingBlock:^(NSNotification *n) { reorder_all(); }];
          [observerActive retain];
          [observerUnhide retain];
@@ -228,7 +270,7 @@
      }
      return w;
  }
-@@ -110,8 +213,10 @@
+@@ -110,8 +255,10 @@
                st->lx, st->ly, st->lw, st->lh, st->native, st->level, st->reorder);
  
          if (!st->visible) {
@@ -240,7 +282,7 @@
              if (!w || !st->ctx)
                  return;
          }
-@@ -139,8 +244,15 @@
+@@ -139,12 +286,26 @@
                                     st->lw, st->lh);
              if (!CGRectEqualToRect(w.host.frame, hf))
                  w.host.frame = hf;
@@ -258,7 +300,19 @@
          }
          [CATransaction commit];
  
-@@ -163,6 +275,7 @@
+-        if (st->visible && (st->reorder || !w.isVisible ||
++        /* Above its frame already (one level up, or found there): the X
++         * restack that brought this here (every click in the window) needs
++         * nothing of the overlay, and an orderWindow: of a window with a
++         * hosted layer is not free (the picture blinked at every click;
++         * MEASURED 2026-10-02). */
++        BOOL placed = w.isVisible && w.nativeBelow == st->native &&
++                      (rl_level(w) > w.baseLevel || rl_is_above(w, st->native));
++        if (st->visible && !placed && (st->reorder || !w.isVisible ||
+                             w.nativeBelow != st->native)) {
+             w.nativeBelow = st->native;
+             [w orderWindow:NSWindowAbove relativeTo:st->native];
+@@ -163,6 +324,7 @@
                  });
              }
          }
@@ -266,7 +320,7 @@
      }
  }
  
-@@ -177,6 +290,7 @@
+@@ -177,6 +339,7 @@
          [w orderOut:nil];
          [w close];
          [overlays removeObjectForKey:key];
