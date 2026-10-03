@@ -2,11 +2,13 @@
 // the Vulkan shim. The fragment shader here carries the two constants of
 // EASU's approximations (0x7ef07ebb, 0x5f347d74) and samples set 1 binding
 // 30 with the sampler at binding 14, as Counter-Strike 2's EASU does, but
-// paints magenta. A 32x32 input (blue left half, red right half) is "upscaled"
-// into a 64x64 colour attachment cleared green. SteamARM's KosmicKrisp
+// paints magenta. As in Counter-Strike 2, the input is a texture of the
+// output's size (64x64) with the picture in its top left: 32x32, blue left
+// half and red right half, green around it; the constants (con0, the input's
+// viewport over the output's size) say 0.5. SteamARM's KosmicKrisp
 // (patches/kosmickrisp-14) draws that pass with MetalFX's spatial scaler: the
-// result is the input enlarged (blue left, red right); any other driver, or
-// KK_FSR_METALFX=0, runs the shader: magenta.
+// result is the picture enlarged to the whole output (blue left, red right,
+// no green); any other driver, or KK_FSR_METALFX=0, runs the shader: magenta.
 // Usage: vk_fsr metalfx|shader (the result expected)
 // Prints "== vk_fsr: ok" or "== vk_fsr: FAIL".
 //
@@ -14,7 +16,7 @@
 //   full.vert: full-screen triangle from gl_VertexIndex at z 0.5
 //   easu.frag: uint a = 0x7ef07ebbu - c.con0.x, b = 0x5f347d74u - (c.con0.y >> 1);
 //              o = a == b ? texture(sampler2D(t, s), gl_FragCoord.xy / 64) : magenta
-//              (c: uniform block at set 1 binding 1, zero here; s: binding 14; t: binding 30)
+//              (c: uniform block at set 1 binding 1; s: binding 14; t: binding 30)
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -22,7 +24,7 @@
 #include "vk_fsr_spv.h"
 
 #define CHECK(x) do { VkResult r_ = (x); if (r_ != VK_SUCCESS) { printf("%s -> %d\n== vk_fsr: FAIL\n", #x, r_); exit(1); } } while (0)
-enum { IW = 32, IH = 32, OW = 64, OH = 64 };
+enum { IW = 64, IH = 64, PW = 32, PH = 32, OW = 64, OH = 64 }; // input, its picture, output
 
 static VkDevice dev;
 static VkPhysicalDevice pd;
@@ -133,13 +135,16 @@ int main(int argc, char **argv)
     make_buffer(OW * OH * 4, VK_BUFFER_USAGE_TRANSFER_DST_BIT, &down, &down_map);
     make_buffer(256, VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT, &ubo, &ubo_map);
     memset(ubo_map, 0, 256);
+    float ratio[2] = { (float)PW / OW, (float)PH / OH }; // con0.xy: the input's viewport over the output's size
+    memcpy(ubo_map, ratio, sizeof ratio);
     unsigned char *px = up_map;
     for (int y = 0; y < IH; y++)
         for (int x = 0; x < IW; x++) {
             unsigned char *p = px + 4 * (y * IW + x);
-            p[0] = x < IW / 2 ? 0 : 255;
-            p[1] = 0;
-            p[2] = x < IW / 2 ? 255 : 0;
+            int in = x < PW && y < PH;
+            p[0] = in && x >= PW / 2 ? 255 : 0;
+            p[1] = in ? 0 : 255;
+            p[2] = in && x < PW / 2 ? 255 : 0;
             p[3] = 255;
         }
 
@@ -229,10 +234,14 @@ int main(int argc, char **argv)
     CHECK(vkQueueWaitIdle(queue));
 
     // Away from the middle and the edges, where a filter blends.
+    // The bottom row too: with the whole input enlarged it would be green.
     const unsigned char *o = down_map;
     const unsigned char *l = o + 4 * (OH / 2 * OW + 8), *r = o + 4 * (OH / 2 * OW + OW - 9);
-    printf("left %u,%u,%u right %u,%u,%u\n", l[0], l[1], l[2], r[0], r[1], r[2]);
-    int scaled = l[2] > 200 && l[0] < 60 && l[1] < 60 && r[0] > 200 && r[2] < 60 && r[1] < 60;
+    const unsigned char *bl = o + 4 * ((OH - 4) * OW + 8), *br = o + 4 * ((OH - 4) * OW + OW - 9);
+    printf("left %u,%u,%u right %u,%u,%u bottom %u,%u,%u %u,%u,%u\n", l[0], l[1], l[2], r[0], r[1], r[2],
+           bl[0], bl[1], bl[2], br[0], br[1], br[2]);
+    int scaled = l[2] > 200 && l[0] < 60 && l[1] < 60 && r[0] > 200 && r[2] < 60 && r[1] < 60 &&
+                 bl[2] > 200 && bl[1] < 60 && br[0] > 200 && br[1] < 60;
     int magenta = l[0] > 200 && l[2] > 200 && r[0] > 200 && r[2] > 200 && l[1] < 60 && r[1] < 60;
     printf("result: %s\n", scaled ? "metalfx (the input enlarged)" : magenta ? "shader (magenta)" : "neither");
     int ok = want_metalfx ? scaled : magenta;

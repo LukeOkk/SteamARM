@@ -13,14 +13,21 @@ result; the HUD drawn afterwards stays at the display's resolution.
 
 The input is found from the descriptor (set 1 binding 30 in Counter-Strike
 2's EASU, the sampler at binding 14, the constants at binding 1): image
-views register the resource id of their sampled texture. Formats or texture
+views register the resource id of their sampled texture. The input is a
+texture of the display's size with the picture in its top left; how much of
+it comes from EASU's constants (con0: the input's viewport over the output's
+size), read from mappable memory registered by GPU address. Constants that
+cannot be read: the game's own pass. Measured in Counter-Strike 2 with its
+FSR on: picture 1132x637 -> 1920x1080 by MetalFX, about 110 frames a second
+on an M4 with its lower settings. Formats or texture
 usage MetalFX cannot take, or no Metal 4 MetalFX: the game's own pass.
 KK_FSR_METALFX=0: the game's own pass always. tests/elf/vk_fsr.c checks the
 replacement with a shader of its own (magenta when drawn, the input
-enlarged when MetalFX takes it).
-diff -ruN -x *.orig -x *.rej a/src/kosmickrisp/bridge/meson.build b/src/kosmickrisp/bridge/meson.build
+enlarged when MetalFX takes it; its input has the picture in the top left).
 --- a/src/kosmickrisp/bridge/meson.build	2026-10-03 07:31:39
-+++ b/src/kosmickrisp/bridge/meson.build	2026-10-03 07:31:39
+diff -ruN -x *.orig -x *.rej -x __pycache__ a/src/kosmickrisp/bridge/meson.build b/src/kosmickrisp/bridge/meson.build
+--- a/src/kosmickrisp/bridge/meson.build	2026-10-03 07:31:39
++++ b/src/kosmickrisp/bridge/meson.build	2026-10-03 07:47:42
 @@ -19,6 +19,7 @@
      'mtl_device.m',
      'mtl_encoder.m',
@@ -37,9 +44,9 @@ diff -ruN -x *.orig -x *.rej a/src/kosmickrisp/bridge/meson.build b/src/kosmickr
      'stubs/mtl_render_state.c',
      'stubs/mtl_residency_set.c',
      'stubs/mtl_sampler.c',
-diff -ruN -x *.orig -x *.rej a/src/kosmickrisp/bridge/mtl_metalfx.h b/src/kosmickrisp/bridge/mtl_metalfx.h
+diff -ruN -x *.orig -x *.rej -x __pycache__ a/src/kosmickrisp/bridge/mtl_metalfx.h b/src/kosmickrisp/bridge/mtl_metalfx.h
 --- a/src/kosmickrisp/bridge/mtl_metalfx.h	1969-12-31 21:00:00
-+++ b/src/kosmickrisp/bridge/mtl_metalfx.h	2026-10-03 07:31:39
++++ b/src/kosmickrisp/bridge/mtl_metalfx.h	2026-10-03 07:47:42
 @@ -0,0 +1,23 @@
 +/*
 + * Copyright 2026 SteamARM contributors
@@ -64,9 +71,9 @@ diff -ruN -x *.orig -x *.rej a/src/kosmickrisp/bridge/mtl_metalfx.h b/src/kosmic
 +                                mtl_texture *out, uint32_t in_w, uint32_t in_h);
 +
 +#endif /* MTL_METALFX_H */
-diff -ruN -x *.orig -x *.rej a/src/kosmickrisp/bridge/mtl_metalfx.m b/src/kosmickrisp/bridge/mtl_metalfx.m
+diff -ruN -x *.orig -x *.rej -x __pycache__ a/src/kosmickrisp/bridge/mtl_metalfx.m b/src/kosmickrisp/bridge/mtl_metalfx.m
 --- a/src/kosmickrisp/bridge/mtl_metalfx.m	1969-12-31 21:00:00
-+++ b/src/kosmickrisp/bridge/mtl_metalfx.m	2026-10-03 07:31:39
++++ b/src/kosmickrisp/bridge/mtl_metalfx.m	2026-10-03 07:47:41
 @@ -0,0 +1,125 @@
 +/*
 + * Copyright 2026 SteamARM contributors
@@ -193,9 +200,9 @@ diff -ruN -x *.orig -x *.rej a/src/kosmickrisp/bridge/mtl_metalfx.m b/src/kosmic
 +   }
 +   return ok;
 +}
-diff -ruN -x *.orig -x *.rej a/src/kosmickrisp/bridge/stubs/mtl_metalfx.c b/src/kosmickrisp/bridge/stubs/mtl_metalfx.c
+diff -ruN -x *.orig -x *.rej -x __pycache__ a/src/kosmickrisp/bridge/stubs/mtl_metalfx.c b/src/kosmickrisp/bridge/stubs/mtl_metalfx.c
 --- a/src/kosmickrisp/bridge/stubs/mtl_metalfx.c	1969-12-31 21:00:00
-+++ b/src/kosmickrisp/bridge/stubs/mtl_metalfx.c	2026-10-03 07:31:39
++++ b/src/kosmickrisp/bridge/stubs/mtl_metalfx.c	2026-10-03 07:47:41
 @@ -0,0 +1,14 @@
 +/*
 + * Copyright 2026 SteamARM contributors
@@ -211,11 +218,9 @@ diff -ruN -x *.orig -x *.rej a/src/kosmickrisp/bridge/stubs/mtl_metalfx.c b/src/
 +{
 +   return false;
 +}
-Binary files a/src/kosmickrisp/util/__pycache__/vk_entrypoints.cpython-314.pyc and b/src/kosmickrisp/util/__pycache__/vk_entrypoints.cpython-314.pyc differ
-Binary files a/src/kosmickrisp/util/__pycache__/vk_extensions.cpython-314.pyc and b/src/kosmickrisp/util/__pycache__/vk_extensions.cpython-314.pyc differ
-diff -ruN -x *.orig -x *.rej a/src/kosmickrisp/vulkan/kk_cmd_buffer.c b/src/kosmickrisp/vulkan/kk_cmd_buffer.c
+diff -ruN -x *.orig -x *.rej -x __pycache__ a/src/kosmickrisp/vulkan/kk_cmd_buffer.c b/src/kosmickrisp/vulkan/kk_cmd_buffer.c
 --- a/src/kosmickrisp/vulkan/kk_cmd_buffer.c	2026-10-03 07:31:39
-+++ b/src/kosmickrisp/vulkan/kk_cmd_buffer.c	2026-10-03 07:31:39
++++ b/src/kosmickrisp/vulkan/kk_cmd_buffer.c	2026-10-03 07:47:42
 @@ -301,6 +301,29 @@
     return cmd_buf;
  }
@@ -272,9 +277,9 @@ diff -ruN -x *.orig -x *.rej a/src/kosmickrisp/vulkan/kk_cmd_buffer.c b/src/kosm
  }
  
  mtl_compute_encoder *
-diff -ruN -x *.orig -x *.rej a/src/kosmickrisp/vulkan/kk_cmd_buffer.h b/src/kosmickrisp/vulkan/kk_cmd_buffer.h
+diff -ruN -x *.orig -x *.rej -x __pycache__ a/src/kosmickrisp/vulkan/kk_cmd_buffer.h b/src/kosmickrisp/vulkan/kk_cmd_buffer.h
 --- a/src/kosmickrisp/vulkan/kk_cmd_buffer.h	2026-10-03 07:31:39
-+++ b/src/kosmickrisp/vulkan/kk_cmd_buffer.h	2026-10-03 07:31:39
++++ b/src/kosmickrisp/vulkan/kk_cmd_buffer.h	2026-10-03 07:47:42
 @@ -264,6 +264,9 @@
     /* A dependency of that kind was recorded inside the current render
      * pass: the encoder's command buffer is closed when it ends. */
@@ -297,9 +302,9 @@ diff -ruN -x *.orig -x *.rej a/src/kosmickrisp/vulkan/kk_cmd_buffer.h b/src/kosm
  void kk_cmd_buffer_close_mtl(struct kk_cmd_buffer *cmd);
  void kk_cmd_buffer_dependency(struct kk_cmd_buffer *cmd, uint32_t count,
                                const VkDependencyInfo *deps);
-diff -ruN -x *.orig -x *.rej a/src/kosmickrisp/vulkan/kk_cmd_draw.c b/src/kosmickrisp/vulkan/kk_cmd_draw.c
+diff -ruN -x *.orig -x *.rej -x __pycache__ a/src/kosmickrisp/vulkan/kk_cmd_draw.c b/src/kosmickrisp/vulkan/kk_cmd_draw.c
 --- a/src/kosmickrisp/vulkan/kk_cmd_draw.c	2026-10-03 07:31:39
-+++ b/src/kosmickrisp/vulkan/kk_cmd_draw.c	2026-10-03 07:31:39
++++ b/src/kosmickrisp/vulkan/kk_cmd_draw.c	2026-10-03 07:47:42
 @@ -11,6 +11,9 @@
  
  #include "kk_buffer.h"
@@ -310,7 +315,7 @@ diff -ruN -x *.orig -x *.rej a/src/kosmickrisp/vulkan/kk_cmd_draw.c b/src/kosmic
  #include "kk_format.h"
  #include "kk_image_view.h"
  #include "kk_query_pool.h"
-@@ -2082,9 +2085,53 @@
+@@ -2082,9 +2085,57 @@
     return draw;
  }
  
@@ -334,7 +339,11 @@ diff -ruN -x *.orig -x *.rej a/src/kosmickrisp/vulkan/kk_cmd_draw.c b/src/kosmic
 +
 +   mtl_texture *in = kk_fsr_easu_input(cmd);
 +   mtl_texture *out = render->color_att[0].iview->planes[0].mtl_handle_render;
-+   if (!in || !out)
++   const struct vk_image_view *ov = &render->color_att[0].iview->vk;
++   uint32_t in_w, in_h;
++   if (!in || !out ||
++       !kk_fsr_easu_content(cmd, ov->extent.width, ov->extent.height, &in_w,
++                            &in_h))
 +      return false;
 +
 +   struct kk_device *dev = kk_cmd_buffer_device(cmd);
@@ -348,7 +357,7 @@ diff -ruN -x *.orig -x *.rej a/src/kosmickrisp/vulkan/kk_cmd_draw.c b/src/kosmic
 +   mtl_command_buffer *cmd_buf = kk_cmd_buffer_take_gfx_mtl(cmd);
 +   bool done = mtl_metalfx_spatial_encode(dev->mtl_handle,
 +                                          dev->mtl_compiler_handle, cmd_buf,
-+                                          in, out, 0, 0);
++                                          in, out, in_w, in_h);
 +   kk_cmd_buffer_return_gfx_mtl(cmd, cmd_buf);
 +   if (done)
 +      cmd->after_metalfx = true;
@@ -364,10 +373,37 @@ diff -ruN -x *.orig -x *.rej a/src/kosmickrisp/vulkan/kk_cmd_draw.c b/src/kosmic
     kk_flush_gfx_state(cmd);
  
     data->restart = cmd->vk.dynamic_graphics_state.ia.primitive_restart_enable;
-diff -ruN -x *.orig -x *.rej a/src/kosmickrisp/vulkan/kk_fsr_metalfx.c b/src/kosmickrisp/vulkan/kk_fsr_metalfx.c
+diff -ruN -x *.orig -x *.rej -x __pycache__ a/src/kosmickrisp/vulkan/kk_device_memory.c b/src/kosmickrisp/vulkan/kk_device_memory.c
+--- a/src/kosmickrisp/vulkan/kk_device_memory.c	2026-10-03 07:31:39
++++ b/src/kosmickrisp/vulkan/kk_device_memory.c	2026-10-03 07:47:42
+@@ -6,6 +6,7 @@
+  */
+ 
+ #include "kk_device_memory.h"
++#include "kk_fsr_metalfx.h"
+ 
+ #include "kk_device.h"
+ #include "kk_entrypoints.h"
+@@ -147,6 +148,7 @@
+          goto fail_alloc;
+    }
+ 
++   kk_fsr_register_memory(mem->bo->gpu, mem->bo->size_B, mem->bo->cpu);
+    *pMem = kk_device_memory_to_handle(mem);
+ 
+    return VK_SUCCESS;
+@@ -166,6 +168,7 @@
+    if (!mem)
+       return;
+ 
++   kk_fsr_unregister_memory(mem->bo->gpu);
+    kk_destroy_bo(dev, mem->bo);
+ 
+    vk_device_memory_destroy(&dev->vk, pAllocator, &mem->vk);
+diff -ruN -x *.orig -x *.rej -x __pycache__ a/src/kosmickrisp/vulkan/kk_fsr_metalfx.c b/src/kosmickrisp/vulkan/kk_fsr_metalfx.c
 --- a/src/kosmickrisp/vulkan/kk_fsr_metalfx.c	1969-12-31 21:00:00
-+++ b/src/kosmickrisp/vulkan/kk_fsr_metalfx.c	2026-10-03 07:31:39
-@@ -0,0 +1,124 @@
++++ b/src/kosmickrisp/vulkan/kk_fsr_metalfx.c	2026-10-03 07:47:42
+@@ -0,0 +1,235 @@
 +/*
 + * Copyright 2026 SteamARM contributors
 + * SPDX-License-Identifier: MIT
@@ -387,7 +423,12 @@ diff -ruN -x *.orig -x *.rej a/src/kosmickrisp/vulkan/kk_fsr_metalfx.c b/src/kos
 + * Counter-Strike 2 ("FidelityFX Super Resolution" in its video settings):
 + * EASU samples set 1 binding 30 with the sampler at binding 14 and its
 + * constants at binding 1. The input is found by the resource id in the
-+ * descriptor: image views register theirs here. */
++ * descriptor: image views register theirs here. The input is a texture of
++ * the display's size with the picture in its top left (960x540 of
++ * 1920x1080 at 50 %): how much of it is read from EASU's constants (con0,
++ * the input's viewport over the output's size), in memory registered here
++ * by GPU address; MetalFX given the whole texture showed the picture small
++ * in a corner and garbage around it (MEASURED). */
 +
 +#include "kk_fsr_metalfx.h"
 +
@@ -399,8 +440,12 @@ diff -ruN -x *.orig -x *.rej a/src/kosmickrisp/vulkan/kk_fsr_metalfx.c b/src/kos
 +#include "nir.h"
 +#include "util/hash_table.h"
 +#include "util/simple_mtx.h"
++#include "util/u_dynarray.h"
 +
++#include <math.h>
++#include <stdio.h>
 +#include <stdlib.h>
++#include <string.h>
 +
 +#define FSR_EASU_BINDING 30
 +
@@ -492,10 +537,112 @@ diff -ruN -x *.orig -x *.rej a/src/kosmickrisp/vulkan/kk_fsr_metalfx.c b/src/kos
 +   simple_mtx_unlock(&textures_lock);
 +   return texture;
 +}
-diff -ruN -x *.orig -x *.rej a/src/kosmickrisp/vulkan/kk_fsr_metalfx.h b/src/kosmickrisp/vulkan/kk_fsr_metalfx.h
++
++struct fsr_memory {
++   uint64_t gpu, size;
++   const void *cpu;
++};
++
++static simple_mtx_t memory_lock = SIMPLE_MTX_INITIALIZER;
++static struct util_dynarray memory;
++
++void
++kk_fsr_register_memory(uint64_t gpu, uint64_t size, void *cpu)
++{
++   if (!gpu || !cpu || !kk_fsr_metalfx_enabled())
++      return;
++   struct fsr_memory m = { gpu, size, cpu };
++   simple_mtx_lock(&memory_lock);
++   util_dynarray_append(&memory, m);
++   simple_mtx_unlock(&memory_lock);
++}
++
++void
++kk_fsr_unregister_memory(uint64_t gpu)
++{
++   if (!gpu || !kk_fsr_metalfx_enabled())
++      return;
++   simple_mtx_lock(&memory_lock);
++   util_dynarray_foreach(&memory, struct fsr_memory, m) {
++      if (m->gpu == gpu) {
++         *m = util_dynarray_pop(&memory, struct fsr_memory);
++         break;
++      }
++   }
++   simple_mtx_unlock(&memory_lock);
++}
++
++static bool
++fsr_read(uint64_t addr, void *dst, size_t len)
++{
++   bool found = false;
++   simple_mtx_lock(&memory_lock);
++   util_dynarray_foreach(&memory, struct fsr_memory, m) {
++      if (addr >= m->gpu && addr + len <= m->gpu + m->size) {
++         memcpy(dst, (const char *)m->cpu + (addr - m->gpu), len);
++         found = true;
++         break;
++      }
++   }
++   simple_mtx_unlock(&memory_lock);
++   return found;
++}
++
++#define FSR_EASU_CONSTANTS_BINDING 1
++
++bool
++kk_fsr_easu_content(struct kk_cmd_buffer *cmd, uint32_t out_w, uint32_t out_h,
++                    uint32_t *in_w, uint32_t *in_h)
++{
++   struct kk_descriptor_state *desc = &cmd->state.gfx.descriptors;
++   struct kk_descriptor_set *set = desc->sets[1];
++   if (!set || !set->layout ||
++       set->layout->binding_count <= FSR_EASU_CONSTANTS_BINDING)
++      return false;
++
++   const struct kk_descriptor_set_binding_layout *bl =
++      &set->layout->binding[FSR_EASU_CONSTANTS_BINDING];
++   struct kk_buffer_address ubo;
++   if (bl->type == VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER) {
++      if (bl->offset + sizeof(ubo) > set->size)
++         return false;
++      memcpy(&ubo, (const char *)set->mapped_ptr + bl->offset, sizeof(ubo));
++   } else if (bl->type == VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC) {
++      uint32_t i = desc->root.set_dynamic_buffer_start[1] +
++                   bl->dynamic_buffer_index;
++      if (i >= KK_MAX_DYNAMIC_BUFFERS)
++         return false;
++      ubo = desc->root.dynamic_buffers[i];
++   } else {
++      return false;
++   }
++
++   uint32_t con0[4];
++   if (ubo.size < sizeof(con0) || !fsr_read(ubo.base_addr, con0, sizeof(con0)))
++      return false;
++   float rx, ry;
++   memcpy(&rx, &con0[0], sizeof(rx));
++   memcpy(&ry, &con0[1], sizeof(ry));
++   /* FSR 1 goes up to 2x a side (its Performance mode); a little more is
++    * allowed, nothing above 1. */
++   if (!(rx >= 0.3f && rx <= 1.0001f && ry >= 0.3f && ry <= 1.0001f))
++      return false;
++   *in_w = (uint32_t)lroundf(rx * out_w);
++   *in_h = (uint32_t)lroundf(ry * out_h);
++
++   static uint32_t told_w, told_h;
++   if (*in_w != told_w || *in_h != told_h) {
++      fprintf(stderr, "kk: FSR by MetalFX: picture %ux%u -> %ux%u\n", *in_w,
++              *in_h, out_w, out_h);
++      told_w = *in_w;
++      told_h = *in_h;
++   }
++   return true;
++}
+diff -ruN -x *.orig -x *.rej -x __pycache__ a/src/kosmickrisp/vulkan/kk_fsr_metalfx.h b/src/kosmickrisp/vulkan/kk_fsr_metalfx.h
 --- a/src/kosmickrisp/vulkan/kk_fsr_metalfx.h	1969-12-31 21:00:00
-+++ b/src/kosmickrisp/vulkan/kk_fsr_metalfx.h	2026-10-03 07:31:39
-@@ -0,0 +1,33 @@
++++ b/src/kosmickrisp/vulkan/kk_fsr_metalfx.h	2026-10-03 07:47:42
+@@ -0,0 +1,44 @@
 +/*
 + * Copyright 2026 SteamARM contributors
 + * SPDX-License-Identifier: MIT
@@ -528,10 +675,21 @@ diff -ruN -x *.orig -x *.rej a/src/kosmickrisp/vulkan/kk_fsr_metalfx.h b/src/kos
 + * first image of the pass's descriptors), or NULL. */
 +mtl_texture *kk_fsr_easu_input(struct kk_cmd_buffer *cmd);
 +
++/* Memory the application can map, by GPU address: EASU's constants are read
++ * from it. */
++void kk_fsr_register_memory(uint64_t gpu, uint64_t size, void *cpu);
++void kk_fsr_unregister_memory(uint64_t gpu);
++
++/* The part of the input that holds the picture (its top left), from EASU's
++ * constants (set 1 binding 1: con0 = the input's viewport over the output's
++ * size), for an output of out_w x out_h. False when they cannot be read. */
++bool kk_fsr_easu_content(struct kk_cmd_buffer *cmd, uint32_t out_w,
++                         uint32_t out_h, uint32_t *in_w, uint32_t *in_h);
++
 +#endif /* KK_FSR_METALFX_H */
-diff -ruN -x *.orig -x *.rej a/src/kosmickrisp/vulkan/kk_image_view.c b/src/kosmickrisp/vulkan/kk_image_view.c
+diff -ruN -x *.orig -x *.rej -x __pycache__ a/src/kosmickrisp/vulkan/kk_image_view.c b/src/kosmickrisp/vulkan/kk_image_view.c
 --- a/src/kosmickrisp/vulkan/kk_image_view.c	2026-10-03 07:31:39
-+++ b/src/kosmickrisp/vulkan/kk_image_view.c	2026-10-03 07:31:39
++++ b/src/kosmickrisp/vulkan/kk_image_view.c	2026-10-03 07:47:42
 @@ -6,6 +6,7 @@
   */
  
@@ -557,9 +715,9 @@ diff -ruN -x *.orig -x *.rej a/src/kosmickrisp/vulkan/kk_image_view.c b/src/kosm
        if (view->planes[plane].mtl_handle_sampled)
           mtl_release(view->planes[plane].mtl_handle_sampled);
  
-diff -ruN -x *.orig -x *.rej a/src/kosmickrisp/vulkan/kk_shader.c b/src/kosmickrisp/vulkan/kk_shader.c
+diff -ruN -x *.orig -x *.rej -x __pycache__ a/src/kosmickrisp/vulkan/kk_shader.c b/src/kosmickrisp/vulkan/kk_shader.c
 --- a/src/kosmickrisp/vulkan/kk_shader.c	2026-10-03 07:31:39
-+++ b/src/kosmickrisp/vulkan/kk_shader.c	2026-10-03 07:31:39
++++ b/src/kosmickrisp/vulkan/kk_shader.c	2026-10-03 07:47:42
 @@ -6,6 +6,7 @@
   */
  
@@ -601,9 +759,9 @@ diff -ruN -x *.orig -x *.rej a/src/kosmickrisp/vulkan/kk_shader.c b/src/kosmickr
     }
  
     /* Compile pipeline:
-diff -ruN -x *.orig -x *.rej a/src/kosmickrisp/vulkan/kk_shader.h b/src/kosmickrisp/vulkan/kk_shader.h
+diff -ruN -x *.orig -x *.rej -x __pycache__ a/src/kosmickrisp/vulkan/kk_shader.h b/src/kosmickrisp/vulkan/kk_shader.h
 --- a/src/kosmickrisp/vulkan/kk_shader.h	2026-10-03 07:31:39
-+++ b/src/kosmickrisp/vulkan/kk_shader.h	2026-10-03 07:31:39
++++ b/src/kosmickrisp/vulkan/kk_shader.h	2026-10-03 07:47:42
 @@ -59,6 +59,10 @@
      * kk_nir_lower_alpha_to_coverage), Metal's hardware one stays off. */
     bool a2c_lowered;
@@ -615,9 +773,9 @@ diff -ruN -x *.orig -x *.rej a/src/kosmickrisp/vulkan/kk_shader.h b/src/kosmickr
     /* Required for fragment shader cull distance discards. */
     uint8_t num_cull_distances;
  
-diff -ruN -x *.orig -x *.rej a/src/kosmickrisp/vulkan/meson.build b/src/kosmickrisp/vulkan/meson.build
+diff -ruN -x *.orig -x *.rej -x __pycache__ a/src/kosmickrisp/vulkan/meson.build b/src/kosmickrisp/vulkan/meson.build
 --- a/src/kosmickrisp/vulkan/meson.build	2026-10-03 07:31:39
-+++ b/src/kosmickrisp/vulkan/meson.build	2026-10-03 07:31:39
++++ b/src/kosmickrisp/vulkan/meson.build	2026-10-03 07:47:42
 @@ -88,6 +88,7 @@
    'kk_image.c',
    'kk_instance.h',
