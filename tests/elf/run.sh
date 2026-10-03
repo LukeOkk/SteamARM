@@ -1098,6 +1098,29 @@ else
     echo "  skip  ARM64_INITIAL_STACK_BOUNDS (no $STAGE)"
 fi
 
+# A large anonymous mapping 8 KiB into a host page, as Wine's ntdll reserves
+# its low address space: zero, mprotect-able in 4 KiB pieces, and not one
+# kernel map entry per 16 KiB host page (runtime/subpage.c; a game's start
+# made a million and safeguard.sh stopped every guest). Under FEX's 4 KiB
+# guest pages (LXRT_GUEST_PAGE=4096), where the sub-page path is taken.
+if [ -f "$STAGE/usr/lib64/libc.a" ] && [ -n "$GCCDIR" ]; then
+    if err=$(glibc_cc -static-pie -O2 -o build/subpage_big_anon tests/elf/subpage_big_anon.c); then
+        out=build/subpage_big_anon.out
+        LXRT_GUEST_PAGE=4096 deadline 30 ./build/lxrun build/subpage_big_anon > "$out" 2>&1 &
+        sbp=$!
+        for _ in $(seq 1 50); do grep -q '^mapped' "$out" && break; sleep 0.1; done
+        regions=$(vmmap -summary "$(awk '/^mapped/ {print $2}' "$out")" 2>/dev/null | awk '/^TOTAL/ && !/MALLOC/ {print $NF; exit}')
+        wait $sbp
+        if grep -q '^== subpage_big_anon: ok' "$out" && [ -n "$regions" ] && [ "$regions" -lt 5000 ]; then
+            ok "512 MiB anonymous mapping 8 KiB into a host page: zero, 4 KiB mprotect, $regions regions"
+        else
+            bad "subpage_big_anon" "regions=${regions:-?} $(grep -E 'FAIL' "$out" | head -3)"
+        fi
+    else bad "build subpage_big_anon" "$err"; fi
+else
+    echo "  skip  subpage_big_anon (no $STAGE)"
+fi
+
 # /proc/<pid>/root of another guest process: that process's "/" (PipeWire's
 # Flatpak check opens it, and took every client for a Flatpak app while it
 # was missing; runtime/procpid.c).

@@ -505,6 +505,55 @@ static bool fast_file_interior(uint64_t addr, uint64_t len, int prot,
     return true;
 }
 
+// The same for anonymous memory. Wine's preloader reserves its low address
+// space (0x110000-0x68000000) PROT_NONE; ntdll then reserves it again from
+// 0x112000, 8 KiB into a host page, and the whole 1.6 GiB went through the
+// page-by-page path: a mach_vm_region per host page, a memset of all of it,
+// and an mprotect per host page, which left one kernel map entry per 16 KiB.
+// About 105,000 entries in every Wine process, a million for one game's
+// start with its services, and safeguard.sh then stopped every guest
+// (kernel vm.objects past 1.5 million; MEASURED with zprint and vmmap). Only
+// the two edge pages need the table's care; the interior is one fresh
+// mapping, already zero.
+static bool fast_anon_interior(uint64_t addr, uint64_t len, int prot, long *result)
+{
+    uint64_t end = addr + len;
+    uint64_t inside = LXRT_ALIGN_UP(addr, LXRT_HOST_PAGE);
+    uint64_t inside_end = LXRT_ALIGN_DOWN(end, LXRT_HOST_PAGE);
+    if (end < addr || inside_end <= inside || inside_end - inside < (1u << 20))
+        return false;
+
+    uint64_t hstart = LXRT_ALIGN_DOWN(addr, LXRT_HOST_PAGE);
+    uint64_t hend = LXRT_ALIGN_UP(end, LXRT_HOST_PAGE);
+    if (hstart < inside) adopt_untracked(hstart);
+    if (inside_end < hend) adopt_untracked(inside_end);
+    if (!back_range(hstart, inside) || !back_range(inside_end, hend)) {
+        *result = LERR(ENOMEM);
+        return true;
+    }
+    int whole_prot = prot;
+    if ((whole_prot & PROT_WRITE) && (whole_prot & PROT_EXEC))
+        whole_prot &= ~PROT_EXEC;
+    void *mapped = mmap((void *)inside, (size_t)(inside_end - inside), whole_prot,
+                        MAP_PRIVATE | MAP_ANON | MAP_FIXED, -1, 0);
+    if (mapped == MAP_FAILED) {
+        *result = LERR(errno);
+        return true;
+    }
+    if (inside > addr)
+        memset((void *)addr, 0, (size_t)(inside - addr));
+    if (inside_end < end)
+        memset((void *)inside_end, 0, (size_t)(end - inside_end));
+    record(addr, end, prot);
+    if ((hstart < inside && apply_prot(hstart, prot & PROT_WRITE ? PROT_WRITE : PROT_EXEC) < 0) ||
+        (inside_end < hend && apply_prot(inside_end, prot & PROT_WRITE ? PROT_WRITE : PROT_EXEC) < 0)) {
+        *result = LERR(errno);
+        return true;
+    }
+    *result = (long)addr;
+    return true;
+}
+
 bool lxrt_trace_on(void);
 #define STEP(fmt, ...) do { if (lxrt_trace_on()) \
     fprintf(lxrt_trace_stream(), "[lxrt]    subpage " fmt "\n", ##__VA_ARGS__); } while (0)
@@ -588,6 +637,12 @@ static long subpage_mmap_locked(uint64_t addr, uint64_t len, int prot, bool anon
     if (!getenv("LXRT_NO_FAST_SUBPAGE") && !anon && fd >= 0 &&
         fast_file_interior(addr, len, prot, fd, off, &fast_result)) {
         STEP("file interior mapped directly 0x%llx+0x%llx", (unsigned long long)addr,
+             (unsigned long long)len);
+        return fast_result;
+    }
+    if (!getenv("LXRT_NO_FAST_SUBPAGE") && anon &&
+        fast_anon_interior(addr, len, prot, &fast_result)) {
+        STEP("anonymous interior mapped directly 0x%llx+0x%llx", (unsigned long long)addr,
              (unsigned long long)len);
         return fast_result;
     }
