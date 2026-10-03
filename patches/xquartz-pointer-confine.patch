@@ -1,0 +1,257 @@
+--- a/hw/xquartz/X11Application.m
++++ b/hw/xquartz/X11Application.m
+@@ -914,6 +914,7 @@
+ 
+     if (isMouseOrTabletEvent) {
+         static NSPoint lastpt;
++        extern BOOL XQPointerClamp(NSPoint *location);
+         NSWindow *window = [e window];
+         NSRect screen = [[[NSScreen screens] objectAtIndex:0] frame];
+         BOOL hasUntrustedPointerDelta;
+@@ -975,6 +976,10 @@
+ 
+         /* Convert coordinate system */
+         location.y = (screen.origin.y + screen.size.height) - location.y;
++
++        /* SteamARM: a visible cursor confined by a grab stays in its box. */
++        if (!isTabletEvent && [e type] != NSScrollWheel)
++            XQPointerClamp(&location);
+     }
+ 
+     modifierFlags = [e modifierFlags];
+@@ -1361,3 +1366,150 @@
+     }
+ }
+ @end
++
++
++/*
++ * SteamARM: pointer confinement on macOS.
++ *
++ * An X client that grabs the pointer with confine_to (SDL's mouse grab and
++ * relative mode, which games use for mouse-look) has the X sprite confined
++ * by the DIX, but the cursor on screen is macOS's, and it went on moving:
++ * out of the game's window while the player aimed, so that a click landed
++ * on another window or the desktop and the game lost its focus.
++ *
++ *   - confined and the cursor hidden (mouse-look): the macOS cursor is put
++ *     at the centre of the confining window and dissociated from the mouse
++ *     (CGAssociateMouseAndMouseCursorPosition(false), what SDL itself does
++ *     in relative mode on macOS). The mouse still reports its motion, which
++ *     reaches the client as the pointer's Rel X / Rel Y valuators (XInput 2
++ *     raw motion: SDL 3 reads those), and every click lands in the window;
++ *   - confined and the cursor shown: the cursor is kept inside the box.
++ *
++ * Nothing is held while another application is active (Cmd-Tab gives the
++ * mouse back at once). XQUARTZ_POINTER_CONFINE=0 turns all of it off;
++ * XQUARTZ_PTR_DEBUG=1 logs the changes.
++ */
++static volatile int xq_ptr_confined, xq_ptr_hidden;
++static volatile int xq_ptr_box[4];
++static BOOL xq_ptr_locked;
++static id xq_ptr_observer_active, xq_ptr_observer_resign;
++
++static BOOL
++xq_ptr_enabled(void)
++{
++    static int on = -1;
++    if (on < 0) {
++        const char *e = getenv("XQUARTZ_POINTER_CONFINE");
++        on = !(e && e[0] == '0');
++    }
++    return on;
++}
++
++static BOOL
++xq_ptr_debug(void)
++{
++    static int on = -1;
++    if (on < 0)
++        on = getenv("XQUARTZ_PTR_DEBUG") != NULL;
++    return on;
++}
++
++static void
++xq_ptr_apply(void)
++{
++    BOOL lock = xq_ptr_enabled() && xq_ptr_confined && xq_ptr_hidden && NSApp.active;
++
++    if (!xq_ptr_observer_active) {
++        NSNotificationCenter *nc = NSNotificationCenter.defaultCenter;
++        xq_ptr_observer_active = [[nc addObserverForName:NSApplicationDidBecomeActiveNotification
++                                                  object:nil queue:nil
++                                              usingBlock:^(NSNotification *n) { xq_ptr_apply(); }] retain];
++        xq_ptr_observer_resign = [[nc addObserverForName:NSApplicationDidResignActiveNotification
++                                                  object:nil queue:nil
++                                              usingBlock:^(NSNotification *n) { xq_ptr_apply(); }] retain];
++    }
++
++    if (lock && !xq_ptr_locked) {
++        CGPoint centre = CGPointMake((xq_ptr_box[0] + xq_ptr_box[2]) / 2.0,
++                                     (xq_ptr_box[1] + xq_ptr_box[3]) / 2.0);
++        CGWarpMouseCursorPosition(centre);
++        CGAssociateMouseAndMouseCursorPosition(false);
++        xq_ptr_locked = YES;
++        if (xq_ptr_debug())
++            ErrorF("pointer: locked at %.0f,%.0f (box %d,%d-%d,%d)\n", centre.x, centre.y,
++                   xq_ptr_box[0], xq_ptr_box[1], xq_ptr_box[2], xq_ptr_box[3]);
++    }
++    else if (!lock && xq_ptr_locked) {
++        CGAssociateMouseAndMouseCursorPosition(true);
++        xq_ptr_locked = NO;
++        if (xq_ptr_debug())
++            ErrorF("pointer: released (confined %d, hidden %d, active %d)\n",
++                   xq_ptr_confined, xq_ptr_hidden, (int)NSApp.active);
++    }
++}
++
++/* X server thread. */
++void
++XQPointerSetConfine(int confined, int x1, int y1, int x2, int y2)
++{
++    if (confined == xq_ptr_confined && (!confined ||
++        (x1 == xq_ptr_box[0] && y1 == xq_ptr_box[1] &&
++         x2 == xq_ptr_box[2] && y2 == xq_ptr_box[3])))
++        return;
++    xq_ptr_box[0] = x1;
++    xq_ptr_box[1] = y1;
++    xq_ptr_box[2] = x2;
++    xq_ptr_box[3] = y2;
++    xq_ptr_confined = confined;
++    if (xq_ptr_debug())
++        ErrorF("pointer: %s %d,%d-%d,%d\n", confined ? "confined to" : "free, screen",
++               x1, y1, x2, y2);
++    dispatch_async(dispatch_get_main_queue(), ^{ xq_ptr_apply(); });
++}
++
++/* X server thread. */
++void
++XQPointerSetCursorHidden(int hidden)
++{
++    if (hidden == xq_ptr_hidden)
++        return;
++    xq_ptr_hidden = hidden;
++    if (xq_ptr_debug())
++        ErrorF("pointer: cursor %s\n", hidden ? "hidden" : "shown");
++    dispatch_async(dispatch_get_main_queue(), ^{ xq_ptr_apply(); });
++}
++
++/* After CGWarpMouseCursorPosition (XWarpPointer): macOS drops the mouse's
++ * events for a quarter of a second after a warp unless the cursor is
++ * associated again at once (what SDL does on macOS). Not while locked:
++ * that would let the cursor go. */
++void
++XQPointerAfterWarp(void)
++{
++    if (!xq_ptr_locked)
++        CGAssociateMouseAndMouseCursorPosition(true);
++}
++
++/* Main thread, for each mouse event: a visible cursor confined by a grab is
++ * put back inside the box (global coordinates, top-left origin). */
++BOOL
++XQPointerClamp(NSPoint *location)
++{
++    CGFloat x, y;
++
++    if (!xq_ptr_enabled() || !xq_ptr_confined || xq_ptr_locked)
++        return NO;
++    x = location->x;
++    y = location->y;
++    if (x < xq_ptr_box[0]) x = xq_ptr_box[0];
++    if (y < xq_ptr_box[1]) y = xq_ptr_box[1];
++    if (x > xq_ptr_box[2] - 1) x = xq_ptr_box[2] - 1;
++    if (y > xq_ptr_box[3] - 1) y = xq_ptr_box[3] - 1;
++    if (x == location->x && y == location->y)
++        return NO;
++    location->x = x;
++    location->y = y;
++    CGWarpMouseCursorPosition(CGPointMake(x, y));
++    CGAssociateMouseAndMouseCursorPosition(true);
++    return YES;
++}
+--- a/hw/xquartz/xpr/xprCursor.c
++++ b/hw/xquartz/xpr/xprCursor.c
+@@ -56,6 +56,55 @@
+     miPointerSpriteFuncPtr spriteFuncs;
+ } QuartzCursorScreenRec, *QuartzCursorScreenPtr;
+ 
++/* SteamARM: pointer confinement honoured on macOS (X11Application.m). */
++extern void XQPointerSetConfine(int confined, int x1, int y1, int x2, int y2);
++extern void XQPointerSetCursorHidden(int hidden);
++extern void XQPointerAfterWarp(void);
++static ConstrainCursorProcPtr QuartzSavedConstrainCursor;
++
++/* A cursor nothing of which is drawn: what SDL and other toolkits set to
++ * hide the pointer (an empty pixmap cursor), like no cursor at all. */
++static Bool
++QuartzCursorIsInvisible(CursorPtr pCursor)
++{
++    CursorBitsPtr bits;
++    size_t i, n;
++
++    if (pCursor == NULL)
++        return TRUE;
++    bits = pCursor->bits;
++    if (bits->argb != NULL) {
++        n = (size_t)bits->width * bits->height;
++        for (i = 0; i < n; i++)
++            if (bits->argb[i] >> 24)
++                return FALSE;
++        return TRUE;
++    }
++    if (bits->mask == NULL)
++        return FALSE;
++    n = (size_t)BitmapBytePad(bits->width) * bits->height;
++    for (i = 0; i < n; i++)
++        if (bits->mask[i])
++            return FALSE;
++    return TRUE;
++}
++
++/* The DIX confines the X sprite (a grab with confine_to, the root window
++ * otherwise); the macOS cursor, which is the one on screen, has to follow. */
++static void
++QuartzConstrainCursor(DeviceIntPtr pDev, ScreenPtr pScreen, BoxPtr pBox)
++{
++    int ox = pScreen->x + darwinMainScreenX;
++    int oy = pScreen->y + darwinMainScreenY;
++    Bool whole;
++
++    QuartzSavedConstrainCursor(pDev, pScreen, pBox);
++    whole = pBox->x1 <= 0 && pBox->y1 <= 0 &&
++            pBox->x2 >= pScreen->width && pBox->y2 >= pScreen->height;
++    XQPointerSetConfine(!whole, pBox->x1 + ox, pBox->y1 + oy,
++                        pBox->x2 + ox, pBox->y2 + oy);
++}
++
+ static DevPrivateKeyRec darwinCursorScreenKeyRec;
+ #define darwinCursorScreenKey (&darwinCursorScreenKeyRec)
+ 
+@@ -224,6 +273,8 @@
+ {
+     QuartzCursorScreenPtr ScreenPriv = CURSOR_PRIV(pScreen);
+ 
++    XQPointerSetCursorHidden(QuartzCursorIsInvisible(pCursor));
++
+     if (!XQuartzServerVisible)
+         return;
+ 
+@@ -293,6 +344,7 @@
+         sy = pScreen->y + darwinMainScreenY;
+ 
+         CGWarpMouseCursorPosition(CGPointMake(sx + x, sy + y));
++        XQPointerAfterWarp();
+     }
+ 
+     miPointerWarpCursor(pDev, pScreen, x, y);
+@@ -370,6 +422,9 @@
+     PointPriv->spriteFuncs->SetCursor = QuartzSetCursor;
+     PointPriv->spriteFuncs->MoveCursor = QuartzMoveCursor;
+ 
++    QuartzSavedConstrainCursor = pScreen->ConstrainCursor;
++    pScreen->ConstrainCursor = QuartzConstrainCursor;
++
+     ScreenPriv->cursorVisible = TRUE;
+     return TRUE;
+ }

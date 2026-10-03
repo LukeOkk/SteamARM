@@ -116,6 +116,30 @@ MEASURED, `benchmarks/stage53-fullscreen-layer-order.txt`:
   hidden menu bar. UNKNOWN: Mission Control and Stage Manager with a
   fullscreen layer.
 
+## Pointer confinement (mouse-look)
+
+`patches/xquartz-pointer-confine.patch`, MEASURED 2026-10-02 (stage 55):
+an X client that grabs the pointer with `confine_to` has the X sprite
+confined by the DIX, but the cursor on screen is macOS's, and it kept
+moving: out of Counter-Strike 2's window while the player aimed, so that a
+click landed on another window. SDL 3 grabs that way for mouse-look and
+hides the cursor with an empty pixmap cursor; it reads motion from the
+pointer's XInput 2 raw "Rel X"/"Rel Y" valuators, which XQuartz fills with
+the mouse's deltas.
+
+- Confined and the cursor hidden: the macOS cursor is put at the centre of
+  the confining window and dissociated from the mouse
+  (`CGAssociateMouseAndMouseCursorPosition(false)`, what SDL does on macOS);
+  the deltas keep arriving, every click lands in the window.
+- Confined and the cursor shown: the cursor is kept inside the box.
+- Released at once when another application becomes active (Cmd-Tab), when
+  the grab ends or the cursor is shown. After an `XWarpPointer` the cursor is
+  associated again at once, so macOS does not drop the mouse's events for a
+  quarter of a second.
+- `XQUARTZ_POINTER_CONFINE=0` turns it off, `XQUARTZ_PTR_DEBUG=1` logs it.
+  `tests/x11/run-confine.sh` (moves the mouse: refuses to run while someone
+  uses it).
+
 ## VNC
 
 - `run-app.sh` runs `build/lxrun /usr/bin/Xvnc :1 ... -SecurityTypes VncAuth
