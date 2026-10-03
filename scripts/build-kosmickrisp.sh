@@ -28,6 +28,13 @@
 #       presented, is given back: after two swapchains with an image in hand
 #       the layer had no drawable left (a game changing its video settings:
 #       black, a second per frame; benchmarks/stage54). KK_DRAWABLE_LOG=1.
+#   08  alpha-to-coverage from the alpha the application's shader wrote, in
+#       the shader when its blending, write mask or trimming to the
+#       attachment changes that alpha (a depth prepass with colour writes off
+#       covered every sample; B10G11R11 has no alpha), and in the shader key
+#       with the depth/stencil formats: through a VkPipelineCache a pipeline
+#       was handed the one compiled without alpha-to-coverage. Cut-out
+#       foliage drawn opaque (de_dust2's palms; tests/elf/vk_alphamask.c).
 #
 # Only Homebrew formulae and a Python virtualenv are installed. Re-running is
 # safe: the download is cached and the build is incremental. Needs macOS 26.
