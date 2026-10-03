@@ -140,6 +140,8 @@ class SettingsEnvironmentTests(unittest.TestCase):
         env = self.settings.env_from_settings({"scalingFilter": "linear"}, chip=m4, display=(1920, 1080))
         self.assertNotIn("LXRT_VK_SCALER", env)
         self.assertEqual(env["STEAMARM_RENDER_SIZE"], "1280x720")
+        env = self.settings.env_from_settings({"scalingFilter": "metalfx-temporal"})
+        self.assertEqual(env["LXRT_VK_SCALER"], "metalfx-temporal")
         env = self.settings.env_from_settings({"scalingFilter": "fsr", "fsrSharpness": 40})
         self.assertEqual((env["LXRT_VK_SCALER"], env["LXRT_VK_FSR_SHARPNESS"]), ("fsr", "40"))
         env = self.settings.env_from_settings({"scalingFilter": "fsr", "fsrSharpness": 500})

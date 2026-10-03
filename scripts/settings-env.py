@@ -23,7 +23,7 @@ STATE = os.environ.get("STEAMARM_STATE") or os.path.expanduser("~/SteamARM-roots
 SHIM = os.path.join(STATE, "steamroot", "usr", "lib", "lxrt-emu", "libvulkan.so.1")
 ICD_MARKER = b"STEAMARM_VK_ICD"
 OVERRIDABLE = ("display", "vsync", "synchronization", "graphicsBackend", "scalingFilter")
-SCALING_FILTERS = ("auto", "linear", "nearest", "fsr", "metalfx")
+SCALING_FILTERS = ("auto", "linear", "nearest", "fsr", "metalfx", "metalfx-temporal")
 STEAM_UI_GPU_SWITCHES = ("--use-gl=angle", "--use-angle=vulkan",
                          "--enable-features=Vulkan,VulkanFromANGLE,DefaultANGLEVulkan",
                          "--ignore-gpu-blocklist")

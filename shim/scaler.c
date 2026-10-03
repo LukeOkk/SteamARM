@@ -18,6 +18,9 @@
 //                            encodes it (runtime/metalfx.m) between two of
 //                            the shim's submissions, ordered by a timeline
 //                            semaphore's MTLSharedEvent (VK_EXT_metal_objects)
+//                  metalfx-temporal  MetalFX's temporal scaler, with a
+//                            reactive mask from frame differences in place of
+//                            the game's motion vectors (runtime/metalfx.m)
 //                  auto      metalfx where the driver exports its Metal
 //                            objects (MoltenVK; SteamARM's KosmicKrisp with
 //                            patches/kosmickrisp-10-metal-objects.patch),
@@ -169,6 +172,7 @@ struct lxrt_mfx_run {
     void *scaler;
     void *queue, *in, *out, *event;
     uint64_t wait, signal;
+    int mode;           // 0 spatial, 1 temporal
 };
 #define MAXI 8          // swapchain images; MoltenVK gives 2 or 3
 #define MID_FORMAT VK_FORMAT_R16G16B16A16_SFLOAT
@@ -256,11 +260,20 @@ static int filter_wanted(void)
         return F_NEAREST;
     if (s_eq(e, "fsr"))
         return F_FSR;
-    if (s_eq(e, "metalfx"))
+    if (s_eq(e, "metalfx") || s_eq(e, "metalfx-temporal") || s_eq(e, "metalfx_temporal"))
         return F_METALFX;
     if (s_eq(e, "auto"))
         return F_AUTO;
     return F_LINEAR;
+}
+
+// LXRT_VK_SCALER=metalfx-temporal: MetalFX's temporal scaler instead of its
+// spatial one (runtime/metalfx.m says what it gets in place of the game's
+// depth, motion and jitter). Also with auto when LXRT_VK_MFX_TEMPORAL=1.
+static int temporal_wanted(void)
+{
+    const char *e = getenv("LXRT_VK_SCALER"), *t = getenv("LXRT_VK_MFX_TEMPORAL");
+    return (e && (s_eq(e, "metalfx-temporal") || s_eq(e, "metalfx_temporal"))) || (t && *t == '1');
 }
 
 // 1 if the device lists VK_EXT_metal_objects: MoltenVK, and SteamARM's
@@ -319,7 +332,8 @@ static int probe_wanted(void)
 
 static const char *filter_name(int f)
 {
-    return f == F_NEAREST ? "nearest" : f == F_FSR ? "fsr" : f == F_METALFX ? "metalfx" : f == F_LINEAR_BLIT ? "linear-blit" : "linear";
+    return f == F_NEAREST ? "nearest" : f == F_FSR ? "fsr" : f == F_METALFX ? (temporal_wanted() ? "metalfx-temporal" : "metalfx")
+         : f == F_LINEAR_BLIT ? "linear-blit" : "linear";
 }
 
 static uint32_t fbits(float f)
@@ -1238,7 +1252,8 @@ static VkResult present_mfx(scaled *s, VkQueue q, uint32_t i, const VkSubmitInfo
     // A driver that exports no MTLCommandQueue (KosmicKrisp: its queue is
     // an MTL4CommandQueue) leaves mtl_queue 0, and the runtime encodes on a
     // queue of its own; the shared event orders it either way.
-    struct lxrt_mfx_run run = { s->mfx, s->mtl_queue, s->tex_in[i], s->tex_out[i], s->event, in_done, scaled_done };
+    struct lxrt_mfx_run run = { s->mfx, s->mtl_queue, s->tex_in[i], s->tex_out[i], s->event, in_done, scaled_done,
+                                temporal_wanted() };
     long e = lxrt_syscall2(LXRT_NR_MFX_ENCODE, (long)(uintptr_t)&run, 0);
     s->mfx = run.scaler;
     if (e) {

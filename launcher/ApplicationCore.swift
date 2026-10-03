@@ -1598,6 +1598,7 @@ enum ScalingFilterChoice {
         ("linear", "Bilineal"),
         ("fsr", "AMD FidelityFX Super Resolution 1.0"),
         ("metalfx", "Apple MetalFX (espacial)"),
+        ("metalfx-temporal", "Apple MetalFX (temporal)"),
         ("nearest", "Píxeles nítidos (vecino más cercano)"),
     ]
 
@@ -1609,11 +1610,13 @@ enum ScalingFilterChoice {
         let scope = " Actúa cuando un juego Vulkan o Direct3D (DXVK, VKD3D) dibuja más pequeño que su ventana; no en OpenGL (WineD3D)."
         switch value {
         case "auto":
-            return "MetalFX espacial de Apple con KosmicKrisp (parche 10) o MoltenVK; FSR 1.0 si el driver no lo permite. Actúa con la Escala de render de arriba o cuando el juego dibuja más pequeño que su ventana. MetalFX temporal no es posible al presentar: le faltan la profundidad y los vectores de movimiento del juego." + scope
+            return "MetalFX espacial de Apple con KosmicKrisp (parche 10) o MoltenVK; FSR 1.0 si el driver no lo permite. Actúa con la Escala de render de arriba o cuando el juego dibuja más pequeño que su ventana. Para MetalFX temporal, elígelo abajo." + scope
         case "fsr":
             return "FSR 1.0 de AMD: agranda respetando los bordes (EASU) y afila (RCAS); la nitidez va de suave (0 %) al máximo de FSR (100 %)." + scope
         case "metalfx":
             return "El escalador espacial de Apple, en la GPU del Mac. Si macOS lo rechaza, se vuelve a bilineal." + scope
+        case "metalfx-temporal":
+            return "El escalador temporal de Apple: acumula los fotogramas anteriores donde la imagen no cambia (bordes más estables, menos parpadeo) y se fía solo del fotograma actual donde algo se mueve, para no dejar estelas. El juego no da su profundidad, sus vectores de movimiento ni su jitter, así que no recupera el detalle extra de un temporal integrado en el juego. Si macOS lo rechaza, se vuelve a bilineal." + scope
         case "nearest":
             return "Cada píxel del juego se repite tal cual: aspecto pixelado, sin suavizado." + scope
         default:

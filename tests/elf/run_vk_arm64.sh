@@ -216,8 +216,10 @@ else
         fi
     }
     run_metalfx moltenvk STEAMARM_VK_ICD=moltenvk
+    run_metalfx "moltenvk temporal" STEAMARM_VK_ICD=moltenvk VK_METALFX_TEMPORAL=1
     if [ -f "$OWN/libvulkan_kosmickrisp.dylib" ]; then
         run_metalfx "kosmickrisp steamarm" STEAMARM_VK_ICD=kosmickrisp STEAMARM_KK_DIR="$OWN"
+        run_metalfx "kosmickrisp steamarm temporal" STEAMARM_VK_ICD=kosmickrisp STEAMARM_KK_DIR="$OWN" VK_METALFX_TEMPORAL=1
     fi
 fi
 # vk_x11_present: a swapchain on an X window of SteamARM's X server. With

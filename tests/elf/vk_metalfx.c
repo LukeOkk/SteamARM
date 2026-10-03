@@ -15,10 +15,12 @@
 // three steps 300 times, and the time per frame (the whole chain, CPU and
 // GPU, as at a present), against one bilinear vkCmdBlitImage of the same
 // sizes.
+// VK_METALFX_TEMPORAL=1: the temporal scaler (runtime/metalfx.m), same checks.
 // Prints "== vk_metalfx: ok", "== vk_metalfx: skip (...)" (a driver without
 // VK_EXT_metal_objects) or the first thing that is wrong.
 #define VK_USE_PLATFORM_METAL_EXT
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <stdint.h>
 #include <time.h>
@@ -31,6 +33,7 @@ enum { IW = 960, IH = 540, OW = 1920, OH = 1080, RUNS = 300 };
 struct lxrt_mfx_run {
     void *scaler, *queue, *in, *out, *event;
     uint64_t wait, signal;
+    int mode;           // 0 spatial, 1 temporal (VK_METALFX_TEMPORAL=1)
 };
 
 static VkDevice dev;
@@ -204,7 +207,9 @@ int main(void)
 
     // 2. MetalFX: waits for 1, signals 2.
     struct lxrt_mfx_run run = { 0, (void *)eq.mtlCommandQueue, (void *)t_in.mtlTexture, (void *)t_out.mtlTexture,
-                                (void *)ev.mtlSharedEvent, 1, 2 };
+                                (void *)ev.mtlSharedEvent, 1, 2,
+                                getenv("VK_METALFX_TEMPORAL") && *getenv("VK_METALFX_TEMPORAL") == '1' };
+    printf("mode: %s\n", run.mode ? "temporal" : "spatial");
     long e = lxrt_syscall2(LXRT_NR_MFX_ENCODE, (long)(uintptr_t)&run, 0);
     printf("runtime encode -> %ld (queue: %s)\n", e, eq.mtlCommandQueue ? "the driver's" : "the runtime's own");
     if (e) { printf("== vk_metalfx: FAIL\n"); return 1; }

@@ -186,7 +186,7 @@ struct LauncherSettings: Codable, Equatable {
     var anisotropy: Int = 0
     var antialiasing: Int = 0          // MSAA samples DXVK forces on D3D9 swapchains; 0 = the game's
     var resolutionScaling: Bool = false // Wine's display-mode emulation in the game prefixes
-    var scalingFilter: String = "auto"   // a picture smaller than its window: auto, linear, nearest, fsr, metalfx (shim/scaler.c)
+    var scalingFilter: String = "auto"   // a picture smaller than its window: auto, linear, nearest, fsr, metalfx, metalfx-temporal (shim/scaler.c)
     var fsrSharpness: Int = 90         // FSR's RCAS strength, percent
     var renderScale: String = "auto"   // games covering the screen render at this scale, the shim enlarges: auto (this Mac's chip), 1.0, 0.77, 0.67, 0.59, 0.5
     var steamUIAcceleration: Bool = true // ARM64 Steam's webhelper on ANGLE/Vulkan (LXRT_EXEC_ARGS)
