@@ -112,6 +112,15 @@ MEASURED, `benchmarks/stage53-fullscreen-layer-order.txt`:
 - While a Vulkan layer covers a display, the server hides the menu bar and
   the Dock (`NSApplicationPresentationHideDock | HideMenuBar`); they return
   when another application is activated or the layer goes.
+- Exclusive fullscreen: XQuartz answered a client's RandR mode request for
+  anything but the rootless mode with `CGCaptureAllDisplays` (a black shield
+  over every window) and a switch to the rooted X screen, where no Vulkan
+  layer is shown: a game's "fullscreen" with a refresh rate of its own, or
+  XQuartz's fake 2 Hz "fullscreen" mode, left a black screen. Since
+  `patches/xquartz-rootless-modeset.patch` a request for the display's own
+  size (any rate) is taken as done and another size is refused (SDL then
+  stays fullscreen at the display's resolution); `XQUARTZ_RANDR_MODESET=1`
+  restores XQuartz's behaviour.
 - X windows without a layer (indirect GLX) get the geometry but not the
   hidden menu bar. UNKNOWN: Mission Control and Stage Manager with a
   fullscreen layer.

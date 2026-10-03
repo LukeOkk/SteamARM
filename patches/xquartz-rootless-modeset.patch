@@ -1,0 +1,34 @@
+--- a/hw/xquartz/quartzRandR.c
++++ b/hw/xquartz/quartzRandR.c
+@@ -378,6 +378,31 @@
+     if (QuartzRandRModesEqual(&reqMode, &pQuartzScreen->currentMode))
+         return TRUE;
+ 
++    /* SteamARM: a client's mode request never captures the displays nor
++     * leaves rootless mode. XQuartz did both for any mode but the rootless
++     * one (CGCaptureAllDisplays: a black shield over everything; then the
++     * rooted X screen, where no Vulkan layer is shown): a game's exclusive
++     * fullscreen ("Pantalla completa" in Counter-Strike 2, any refresh rate,
++     * or XQuartz's fake 2 Hz "fullscreen" mode) left a black screen.
++     * The display's own size at any rate is taken as done: the window goes
++     * fullscreen at the display's resolution and refresh. Another size is
++     * refused; SDL then stays fullscreen at the display's resolution.
++     * XQUARTZ_RANDR_MODESET=1 restores XQuartz's behaviour. */
++    {
++        const char *e = getenv("XQUARTZ_RANDR_MODESET");
++        if (!(e && e[0] == '1') && XQuartzIsRootless) {
++            if (reqMode.width == pQuartzScreen->rootlessMode.width &&
++                reqMode.height == pQuartzScreen->rootlessMode.height) {
++                ErrorF("randr: %dx%d @ %d requested: the display's own size, kept as it is\n",
++                       (int)reqMode.width, (int)reqMode.height, (int)rate);
++                return TRUE;
++            }
++            ErrorF("randr: %dx%d @ %d requested: refused (would capture the displays)\n",
++                   (int)reqMode.width, (int)reqMode.height, (int)rate);
++            return FALSE;
++        }
++    }
++
+     if (QuartzRandREnumerateModes(pScreen, QuartzRandRSetModeCallback,
+                                   &reqMode)) {
+         return TRUE;
