@@ -1,0 +1,93 @@
+SteamARM: a fullscreen window keeps the whole head
+
+Counter-Strike 2 in "Ventana a pantalla completa" (SDL, _NET_WM_STATE_FULLSCREEN)
+ended up 1920x1058 on a 1920x1080 display: its own request for the display's
+size went through validate_window_size, which keeps a title bar's height
+free (1080 - 22). Its layer was then short of the display, the server did
+not take it for a fullscreen game, and the Dock and the menu bar stayed over
+it ("el dock siempre se ve por encima", the user). A fullscreen window's
+ConfigureRequest now leaves it at its head's rectangle, and its size
+validates to the head's size; the frame made again when it goes fullscreen
+without its title bar is the head as well.
+diff -ruN a/src/x-window.m b/src/x-window.m
+--- a/src/x-window.m	2026-10-03 07:09:26
++++ b/src/x-window.m	2026-10-03 07:21:30
+@@ -739,6 +739,36 @@
+ 
+     TRACE ();
+ 
++    if (_fullscreen) {
++        /* SteamARM: a fullscreen window keeps its whole head. The client's
++         * own geometry does not shrink it: Counter-Strike 2 (SDL) asks for
++         * the display's 1920x1080, which the title bar's allowance in
++         * validate_window_size cut to 1920x1058, and the Dock then stayed
++         * over the game, its layer short of the display by the menu bar's
++         * height. */
++        X11Rect head = [_screen head_containing_point:X11RectOrigin(_reparented ? _current_frame : r)];
++
++        if (!_reparented) {
++            _xattr.x = head.x;
++            _xattr.y = head.y;
++            _xattr.width = head.width;
++            _xattr.height = head.height;
++            XMoveResizeWindow(x_dpy, _id, _xattr.x, _xattr.y,
++                              _xattr.width, _xattr.height);
++            return;
++        }
++        _needs_configure_notify = YES;
++        if (_frame_id)
++            [self resize_frame:head];
++        else
++            _frame_height = head.height;
++        if (_needs_configure_notify) {
++            [self send_configure];
++            _needs_configure_notify = NO;
++        }
++        return;
++    }
++
+     if (!_reparented) {
+         r = [self validate_frame_rect:r];
+ 
+@@ -1703,6 +1733,28 @@
+             if(need_resize_frame)
+                 [self resize_frame:new_frame_size force:YES];
+ 
++            /* SteamARM: the frame made again from the client's size, cut by
++             * the title bar it had before going fullscreen (Counter-Strike 2:
++             * 1920x1058 of 1080): a fullscreen frame is its head. */
++            if(_fullscreen) {
++                X11Rect head = [_screen head_containing_point:X11RectOrigin(_current_frame)];
++
++                [self resize_frame:head force:YES];
++                /* The new frame may already have the head's size, from the
++                 * old one: report_frame_size then leaves the client as it
++                 * was. */
++                if(!_shaded && (_xattr.width != head.width ||
++                                _xattr.height != head.height - _frame_title_height)) {
++                    _frame_height = head.height;
++                    _xattr.width = head.width;
++                    _xattr.height = head.height - _frame_title_height;
++                    DISABLE_EVENTS(_id, 0);
++                    XResizeWindow(x_dpy, _id, _xattr.width, _xattr.height);
++                    ENABLE_EVENTS(_id, X_CLIENT_WINDOW_EVENTS);
++                    [self send_configure];
++                }
++            }
++
+             [self map_unmap_client];
+             if(_reparented)
+                 XMapWindow(x_dpy, _frame_id);
+@@ -2570,6 +2622,12 @@
+                        from_user:(BOOL)uflag constrain:(BOOL)cflag
+ {
+     int base[2], min[2], max[2], inc[2];
++
++    if (_fullscreen) {
++        /* SteamARM: fullscreen is the head's size (see resize_client). */
++        X11Rect head = [_screen head_containing_point:X11RectOrigin(r)];
++        return X11SizeMake(head.width, head.height - _frame_title_height);
++    }
+ 
+     decode_size_hints (&_size_hints, base, min, max, inc);
+     if (_fixed_game) {
