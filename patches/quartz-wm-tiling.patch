@@ -1,0 +1,569 @@
+SteamARM: macOS 15's window tiling for X windows
+
+X windows are drawn by quartz-wm through Xplugin; they are not NSWindows,
+so macOS's own tiling never applied to them. Here it is in the window
+manager, for framed windows and for frameless ones that move through
+_NET_WM_MOVERESIZE (Steam's, Chromium's, SDL's):
+
+- drag a window's title bar to an edge of the screen: left or right edge,
+  that half; top edge, Fill; near a corner, that quarter. While the pointer
+  is there an outline of the region shows (a shaped ring at the floating
+  level that takes no input: XQuartz has no translucent windows); release
+  tiles the window. QUARTZ_WM_TILING=0 turns the drag tiling off;
+- a tiled window dragged away goes back to its size from before, the point
+  under the pointer kept in proportion; a resize by hand leaves the tile;
+- the regions are the visible frame of the screen (below the menu bar,
+  beside the Dock), with the gaps of "Tiled windows have margins"
+  (com.apple.WindowManager EnableTiledWindowMargins);
+- a double click on the title bar with the macOS setting "Fill" fills the
+  window, and a second one gives back its size (Maximize stays Zoom);
+- XQuartz's Window menu (patches/xquartz-ui-tiling-menu.patch) sends Fill,
+  Center, the halves, the quarters and Return to Previous Size as an
+  AppleWMControllerNotify of kind 32 (QWM_TILE_KIND), the action in arg;
+- a drag is decided by where the press was, not by where the pointer is
+  once past the threshold: a quick drag was over the client already and
+  never moved the window.
+
+Measured with XTest drags: left edge 943x1050 (the visible frame is 1887
+wide beside a Dock on the right), top edge Fill 1887x1050, bottom right
+corner 943x525, dragged away back to 800x522; a frameless window through
+_NET_WM_MOVERESIZE: right half, then back to 700x450.
+diff -ruN a/src/quartz-wm.h b/src/quartz-wm.h
+--- a/src/quartz-wm.h	2026-10-03 14:55:37
++++ b/src/quartz-wm.h	2026-10-03 15:04:33
+@@ -121,6 +121,24 @@
+ extern void x_input_register (void);
+ extern void x_input_run (void);
+ 
++/* SteamARM: macOS 15's window tiling. XQuartz's Window menu sends an
++ * AppleWMControllerNotify of kind QWM_TILE_KIND with one of these in arg
++ * (hw/xquartz/X11Controller.m keeps the same numbers); the kind travels as
++ * a byte and stays clear of AppleWM's own 0-12. */
++#define QWM_TILE_KIND           32
++#define QWM_TILE_NONE           0
++#define QWM_TILE_FILL           1
++#define QWM_TILE_CENTER         2
++#define QWM_TILE_LEFT           3
++#define QWM_TILE_RIGHT          4
++#define QWM_TILE_TOP            5
++#define QWM_TILE_BOTTOM         6
++#define QWM_TILE_TOP_LEFT       7
++#define QWM_TILE_TOP_RIGHT      8
++#define QWM_TILE_BOTTOM_LEFT    9
++#define QWM_TILE_BOTTOM_RIGHT   10
++#define QWM_TILE_RESTORE        11
++
+ /* _NET_WM_MOVERESIZE directions (EWMH 1.5, "_NET_WM_MOVERESIZE") */
+ #define NET_WM_MOVERESIZE_SIZE_TOPLEFT      0
+ #define NET_WM_MOVERESIZE_SIZE_TOP          1
+diff -ruN a/src/x-input.m b/src/x-input.m
+--- a/src/x-input.m	2026-10-03 14:55:37
++++ b/src/x-input.m	2026-10-03 15:04:33
+@@ -66,6 +66,7 @@
+     unsigned dragging :1;
+     unsigned clicking :1;
+     unsigned resizing :1;
++    unsigned down_on_frame :1;  /* SteamARM: pressed on the frame itself */
+ } pointer_state;
+ 
+ /* Timestamp when the X server last told us it's active */
+@@ -146,7 +147,143 @@
+ 
+ static BOOL frameless_press (x_window *w, XButtonEvent *e);
+ 
++/* SteamARM: tiling by dragging a window's title bar to an edge or corner
++ * of the screen, as macOS 15 does: left or right edge, half; top edge,
++ * Fill; near a corner, a quarter. While the pointer is there an outline of
++ * the region shows where the window will go; it is applied on release.
++ * XQuartz has no translucent windows (no alpha, no Composite), so the
++ * outline is a shaped ring at the floating level that takes no input. */
++#define TILE_EDGE    2      /* the pointer within this of the screen's edge */
++#define TILE_CORNER  48     /* ...and within this of a corner: a quarter */
++
++static struct {
++    Window preview;
++    Window root;
++    int where;              /* QWM_TILE_*, QWM_TILE_NONE when off */
++    X11Rect shown;
++} tile_drag;
++
++static int
++tile_zone (x_window *w, X11Point p)
++{
++    X11Rect h = [w->_screen head_containing_point:p];
++    int band_y = MAX (TILE_CORNER, (int) h.height / 10);
++    int band_x = MAX (TILE_CORNER, (int) h.width / 10);
++    BOOL left = p.x <= h.x + TILE_EDGE - 1;
++    BOOL right = p.x >= h.x + (int) h.width - TILE_EDGE;
++    BOOL top = p.y <= h.y + TILE_EDGE - 1;
++    BOOL near_top = p.y < h.y + band_y;
++    BOOL near_bottom = p.y >= h.y + (int) h.height - band_y;
++
++    if (![w can_tile])
++        return QWM_TILE_NONE;
++    if (left)
++        return near_top ? QWM_TILE_TOP_LEFT : near_bottom ? QWM_TILE_BOTTOM_LEFT : QWM_TILE_LEFT;
++    if (right)
++        return near_top ? QWM_TILE_TOP_RIGHT : near_bottom ? QWM_TILE_BOTTOM_RIGHT : QWM_TILE_RIGHT;
++    if (top) {
++        if (p.x < h.x + band_x)
++            return QWM_TILE_TOP_LEFT;
++        if (p.x >= h.x + (int) h.width - band_x)
++            return QWM_TILE_TOP_RIGHT;
++        return QWM_TILE_FILL;
++    }
++    return QWM_TILE_NONE;
++}
++
+ static void
++tile_preview_hide (void)
++{
++    if (tile_drag.preview != None)
++        XUnmapWindow (x_dpy, tile_drag.preview);
++    tile_drag.where = QWM_TILE_NONE;
++}
++
++static void
++tile_preview_show (x_window *w, X11Rect r)
++{
++    enum { RING = 4 };
++    XRectangle ring[4];
++
++    if (tile_drag.preview != None && tile_drag.root != w->_screen->_root) {
++        XDestroyWindow (x_dpy, tile_drag.preview);
++        tile_drag.preview = None;
++    }
++    if (tile_drag.preview == None) {
++        XSetWindowAttributes attr;
++        XColor c = { 0 };
++
++        /* macOS's accent blue */
++        c.red = 0x0a0a; c.green = 0x8484; c.blue = 0xffff;
++        c.flags = DoRed | DoGreen | DoBlue;
++        attr.background_pixel = XAllocColor (x_dpy, w->_screen->_colormap, &c)
++            ? c.pixel : WhitePixel (x_dpy, DefaultScreen (x_dpy));
++        attr.override_redirect = True;
++        attr.border_pixel = 0;
++        attr.colormap = w->_screen->_colormap;
++        tile_drag.preview = XCreateWindow (x_dpy, w->_screen->_root, r.x, r.y,
++                                           MAX (r.width, 2 * RING + 1), MAX (r.height, 2 * RING + 1),
++                                           0, w->_screen->_depth, InputOutput, w->_screen->_visual,
++                                           CWBackPixel | CWOverrideRedirect | CWBorderPixel | CWColormap,
++                                           &attr);
++        tile_drag.root = w->_screen->_root;
++        /* Never in the way of the pointer. */
++        XShapeCombineRectangles (x_dpy, tile_drag.preview, ShapeInput, 0, 0, NULL, 0,
++                                 ShapeSet, Unsorted);
++        tile_drag.shown = X11EmptyRect;
++    }
++
++    if (!X11RectEqualToRect (r, tile_drag.shown)) {
++        ring[0] = (XRectangle) { 0, 0, r.width, RING };
++        ring[1] = (XRectangle) { 0, r.height - RING, r.width, RING };
++        ring[2] = (XRectangle) { 0, RING, RING, r.height - 2 * RING };
++        ring[3] = (XRectangle) { r.width - RING, RING, RING, r.height - 2 * RING };
++        XMoveResizeWindow (x_dpy, tile_drag.preview, r.x, r.y, r.width, r.height);
++        XShapeCombineRectangles (x_dpy, tile_drag.preview, ShapeBounding, 0, 0, ring, 4,
++                                 ShapeSet, Unsorted);
++        tile_drag.shown = r;
++    }
++    XMapRaised (x_dpy, tile_drag.preview);
++    XAppleWMSetWindowLevel (x_dpy, tile_drag.preview, AppleWMWindowLevelFloating);
++}
++
++/* A drag of |w| is at |p|: the outline follows the zone. */
++static void
++tile_drag_motion (x_window *w, X11Point p)
++{
++    const char *e = getenv ("QUARTZ_WM_TILING");
++    int where;
++
++    if (e && e[0] == '0')
++        return;
++    where = tile_zone (w, p);
++    if (where == tile_drag.where)
++        return;
++    if (where == QWM_TILE_NONE) {
++        tile_preview_hide ();
++        return;
++    }
++    tile_drag.where = where;
++    tile_preview_show (w, [w tile_rect:where at:p]);
++}
++
++/* The drag of |w| ended: tiled if it ended in a zone (|apply|), the
++ * outline gone either way. |pretile| is the frame the drag started from. */
++static void
++tile_drag_end (x_window *w, BOOL apply, X11Rect pretile)
++{
++    int where = tile_drag.where;
++
++    tile_preview_hide ();
++    if (apply && where != QWM_TILE_NONE && w != nil && !w->_removed && !w->_deleted)
++        [w do_tile:where pretile:pretile];
++}
++
++/* The frame a framed title-bar drag started from (for Return to Previous
++ * Size after a tile). */
++static X11Rect tile_drag_start_frame;
++
++static void
+ x_event_button (XButtonEvent *e)
+ {
+     x_window *w = x_get_window (e->window);
+@@ -218,6 +355,10 @@
+                 pointer_state.down_id = e->window;
+                 pointer_state.down_time = e->time;
+                 pointer_state.down_attrs = [w hit_test_frame:p];
++                /* SteamARM: where the press was decides a drag, not where
++                 * the pointer is once past the threshold -- a quick drag
++                 * was over the client already and never moved the window. */
++                pointer_state.down_on_frame = (e->subwindow == None);
+ 
+                 if ((pointer_state.down_attrs
+                      & (w->_frame_attr & XP_FRAME_ATTRS_ANY_BUTTON)) != 0)
+@@ -245,6 +386,7 @@
+                     qwm_dock_drag_end([w get_osx_id]);
+ #endif
+                     pointer_state.dragging = NO;
++                    tile_drag_end (w, YES, tile_drag_start_frame);
+                 }
+                 else if (pointer_state.resizing)
+                 {
+@@ -341,6 +483,7 @@
+                     qwm_dock_drag_end([w get_osx_id]);
+ #endif
+                     pointer_state.dragging = NO;
++                    tile_drag_end (w, NO, tile_drag_start_frame);
+                 }
+                 if (pointer_state.resizing) {
+                     pointer_state.resizing = NO;
+@@ -351,13 +494,17 @@
+             if (pointer_state.dragging)
+             {
+             do_drag:
++                /* The size asked for last: after an untile the frame has
++                 * not come back from the server yet. */
++                r = [w intended_frame];
+                 r = X11RectMake(p.x + pointer_state.offset.x, p.y + pointer_state.offset.y,
+-                                w->_current_frame.width, w->_current_frame.height);
++                                r.width, r.height);
+                 r = [w->_screen validate_window_position:r titlebar_height:w->_frame_title_height];
+ #if MAC_OS_X_VERSION_MIN_REQUIRED >= 1050
+                 qwm_dock_drag_begin([w get_osx_id]);
+ #endif
+                 [w resize_frame:r];
++                tile_drag_motion (w, p);
+             }
+             else if (pointer_state.resizing)
+             {
+@@ -399,16 +546,22 @@
+                 {
+                     if (e->window == w->_growbox_id)
+                     {
++                        [w leave_tile];     /* SteamARM: resized by hand */
+                         pointer_state.offset.x = w->_current_frame.width;
+                         pointer_state.offset.y = w->_current_frame.height;
+                         pointer_state.resizing = YES;
+                         goto do_resize;
+                     }
+                     else if (e->window == w->_frame_id
+-                             && w->_movable && e->subwindow == None)
++                             && w->_movable && pointer_state.down_on_frame)
+                     {
+-                        pointer_state.offset.x = w->_current_frame.x - pointer_state.down_location.x;
+-                        pointer_state.offset.y = w->_current_frame.y - pointer_state.down_location.y;
++                        /* SteamARM: a tiled window leaves its tile at its
++                         * size from before (untile_for_drag_at). */
++                        X11Rect f = [w untile_for_drag_at:pointer_state.down_location];
++
++                        tile_drag_start_frame = f;
++                        pointer_state.offset.x = f.x - pointer_state.down_location.x;
++                        pointer_state.offset.y = f.y - pointer_state.down_location.y;
+                         pointer_state.dragging = YES;
+                         goto do_drag;
+                     }
+@@ -500,8 +653,18 @@
+ /* Ends the drag where it is: button released, _NET_WM_MOVERESIZE_CANCEL,
+  * a new request, X going inactive, the window going away. */
+ static void
++moveresize_end_tiling (BOOL apply);
++
++static void
+ moveresize_end (void)
+ {
++    moveresize_end_tiling (NO);
++}
++
++/* |apply|: a move released over a tiling zone tiles the window. */
++static void
++moveresize_end_tiling (BOOL apply)
++{
+     x_window *w = moveresize.w;
+ 
+     if (w == nil)
+@@ -509,6 +672,9 @@
+ 
+     moveresize.w = nil;
+ 
++    if (moveresize.direction == NET_WM_MOVERESIZE_MOVE)
++        tile_drag_end (w, apply && moveresize.moved, moveresize.start_frame);
++
+     XUngrabPointer (x_dpy, CurrentTime);
+ 
+     if (!w->_removed && !w->_deleted) {
+@@ -566,6 +732,12 @@
+         if (moveresize.direction == NET_WM_MOVERESIZE_MOVE)
+             qwm_dock_drag_begin ([w get_osx_id]);
+ #endif
++        /* SteamARM: a tiled window leaves its tile at its size from before;
++         * a resize by hand leaves it too. */
++        if (moveresize.direction == NET_WM_MOVERESIZE_MOVE)
++            moveresize.start_frame = [w untile_for_drag_at:moveresize.anchor];
++        else
++            [w leave_tile];
+     }
+ 
+     r = [w moveresize_frame:moveresize.start_frame
+@@ -577,6 +749,8 @@
+ 
+     if (moveresize.direction != NET_WM_MOVERESIZE_MOVE)
+         [w set_resizing_title:r];
++    else
++        tile_drag_motion (w, p);
+ }
+ 
+ /* Takes the pointer for a drag of |w|: an active grab on the root with the
+@@ -789,7 +963,7 @@
+         case ButtonRelease:
+             moveresize_motion (e->xbutton.x_root, e->xbutton.y_root,
+                                e->xbutton.state);
+-            moveresize_end ();
++            moveresize_end_tiling (YES);
+             return YES;
+ 
+         case ButtonPress:
+@@ -1261,6 +1435,12 @@
+ 
+             case AppleWMPreviousWindow:
+                 next_window (e->time, TRUE);
++                break;
++
++            case QWM_TILE_KIND:     /* SteamARM: Fill, Center, Move & Resize */
++                w = x_get_active_window ();
++                if (w != nil)
++                    [w do_tile:(int) e->arg];
+                 break;
+         }
+             break;
+diff -ruN a/src/x-window.h b/src/x-window.h
+--- a/src/x-window.h	2026-10-03 14:55:37
++++ b/src/x-window.h	2026-10-03 15:04:33
+@@ -101,6 +101,7 @@
+     unsigned _above :1;			/* _NET_WM_STATE_ABOVE */
+     unsigned _net_frame_extents_valid :1;
+     unsigned _net_wm_state_valid :1;
++    unsigned _tiled :1;         /* SteamARM: placed by a tile (do_tile) */
+ 
+     /* Top value last written to _NET_FRAME_EXTENTS */
+     int _net_frame_extents_top;
+@@ -122,6 +123,10 @@
+     X11Rect _pending_frame;
+     X11Rect _queued_frame;
+     X11Rect _unzoomed_frame;
++    /* SteamARM: the frame before the window was tiled, which "Return to
++     * Previous Size" and a drag away from the tile go back to. */
++    X11Rect _pretile_frame;
++    int _tile_where;
+ 
+     /* Stored result from XGetWMHints() and XGetWMNormalHints() */
+     XWMHints *_wm_hints;
+@@ -205,6 +210,12 @@
+ /* _NET_WM_MOVERESIZE support */
+ - (X11Rect) intended_frame;
+ - (void) fill_head_client:(X11Rect)head;
++- (X11Rect) tile_rect:(int)where at:(X11Point)p;
++- (void) do_tile:(int)where;
++- (void) do_tile:(int)where pretile:(X11Rect)pretile;
++- (X11Rect) untile_for_drag_at:(X11Point)pointer;
++- (BOOL) can_tile;
++- (void) leave_tile;
+ - (BOOL) can_moveresize:(int)direction;
+ - (X11Rect) moveresize_frame:(X11Rect)start direction:(int)direction
+                           dx:(int)dx dy:(int)dy pointer:(X11Point)p;
+diff -ruN a/src/x-window.m b/src/x-window.m
+--- a/src/x-window.m	2026-10-03 14:55:37
++++ b/src/x-window.m	2026-10-03 15:04:33
+@@ -2469,6 +2469,7 @@
+ }
+ 
+ - (void) do_zoom {
++    _tiled = NO;   /* SteamARM: a zoom is not a tile */
+     X11Rect r = [self intended_frame];
+     X11Rect new_rect;
+ 
+@@ -2509,6 +2510,8 @@
+  * the actual frame for Xplugin (done in update_frame).
+  */
+ - (void) do_fullscreen:(BOOL) flag {
++    if (flag)
++        _tiled = NO;   /* SteamARM */
+ 
+     DB("id: 0x%lx frame_id: 0x%lx currently: %d requested: %d", _id, _frame_id, _fullscreen, flag);
+ 
+@@ -2954,9 +2957,132 @@
+ /* Double click on a title bar: System Settings > Desktop & Dock >
+  * "Double-click a window's title bar to" (Zoom / Fill / Minimize / Do
+  * Nothing), like every native window. */
++/* SteamARM: macOS 15's window tiling, for X windows (they are not
++ * NSWindows, so the system's own tiling never applied to them). Regions of
++ * the visible frame of the screen under a point -- below the menu bar,
++ * beside the Dock -- with the gaps of "Tiled windows have margins"
++ * (com.apple.WindowManager EnableTiledWindowMargins, on by default). */
++static int
++tile_margin (void)
++{
++    Boolean ok = false;
++    Boolean on = CFPreferencesGetAppBooleanValue (CFSTR ("EnableTiledWindowMargins"),
++                                                  CFSTR ("com.apple.WindowManager"), &ok);
++    return (ok && !on) ? 0 : 8;
++}
++
++- (X11Rect) tile_rect:(int)where at:(X11Point)p
++{
++    X11Rect v = [_screen zoomed_rect:p];
++    int m = tile_margin ();
++    X11Rect a = X11RectMake (v.x + m, v.y + m, v.width - 2 * m, v.height - 2 * m);
++    int hw = (a.width - m) / 2, hh = (a.height - m) / 2;
++    X11Rect f;
++
++    switch (where) {
++        case QWM_TILE_LEFT:         return X11RectMake (a.x, a.y, hw, a.height);
++        case QWM_TILE_RIGHT:        return X11RectMake (a.x + a.width - hw, a.y, hw, a.height);
++        case QWM_TILE_TOP:          return X11RectMake (a.x, a.y, a.width, hh);
++        case QWM_TILE_BOTTOM:       return X11RectMake (a.x, a.y + a.height - hh, a.width, hh);
++        case QWM_TILE_TOP_LEFT:     return X11RectMake (a.x, a.y, hw, hh);
++        case QWM_TILE_TOP_RIGHT:    return X11RectMake (a.x + a.width - hw, a.y, hw, hh);
++        case QWM_TILE_BOTTOM_LEFT:  return X11RectMake (a.x, a.y + a.height - hh, hw, hh);
++        case QWM_TILE_BOTTOM_RIGHT: return X11RectMake (a.x + a.width - hw, a.y + a.height - hh, hw, hh);
++        case QWM_TILE_CENTER:
++            f = [self intended_frame];
++            return X11RectMake (v.x + (v.width - (int) f.width) / 2,
++                                v.y + (v.height - (int) f.height) / 2, f.width, f.height);
++        case QWM_TILE_FILL:
++        default:
++            return a;
++    }
++}
++
++- (void) do_tile:(int)where
++{
++    [self do_tile:where pretile:[self intended_frame]];
++}
++
++- (BOOL) can_tile
++{
++    return _movable && !_fullscreen && !_shaded && !_hidden;
++}
++
++/* Moved or resized by hand: no longer in its tile. */
++- (void) leave_tile
++{
++    _tiled = NO;
++}
++
++/* |pretile| is what Return to Previous Size goes back to when the window
++ * was not tiled already (for a drag, the frame the drag started from). */
++- (void) do_tile:(int)where pretile:(X11Rect)pretile
++{
++    X11Rect cur, r;
++    X11Point at;
++
++    if (_fullscreen || _shaded || _hidden || where <= QWM_TILE_NONE || where > QWM_TILE_RESTORE)
++        return;
++
++    if (where == QWM_TILE_RESTORE) {
++        if (!_tiled)
++            return;
++        _tiled = NO;
++        r = [self validate_frame_rect:_pretile_frame from_user:YES constrain:NO];
++        [self resize_frame:r force:YES];
++        return;
++    }
++
++    cur = [self intended_frame];
++    if (!_tiled)
++        _pretile_frame = pretile;
++
++    /* The screen the window's title bar is on. */
++    at = X11PointMake (cur.x + (int) cur.width / 2, cur.y + MIN ((int) cur.height / 2, 12));
++    r = [self tile_rect:where at:at];
++
++    /* A window that keeps its size (min = max, a dialog) goes to the
++     * middle of the region instead. */
++    if (!_resizable && where != QWM_TILE_CENTER) {
++        X11Rect c = X11RectMake (r.x + ((int) r.width - (int) cur.width) / 2,
++                                 r.y + ((int) r.height - (int) cur.height) / 2,
++                                 cur.width, cur.height);
++        r = c;
++    }
++
++    r = [self validate_frame_rect:r from_user:YES constrain:NO];
++    _tiled = YES;
++    _tile_where = where;
++    [self resize_frame:r force:YES];
++}
++
++/* A tiled window dragged away goes back to its size before the tile, as
++ * on macOS, with the point under the pointer kept in proportion. Returns
++ * the frame to drag from. */
++- (X11Rect) untile_for_drag_at:(X11Point)pointer
++{
++    X11Rect f = [self intended_frame], r;
++    double rel;
++
++    if (!_tiled)
++        return f;
++    _tiled = NO;
++    if (!_resizable || (int) f.width <= 0)
++        return f;
++
++    rel = (double) (pointer.x - f.x) / (double) f.width;
++    if (rel < 0) rel = 0;
++    if (rel > 1) rel = 1;
++    r = X11RectMake (pointer.x - (int) (rel * _pretile_frame.width), f.y,
++                     _pretile_frame.width, _pretile_frame.height);
++    r = [self validate_frame_rect:r from_user:YES constrain:NO];
++    [self resize_frame:r force:YES];
++    return r;
++}
++
+ - (void) do_title_double_click
+ {
+-    enum { ACTION_ZOOM, ACTION_MINIMIZE, ACTION_NONE } action = ACTION_ZOOM;
++    enum { ACTION_ZOOM, ACTION_MINIMIZE, ACTION_NONE, ACTION_FILL } action = ACTION_ZOOM;
+     CFPropertyListRef value;
+ 
+     value = CFPreferencesCopyAppValue (CFSTR ("AppleActionOnDoubleClick"),
+@@ -2968,7 +3094,9 @@
+             action = ACTION_MINIMIZE;
+         else if (CFStringCompare (str, CFSTR ("None"), kCFCompareCaseInsensitive) == kCFCompareEqualTo)
+             action = ACTION_NONE;
+-        /* "Maximize" (Zoom) and "Fill" both fill the visible frame. */
++        else if (CFStringCompare (str, CFSTR ("Fill"), kCFCompareCaseInsensitive) == kCFCompareEqualTo)
++            action = ACTION_FILL;   /* SteamARM: Fill as macOS 15 fills (do_tile) */
++        /* "Maximize" is Zoom. */
+     } else {
+         /* Key used before macOS 10.11. */
+         Boolean ok = false;
+@@ -2990,6 +3118,10 @@
+         case ACTION_ZOOM:
+             if (_frame_attr & XP_FRAME_ATTR_ZOOM)
+                 [self do_zoom];
++            break;
++        case ACTION_FILL:
++            /* Filled already: back to the size it had. */
++            [self do_tile:(_tiled && _tile_where == QWM_TILE_FILL) ? QWM_TILE_RESTORE : QWM_TILE_FILL];
+             break;
+         case ACTION_NONE:
+             break;

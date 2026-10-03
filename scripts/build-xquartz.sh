@@ -144,7 +144,7 @@ fi
 #    picks the patches up when it is restarted.
 QWM_COMMIT=3570364dd893713e6697d0d80beb61ad03e43c6c
 QWM="$XQ_ROOT/quartz-wm"
-QWM_PATCHES=(quartz-wm-picture.patch quartz-wm-netwm-moveresize.patch quartz-wm-fullscreen-head.patch quartz-wm-resize-fixed.patch quartz-wm-fullscreen-keep.patch)
+QWM_PATCHES=(quartz-wm-picture.patch quartz-wm-netwm-moveresize.patch quartz-wm-fullscreen-head.patch quartz-wm-resize-fixed.patch quartz-wm-fullscreen-keep.patch quartz-wm-tiling.patch)
 QWM_STAMP="$QWM_COMMIT $( cd "$PROJECT_DIR/patches" && cat "${QWM_PATCHES[@]}" | shasum -a 256 | cut -d' ' -f1 )"
 if [ ! -x "$QWM/src/quartz-wm" ] || [ "$(cat "$QWM/.steamarm-patches" 2>/dev/null)" != "$QWM_STAMP" ]; then
     log "building quartz-wm"
