@@ -34,7 +34,10 @@
 #       covered every sample; B10G11R11 has no alpha), and in the shader key
 #       with the depth/stencil formats: through a VkPipelineCache a pipeline
 #       was handed the one compiled without alpha-to-coverage. Cut-out
-#       foliage drawn opaque (de_dust2's palms; tests/elf/vk_alphamask.c).
+#       foliage drawn opaque (de_dust2's palms; tests/elf/vk_alphamask.c);
+#   09  a pipeline with no fragment shader (a depth or shadow prepass) hashes
+#       its render-pass and depth state too: through a VkPipelineCache it was
+#       handed another's depth state (tests/elf/vk_vsonly.c).
 #
 # Only Homebrew formulae and a Python virtualenv are installed. Re-running is
 # safe: the download is cached and the build is incremental. Needs macOS 26.

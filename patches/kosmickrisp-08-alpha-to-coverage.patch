@@ -1,6 +1,6 @@
 diff -ruN -x __pycache__ b7/src/kosmickrisp/vulkan/kk_shader.c b8/src/kosmickrisp/vulkan/kk_shader.c
---- a/src/kosmickrisp/vulkan/kk_shader.c
-+++ b/src/kosmickrisp/vulkan/kk_shader.c
+--- a/src/kosmickrisp/vulkan/kk_shader.c	2026-10-02 20:22:38
++++ b/src/kosmickrisp/vulkan/kk_shader.c	2026-10-02 23:16:49
 @@ -130,6 +130,16 @@
     uint16_t static_sample_mask;
     bool sample_shading_enable;
@@ -35,12 +35,10 @@ diff -ruN -x __pycache__ b7/src/kosmickrisp/vulkan/kk_shader.c b8/src/kosmickris
  }
  
  static void
-@@ -350,8 +366,137 @@
-                                uint8_t i)
- {
+@@ -352,6 +368,135 @@
     return (state->cal) ? state->cal->color_map[i] : i;
-+}
-+
+ }
+ 
 +/* Metal takes alpha-to-coverage from the alpha the fragment function returns
 + * for colour attachment 0. KosmicKrisp blends, applies the colour write mask
 + * and trims the colour to the attachment's channels in the shader
@@ -82,8 +80,8 @@ diff -ruN -x __pycache__ b7/src/kosmickrisp/vulkan/kk_shader.c b8/src/kosmickris
 +      return false;
 +   }
 +   return false;
- }
- 
++}
++
 +/* The sample mask alpha-to-coverage leaves: the formula and the dithering of
 + * nir_lower_alpha.c, in 32-bit integers.
 + */
@@ -173,25 +171,114 @@ diff -ruN -x __pycache__ b7/src/kosmickrisp/vulkan/kk_shader.c b8/src/kosmickris
  static void
  kk_lower_fs_blend(nir_shader *nir,
                    const struct vk_graphics_pipeline_state *state)
-@@ -439,6 +584,10 @@
-     * goes here but need to double check. */
+@@ -428,7 +573,7 @@
+ 
+ static void
+ kk_lower_fs(struct kk_device *dev, nir_shader *nir,
+-            const struct vk_graphics_pipeline_state *state)
++            const struct vk_graphics_pipeline_state *state, bool *a2c_lowered)
+ {
+    nir->info.fs.uses_sample_shading |=
+       state->ms && state->ms->sample_shading_enable;
+@@ -440,6 +585,17 @@
     if (nir->info.fs.uses_sample_shading)
        NIR_PASS(_, nir, msl_nir_lower_sample_shading);
-+
-+   /* Before blending: from the alpha the application's shader wrote */
-+   if (kk_fs_lowers_alpha_to_coverage(state))
-+      NIR_PASS(_, nir, kk_nir_lower_alpha_to_coverage);
  
++   /* Before blending: from the alpha the application's shader wrote. Only
++    * when the pass did it is Metal's hardware alpha-to-coverage turned off
++    * (gather_graphics_pipeline_create_info); a shader the pass cannot handle
++    * keeps the hardware one, as before. */
++   if (kk_fs_lowers_alpha_to_coverage(state)) {
++      bool lowered = false;
++      NIR_PASS(lowered, nir, kk_nir_lower_alpha_to_coverage);
++      if (a2c_lowered)
++         *a2c_lowered = lowered;
++   }
++
     if (state->cb)
        kk_lower_fs_blend(nir, state);
-@@ -1205,7 +1354,9 @@
+ 
+@@ -509,7 +665,7 @@
+              const struct vk_pipeline_robustness_state *rs,
+              uint32_t set_layout_count,
+              struct vk_descriptor_set_layout *const *set_layouts,
+-             const struct vk_graphics_pipeline_state *state)
++             const struct vk_graphics_pipeline_state *state, bool *a2c_lowered)
+ {
+    if (nir->info.io_lowered)
+       return;
+@@ -608,7 +764,7 @@
+        !emulated_stage) {
+       kk_lower_hw_vs(nir, state);
+    } else if (nir->info.stage == MESA_SHADER_FRAGMENT) {
+-      kk_lower_fs(dev, nir, state);
++      kk_lower_fs(dev, nir, state, a2c_lowered);
+    }
+ 
+    /* Descriptor lowering needs to happen after lowering blend since we will
+@@ -1022,7 +1178,7 @@
+       .null_uniform_buffer_descriptor = false,
+       .null_storage_buffer_descriptor = false,
+    };
+-   kk_lower_nir(dev, nir, false, &no_robustness, 0u, NULL, state);
++   kk_lower_nir(dev, nir, false, &no_robustness, 0u, NULL, state, NULL);
+    nir_shader_gather_info(nir, nir_shader_get_entrypoint(nir));
+ 
+    return nir;
+@@ -1205,7 +1361,11 @@
     if (info->vs.has_ms) {
        const struct vk_multisample_state *ms = state->ms;
        info->vs.sample_count = ms->rasterization_samples;
 -      info->vs.has_alpha_to_coverage_enabled = ms->alpha_to_coverage_enable;
 +      /* Done by the fragment shader instead when it changes the alpha */
++      const struct kk_shader *fs = shaders[shader_count - 1];
 +      info->vs.has_alpha_to_coverage_enabled =
-+         ms->alpha_to_coverage_enable && !kk_fs_lowers_alpha_to_coverage(state);
++         ms->alpha_to_coverage_enable &&
++         !(fs->info.stage == MESA_SHADER_FRAGMENT && fs->info.a2c_lowered);
        info->vs.has_alpha_to_one_enabled = ms->alpha_to_one_enable;
     }
+ 
+@@ -1386,6 +1546,7 @@
+    /* Lower shaders, notably lowering IO. This is a prerequisite for intershader
+     * optimization. */
+    const struct vk_pipeline_robustness_state *vertex_robustness = &rs_none;
++   bool a2c_lowered = false;
+    for (uint32_t i = 0u; i < shader_count; ++i) {
+       const struct vk_shader_compile_info *info = &infos[i];
+       nir_shader *nir = info->nir;
+@@ -1396,7 +1557,8 @@
+ 
+       msl_preprocess_nir_workarounds(nir, dev->disabled_workarounds);
+       kk_lower_nir(dev, nir, emulated_stage, info->robustness,
+-                   info->set_layout_count, info->set_layouts, state);
++                   info->set_layout_count, info->set_layouts, state,
++                   &a2c_lowered);
+ 
+       if (nir->info.stage == MESA_SHADER_VERTEX)
+          vertex_robustness = info->robustness;
+@@ -1442,6 +1604,11 @@
+ 
+          return result;
+       }
++   }
++
++   for (uint32_t i = 0; i < total_shaders; i++) {
++      if (shaders[i]->info.stage == MESA_SHADER_FRAGMENT)
++         shaders[i]->info.a2c_lowered = a2c_lowered;
+    }
+ 
+    /* Compile pipeline:
+diff -ruN -x __pycache__ b7/src/kosmickrisp/vulkan/kk_shader.h b8/src/kosmickrisp/vulkan/kk_shader.h
+--- a/src/kosmickrisp/vulkan/kk_shader.h	2026-10-02 20:22:38
++++ b/src/kosmickrisp/vulkan/kk_shader.h	2026-10-02 23:16:49
+@@ -55,6 +55,10 @@
+    bool reads_images;
+    bool writes_memory;
+ 
++   /* Fragment: alpha-to-coverage is computed by the shader (patch 08,
++    * kk_nir_lower_alpha_to_coverage), Metal's hardware one stays off. */
++   bool a2c_lowered;
++
+    /* Required for fragment shader cull distance discards. */
+    uint8_t num_cull_distances;
  

@@ -1,0 +1,28 @@
+diff -ruN -x __pycache__ b8/src/kosmickrisp/vulkan/kk_shader.c b9/src/kosmickrisp/vulkan/kk_shader.c
+--- a/src/kosmickrisp/vulkan/kk_shader.c	2026-10-02 23:16:49
++++ b/src/kosmickrisp/vulkan/kk_shader.c	2026-10-02 23:17:52
+@@ -191,13 +191,21 @@
+       _mesa_blake3_update(&blake3_ctx, &key, sizeof(key));
+    }
+ 
+-   if (stages & VK_SHADER_STAGE_FRAGMENT_BIT) {
++   /* The Metal render pipeline (attachment formats, samples, depth/stencil
++    * and blend state) lives in the vertex kk_shader, also when the pipeline
++    * has no fragment shader (a depth prepass, a shadow pass: a generated
++    * empty one is used): its state is hashed with the vertex shader too. A
++    * vertex-only pipeline was handed another's depth state through a
++    * VkPipelineCache (tests/elf/vk_vsonly.c). */
++   if ((stages & VK_SHADER_STAGE_FRAGMENT_BIT) ||
++       ((stages & VK_SHADER_STAGE_VERTEX_BIT) && state && state->rp)) {
+       struct kk_fs_key key;
+       kk_populate_fs_key(&key, state);
+       _mesa_blake3_update(&blake3_ctx, &key, sizeof(key));
+ 
+-      _mesa_blake3_update(&blake3_ctx, &state->mv->view_mask,
+-                          sizeof(state->mv->view_mask));
++      if (state->mv)
++         _mesa_blake3_update(&blake3_ctx, &state->mv->view_mask,
++                             sizeof(state->mv->view_mask));
+    }
+ 
+    _mesa_blake3_update(&blake3_ctx, &enabled_features->nullDescriptor,

@@ -136,6 +136,32 @@ else
         echo "  skip  vk_alphamask kosmickrisp steamarm (no $OWN: scripts/build-kosmickrisp.sh)"
     fi
 fi
+# vk_vsonly: a depth prepass made of pipelines with no fragment shader,
+# through a VkPipelineCache: KosmicKrisp handed one the other's depth state
+# (patches/kosmickrisp-09). Homebrew's driver fails it with the cache.
+exe7="$ROOT/tmp/vktest/vk_vsonly"
+if ! "$CLANG" --target=aarch64-redhat-linux-gnu --sysroot="$STAGE" --gcc-install-dir="$GCCDIR" -fuse-ld=lld \
+        --ld-path=/opt/homebrew/opt/lld/bin/ld.lld -w -O2 -I/opt/homebrew/include -Itests/elf -o "$exe7" \
+        tests/elf/vk_vsonly.c "$ROOT/usr/lib/libvulkan.so.1"; then
+    echo "  FAIL  vk_vsonly (build)"; fail=$((fail + 1))
+else
+    run_vsonly() { # label, cache argument, then environment assignments
+        local label=$1 cache=$2; shift 2
+        local log="$ROOT/tmp/vktest/vk_vsonly_${label// /_}.log"
+        env OBJC_DISABLE_INITIALIZE_FORK_SAFETY=YES LXRT_ROOT="$ROOT" "$@" \
+            perl -e 'alarm 120; exec @ARGV' ./build/lxrun /tmp/vktest/vk_vsonly $cache > "$log" 2>&1
+        if [ "$(grep -E '^== vk_vsonly' "$log" | tail -1)" = "== vk_vsonly: ok" ]; then
+            printf '  ok    vk_vsonly %s\n' "$label"; pass=$((pass + 1))
+        else
+            printf '  FAIL  vk_vsonly %s: %s (log %s)\n' "$label" "$(grep -m1 FAIL "$log")" "$log"; fail=$((fail + 1))
+        fi
+    }
+    run_vsonly "moltenvk cache" cache STEAMARM_VK_ICD=moltenvk
+    if [ -f "$OWN/libvulkan_kosmickrisp.dylib" ]; then
+        run_vsonly "kosmickrisp steamarm" "" STEAMARM_VK_ICD=kosmickrisp STEAMARM_KK_DIR="$OWN"
+        run_vsonly "kosmickrisp steamarm cache" cache STEAMARM_VK_ICD=kosmickrisp STEAMARM_KK_DIR="$OWN"
+    fi
+fi
 # vk_x11_present: a swapchain on an X window of SteamARM's X server. With
 # IMMEDIATE the shim's mailbox (shim/mailbox.c) must not wait for the display
 # (the layer is shown by another process and takes one drawable per refresh:
