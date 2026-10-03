@@ -1331,19 +1331,30 @@ long lxrt_fallocate(int fd, int lmode, int64_t offset, int64_t len)
 //   F_BARRIERFSYNC    fsync plus a write barrier -- ordering is guaranteed
 //   F_FULLFSYNC       fsync plus a full drive cache flush -- durable, and slow
 //
-// F_BARRIERFSYNC is the closest match. F_FULLFSYNC is strictly stronger than
-// what Linux promises and costs a whole-drive cache flush per call, which is
-// not something to impose on a shader cache being written a few KiB at a time.
-// The residual gap is stated rather than hidden: data acknowledged here can
-// still be lost to a power cut, where Linux's fdatasync would have kept it.
+// fsync (LNR_fsync) is answered with the plain Darwin fsync, and fdatasync
+// now is too. It used F_BARRIERFSYNC, as the closest match to Linux's
+// guarantee -- and on Linux fdatasync is the CHEAPER of the two, while here
+// it was by far the dearer: on the disk image the guests' root lives on,
+// with bulk writes going on (a Steam start), MEASURED 154 ms mean / 312 ms
+// worst per F_BARRIERFSYNC against 8.7 / 17.7 ms per fsync (F_FULLFSYNC:
+// 104 / 207 ms). Chromium's caches call fdatasync all through Steam's start,
+// and the one web helper caught hung in the kernel (a start in about sixty
+// with no main window, 2026-10-03) had a thread inside that fcntl and its
+// main thread blocked in an openat. The residual gap is stated rather than
+// hidden: data acknowledged here can still be lost to a power cut, where
+// Linux's fdatasync would have kept it -- the same as this runtime's fsync.
+// LXRT_FDATASYNC_BARRIER=1 brings the barrier back.
 long lxrt_fdatasync(int fd)
 {
-    if (fcntl(fd, F_BARRIERFSYNC) == 0)
-        return 0;
-    // Not every filesystem implements the barrier; fall back rather than fail a
-    // sync that plain fsync can satisfy.
-    if (errno != ENOTTY && errno != ENOTSUP && errno != EINVAL)
-        return LERR(errno);
+    static int barrier = -1;
+    if (barrier < 0)
+        barrier = getenv("LXRT_FDATASYNC_BARRIER") && *getenv("LXRT_FDATASYNC_BARRIER") == '1';
+    if (barrier) {
+        if (fcntl(fd, F_BARRIERFSYNC) == 0)
+            return 0;
+        if (errno != ENOTTY && errno != ENOTSUP && errno != EINVAL)
+            return LERR(errno);
+    }
     return fsync(fd) != 0 ? LERR(errno) : 0;
 }
 
