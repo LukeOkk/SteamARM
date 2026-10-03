@@ -225,7 +225,14 @@ typedef struct {
 } scaled;
 
 static scaled *g_sc[16];
-static struct { VkQueue q; uint32_t family; } g_q[32];
+// Every queue the game got through this shim, with its device: shim/mailbox.c
+// signals a first acquire's semaphore on one of the swapchain's device before
+// the game has presented. Forgotten when the device is destroyed: Steam's web
+// helper makes a device, drops it, and makes the one it draws with; the
+// first acquire on the second then went to the first device's freed queue
+// (vk_queue_submit_alloc / mtl_residency_set_commit crashes 13-17 s into a
+// Steam start, from 2026-10-02 13:16, when the mailbox began).
+static struct { VkDevice dev; VkQueue q; uint32_t family; } g_q[32];
 static unsigned g_q_next;
 static volatile int g_lock;
 
@@ -371,7 +378,7 @@ static uint32_t queue_family(VkQueue q)
     return 0;
 }
 
-static void note_queue(VkQueue q, uint32_t family)
+static void note_queue(VkDevice dev, VkQueue q, uint32_t family)
 {
     if (!q)
         return;
@@ -382,21 +389,35 @@ static void note_queue(VkQueue q, uint32_t family)
             k = i;
     if (k < 0)
         k = g_q_next++ % 32;
+    g_q[k].dev = dev;
     g_q[k].q = q;
     g_q[k].family = family;
     unlock();
 }
 
-// shim/mailbox.c: a queue to signal an acquire's semaphore on before the
-// game has presented anything, and a queue's family.
-VkQueue lxrt_scaler_a_queue(void)
+// shim/mailbox.c: a queue of `dev` to signal an acquire's semaphore on before
+// the game has presented anything (VK_NULL_HANDLE: the game got none through
+// this shim), and a queue's family.
+VkQueue lxrt_scaler_a_queue(VkDevice dev)
 {
     VkQueue q = VK_NULL_HANDLE;
     lock();
     for (int i = 0; i < 32 && !q; i++)
-        q = g_q[i].q;
+        if (g_q[i].dev == dev)
+            q = g_q[i].q;
     unlock();
     return q;
+}
+
+void lxrt_mvk_vkDestroyDevice(VkDevice, const VkAllocationCallbacks *);
+void lxrt_inner_vkDestroyDevice(VkDevice dev, const VkAllocationCallbacks *alloc)
+{
+    lock();
+    for (int i = 0; i < 32; i++)
+        if (g_q[i].dev == dev)
+            g_q[i].dev = VK_NULL_HANDLE, g_q[i].q = VK_NULL_HANDLE, g_q[i].family = 0;
+    unlock();
+    lxrt_mvk_vkDestroyDevice(dev, alloc);
 }
 
 uint32_t lxrt_scaler_queue_family(VkQueue q) { return queue_family(q); }
@@ -404,13 +425,13 @@ uint32_t lxrt_scaler_queue_family(VkQueue q) { return queue_family(q); }
 void lxrt_inner_vkGetDeviceQueue(VkDevice dev, uint32_t family, uint32_t index, VkQueue *q)
 {
     lxrt_mvk_vkGetDeviceQueue(dev, family, index, q);
-    note_queue(*q, family);
+    note_queue(dev, *q, family);
 }
 
 void lxrt_inner_vkGetDeviceQueue2(VkDevice dev, const VkDeviceQueueInfo2 *info, VkQueue *q)
 {
     lxrt_mvk_vkGetDeviceQueue2(dev, info, q);
-    note_queue(*q, info->queueFamilyIndex);
+    note_queue(dev, *q, info->queueFamilyIndex);
 }
 
 static void destroy(scaled *s)

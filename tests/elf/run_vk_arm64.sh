@@ -277,6 +277,34 @@ else
             modes "kosmickrisp steamarm" STEAMARM_VK_ICD=kosmickrisp STEAMARM_KK_DIR="$OWN"
         fi
     fi
+    # vk_twodev: a device made and destroyed, then the one that draws, whose
+    # first acquire comes before any present. The mailbox signalled that
+    # acquire on the destroyed device's queue (Steam's web helper crashed in
+    # vk_queue_submit_alloc 13-17 s into most starts). MallocScribble makes the
+    # freed device unmistakable.
+    exe9="$ROOT/tmp/vktest/vk_twodev"
+    if ! "$CLANG" --target=aarch64-redhat-linux-gnu --sysroot="$STAGE" --gcc-install-dir="$GCCDIR" -fuse-ld=lld \
+            --ld-path=/opt/homebrew/opt/lld/bin/ld.lld -w -O2 -I/opt/homebrew/include -o "$exe9" \
+            tests/elf/vk_twodev.c "$ROOT/usr/lib/libvulkan.so.1" "$(ls "$ROOT"/usr/lib/libxcb.so.1* | head -1)"; then
+        echo "  FAIL  vk_twodev (build)"; fail=$((fail + 1))
+    else
+        twodev() { # label, then environment assignments
+            local label=$1; shift
+            local log="$ROOT/tmp/vktest/vk_twodev_${label// /_}.log"
+            env OBJC_DISABLE_INITIALIZE_FORK_SAFETY=YES LXRT_ROOT="$ROOT" DISPLAY=$XDISP MallocScribble=1 "$@" \
+                perl -e 'alarm 60; exec @ARGV' ./build/lxrun /tmp/vktest/vk_twodev > "$log" 2>&1
+            if grep -q '^== vk twodev: ok' "$log"; then
+                printf '  ok    vk_twodev %s\n' "$label"; pass=$((pass + 1))
+            else
+                printf '  FAIL  vk_twodev %s: %s (log %s)\n' "$label" "$(grep -a -m1 'FALLO\|SIGSEGV\|SIGBUS' "$log" | cut -c1-80)" "$log"
+                fail=$((fail + 1))
+            fi
+        }
+        twodev moltenvk STEAMARM_VK_ICD=moltenvk
+        if [ -f "$OWN/libvulkan_kosmickrisp.dylib" ]; then
+            twodev "kosmickrisp steamarm" STEAMARM_VK_ICD=kosmickrisp STEAMARM_KK_DIR="$OWN"
+        fi
+    fi
 fi
 echo "== $pass passed, $fail failed"
 [ "$fail" -eq 0 ]

@@ -116,7 +116,8 @@ VkResult lxrt_mvk_vkMapMemory(VkDevice, VkDeviceMemory, VkDeviceSize, VkDeviceSi
 void lxrt_mvk_vkCmdCopyImageToBuffer(VkCommandBuffer, VkImage, VkImageLayout, VkBuffer, uint32_t,
                                      const VkBufferImageCopy *);
 
-VkQueue lxrt_scaler_a_queue(void);            // scaler.c: a queue the game got from this shim
+VkQueue lxrt_scaler_a_queue(VkDevice);        // scaler.c: a queue of that device the game got from this shim
+void lxrt_mvk_vkGetDeviceQueue(VkDevice, uint32_t, uint32_t, VkQueue *);
 uint32_t lxrt_scaler_queue_family(VkQueue);
 
 #define MAXV 8      // images the game sees
@@ -585,7 +586,13 @@ VkResult lxrt_mailbox_acquire(VkSwapchainKHR sc, VkSemaphore sem, VkFence fence,
     pthread_mutex_unlock(&m->lock);
     if (sticky != VK_SUCCESS && sticky != VK_SUBOPTIMAL_KHR)
         return sticky;                  // out of date: the game makes a new swapchain
-    VkQueue q = m->q ? m->q : lxrt_scaler_a_queue();
+    // Before the game's first present: a queue of the swapchain's own device
+    // (never another device's: it may have been destroyed). The game always
+    // gets one before it can draw; if it got it some other way, the first
+    // queue of family 0, which every driver here has.
+    VkQueue q = m->q ? m->q : lxrt_scaler_a_queue(m->dev);
+    if (!q && (sem || fence))
+        lxrt_mvk_vkGetDeviceQueue(m->dev, 0, 0, &q);
     if (sem || fence) {
         if (!q)
             return VK_ERROR_DEVICE_LOST;

@@ -46,6 +46,7 @@ vkDestroySwapchainKHR
 vkQueuePresentKHR
 vkGetDeviceQueue
 vkGetDeviceQueue2
+vkDestroyDevice
 # spirv_names.c
 vkCreateShaderModule
 # mailbox.c
