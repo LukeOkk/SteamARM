@@ -9,7 +9,10 @@
 // (patches/kosmickrisp-14) draws that pass with MetalFX's spatial scaler: the
 // result is the picture enlarged to the whole output (blue left, red right,
 // no green); any other driver, or KK_FSR_METALFX=0, runs the shader: magenta.
-// Usage: vk_fsr metalfx|shader (the result expected)
+// With "dynamic" as the second argument the constants are a dynamic uniform
+// buffer at an offset, and set 0 has a dynamic uniform buffer of its own whose
+// data would also pass for con0 (0.9): the driver must find set 1's.
+// Usage: vk_fsr metalfx|shader [dynamic] (the result expected)
 // Prints "== vk_fsr: ok" or "== vk_fsr: FAIL".
 //
 // The shaders (vk_fsr_spv.h, glslangValidator -V --target-env vulkan1.3):
@@ -89,6 +92,8 @@ static VkShaderModule module(const uint32_t *code, size_t size)
 int main(int argc, char **argv)
 {
     int want_metalfx = argc > 1 && !strcmp(argv[1], "metalfx");
+    int dynamic = argc > 2 && !strcmp(argv[2], "dynamic");
+    VkDescriptorType ubo_type = dynamic ? VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC : VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
     VkApplicationInfo app = { VK_STRUCTURE_TYPE_APPLICATION_INFO, 0, "vk_fsr", 1, 0, 0, VK_API_VERSION_1_3 };
     VkInstanceCreateInfo ici = { VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO, 0, 0, &app };
     VkInstance inst;
@@ -111,11 +116,12 @@ int main(int argc, char **argv)
 
     // Set 1 as Counter-Strike 2's EASU has it; set 0 is empty.
     VkDescriptorSetLayoutBinding b[3] = {
-        { 1, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1, VK_SHADER_STAGE_FRAGMENT_BIT },
+        { 1, ubo_type, 1, VK_SHADER_STAGE_FRAGMENT_BIT },
         { 14, VK_DESCRIPTOR_TYPE_SAMPLER, 1, VK_SHADER_STAGE_FRAGMENT_BIT },
         { 30, VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, 1, VK_SHADER_STAGE_FRAGMENT_BIT },
     };
-    VkDescriptorSetLayoutCreateInfo lci0 = { VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO };
+    VkDescriptorSetLayoutBinding b0 = { 0, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC, 1, VK_SHADER_STAGE_FRAGMENT_BIT };
+    VkDescriptorSetLayoutCreateInfo lci0 = { VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO, 0, 0, dynamic ? 1u : 0u, &b0 };
     VkDescriptorSetLayoutCreateInfo lci1 = { VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO, 0, 0, 3, b };
     VkDescriptorSetLayout sl[2];
     CHECK(vkCreateDescriptorSetLayout(dev, &lci0, 0, &sl[0]));
@@ -133,10 +139,14 @@ int main(int argc, char **argv)
     void *up_map, *down_map, *ubo_map;
     make_buffer(IW * IH * 4, VK_BUFFER_USAGE_TRANSFER_SRC_BIT, &up, &up_map);
     make_buffer(OW * OH * 4, VK_BUFFER_USAGE_TRANSFER_DST_BIT, &down, &down_map);
-    make_buffer(256, VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT, &ubo, &ubo_map);
-    memset(ubo_map, 0, 256);
+    make_buffer(1024, VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT, &ubo, &ubo_map);
+    memset(ubo_map, 0, 1024);
     float ratio[2] = { (float)PW / OW, (float)PH / OH }; // con0.xy: the input's viewport over the output's size
-    memcpy(ubo_map, ratio, sizeof ratio);
+    float decoy[2] = { 0.9f, 0.9f };                     // set 0's dynamic buffer, at offset 0
+    uint32_t con_off = dynamic ? 512 : 0;                // set 1's, at a dynamic offset
+    memcpy((char *)ubo_map + con_off, ratio, sizeof ratio);
+    if (dynamic)
+        memcpy(ubo_map, decoy, sizeof decoy);
     unsigned char *px = up_map;
     for (int y = 0; y < IH; y++)
         for (int x = 0; x < IW; x++) {
@@ -153,22 +163,27 @@ int main(int argc, char **argv)
     VkSampler sampler;
     CHECK(vkCreateSampler(dev, &sci, 0, &sampler));
 
-    VkDescriptorPoolSize ps[3] = { { VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1 }, { VK_DESCRIPTOR_TYPE_SAMPLER, 1 },
-                                   { VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, 1 } };
-    VkDescriptorPoolCreateInfo dpci = { VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO, 0, 0, 2, 3, ps };
+    VkDescriptorPoolSize ps[4] = { { VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1 }, { VK_DESCRIPTOR_TYPE_SAMPLER, 1 },
+                                   { VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, 1 }, { VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC, 2 } };
+    VkDescriptorPoolCreateInfo dpci = { VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO, 0, 0, 2, 4, ps };
     VkDescriptorPool dp;
     CHECK(vkCreateDescriptorPool(dev, &dpci, 0, &dp));
     VkDescriptorSetAllocateInfo dsai = { VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO, 0, dp, 2, sl };
     VkDescriptorSet sets[2];
     CHECK(vkAllocateDescriptorSets(dev, &dsai, sets));
-    VkDescriptorBufferInfo bi = { ubo, 0, 16 };
+    VkDescriptorBufferInfo bi = { ubo, 0, 16 }, bi0 = { ubo, 0, 16 };
     VkDescriptorImageInfo si = { sampler }, ii = { 0, in_view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
     VkWriteDescriptorSet w[3] = {
-        { VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, 0, sets[1], 1, 0, 1, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 0, &bi },
+        { VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, 0, sets[1], 1, 0, 1, ubo_type, 0, &bi },
         { VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, 0, sets[1], 14, 0, 1, VK_DESCRIPTOR_TYPE_SAMPLER, &si },
         { VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, 0, sets[1], 30, 0, 1, VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, &ii },
     };
     vkUpdateDescriptorSets(dev, 3, w, 0, 0);
+    if (dynamic) {
+        VkWriteDescriptorSet w0 = { VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, 0, sets[0], 0, 0, 1,
+                                    VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC, 0, &bi0 };
+        vkUpdateDescriptorSets(dev, 1, &w0, 0, 0);
+    }
 
     VkShaderModule vs = module(vfs_full, sizeof vfs_full), fs = module(vfs_easu, sizeof vfs_easu);
     VkPipelineShaderStageCreateInfo st[2] = {
@@ -222,7 +237,8 @@ int main(int argc, char **argv)
     vkCmdSetViewport(cb, 0, 1, &vp);
     vkCmdSetScissor(cb, 0, 1, &sc);
     vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, pipe);
-    vkCmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, pl, 0, 2, sets, 0, 0);
+    uint32_t dyn_off[2] = { 0, con_off };
+    vkCmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, pl, 0, 2, sets, dynamic ? 2 : 0, dyn_off);
     vkCmdDraw(cb, 3, 1, 0, 0);
     vkCmdEndRendering(cb);
     barrier(cb, out, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);

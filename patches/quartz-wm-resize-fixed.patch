@@ -8,9 +8,11 @@ green button) and its own min = max no longer binds the user; the game hears
 of the new size, and a picture it keeps at its own resolution is scaled to
 the window by SteamARM's Vulkan shim. Small fixed windows (dialogs) stay
 fixed. QUARTZ_WM_RESIZE_FIXED=0 restores the old behaviour.
+Fixed windows that are transient, dialogs or modal stay fixed (a Wine
+installer of 800x600 is not a game).
 diff -ruN a/src/x-window.h b/src/x-window.h
---- a/src/x-window.h	2026-10-03 06:15:07
-+++ b/src/x-window.h	2026-10-03 06:15:07
+--- a/src/x-window.h	2026-10-03 13:03:34
++++ b/src/x-window.h	2026-10-03 13:03:34
 @@ -82,6 +82,7 @@
      unsigned _decorated :1;
      unsigned _fullscreen :1;
@@ -20,8 +22,8 @@ diff -ruN a/src/x-window.h b/src/x-window.h
      unsigned _shaded :1;
      unsigned _hidden :1;
 diff -ruN a/src/x-window.m b/src/x-window.m
---- a/src/x-window.m	2026-10-03 06:15:07
-+++ b/src/x-window.m	2026-10-03 06:15:07
+--- a/src/x-window.m	2026-10-03 13:03:34
++++ b/src/x-window.m	2026-10-03 13:03:34
 @@ -27,6 +27,7 @@
  #endif
  
@@ -30,7 +32,7 @@ diff -ruN a/src/x-window.m b/src/x-window.m
  #import "x-window.h"
  #include "frame.h"
  #include "utils.h"
-@@ -1168,10 +1169,21 @@
+@@ -1168,10 +1169,22 @@
  {
      XGetWMNormalHints (x_dpy, _id, &_size_hints, &_size_hints_supplied);
  
@@ -46,14 +48,38 @@ diff -ruN a/src/x-window.m b/src/x-window.m
 +         * to the window by SteamARM's Vulkan shim. Small fixed windows
 +         * (dialogs) stay fixed. QUARTZ_WM_RESIZE_FIXED=0: as before. */
 +        const char *e = getenv ("QUARTZ_WM_RESIZE_FIXED");
-+        if ((!e || e[0] != '0') && _size_hints.min_width >= 640 && _size_hints.min_height >= 400)
++        if ((!e || e[0] != '0') && !_transient_for &&
++            _size_hints.min_width >= 640 && _size_hints.min_height >= 400)
 +            _fixed_game = YES;
 +        else
 +            _resizable = NO;
      }
  }
  
-@@ -2560,6 +2572,11 @@
+@@ -1273,6 +1286,11 @@
+ 
+             break;
+         } else if ((Atom)_atoms[i] == atoms.net_wm_window_type_dialog) {
++            /* SteamARM: a fixed-size dialog stays fixed (update_size_hints). */
++            if (_fixed_game) {
++                _fixed_game = NO;
++                _resizable = NO;
++            }
+             /* _NET_WM_WINDOW_TYPE_DIALOG indicates that this is a dialog
+              * window. If _NET_WM_WINDOW_TYPE is not set, then windows with
+              * WM_TRANSIENT_FOR set MUST be taken as this type.
+@@ -1636,6 +1654,10 @@
+ 
+     /* Handle determined properties */
+     if(_modal) {
++        if (_fixed_game) {          /* SteamARM: nor a modal one */
++            _fixed_game = NO;
++            _resizable = NO;
++        }
+         _in_window_menu = NO;
+         _frame_attr &= ~(XP_FRAME_ATTR_ZOOM | XP_FRAME_ATTR_COLLAPSE);
+     }
+@@ -2560,6 +2582,11 @@
      int base[2], min[2], max[2], inc[2];
  
      decode_size_hints (&_size_hints, base, min, max, inc);

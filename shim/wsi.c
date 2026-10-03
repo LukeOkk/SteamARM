@@ -401,6 +401,12 @@ static void window_extents(VkSurfaceKHR surface, void *caps)
     double scale = render_scale();
     if (scale < 1.0 && c[2] >= 1024 && covers_screen(s->conn, s->shown, c[2], c[3])) {
         uint32_t sw = (uint32_t)(c[2] * scale + 0.5) & ~1u, sh = (uint32_t)(c[3] * scale + 0.5) & ~1u;
+        // Never below a third of the window, rounded up to even: MetalFX's
+        // temporal scaler stops at 3x, and 0.33 rounded down asked it for
+        // 3.03x (634x356 -> 1920x1078: refused, bilinear for the swapchain).
+        uint32_t mw = (c[2] + 5) / 6 * 2, mh = (c[3] + 5) / 6 * 2;
+        if (sw < mw) sw = mw;
+        if (sh < mh) sh = mh;
         static uint32_t said_w, said_h;
         if ((sw != said_w || sh != said_h) && getenv("LXRT_VK_DEBUG")) {
             dprintf(2, "[shim] render scale %.2f: %ux%u for a %ux%u window\n", scale, sw, sh, c[2], c[3]);

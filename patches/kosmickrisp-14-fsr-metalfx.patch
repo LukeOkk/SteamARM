@@ -25,9 +25,20 @@ KK_FSR_METALFX=0: the game's own pass always. tests/elf/vk_fsr.c checks the
 replacement with a shader of its own (magenta when drawn, the input
 enlarged when MetalFX takes it; its input has the picture in the top left).
 --- a/src/kosmickrisp/bridge/meson.build	2026-10-03 07:31:39
+
+Hardened after a review: only a pass drawing to all of level 0 of a plain
+2D image from its origin is replaced; MetalFX is asked whether it takes the
+pair before the pass is split, and a refusal is remembered; the pass goes
+on in a new encoder that waits for MetalFX and ends with the usual producer
+barrier, so later command buffers (the WSI's copy) wait for it too; the
+dynamic uniform buffer is found through set_dynamic_buffer_start, which
+kk_bind_descriptor_sets now keeps; fsr_easu is the shader's own property
+and KK_FSR_METALFX is read at draw time (pipeline caches do not know it);
+cached scalers drop the game's textures once encoded.
+
 diff -ruN -x *.orig -x *.rej -x __pycache__ a/src/kosmickrisp/bridge/meson.build b/src/kosmickrisp/bridge/meson.build
 --- a/src/kosmickrisp/bridge/meson.build	2026-10-03 07:31:39
-+++ b/src/kosmickrisp/bridge/meson.build	2026-10-03 07:47:42
++++ b/src/kosmickrisp/bridge/meson.build	2026-10-03 13:08:23
 @@ -19,6 +19,7 @@
      'mtl_device.m',
      'mtl_encoder.m',
@@ -46,8 +57,8 @@ diff -ruN -x *.orig -x *.rej -x __pycache__ a/src/kosmickrisp/bridge/meson.build
      'stubs/mtl_sampler.c',
 diff -ruN -x *.orig -x *.rej -x __pycache__ a/src/kosmickrisp/bridge/mtl_metalfx.h b/src/kosmickrisp/bridge/mtl_metalfx.h
 --- a/src/kosmickrisp/bridge/mtl_metalfx.h	1969-12-31 21:00:00
-+++ b/src/kosmickrisp/bridge/mtl_metalfx.h	2026-10-03 07:47:42
-@@ -0,0 +1,23 @@
++++ b/src/kosmickrisp/bridge/mtl_metalfx.h	2026-10-03 13:08:23
+@@ -0,0 +1,29 @@
 +/*
 + * Copyright 2026 SteamARM contributors
 + * SPDX-License-Identifier: MIT
@@ -66,6 +77,12 @@ diff -ruN -x *.orig -x *.rej -x __pycache__ a/src/kosmickrisp/bridge/mtl_metalfx
 + * into `cmd_buf` (a Metal 4 command buffer with no encoder open). False when
 + * MetalFX cannot do it (formats, texture usage, no Metal 4 MetalFX): the
 + * caller draws the game's own pass instead. */
++/* Whether mtl_metalfx_spatial_encode would take this pair (it makes and
++ * keeps the scaler): asked before the caller splits its render pass. */
++bool mtl_metalfx_spatial_usable(mtl_device *device, mtl_compiler *compiler,
++                                mtl_texture *in, mtl_texture *out,
++                                uint32_t in_w, uint32_t in_h);
++
 +bool mtl_metalfx_spatial_encode(mtl_device *device, mtl_compiler *compiler,
 +                                mtl_command_buffer *cmd_buf, mtl_texture *in,
 +                                mtl_texture *out, uint32_t in_w, uint32_t in_h);
@@ -73,8 +90,8 @@ diff -ruN -x *.orig -x *.rej -x __pycache__ a/src/kosmickrisp/bridge/mtl_metalfx
 +#endif /* MTL_METALFX_H */
 diff -ruN -x *.orig -x *.rej -x __pycache__ a/src/kosmickrisp/bridge/mtl_metalfx.m b/src/kosmickrisp/bridge/mtl_metalfx.m
 --- a/src/kosmickrisp/bridge/mtl_metalfx.m	1969-12-31 21:00:00
-+++ b/src/kosmickrisp/bridge/mtl_metalfx.m	2026-10-03 07:47:41
-@@ -0,0 +1,125 @@
++++ b/src/kosmickrisp/bridge/mtl_metalfx.m	2026-10-03 13:08:23
+@@ -0,0 +1,154 @@
 +/*
 + * Copyright 2026 SteamARM contributors
 + * SPDX-License-Identifier: MIT
@@ -95,7 +112,8 @@ diff -ruN -x *.orig -x *.rej -x __pycache__ a/src/kosmickrisp/bridge/mtl_metalfx
 +struct mfx_scaler {
 +   MTLPixelFormat in_format, out_format;
 +   NSUInteger in_w, in_h, out_w, out_h;
-+   id<MTL4FXSpatialScaler> scaler;
++   id<MTL4FXSpatialScaler> scaler;   /* nil: MetalFX refused this one */
++   bool used;
 +};
 +
 +static struct mfx_scaler scalers[MFX_SCALERS];
@@ -106,9 +124,11 @@ diff -ruN -x *.orig -x *.rej -x __pycache__ a/src/kosmickrisp/bridge/mtl_metalfx
 +mfx_scaler_get(id<MTLDevice> dev, id<MTL4Compiler> compiler, id<MTLTexture> in,
 +               id<MTLTexture> out)
 +{
++   /* A refusal is remembered too: asked again it compiled and logged on
++    * every frame. */
 +   for (unsigned i = 0; i < MFX_SCALERS; i++) {
 +      struct mfx_scaler *s = &scalers[i];
-+      if (s->scaler && s->in_format == in.pixelFormat &&
++      if (s->used && s->in_format == in.pixelFormat &&
 +          s->out_format == out.pixelFormat && s->in_w == in.width &&
 +          s->in_h == in.height && s->out_w == out.width &&
 +          s->out_h == out.height)
@@ -135,8 +155,17 @@ diff -ruN -x *.orig -x *.rej -x __pycache__ a/src/kosmickrisp/bridge/mtl_metalfx
 +           (unsigned long)in.pixelFormat, (unsigned long)out.width,
 +           (unsigned long)out.height, (unsigned long)out.pixelFormat,
 +           scaler ? "" : ": MetalFX has no scaler for it, the game's own pass");
-+   if (!scaler)
-+      return nil;
++   if (scaler && ((in.usage & scaler.colorTextureUsage) != scaler.colorTextureUsage ||
++                  (out.usage & scaler.outputTextureUsage) != scaler.outputTextureUsage)) {
++      fprintf(stderr,
++              "kk: FSR by MetalFX: texture usage 0x%lx/0x%lx, MetalFX needs "
++              "0x%lx/0x%lx: the game's own pass\n",
++              (unsigned long)in.usage, (unsigned long)out.usage,
++              (unsigned long)scaler.colorTextureUsage,
++              (unsigned long)scaler.outputTextureUsage);
++      [scaler release];
++      scaler = nil;
++   }
 +
 +   struct mfx_scaler *s = &scalers[scaler_next++ % MFX_SCALERS];
 +   [s->scaler release];
@@ -148,8 +177,42 @@ diff -ruN -x *.orig -x *.rej -x __pycache__ a/src/kosmickrisp/bridge/mtl_metalfx
 +      .out_w = out.width,
 +      .out_h = out.height,
 +      .scaler = scaler,
++      .used = true,
 +   };
 +   return scaler;
++}
++
++/* The scaler for this pair, if MetalFX takes it: plain 2D textures, the
++ * content within the input, the input no larger than the output, a scaler
++ * MetalFX made and whose texture usage these textures have. Caller holds the
++ * lock. */
++static id<MTL4FXSpatialScaler>
++mfx_usable(id<MTLDevice> dev, id<MTL4Compiler> compiler, id<MTLTexture> in,
++           id<MTLTexture> out, uint32_t in_w, uint32_t in_h)
++{
++   static int supported = -1;
++   if (supported < 0)
++      supported = [MTLFXSpatialScalerDescriptor supportsMetal4FX:dev];
++   if (!supported || !in || !out || in.textureType != MTLTextureType2D ||
++       out.textureType != MTLTextureType2D || in.width > out.width ||
++       in.height > out.height || in_w > in.width || in_h > in.height)
++      return nil;
++   return mfx_scaler_get(dev, compiler, in, out);
++}
++
++bool
++mtl_metalfx_spatial_usable(mtl_device *device, mtl_compiler *compiler,
++                           mtl_texture *in, mtl_texture *out, uint32_t in_w,
++                           uint32_t in_h)
++{
++   bool ok;
++   @autoreleasepool {
++      pthread_mutex_lock(&scaler_lock);
++      ok = mfx_usable((id<MTLDevice>)device, (id<MTL4Compiler>)compiler,
++                      (id<MTLTexture>)in, (id<MTLTexture>)out, in_w, in_h) != nil;
++      pthread_mutex_unlock(&scaler_lock);
++   }
++   return ok;
 +}
 +
 +bool
@@ -157,44 +220,27 @@ diff -ruN -x *.orig -x *.rej -x __pycache__ a/src/kosmickrisp/bridge/mtl_metalfx
 +                           mtl_command_buffer *cmd_buf, mtl_texture *in_tex,
 +                           mtl_texture *out_tex, uint32_t in_w, uint32_t in_h)
 +{
-+   static int supported = -1;
 +   bool ok = false;
 +
 +   @autoreleasepool {
-+      id<MTLDevice> dev = (id<MTLDevice>)device;
 +      id<MTLTexture> in = (id<MTLTexture>)in_tex;
 +      id<MTLTexture> out = (id<MTLTexture>)out_tex;
 +
-+      if (supported < 0)
-+         supported = [MTLFXSpatialScalerDescriptor supportsMetal4FX:dev];
-+      if (!supported || !in || !out || in.width > out.width ||
-+          in.height > out.height)
-+         return false;
-+
 +      pthread_mutex_lock(&scaler_lock);
 +      id<MTL4FXSpatialScaler> scaler =
-+         mfx_scaler_get(dev, (id<MTL4Compiler>)compiler, in, out);
++         mfx_usable((id<MTLDevice>)device, (id<MTL4Compiler>)compiler, in, out,
++                    in_w, in_h);
 +      if (scaler) {
-+         MTLTextureUsage need_in = scaler.colorTextureUsage;
-+         MTLTextureUsage need_out = scaler.outputTextureUsage;
-+         if ((in.usage & need_in) != need_in ||
-+             (out.usage & need_out) != need_out) {
-+            static bool told;
-+            if (!told)
-+               fprintf(stderr,
-+                       "kk: FSR by MetalFX: texture usage 0x%lx/0x%lx, MetalFX "
-+                       "needs 0x%lx/0x%lx: the game's own pass\n",
-+                       (unsigned long)in.usage, (unsigned long)out.usage,
-+                       (unsigned long)need_in, (unsigned long)need_out);
-+            told = true;
-+         } else {
-+            scaler.colorTexture = in;
-+            scaler.outputTexture = out;
-+            scaler.inputContentWidth = in_w ? in_w : in.width;
-+            scaler.inputContentHeight = in_h ? in_h : in.height;
-+            [scaler encodeToCommandBuffer:(id<MTL4CommandBuffer>)cmd_buf];
-+            ok = true;
-+         }
++         scaler.colorTexture = in;
++         scaler.outputTexture = out;
++         scaler.inputContentWidth = in_w ? in_w : in.width;
++         scaler.inputContentHeight = in_h ? in_h : in.height;
++         [scaler encodeToCommandBuffer:(id<MTL4CommandBuffer>)cmd_buf];
++         /* Encoded: the scaler need not keep the game's textures alive (a
++          * cached one held display-sized textures after they were freed). */
++         scaler.colorTexture = nil;
++         scaler.outputTexture = nil;
++         ok = true;
 +      }
 +      pthread_mutex_unlock(&scaler_lock);
 +   }
@@ -202,8 +248,8 @@ diff -ruN -x *.orig -x *.rej -x __pycache__ a/src/kosmickrisp/bridge/mtl_metalfx
 +}
 diff -ruN -x *.orig -x *.rej -x __pycache__ a/src/kosmickrisp/bridge/stubs/mtl_metalfx.c b/src/kosmickrisp/bridge/stubs/mtl_metalfx.c
 --- a/src/kosmickrisp/bridge/stubs/mtl_metalfx.c	1969-12-31 21:00:00
-+++ b/src/kosmickrisp/bridge/stubs/mtl_metalfx.c	2026-10-03 07:47:41
-@@ -0,0 +1,14 @@
++++ b/src/kosmickrisp/bridge/stubs/mtl_metalfx.c	2026-10-03 13:08:23
+@@ -0,0 +1,22 @@
 +/*
 + * Copyright 2026 SteamARM contributors
 + * SPDX-License-Identifier: MIT
@@ -218,9 +264,17 @@ diff -ruN -x *.orig -x *.rej -x __pycache__ a/src/kosmickrisp/bridge/stubs/mtl_m
 +{
 +   return false;
 +}
++
++bool
++mtl_metalfx_spatial_usable(mtl_device *device, mtl_compiler *compiler,
++                           mtl_texture *in, mtl_texture *out, uint32_t in_w,
++                           uint32_t in_h)
++{
++   return false;
++}
 diff -ruN -x *.orig -x *.rej -x __pycache__ a/src/kosmickrisp/vulkan/kk_cmd_buffer.c b/src/kosmickrisp/vulkan/kk_cmd_buffer.c
 --- a/src/kosmickrisp/vulkan/kk_cmd_buffer.c	2026-10-03 07:31:39
-+++ b/src/kosmickrisp/vulkan/kk_cmd_buffer.c	2026-10-03 07:47:42
++++ b/src/kosmickrisp/vulkan/kk_cmd_buffer.c	2026-10-03 13:08:23
 @@ -301,6 +301,29 @@
     return cmd_buf;
  }
@@ -277,9 +331,20 @@ diff -ruN -x *.orig -x *.rej -x __pycache__ a/src/kosmickrisp/vulkan/kk_cmd_buff
  }
  
  mtl_compute_encoder *
+@@ -691,6 +726,10 @@
+       if (pipeline_layout->set_layouts[s] != NULL) {
+          const struct kk_descriptor_set_layout *set_layout =
+             vk_to_kk_descriptor_set_layout(pipeline_layout->set_layouts[s]);
++
++         /* SteamARM: where this set's dynamic buffers start, as NVK keeps it
++          * (kk_fsr_easu_content reads a dynamic uniform buffer by it). */
++         desc->root.set_dynamic_buffer_start[s] = dyn_buffer_start;
+ 
+          if (set != NULL && set_layout->vk.dynamic_descriptor_count > 0) {
+             for (uint32_t j = 0; j < set_layout->vk.dynamic_descriptor_count;
 diff -ruN -x *.orig -x *.rej -x __pycache__ a/src/kosmickrisp/vulkan/kk_cmd_buffer.h b/src/kosmickrisp/vulkan/kk_cmd_buffer.h
 --- a/src/kosmickrisp/vulkan/kk_cmd_buffer.h	2026-10-03 07:31:39
-+++ b/src/kosmickrisp/vulkan/kk_cmd_buffer.h	2026-10-03 07:47:42
++++ b/src/kosmickrisp/vulkan/kk_cmd_buffer.h	2026-10-03 13:08:23
 @@ -264,6 +264,9 @@
     /* A dependency of that kind was recorded inside the current render
      * pass: the encoder's command buffer is closed when it ends. */
@@ -304,7 +369,7 @@ diff -ruN -x *.orig -x *.rej -x __pycache__ a/src/kosmickrisp/vulkan/kk_cmd_buff
                                const VkDependencyInfo *deps);
 diff -ruN -x *.orig -x *.rej -x __pycache__ a/src/kosmickrisp/vulkan/kk_cmd_draw.c b/src/kosmickrisp/vulkan/kk_cmd_draw.c
 --- a/src/kosmickrisp/vulkan/kk_cmd_draw.c	2026-10-03 07:31:39
-+++ b/src/kosmickrisp/vulkan/kk_cmd_draw.c	2026-10-03 07:47:42
++++ b/src/kosmickrisp/vulkan/kk_cmd_draw.c	2026-10-03 13:08:23
 @@ -11,6 +11,9 @@
  
  #include "kk_buffer.h"
@@ -315,7 +380,7 @@ diff -ruN -x *.orig -x *.rej -x __pycache__ a/src/kosmickrisp/vulkan/kk_cmd_draw
  #include "kk_format.h"
  #include "kk_image_view.h"
  #include "kk_query_pool.h"
-@@ -2082,9 +2085,57 @@
+@@ -2082,9 +2085,83 @@
     return draw;
  }
  
@@ -332,14 +397,29 @@ diff -ruN -x *.orig -x *.rej -x __pycache__ a/src/kosmickrisp/vulkan/kk_cmd_draw
 +   struct kk_shader *fs = cmd->state.shaders[MESA_SHADER_FRAGMENT];
 +   struct kk_rendering_state *render = &cmd->state.gfx.render;
 +
-+   if (!fs || !fs->info.fsr_easu || render->color_att_count < 1 ||
-+       !render->color_att[0].iview || render->view_mask ||
-+       render->layer_count > 1 || cmd->state.cond_render.enabled)
++   if (!fs || !fs->info.fsr_easu || !kk_fsr_metalfx_enabled() ||
++       render->color_att_count < 1 || !render->color_att[0].iview ||
++       render->view_mask || render->layer_count > 1 ||
++       cmd->state.cond_render.enabled)
++      return false;
++
++   /* MetalFX writes the whole output texture: only a pass drawing to all of
++    * level 0 of a plain image, from its origin, is replaced. */
++   const struct kk_image_view *oiv = render->color_att[0].iview;
++   const struct vk_image_view *ov = &oiv->vk;
++   const struct vk_dynamic_graphics_state *dyn = &cmd->vk.dynamic_graphics_state;
++   if (ov->base_mip_level || ov->base_array_layer ||
++       render->area.offset.x || render->area.offset.y ||
++       render->area.extent.width != ov->extent.width ||
++       render->area.extent.height != ov->extent.height ||
++       dyn->vp.viewport_count < 1 || dyn->vp.viewports[0].x != 0.0f ||
++       dyn->vp.viewports[0].y != 0.0f ||
++       dyn->vp.viewports[0].width != (float)ov->extent.width ||
++       dyn->vp.viewports[0].height != (float)ov->extent.height)
 +      return false;
 +
 +   mtl_texture *in = kk_fsr_easu_input(cmd);
-+   mtl_texture *out = render->color_att[0].iview->planes[0].mtl_handle_render;
-+   const struct vk_image_view *ov = &render->color_att[0].iview->vk;
++   mtl_texture *out = oiv->planes[0].mtl_handle_render;
 +   uint32_t in_w, in_h;
 +   if (!in || !out ||
 +       !kk_fsr_easu_content(cmd, ov->extent.width, ov->extent.height, &in_w,
@@ -347,6 +427,11 @@ diff -ruN -x *.orig -x *.rej -x __pycache__ a/src/kosmickrisp/vulkan/kk_cmd_draw
 +      return false;
 +
 +   struct kk_device *dev = kk_cmd_buffer_device(cmd);
++   /* Asked before the pass is split: a combination MetalFX cannot take is
++    * the game's own draw, without ending its encoder. */
++   if (!mtl_metalfx_spatial_usable(dev->mtl_handle, dev->mtl_compiler_handle,
++                                   in, out, in_w, in_h))
++      return false;
 +   /* Twice: compute work open beside the pass is closed as well. */
 +   cs_end(cmd);
 +   cs_end(cmd);
@@ -359,8 +444,14 @@ diff -ruN -x *.orig -x *.rej -x __pycache__ a/src/kosmickrisp/vulkan/kk_cmd_draw
 +                                          dev->mtl_compiler_handle, cmd_buf,
 +                                          in, out, in_w, in_h);
 +   kk_cmd_buffer_return_gfx_mtl(cmd, cmd_buf);
-+   if (done)
++   if (done) {
++      /* The pass goes on in a new encoder that waits for MetalFX (a queue
++       * barrier, after_metalfx) and ends with the producer barrier every
++       * encoder ends with: later work, in this command buffer or a later
++       * one (the WSI's copy to the drawable), waits for MetalFX's writes. */
 +      cmd->after_metalfx = true;
++      cs_get_render(cmd);
++   }
 +   return done;
 +}
 +
@@ -375,7 +466,7 @@ diff -ruN -x *.orig -x *.rej -x __pycache__ a/src/kosmickrisp/vulkan/kk_cmd_draw
     data->restart = cmd->vk.dynamic_graphics_state.ia.primitive_restart_enable;
 diff -ruN -x *.orig -x *.rej -x __pycache__ a/src/kosmickrisp/vulkan/kk_device_memory.c b/src/kosmickrisp/vulkan/kk_device_memory.c
 --- a/src/kosmickrisp/vulkan/kk_device_memory.c	2026-10-03 07:31:39
-+++ b/src/kosmickrisp/vulkan/kk_device_memory.c	2026-10-03 07:47:42
++++ b/src/kosmickrisp/vulkan/kk_device_memory.c	2026-10-03 13:08:23
 @@ -6,6 +6,7 @@
   */
  
@@ -402,8 +493,8 @@ diff -ruN -x *.orig -x *.rej -x __pycache__ a/src/kosmickrisp/vulkan/kk_device_m
     vk_device_memory_destroy(&dev->vk, pAllocator, &mem->vk);
 diff -ruN -x *.orig -x *.rej -x __pycache__ a/src/kosmickrisp/vulkan/kk_fsr_metalfx.c b/src/kosmickrisp/vulkan/kk_fsr_metalfx.c
 --- a/src/kosmickrisp/vulkan/kk_fsr_metalfx.c	1969-12-31 21:00:00
-+++ b/src/kosmickrisp/vulkan/kk_fsr_metalfx.c	2026-10-03 07:47:42
-@@ -0,0 +1,235 @@
++++ b/src/kosmickrisp/vulkan/kk_fsr_metalfx.c	2026-10-03 13:08:23
+@@ -0,0 +1,237 @@
 +/*
 + * Copyright 2026 SteamARM contributors
 + * SPDX-License-Identifier: MIT
@@ -465,7 +556,9 @@ diff -ruN -x *.orig -x *.rej -x __pycache__ a/src/kosmickrisp/vulkan/kk_fsr_meta
 +{
 +   bool a = false, b = false;
 +
-+   if (nir->info.stage != MESA_SHADER_FRAGMENT || !kk_fsr_metalfx_enabled())
++   /* The shader's own property, whatever KK_FSR_METALFX says: it is kept
++    * in pipeline caches whose key does not know the switch. */
++   if (nir->info.stage != MESA_SHADER_FRAGMENT)
 +      return false;
 +
 +   nir_foreach_function_impl(impl, nir) {
@@ -641,7 +734,7 @@ diff -ruN -x *.orig -x *.rej -x __pycache__ a/src/kosmickrisp/vulkan/kk_fsr_meta
 +}
 diff -ruN -x *.orig -x *.rej -x __pycache__ a/src/kosmickrisp/vulkan/kk_fsr_metalfx.h b/src/kosmickrisp/vulkan/kk_fsr_metalfx.h
 --- a/src/kosmickrisp/vulkan/kk_fsr_metalfx.h	1969-12-31 21:00:00
-+++ b/src/kosmickrisp/vulkan/kk_fsr_metalfx.h	2026-10-03 07:47:42
++++ b/src/kosmickrisp/vulkan/kk_fsr_metalfx.h	2026-10-03 13:08:23
 @@ -0,0 +1,44 @@
 +/*
 + * Copyright 2026 SteamARM contributors
@@ -689,7 +782,7 @@ diff -ruN -x *.orig -x *.rej -x __pycache__ a/src/kosmickrisp/vulkan/kk_fsr_meta
 +#endif /* KK_FSR_METALFX_H */
 diff -ruN -x *.orig -x *.rej -x __pycache__ a/src/kosmickrisp/vulkan/kk_image_view.c b/src/kosmickrisp/vulkan/kk_image_view.c
 --- a/src/kosmickrisp/vulkan/kk_image_view.c	2026-10-03 07:31:39
-+++ b/src/kosmickrisp/vulkan/kk_image_view.c	2026-10-03 07:47:42
++++ b/src/kosmickrisp/vulkan/kk_image_view.c	2026-10-03 13:08:23
 @@ -6,6 +6,7 @@
   */
  
@@ -717,7 +810,7 @@ diff -ruN -x *.orig -x *.rej -x __pycache__ a/src/kosmickrisp/vulkan/kk_image_vi
  
 diff -ruN -x *.orig -x *.rej -x __pycache__ a/src/kosmickrisp/vulkan/kk_shader.c b/src/kosmickrisp/vulkan/kk_shader.c
 --- a/src/kosmickrisp/vulkan/kk_shader.c	2026-10-03 07:31:39
-+++ b/src/kosmickrisp/vulkan/kk_shader.c	2026-10-03 07:47:42
++++ b/src/kosmickrisp/vulkan/kk_shader.c	2026-10-03 13:08:23
 @@ -6,6 +6,7 @@
   */
  
@@ -726,7 +819,7 @@ diff -ruN -x *.orig -x *.rej -x __pycache__ a/src/kosmickrisp/vulkan/kk_shader.c
  
  #include "kk_cmd_buffer.h"
  #include "kk_debug.h"
-@@ -1597,10 +1598,20 @@
+@@ -1597,10 +1598,21 @@
      * optimization. */
     const struct vk_pipeline_robustness_state *vertex_robustness = &rs_none;
     bool a2c_lowered = false;
@@ -740,14 +833,15 @@ diff -ruN -x *.orig -x *.rej -x __pycache__ a/src/kosmickrisp/vulkan/kk_shader.c
 +         fsr_easu = true;
 +         static bool told;
 +         if (!told)
-+            fprintf(stderr, "kk: FSR 1 upscale (EASU) found: MetalFX draws it\n");
++            fprintf(stderr, "kk: FSR 1 upscale (EASU) found%s\n",
++                    kk_fsr_metalfx_enabled() ? ": MetalFX draws it" : " (KK_FSR_METALFX=0)");
 +         told = true;
 +      }
 +
        /* For tessellation pipelines, some stages may be emulated in compute */
        bool emulated_stage = tess && (nir->info.stage == MESA_SHADER_VERTEX ||
                                       nir->info.stage == MESA_SHADER_TESS_CTRL);
-@@ -1658,8 +1669,10 @@
+@@ -1658,8 +1670,10 @@
     }
  
     for (uint32_t i = 0; i < total_shaders; i++) {
@@ -761,7 +855,7 @@ diff -ruN -x *.orig -x *.rej -x __pycache__ a/src/kosmickrisp/vulkan/kk_shader.c
     /* Compile pipeline:
 diff -ruN -x *.orig -x *.rej -x __pycache__ a/src/kosmickrisp/vulkan/kk_shader.h b/src/kosmickrisp/vulkan/kk_shader.h
 --- a/src/kosmickrisp/vulkan/kk_shader.h	2026-10-03 07:31:39
-+++ b/src/kosmickrisp/vulkan/kk_shader.h	2026-10-03 07:47:42
++++ b/src/kosmickrisp/vulkan/kk_shader.h	2026-10-03 13:08:23
 @@ -59,6 +59,10 @@
      * kk_nir_lower_alpha_to_coverage), Metal's hardware one stays off. */
     bool a2c_lowered;
@@ -775,7 +869,7 @@ diff -ruN -x *.orig -x *.rej -x __pycache__ a/src/kosmickrisp/vulkan/kk_shader.h
  
 diff -ruN -x *.orig -x *.rej -x __pycache__ a/src/kosmickrisp/vulkan/meson.build b/src/kosmickrisp/vulkan/meson.build
 --- a/src/kosmickrisp/vulkan/meson.build	2026-10-03 07:31:39
-+++ b/src/kosmickrisp/vulkan/meson.build	2026-10-03 07:47:42
++++ b/src/kosmickrisp/vulkan/meson.build	2026-10-03 13:08:23
 @@ -88,6 +88,7 @@
    'kk_image.c',
    'kk_instance.h',

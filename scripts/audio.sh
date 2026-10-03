@@ -28,6 +28,7 @@ LOG="$STATE/logs/pulseaudio.log"
 CONF="$STATE/launcher/pulse.pa"
 DAEMONCONF="$STATE/launcher/pulse-daemon.conf"
 SRVFILE="$STATE/launcher/pulse.socket"     # the socket the server was started with
+BINFILE="$STATE/launcher/pulse.bin"        # the server binary it was started from
 
 live() { [ -S "$1" ] && "$PA/pactl" -s "unix:$1" info >/dev/null 2>&1; }
 # A socket of the running server: its own, else this root's.
@@ -42,14 +43,21 @@ running() { [ -n "$(server)" ]; }
 start() {
     [ -x "$PA/pulseaudio" ] || { echo "audio: PulseAudio not installed (brew install pulseaudio)" >&2; return 1; }
     # A server of the other build (Homebrew's, started before SteamARM had
-    # its own) outlives Steam's restarts: replaced while nothing is connected.
-    # (It runs with --disallow-exit: stopped by its pid, not "pactl exit".)
+    # its own) outlives Steam's restarts: replaced while nothing is connected,
+    # with the sockets it served for other roots made again on the new one.
+    # Which binary it runs is what start wrote down (pulse.bin); a server
+    # older than that file is known by its command line. (It runs with
+    # --disallow-exit: stopped by its pid, not "pactl exit".)
+    local restore=""
     if running; then
         local pid bin
         read -r pid bin <<<"$(ps -axo pid=,command= | awk -v c="$CONF" \
             'index($0, "pulseaudio") && index($0, "-F " c) {print $1, $2; exit}')"
-        if [ -n "$bin" ] && [ "$bin" != "$PA/pulseaudio" ] &&
+        [ -f "$BINFILE" ] && bin="$(cat "$BINFILE")"
+        if [ -n "$pid" ] && [ -n "$bin" ] && [ "$bin" != "$PA/pulseaudio" ] &&
            [ "$(pactl_ list clients short 2>/dev/null | grep -vc pactl)" -eq 0 ]; then
+            restore="$(pactl_ list modules short 2>/dev/null |
+                sed -n 's/.*module-native-protocol-unix.*socket=\([^ ]*\).*/\1/p' | grep -vxF "$SOCK")"
             kill "$pid" 2>/dev/null
             for _ in $(seq 1 50); do kill -0 "$pid" 2>/dev/null || break; sleep 0.1; done
             rm -f "$SOCK"
@@ -93,10 +101,17 @@ EOF
                 --disallow-exit --disable-shm=yes -n -F "$CONF" --log-target=file:"$LOG" \
                 || { echo "audio: PulseAudio did not start (log $LOG)" >&2; return 1; }
             echo "$SOCK" > "$SRVFILE"
+            echo "$PA/pulseaudio" > "$BINFILE"
         fi
         for _ in $(seq 1 50); do live "$SOCK" && break; sleep 0.1; done
         live "$SOCK" || { echo "audio: no socket at $SOCK (log $LOG)" >&2; return 1; }
     fi
+    local s
+    while IFS= read -r s; do
+        [ -n "$s" ] || continue
+        rm -f "$s"
+        pactl_ load-module module-native-protocol-unix socket="$s" auth-anonymous=1 >/dev/null 2>&1 || true
+    done <<<"$restore"
     # Devices nobody plays to or records from are closed after 3 s. Without
     # it every input of the Mac stayed open (IDLE) for the life of the
     # server: the microphone in use -- macOS's orange dot -- although no
@@ -132,7 +147,7 @@ case "${1:-status}" in
     start)  start "${2:-}" ;;
     volume) running || start; volume "${2:-100}" ;;
     stop)   running && pactl_ exit 2>/dev/null; pkill -f "pulseaudio.*$CONF" 2>/dev/null
-            rm -f "$SOCK" "$SRVFILE"; true ;;
+            rm -f "$SOCK" "$SRVFILE" "$BINFILE"; true ;;
     follow) running && follow_default ;;
     status) if running; then echo "audio: running ($(server)), default sink $(pactl_ get-default-sink)"; else echo "audio: stopped"; fi ;;
     *) sed -n '2,13p' "$0" | sed 's/^# \{0,1\}//'; exit 2 ;;

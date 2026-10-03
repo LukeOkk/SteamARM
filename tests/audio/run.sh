@@ -56,6 +56,20 @@ live "$W/arm64root/tmp/pulse/native" && ok "socket in the ARM64 root" || bad "AR
 [ "$(npa)" = 1 ] && ok "still one PulseAudio server" || bad "servers: $(npa)"
 LXRT_ROOT="$W/arm64root" a start 50 >/dev/null 2>&1 && [ "$(npa)" = 1 ] && ok "start again: idempotent" || bad "second start"
 
+echo "== a server of another build is replaced, other roots' sockets kept"
+# What audio.sh writes down for the server it started is another binary
+# (Homebrew's, before SteamARM's own build existed): with nothing connected
+# the next start replaces it, and the ARM64 root's socket survives the swap.
+pid_before="$(pgrep -f "pulseaudio.*$W/state" | head -1)"
+echo "/elsewhere/pulseaudio" > "$W/state/launcher/pulse.bin"
+LXRT_ROOT="$W/steamroot" a start 50 >/dev/null 2>&1 && [ -n "$pid_before" ] &&
+    [ "$(pgrep -f "pulseaudio.*$W/state" | head -1)" != "$pid_before" ] &&
+    ok "start replaces the other build's server" || bad "start after the swap (server not replaced)"
+[ "$(npa)" = 1 ] && ok "one server after the swap" || bad "servers after the swap: $(npa)"
+live "$W/steamroot/tmp/pulse/native" && ok "Steam root socket on the new server" || bad "Steam root socket after the swap"
+live "$W/arm64root/tmp/pulse/native" && ok "ARM64 root socket made again on the new server" || bad "ARM64 root socket lost in the swap"
+[ "$(cat "$W/state/launcher/pulse.bin")" = "$W/brew/opt/pulseaudio/bin/pulseaudio" ] && ok "pulse.bin names the new server's binary" || bad "pulse.bin: $(cat "$W/state/launcher/pulse.bin")"
+
 echo "== a root without a socket reaches the server"
 # The Steam root's socket is gone (as after an ARM64-only session started the
 # server): volume/status must use the server, not start a second one.

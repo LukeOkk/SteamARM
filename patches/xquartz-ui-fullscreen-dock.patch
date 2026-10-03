@@ -10,8 +10,8 @@ again) is given 400 ms before the Dock returns. The blinking measured with
 the 100 ms overlay watch on as well stays avoided: the watch is off.
 XQUARTZ_RL_PRESENTATION=0 restores the old behaviour.
 diff -ruN a/hw/xquartz/remoteLayerCocoa.m b/hw/xquartz/remoteLayerCocoa.m
---- a/hw/xquartz/remoteLayerCocoa.m	2026-10-03 06:16:05
-+++ b/hw/xquartz/remoteLayerCocoa.m	2026-10-03 06:16:05
+--- a/hw/xquartz/remoteLayerCocoa.m	2026-10-03 13:03:51
++++ b/hw/xquartz/remoteLayerCocoa.m	2026-10-03 13:03:51
 @@ -61,7 +61,7 @@
   * Otherwise it is at the frame's level, directly above it, as before. */
  /* XQUARTZ_RL_LEVEL (default 1): the overlay one level above its frame while
@@ -21,7 +21,7 @@ diff -ruN a/hw/xquartz/remoteLayerCocoa.m b/hw/xquartz/remoteLayerCocoa.m
   * the menu bar and the Dock under a layer that covers a display. With the
   * last two on, Counter-Strike 2's picture blinked every few hundred
   * milliseconds by itself; with the first alone it did not, and a click no
-@@ -155,19 +155,52 @@
+@@ -155,19 +155,62 @@
  
  /* A layer that takes a whole display is a game in fullscreen: the menu bar
   * and the Dock are hidden while this application is the active one (they
@@ -51,6 +51,9 @@ diff -ruN a/hw/xquartz/remoteLayerCocoa.m b/hw/xquartz/remoteLayerCocoa.m
  {
      static int on = -1;
 +    static BOOL pending;
++    /* A layer back before the 400 ms are over cancels the check: the next
++     * time it leaves gets its full 400 ms (a swapchain made twice in a row). */
++    static unsigned generation;
      if (on < 0)
 -        on = rl_switch("XQUARTZ_RL_PRESENTATION", 0);
 +        on = rl_switch("XQUARTZ_RL_PRESENTATION", 1);
@@ -62,13 +65,20 @@ diff -ruN a/hw/xquartz/remoteLayerCocoa.m b/hw/xquartz/remoteLayerCocoa.m
 -            full = YES;
 +    BOOL full = rl_presentation_wanted();
 +    if (full || NSApp.presentationOptions == NSApplicationPresentationDefault) {
++        if (full) {
++            generation++;
++            pending = NO;
++        }
 +        rl_presentation_apply(full);
 +        return;
 +    }
 +    if (pending)
 +        return;
 +    pending = YES;
++    unsigned g = generation;
 +    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 400 * NSEC_PER_MSEC), dispatch_get_main_queue(), ^{
++        if (g != generation)
++            return;
 +        pending = NO;
 +        rl_presentation_apply(rl_presentation_wanted());
 +    });
@@ -80,7 +90,7 @@ diff -ruN a/hw/xquartz/remoteLayerCocoa.m b/hw/xquartz/remoteLayerCocoa.m
      NSApplicationPresentationOptions want = full
          ? NSApplicationPresentationHideDock | NSApplicationPresentationHideMenuBar
          : NSApplicationPresentationDefault;
-@@ -230,7 +263,7 @@
+@@ -230,7 +273,7 @@
          [observerActive retain];
          [observerUnhide retain];
          [[nc addObserverForName:NSApplicationDidBecomeActiveNotification object:nil queue:nil

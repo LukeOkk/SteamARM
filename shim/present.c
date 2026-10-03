@@ -161,9 +161,11 @@ static int needs_stretch(VkDevice dev, const VkSwapchainCreateInfoKHR *ci, VkExt
     // the MetalFX temporal filter: the picture goes through the scaler at its
     // own size -- MetalFX's temporal pass as antialiasing at the native
     // resolution, the 100 % of "Calidad de MetalFX". Game-sized windows only.
+    // 2, not 1: the sizes match, and a scaler that cannot be made falls back
+    // to the mailbox like any window-sized swapchain.
     const char *nat = getenv("LXRT_VK_SCALER_NATIVE"), *flt = getenv("LXRT_VK_SCALER");
     return nat && *nat == '1' && flt && (s_ieq(flt, "metalfx-temporal") || s_ieq(flt, "metalfx_temporal")) &&
-           caps.currentExtent.width >= 1024;
+           caps.currentExtent.width >= 1024 ? 2 : 0;
 }
 
 // shim/scaler.c: the other filters (LXRT_VK_SCALER), or an error when MoltenVK
@@ -197,6 +199,8 @@ VkResult lxrt_inner_vkCreateSwapchainKHR(VkDevice dev, const VkSwapchainCreateIn
         lxrt_mailbox_retire(ci->oldSwapchain);
     if (stretch && lxrt_scaler_create(dev, device_pd(dev), ci, window, alloc, out) == VK_SUCCESS)
         return VK_SUCCESS;
+    if (stretch == 2)
+        stretch = 0;   // native MetalFX refused: the plain path, mailbox included
     if (ci && !stretch) {
         VkSwapchainCreateInfoKHR m = *ci;
         if (ov > 0 && device_pd(dev) && surface_offers(device_pd(dev), ci->surface, want))

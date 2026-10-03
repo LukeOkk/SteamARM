@@ -236,7 +236,7 @@ else
         local label=$1 want=$2; shift 2
         local log="$ROOT/tmp/vktest/vk_fsr_${label// /_}.log"
         env OBJC_DISABLE_INITIALIZE_FORK_SAFETY=YES LXRT_ROOT="$ROOT" "$@" \
-            perl -e 'alarm 60; exec @ARGV' ./build/lxrun /tmp/vktest/vk_fsr "$want" > "$log" 2>&1
+            perl -e 'alarm 60; exec @ARGV' ./build/lxrun /tmp/vktest/vk_fsr $want > "$log" 2>&1
         if [ "$(grep -E '^== vk_fsr' "$log" | tail -1)" = "== vk_fsr: ok" ]; then
             printf '  ok    vk_fsr %s (%s)\n' "$label" "$(grep -m1 '^result:' "$log" | cut -d' ' -f2)"; pass=$((pass + 1))
         else
@@ -248,6 +248,7 @@ else
     if [ -f "$OWN/libvulkan_kosmickrisp.dylib" ]; then
         run_fsr "kosmickrisp steamarm" metalfx STEAMARM_VK_ICD=kosmickrisp STEAMARM_KK_DIR="$OWN"
         run_fsr "kosmickrisp steamarm off" shader STEAMARM_VK_ICD=kosmickrisp STEAMARM_KK_DIR="$OWN" KK_FSR_METALFX=0
+        run_fsr "kosmickrisp steamarm dynamic" "metalfx dynamic" STEAMARM_VK_ICD=kosmickrisp STEAMARM_KK_DIR="$OWN"
     fi
 fi
 # vk_x11_present: a swapchain on an X window of SteamARM's X server. With

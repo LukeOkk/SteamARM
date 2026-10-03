@@ -183,7 +183,7 @@ class SettingsEnvironmentTests(unittest.TestCase):
         self.assertEqual(scale("1.0"), (None, None))         # native: nothing for the shim
         self.assertEqual(scale("0.77"), ("0.7700", "1478x832"))
         self.assertEqual(scale("0.5"), ("0.5000", "960x540"))
-        self.assertEqual(scale("0.33"), ("0.3300", "634x356"))   # rendimiento máximo: MetalFX's 3x
+        self.assertEqual(scale("0.33"), ("0.3300", "640x360"))   # rendimiento máximo: MetalFX's 3x, no more
         self.assertEqual(scale("bogus"), (None, None))
         self.assertEqual(scale("0.2"), (None, None))         # out of range: native
         self.assertEqual(scale("auto"), ("0.6667", "1280x720"))

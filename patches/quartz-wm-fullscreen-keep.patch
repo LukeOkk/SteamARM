@@ -9,10 +9,62 @@ it ("el dock siempre se ve por encima", the user). A fullscreen window's
 ConfigureRequest now leaves it at its head's rectangle, and its size
 validates to the head's size; the frame made again when it goes fullscreen
 without its title bar is the head as well.
+Leaving fullscreen validates the windowed frame it returns to (the
+fullscreen size rule no longer applies to it); the head is the one of the
+position the client asked for (a game moved to another display goes
+fullscreen there); and the client is made to fill a head-sized frame
+wherever the frame already had that size (a request for the head's size,
+a frame made again, a window fullscreen before it was mapped).
+diff -ruN a/src/x-window.h b/src/x-window.h
+--- a/src/x-window.h	2026-10-03 13:03:34
++++ b/src/x-window.h	2026-10-03 13:03:34
+@@ -204,6 +204,7 @@
+ 
+ /* _NET_WM_MOVERESIZE support */
+ - (X11Rect) intended_frame;
++- (void) fill_head_client:(X11Rect)head;
+ - (BOOL) can_moveresize:(int)direction;
+ - (X11Rect) moveresize_frame:(X11Rect)start direction:(int)direction
+                           dx:(int)dx dy:(int)dy pointer:(X11Point)p;
 diff -ruN a/src/x-window.m b/src/x-window.m
---- a/src/x-window.m	2026-10-03 07:09:26
-+++ b/src/x-window.m	2026-10-03 07:21:30
-@@ -739,6 +739,36 @@
+--- a/src/x-window.m	2026-10-03 13:03:34
++++ b/src/x-window.m	2026-10-03 13:03:34
+@@ -549,6 +549,11 @@
+     else
+         [self place_window];
+ 
++    /* SteamARM: fullscreen before it was mapped (_NET_WM_STATE set first):
++     * the frame is the head, the client may still be its own size. */
++    if (_fullscreen)
++        [self fill_head_client:[_screen head_containing_point:X11RectOrigin([self intended_frame])]];
++
+     XMapWindow(x_dpy, _id);
+     if(_reparented)
+         XMapWindow(x_dpy, _frame_id);
+@@ -734,11 +739,64 @@
+         [self decorate];
+ }
+ 
++/* SteamARM: a fullscreen window's client fills its head-sized frame. The
++ * frame can already have the head's size (made again from the old one, or
++ * resized to it before the client asked), and report_frame_size then leaves
++ * the client as it was: 1920x1058 or 1280x720 inside a 1920x1080 frame. */
++- (void) fill_head_client:(X11Rect)head {
++    if (_shaded || !_reparented)
++        return;
++    if (_xattr.width == head.width && _xattr.height == head.height - _frame_title_height)
++        return;
++    _frame_height = head.height;
++    _xattr.width = head.width;
++    _xattr.height = head.height - _frame_title_height;
++    DISABLE_EVENTS(_id, 0);
++    XResizeWindow(x_dpy, _id, _xattr.width, _xattr.height);
++    ENABLE_EVENTS(_id, X_CLIENT_WINDOW_EVENTS);
++    [self send_configure];
++}
++
+ - (void) resize_client:(X11Rect)r {
+     X11Rect fr;
  
      TRACE ();
  
@@ -23,7 +75,10 @@ diff -ruN a/src/x-window.m b/src/x-window.m
 +         * validate_window_size cut to 1920x1058, and the Dock then stayed
 +         * over the game, its layer short of the display by the menu bar's
 +         * height. */
-+        X11Rect head = [_screen head_containing_point:X11RectOrigin(_reparented ? _current_frame : r)];
++        /* The head of the position asked for (r keeps the current one when
++         * the request has none): a game moved to another display goes
++         * fullscreen there. */
++        X11Rect head = [_screen head_containing_point:X11RectOrigin(_reparented ? [self construct_frame_from_winrect:r] : r)];
 +
 +        if (!_reparented) {
 +            _xattr.x = head.x;
@@ -35,10 +90,12 @@ diff -ruN a/src/x-window.m b/src/x-window.m
 +            return;
 +        }
 +        _needs_configure_notify = YES;
-+        if (_frame_id)
++        if (_frame_id) {
 +            [self resize_frame:head];
-+        else
++            [self fill_head_client:head];
++        } else {
 +            _frame_height = head.height;
++        }
 +        if (_needs_configure_notify) {
 +            [self send_configure];
 +            _needs_configure_notify = NO;
@@ -49,7 +106,7 @@ diff -ruN a/src/x-window.m b/src/x-window.m
      if (!_reparented) {
          r = [self validate_frame_rect:r];
  
-@@ -1703,6 +1733,28 @@
+@@ -1713,6 +1771,18 @@
              if(need_resize_frame)
                  [self resize_frame:new_frame_size force:YES];
  
@@ -57,28 +114,32 @@ diff -ruN a/src/x-window.m b/src/x-window.m
 +             * the title bar it had before going fullscreen (Counter-Strike 2:
 +             * 1920x1058 of 1080): a fullscreen frame is its head. */
 +            if(_fullscreen) {
-+                X11Rect head = [_screen head_containing_point:X11RectOrigin(_current_frame)];
++                /* The frame just asked for, not _current_frame: that one
++                 * moves only when the server confirms. */
++                X11Rect head = [_screen head_containing_point:X11RectOrigin([self intended_frame])];
 +
 +                [self resize_frame:head force:YES];
-+                /* The new frame may already have the head's size, from the
-+                 * old one: report_frame_size then leaves the client as it
-+                 * was. */
-+                if(!_shaded && (_xattr.width != head.width ||
-+                                _xattr.height != head.height - _frame_title_height)) {
-+                    _frame_height = head.height;
-+                    _xattr.width = head.width;
-+                    _xattr.height = head.height - _frame_title_height;
-+                    DISABLE_EVENTS(_id, 0);
-+                    XResizeWindow(x_dpy, _id, _xattr.width, _xattr.height);
-+                    ENABLE_EVENTS(_id, X_CLIENT_WINDOW_EVENTS);
-+                    [self send_configure];
-+                }
++                [self fill_head_client:head];
 +            }
 +
              [self map_unmap_client];
              if(_reparented)
                  XMapWindow(x_dpy, _frame_id);
-@@ -2570,6 +2622,12 @@
+@@ -2466,7 +2536,12 @@
+ 
+         [self resize_frame:maximized_rect force:YES];
+     } else {
+-        [self resize_frame:[self validate_frame_rect:_unzoomed_frame] force:YES];
++        /* SteamARM: validated as the windowed frame it goes back to (the
++         * fullscreen branch of validate_window_size gave the head's size). */
++        _fullscreen = NO;
++        X11Rect r = [self validate_frame_rect:_unzoomed_frame];
++        _fullscreen = YES;
++        [self resize_frame:r force:YES];
+     }
+ 
+     _fullscreen = flag;
+@@ -2580,6 +2655,12 @@
                         from_user:(BOOL)uflag constrain:(BOOL)cflag
  {
      int base[2], min[2], max[2], inc[2];

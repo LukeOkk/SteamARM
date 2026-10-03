@@ -385,7 +385,11 @@ def env_from_settings(s, total=None, chip=None, display=None):
         disp = display or main_display_size()
         env["STEAMARM_RENDER_SCALE"] = "%.4f" % scale
         if disp:
-            env["STEAMARM_RENDER_SIZE"] = "%dx%d" % (int(disp[0] * scale + 0.5) & ~1, int(disp[1] * scale + 0.5) & ~1)
+            # As shim/wsi.c computes it: never below a third, rounded up to
+            # even (MetalFX's temporal scaler stops at 3x).
+            def side(n):
+                return max(int(n * scale + 0.5) & ~1, (n + 5) // 6 * 2)
+            env["STEAMARM_RENDER_SIZE"] = "%dx%d" % (side(disp[0]), side(disp[1]))
         if flt == "fsr":
             try:
                 sharp = int(s.get("fsrSharpness", 90))
