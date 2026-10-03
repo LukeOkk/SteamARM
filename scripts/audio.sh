@@ -12,7 +12,16 @@
 set -u
 ROOT="${LXRT_ROOT:-/tmp/lxrt-steamroot}"
 STATE="${STEAMARM_STATE:-$HOME/SteamARM-roots}"
-PA="${BREW:-/opt/homebrew}/opt/pulseaudio/bin"
+# SteamARM's own build when it is there (scripts/build-pulseaudio.sh: the
+# Mac's devices with their real latency, not PulseAudio's default 250 ms, with
+# which every guest's sound was half a second late), Homebrew's otherwise.
+# STEAMARM_BREW_PULSE=1: Homebrew's always.
+OWN_PA="${STEAMARM_BUILD:-$HOME/SteamARM-build}/pulseaudio/out/bin"
+if [ -x "$OWN_PA/pulseaudio" ] && [ "${STEAMARM_BREW_PULSE:-0}" != 1 ]; then
+    PA="$OWN_PA"
+else
+    PA="${BREW:-/opt/homebrew}/opt/pulseaudio/bin"
+fi
 DIR="$ROOT/tmp/pulse"
 SOCK="$DIR/native"
 LOG="$STATE/logs/pulseaudio.log"
@@ -32,6 +41,20 @@ running() { [ -n "$(server)" ]; }
 
 start() {
     [ -x "$PA/pulseaudio" ] || { echo "audio: PulseAudio not installed (brew install pulseaudio)" >&2; return 1; }
+    # A server of the other build (Homebrew's, started before SteamARM had
+    # its own) outlives Steam's restarts: replaced while nothing is connected.
+    # (It runs with --disallow-exit: stopped by its pid, not "pactl exit".)
+    if running; then
+        local pid bin
+        read -r pid bin <<<"$(ps -axo pid=,command= | awk -v c="$CONF" \
+            'index($0, "pulseaudio") && index($0, "-F " c) {print $1, $2; exit}')"
+        if [ -n "$bin" ] && [ "$bin" != "$PA/pulseaudio" ] &&
+           [ "$(pactl_ list clients short 2>/dev/null | grep -vc pactl)" -eq 0 ]; then
+            kill "$pid" 2>/dev/null
+            for _ in $(seq 1 50); do kill -0 "$pid" 2>/dev/null || break; sleep 0.1; done
+            rm -f "$SOCK"
+        fi
+    fi
     if ! live "$SOCK"; then
         mkdir -p "$DIR" "$STATE/logs" "$(dirname "$CONF")"
         rm -f "$SOCK"

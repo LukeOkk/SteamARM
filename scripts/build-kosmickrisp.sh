@@ -56,6 +56,9 @@
 #       capped by size (KK_ALLOCATOR_POOL_MB, 256) and only the part of the
 #       root table in use is uploaded (tests/elf/vk_resubmit.c);
 #   13  no autorelease pool in the per-draw Metal calls.
+#   14  a game's FSR 1 upscale (its EASU pass, found by its constants) drawn
+#       by MetalFX's spatial scaler instead, from the part of the input its
+#       constants name (KK_FSR_METALFX=0: the game's own; tests/elf/vk_fsr.c).
 #
 # Only Homebrew formulae and a Python virtualenv are installed. Re-running is
 # safe: the download is cached and the build is incremental. Needs macOS 26.

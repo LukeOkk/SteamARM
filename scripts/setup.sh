@@ -83,6 +83,13 @@ step_kosmickrisp() {
     scripts/build-kosmickrisp.sh || log "WARNING: KosmicKrisp was not built; Homebrew's driver stays in use"
 }
 
+step_pulseaudio() {
+    # The Mac's sound server with SteamARM's patch (the devices' real
+    # latency). Not required: without it scripts/audio.sh runs Homebrew's.
+    log "PulseAudio with SteamARM's patch (scripts/build-pulseaudio.sh)"
+    scripts/build-pulseaudio.sh || log "WARNING: PulseAudio was not built; Homebrew's stays in use"
+}
+
 step_roots() {
     mkdir -p "$STATE/logs"
     if [ ! -d "$STATE/lxrt-root/usr" ]; then
@@ -165,7 +172,7 @@ step_done() {
     echo "The first Steam start updates the client (several minutes)."
 }
 
-STEPS=(check brew make fex thunks xquartz kosmickrisp roots steam frameroot test done)
+STEPS=(check brew make fex thunks xquartz kosmickrisp pulseaudio roots steam frameroot test done)
 if [ "${1:-}" = --list ]; then
     printf '%s\n' "${STEPS[@]}"
     exit 0

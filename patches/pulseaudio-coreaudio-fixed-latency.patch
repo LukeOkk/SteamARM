@@ -1,0 +1,58 @@
+SteamARM: CoreAudio sinks and sources declare their real latency
+
+module-coreaudio-device never set a fixed latency on its sinks and sources,
+which are not dynamic-latency devices, so PulseAudio gave them its default
+DEFAULT_FIXED_LATENCY of 250 ms. Every client asking for a low latency with
+adjust-latency was told 250 ms and ended up half a second behind ("Final
+latency 520.00 ms = 250.00 ms + 2*10.00 ms + 250.00 ms"), a native pacat
+with --latency-msec=40 had 275 ms of buffer, and so did games' sound and
+Steam's voice through SteamARM. The latency is now a few IOProc buffers
+(STEAMARM_PA_LATENCY_PERIODS, default 3: 32 ms with the default 512 frames
+at 48 kHz): the same pacat gets "Final latency 84.00 ms" and 52 ms of
+buffer, with no underrun in 20 s.
+diff -ruN a/src/modules/macosx/module-coreaudio-device.c b/src/modules/macosx/module-coreaudio-device.c
+--- a/src/modules/macosx/module-coreaudio-device.c	2026-10-03 11:46:24
++++ b/src/modules/macosx/module-coreaudio-device.c	2026-10-03 11:46:33
+@@ -27,6 +27,8 @@
+ #include <config.h>
+ #endif
+ 
++#include <stdlib.h>
++
+ #include <pulse/util.h>
+ #include <pulse/xmalloc.h>
+ 
+@@ -883,6 +885,33 @@
+     property_address.mSelector = kAudioDevicePropertyBufferFrameSize;
+     AudioObjectSetPropertyData(u->object_id, &property_address, 0, NULL, sizeof(frames), &frames);
+     pa_log_debug("%u frames per IOProc\n", (unsigned int) frames);
++
++    /* SteamARM: the latency of these sinks and sources. They are not
++     * dynamic-latency devices, and with no fixed latency set PulseAudio
++     * gives them its default of 250 ms (DEFAULT_FIXED_LATENCY): every
++     * client with adjust-latency was told 250 ms and ended up 520 ms behind
++     * ("Final latency 520.00 ms = 250.00 ms + 2*10.00 ms + 250.00 ms"),
++     * games' sound and Steam's voice included. The device really takes one
++     * IOProc buffer at a time: a few of those (STEAMARM_PA_LATENCY_PERIODS,
++     * default 3) are its latency. */
++    {
++        UInt32 actual = frames, size = sizeof(actual);
++        unsigned periods = 3;
++        const char *e = getenv("STEAMARM_PA_LATENCY_PERIODS");
++
++        if (AudioObjectGetPropertyData(u->object_id, &property_address, 0, NULL, &size, &actual) != noErr || !actual)
++            actual = frames;
++        if (e && atoi(e) > 0 && atoi(e) <= 64)
++            periods = (unsigned) atoi(e);
++
++        for (ca_sink = u->sinks; ca_sink; ca_sink = ca_sink->next)
++            pa_sink_set_fixed_latency(ca_sink->pa_sink,
++                pa_bytes_to_usec((uint64_t) actual * periods * pa_frame_size(&ca_sink->ss), &ca_sink->ss));
++        for (ca_source = u->sources; ca_source; ca_source = ca_source->next)
++            pa_source_set_fixed_latency(ca_source->pa_source,
++                pa_bytes_to_usec((uint64_t) actual * periods * pa_frame_size(&ca_source->ss), &ca_source->ss));
++        pa_log_info("fixed latency: %u periods of %u frames", periods, (unsigned int) actual);
++    }
+ 
+     /* create one ioproc for both directions */
+     err = AudioDeviceCreateIOProcID(u->object_id, io_render_proc, u, &u->proc_id);

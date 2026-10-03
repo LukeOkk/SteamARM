@@ -576,6 +576,13 @@ if [ -z "$APP_ANDROID" ]; then
 apply_resolution_scaling "$LDIR/settings.json"
 VOL="$(/usr/bin/python3 scripts/settings-env.py --volume "$LDIR/settings.json")"
 [ -n "$VOL" ] && { LXRT_ROOT="$APP_ROOT" scripts/audio.sh start "$VOL" >/dev/null || echo "run-app: no sound (scripts/audio.sh)" >&2; }
+# An ARM64 client's games run in the x86 Steam root (steamarm-fex-linux,
+# steamarm-fex-proton) and look for the socket there: it existed only when
+# something else had made it since the server started (the setup's tests),
+# and Counter-Strike 2 had no sound after the Mac's server was restarted.
+if [ -n "$VOL" ] && [ "$APP_ROOT" != "$ROOT" ] && [ -d "$ROOT/usr" ]; then
+    LXRT_ROOT="$ROOT" scripts/audio.sh start >/dev/null 2>&1 || echo "run-app: no sound for games (scripts/audio.sh)" >&2
+fi
 # Controllers (scripts/input.sh): the launcher's Entrada page, as /dev/input.
 scripts/input.sh start >/dev/null || echo "run-app: no controllers for games (scripts/input.sh)" >&2
 fi   # the Android session has its own /dev/input (the composer's) and no sound yet

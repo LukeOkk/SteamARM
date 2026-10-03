@@ -38,7 +38,8 @@ EOF
 printf '#!/bin/bash\nexec "%s/pactl" "$@"\n' "$REAL" > "$B/pactl"
 chmod +x "$B/pulseaudio" "$B/pactl"
 
-export BREW="$W/brew" STEAMARM_STATE="$W/state" XDG_RUNTIME_DIR="$W/xdg"
+# STEAMARM_BREW_PULSE: the wrappers, not SteamARM's own build of the server.
+export BREW="$W/brew" STEAMARM_STATE="$W/state" XDG_RUNTIME_DIR="$W/xdg" STEAMARM_BREW_PULSE=1
 a() { scripts/audio.sh "$@"; }
 cleanup() { LXRT_ROOT="$W/steamroot" a stop >/dev/null 2>&1; pkill -f "pulseaudio.*$W" 2>/dev/null; rm -rf "$W"; }
 trap cleanup EXIT
