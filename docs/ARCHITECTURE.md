@@ -135,7 +135,15 @@ cannot present there (`docs/WINDOWING_AND_PRESENTATION.md`).
 
 - **Sound:** a PulseAudio server on the Mac outputs to CoreAudio. Its
   socket lives inside the Steam root, and pressure-vessel shares it with
-  games like on Linux.
+  games like on Linux. Devices nobody uses are closed after 3 s
+  (`module-suspend-on-idle`), so the microphone is open only while a guest
+  records. Games use it directly (`SDL_AUDIO_DRIVER=pulseaudio`).
+- **PipeWire (ARM64 Steam client):** the client drives its own audio
+  settings and voice through PipeWire (`wpctl`). `scripts/pipewire.sh` runs
+  PipeWire and WirePlumber in the ARM64 root (`resources/pipewire`), with a
+  sink and a source that tunnel to the Mac's PulseAudio server; guests find
+  it at `PIPEWIRE_RUNTIME_DIR=/tmp/steamarm-pipewire`. There is no
+  `pipewire-pulse`, so games' PulseAudio traffic never passes through it.
 - **Controllers:** `steamarm-inputd` reads real controllers with SDL2 and
   publishes each player as a socket plus a capability description
   (`tools/inputd/PROTOCOL.md`). The runtime turns them into

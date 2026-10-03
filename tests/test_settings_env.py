@@ -151,6 +151,18 @@ class SettingsEnvironmentTests(unittest.TestCase):
         merged = self.settings.with_overrides({"scalingFilter": "linear"}, {"scalingFilter": "nearest"})
         self.assertEqual(self.settings.env_from_settings(merged)["LXRT_VK_SCALER"], "nearest")
 
+    def test_sound(self):
+        env = self.settings.env_from_settings({})
+        self.assertEqual(env["PULSE_SERVER"], "unix:/tmp/pulse/native")
+        # Steam's PipeWire (scripts/pipewire.sh) is found by its runtime dir;
+        # SDL games stay on PulseAudio even though SDL prefers PipeWire.
+        self.assertEqual(env["PIPEWIRE_RUNTIME_DIR"], "/tmp/steamarm-pipewire")
+        self.assertEqual((env["SDL_AUDIO_DRIVER"], env["SDL_AUDIODRIVER"]), ("pulseaudio", "pulseaudio"))
+        off = self.settings.env_from_settings({"audioBackend": "none"})
+        self.assertEqual((off["PULSE_SERVER"], off["SDL_AUDIODRIVER"]), ("none", "dummy"))
+        self.assertNotIn("PIPEWIRE_RUNTIME_DIR", off)
+        self.assertEqual(off["SDL_AUDIO_DRIVER"], "dummy")
+
     def test_render_scale(self):
         m4 = self.settings.apple_chip("Apple M4", 10)
         def scale(value):

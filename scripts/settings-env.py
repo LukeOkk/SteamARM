@@ -411,10 +411,18 @@ def env_from_settings(s, total=None, chip=None, display=None):
     # Sonido
     if (s.get("audioBackend") or "coreaudio") == "none":
         env["PULSE_SERVER"] = "none"
-        env["SDL_AUDIODRIVER"] = "dummy"
+        env["SDL_AUDIODRIVER"] = "dummy"          # SDL 2
+        env["SDL_AUDIO_DRIVER"] = "dummy"         # SDL 3
     else:
         # scripts/audio.sh: PulseAudio on the Mac, socket inside the guest root.
         env["PULSE_SERVER"] = "unix:/tmp/pulse/native"
+        # scripts/pipewire.sh: the ARM64 Steam client's PipeWire (its audio
+        # settings and voice), with tunnels to that same PulseAudio server.
+        # SDL prefers PipeWire when it finds one; games stay on PulseAudio,
+        # the direct way, as before there was a PipeWire to find.
+        env["PIPEWIRE_RUNTIME_DIR"] = "/tmp/steamarm-pipewire"
+        env["SDL_AUDIO_DRIVER"] = "pulseaudio"     # SDL 3
+        env["SDL_AUDIODRIVER"] = "pulseaudio"      # SDL 2
 
     # Registros / Depuración
     if s.get("protonLog"):

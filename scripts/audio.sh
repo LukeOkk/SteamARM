@@ -47,6 +47,7 @@ start() {
 load-module module-coreaudio-detect
 load-module module-native-protocol-unix socket=$SOCK auth-anonymous=1
 load-module module-always-sink
+load-module module-suspend-on-idle timeout=3
 EOF
             # The daemon's own settings (PULSE_CONFIG names the file). Games
             # and the Mac's devices run at 48 kHz: the server's default
@@ -73,6 +74,12 @@ EOF
         for _ in $(seq 1 50); do live "$SOCK" && break; sleep 0.1; done
         live "$SOCK" || { echo "audio: no socket at $SOCK (log $LOG)" >&2; return 1; }
     fi
+    # Devices nobody plays to or records from are closed after 3 s. Without
+    # it every input of the Mac stayed open (IDLE) for the life of the
+    # server: the microphone in use -- macOS's orange dot -- although no
+    # guest was recording. Also loaded into a server started before this.
+    pactl_ list modules short 2>/dev/null | grep -q module-suspend-on-idle ||
+        pactl_ load-module module-suspend-on-idle timeout=3 >/dev/null 2>&1 || true
     follow_default
     [ -n "${1:-}" ] && volume "$1"
     return 0

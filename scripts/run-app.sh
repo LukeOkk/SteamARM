@@ -609,6 +609,13 @@ if [ "$APP_ARCH" = aarch64 ] && [ "$APP_KIND" = steam ]; then
         case "$kv" in HOME_IN_GUEST=/*) guest_home=${kv#HOME_IN_GUEST=} ;; esac
     done
     scripts/steam-arm64-links.sh "$APP_ROOT" "$guest_home" || true
+    # PipeWire for the client's own audio settings and voice (wpctl), with
+    # tunnels to the Mac's PulseAudio (scripts/pipewire.sh); not when the
+    # launcher's sound is off.
+    if [ -n "${VOL:-}" ]; then
+        scripts/pipewire.sh start "$APP_ROOT" >/dev/null ||
+            echo "run-app: no PipeWire for Steam's audio settings (scripts/pipewire.sh)" >&2
+    fi
     # An installed compatibility tool is a copy of the script
     # (scripts/install-fex-proton-tool.sh): kept the one this SteamARM ships,
     # or a fix in it never reaches the games.
