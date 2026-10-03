@@ -37,7 +37,7 @@ export PKG_CONFIG_PATH="$BREW/lib/pkgconfig:$BREW/share/pkgconfig:$BREW/opt/open
 export CFLAGS="-I$BREW/opt/gettext/include -I$BREW/include"
 export LDFLAGS="-L$BREW/opt/gettext/lib -L$BREW/lib"
 
-mkdir -p "$PA_ROOT/out"
+mkdir -p "$PA_ROOT"
 cd "$PA_ROOT"
 SRC="$PA_ROOT/pulseaudio-$PA_VER"
 TARBALL="$PA_ROOT/pulseaudio-$PA_VER.tar.xz"
@@ -74,5 +74,19 @@ if [ ! -f "$PA_ROOT/build/build.ninja" ]; then
 fi
 log "ninja"
 ninja -C "$PA_ROOT/build" > "$PA_ROOT/build.log" 2>&1 || { grep -a "error" "$PA_ROOT/build.log" | head -20; log "build failed (log: $PA_ROOT/build.log)"; exit 1; }
-meson install -C "$PA_ROOT/build" --quiet > "$PA_ROOT/install.log" 2>&1 || { log "install failed (log: $PA_ROOT/install.log)"; exit 1; }
+# Installed only when it changed, beside the old one and moved into place at
+# once: scripts/audio.sh may be running the server out of $PA_ROOT/out, and
+# meson install rewrites its libraries in place. The old files, unlinked, stay
+# mapped by that server until it exits.
+STAMP="$PA_VER $PATCH_STAMP"
+if [ ! -x "$PA_ROOT/out/bin/pulseaudio" ] || [ "$(cat "$PA_ROOT/out/.steamarm-build" 2>/dev/null)" != "$STAMP" ]; then
+    rm -rf "$PA_ROOT/stage"
+    DESTDIR="$PA_ROOT/stage" meson install -C "$PA_ROOT/build" --quiet > "$PA_ROOT/install.log" 2>&1 ||
+        { log "install failed (log: $PA_ROOT/install.log)"; exit 1; }
+    echo "$STAMP" > "$PA_ROOT/stage$PA_ROOT/out/.steamarm-build"
+    rm -rf "$PA_ROOT/out.old"
+    [ -d "$PA_ROOT/out" ] && mv "$PA_ROOT/out" "$PA_ROOT/out.old"
+    mv "$PA_ROOT/stage$PA_ROOT/out" "$PA_ROOT/out"
+    rm -rf "$PA_ROOT/stage" "$PA_ROOT/out.old"
+fi
 log "server: $PA_ROOT/out/bin/pulseaudio"
