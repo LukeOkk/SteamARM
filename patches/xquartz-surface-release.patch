@@ -1,0 +1,165 @@
+SteamARM: the X server frees what a GLX client leaves behind
+
+Three leaks, each per GLX client, that together broke GLX after ~60 Steam
+starts on one X server (GLXBadContext on MakeCurrent; Steam's client then
+died in strstr on a NULL GL_RENDERER and its main window never came):
+
+- hw/xquartz/GL/indirect.c: when a GLX window was destroyed, the surface
+  was forgotten but every CGL context attached to it stayed attached, and
+  kept the surface's IOSurface (~37 per Steam start). The contexts are
+  cleared off the surface first.
+- glx/glxext.c ContextGone: only DestroyContext cleared idExists, so a
+  context whose client exited or was killed without destroying it was never
+  freed. Freeing the context's own XID now clears it (a context destroyed
+  while current keeps living under its ghost XID, as before).
+- glx/glxcmds.c: GLVND makes a departing client's contexts not current
+  after its windows are gone; the flush of the previous context failed on
+  the vanished drawable and returned before letting go, and the context
+  stayed current to a dead client forever (glxinfo: one per run; Steam:
+  ~15 per start). No flush for a client that is going away, and a context
+  that stops being current with no XID left is freed directly.
+
+Measured over three Steam starts: Apple GL contexts 15 while running, 0
+after each stop (were +15 per start); IOSurfaces flat at 2 (were +37);
+X server footprint flat at 83 MB (was +6.5 MB per start).
+
+Also logs the remote-layer overlays' creation and removal with the number
+still alive (how the overlays were ruled out).
+diff -ruN a/glx/glxcmds.c b/glx/glxcmds.c
+--- a/glx/glxcmds.c	2026-10-03 04:20:29
++++ b/glx/glxcmds.c	2026-10-03 04:20:29
+@@ -634,6 +634,14 @@
+         if (prevglxc->releaseBehavior == GLX_CONTEXT_RELEASE_BEHAVIOR_NONE_ARB)
+             need_flush = GL_FALSE;
+ #endif
++        /* SteamARM: not for a client that is going away (GLVND's
++         * GlxFreeClientData makes its contexts not current after its
++         * windows are freed): the flush failed on the vanished drawable and
++         * returned here, and the context stayed current to a dead client
++         * forever -- one per GLX client that exited with a context bound
++         * (glxinfo; ~15 per Steam start). */
++        if (client->clientGone)
++            need_flush = GL_FALSE;
+         if (need_flush) {
+             if (!__glXForceCurrent(cl, tag, (int *) &error))
+                 return error;
+@@ -672,7 +680,18 @@
+     if (prevglxc) {
+         prevglxc->currentClient = NULL;
+         if (!prevglxc->idExists) {
+-            FreeResourceByType(prevglxc->id, __glXContextRes, FALSE);
++            /* SteamARM: through its resource when one is left (a context
++             * destroyed while current lives on under a ghost XID); when
++             * none is (the XID went with a client that died, glxext.c
++             * ContextGone), directly -- it was leaked before, 15 per Steam
++             * start. */
++            void *res = NULL;
++            if (dixLookupResourceByType(&res, prevglxc->id, __glXContextRes,
++                                        serverClient, DixGetAttrAccess) == Success &&
++                res == prevglxc)
++                FreeResourceByType(prevglxc->id, __glXContextRes, FALSE);
++            else
++                __glXFreeContextIfOrphan(prevglxc);
+         }
+     }
+ 
+diff -ruN a/glx/glxext.c b/glx/glxext.c
+--- a/glx/glxext.c	2026-10-03 04:20:29
++++ b/glx/glxext.c	2026-10-03 04:20:29
+@@ -78,6 +78,15 @@
+     if (!cx)
+         return TRUE;
+ 
++    /* SteamARM: the XID is gone (DestroyContext, or the client went away).
++     * Only DestroyContext used to clear idExists, so a context whose client
++     * exited or was killed without destroying it was never freed: 17 Apple
++     * GL contexts (with their Metal queues) per Steam start, for the life
++     * of the X server. Only for the context's own XID: a destroyed
++     * context still current somewhere lives on under a ghost XID
++     * (__glXDisp_DestroyContext) and is freed when it stops being current. */
++    if (id == cx->id)
++        cx->idExists = GL_FALSE;
+     if (!cx->currentClient)
+         __glXFreeContext(cx);
+ 
+@@ -195,6 +204,15 @@
+     }
+ 
+     return GL_TRUE;
++}
++
++/* SteamARM: glxcmds.c's DoMakeCurrent, for a context that stopped being
++ * current after its XID was freed (its client died with it bound): no
++ * resource is left to free it through. */
++void
++__glXFreeContextIfOrphan(__GLXcontext * cx)
++{
++    __glXFreeContext(cx);
+ }
+ 
+ /************************************************************************/
+diff -ruN a/glx/glxext.h b/glx/glxext.h
+--- a/glx/glxext.h	2026-10-03 04:20:29
++++ b/glx/glxext.h	2026-10-03 04:20:29
+@@ -59,6 +59,7 @@
+ extern void __glXFlushContextCache(void);
+ 
+ extern Bool __glXAddContext(__GLXcontext * cx);
++extern void __glXFreeContextIfOrphan(__GLXcontext * cx);
+ extern void __glXErrorCallBack(GLenum code);
+ extern void __glXClearErrorOccured(void);
+ extern GLboolean __glXErrorOccured(void);
+diff -ruN a/hw/xquartz/GL/indirect.c b/hw/xquartz/GL/indirect.c
+--- a/hw/xquartz/GL/indirect.c	2026-10-03 04:20:29
++++ b/hw/xquartz/GL/indirect.c	2026-10-03 04:20:29
+@@ -254,8 +254,29 @@
+     GLAQUA_DEBUG_MSG("surface_notify(%p, %p)\n", _arg, data);
+     switch (arg->kind) {
+     case AppleDRISurfaceNotifyDestroyed:
+-        if (surface_hash != NULL)
++        /* SteamARM: detach every context still attached to the surface
++         * before it goes. A CGL context keeps its drawable -- and the
++         * surface's IOSurface -- until it is attached elsewhere or
++         * destroyed, and Steam's web helper makes ~40 GLX windows per start
++         * with contexts that outlive them: the X server kept ~37 16 KiB
++         * IOSurfaces per Steam start, and after ~60 starts CGL could no
++         * longer create a context (GLXBadContext; Steam's client then died
++         * in strstr on a NULL GL_RENDERER). */
++        if (surface_hash != NULL) {
++            lst = x_hash_table_lookup(surface_hash, x_cvt_uint_to_vptr(arg->id), NULL);
++            for (x_list *l = lst; l != NULL; l = l->next) {
++                context = l->data;
++                if (context && context->isAttached && context->sid == arg->id) {
++                    if (CGLGetCurrentContext() == context->ctx)
++                        CGLSetCurrentContext(NULL);
++                    CGLClearDrawable(context->ctx);
++                    context->isAttached = FALSE;
++                    context->sid = 0;
++                }
++            }
++            x_list_free(lst);
+             x_hash_table_remove(surface_hash, x_cvt_uint_to_vptr(arg->id));
++        }
+         draw->pDraw = NULL;
+         draw->sid = 0;
+         break;
+diff -ruN a/hw/xquartz/remoteLayerCocoa.m b/hw/xquartz/remoteLayerCocoa.m
+--- a/hw/xquartz/remoteLayerCocoa.m	2026-10-03 04:20:29
++++ b/hw/xquartz/remoteLayerCocoa.m	2026-10-03 04:20:29
+@@ -266,6 +266,8 @@
+             w = make_overlay();
+             overlays[key] = w;
+             [w release];
++            ErrorF("remote layer: overlay for 0x%x created (%lu live)\n", st->xid,
++                   (unsigned long)overlays.count);
+         }
+ 
+         [CATransaction begin];
+@@ -339,6 +341,7 @@
+         [w orderOut:nil];
+         [w close];
+         [overlays removeObjectForKey:key];
++        ErrorF("remote layer: overlay for 0x%x removed (%lu live)\n", xid, (unsigned long)overlays.count);
+         rl_presentation();
+     }
+ }

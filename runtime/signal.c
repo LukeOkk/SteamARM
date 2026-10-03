@@ -1294,8 +1294,10 @@ static void host_handler(int dsig, siginfo_t *dinfo, void *uap)
         // reporter, usually): one line in /tmp/lxrt-faults.log naming where,
         // so a crash that the guest's reporter then swallows is not silent.
         // The first eight per process.
+        // Not alignment faults (SIGBUS, BUS_ADRALN): FEX takes those on
+        // purpose for unaligned atomics, hundreds per Steam start.
         if ((lsig == 4 || lsig == 7 || lsig == 8 || lsig == 11) && dinfo &&
-            (dinfo->si_code > 0)) {
+            dinfo->si_code > 0 && !(lsig == 7 && dinfo->si_code == BUS_ADRALN)) {
             static _Atomic int noted;
             if (atomic_fetch_add(&noted, 1) < 8) {
                 char where[300] = "?";

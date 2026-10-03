@@ -177,6 +177,25 @@ the mouse's deltas.
   `tests/x11/run-confine.sh` (moves the mouse: refuses to run while someone
   uses it).
 
+## GLX resources of departing clients
+
+The X server :2 runs for days while Steam is started and stopped. Each
+Steam start makes ~15 GLX contexts and ~40 GLX windows (the web helper's),
+and XQuartz's GLX never freed what a client left behind: CGL contexts stayed
+attached to destroyed windows' surfaces (one IOSurface each), contexts of a
+client that exited without destroying them were never freed, and a context
+still current when its client went away stayed current to the dead client.
+After ~60 Steam starts CGL could not create a context any more
+(`GLXBadContext` on `X_GLXMakeCurrent`; Steam's client then died in
+`strstr` on a NULL `GL_RENDERER` and its main window never came).
+`patches/xquartz-surface-release.patch` frees all three. Measured over
+Steam starts: contexts 15 while running and 0 after each stop, IOSurfaces
+flat, X server footprint flat (83 MB; it grew 6.5 MB per start).
+
+To check a running server: `heap <X11.bin pid> | grep GLDContextRec`,
+`vmmap <pid> | grep -c ^IOSurface`, `footprint <pid>`; `glxinfo -B` from the
+ARM64 root must name the renderer ("Apple M4"), not fail with GLXBadContext.
+
 ## VNC
 
 - `run-app.sh` runs `build/lxrun /usr/bin/Xvnc :1 ... -SecurityTypes VncAuth
