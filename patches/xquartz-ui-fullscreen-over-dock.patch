@@ -20,11 +20,15 @@ and is one column wider than the display, the column off an edge with no
 other display next to it (XQUARTZ_RL_OUTSET, default 1; one column short
 worked too but showed the X window under it as a white line). The overlay
 then takes the pointer itself and X11Application sends its events to X,
-so a click at the bottom of the game never lands on the Dock under it.
+so a click at the bottom of the game never lands on the Dock under it;
+its motion is still integrated from the deltas, as over any X window (a
+locked pointer, xquartz-pointer-confine, would otherwise never move the X
+sprite). An X window mapped over the game drops the overlay's level and
+puts it back right above its own frame, under that window.
 XQUARTZ_RL_PRESENTATION=hide or auto keeps the old ways, 0 none.
 diff -ruN a/hw/xquartz/X11Application.m b/hw/xquartz/X11Application.m
---- a/hw/xquartz/X11Application.m	2026-10-03 18:47:28
-+++ b/hw/xquartz/X11Application.m	2026-10-03 18:47:28
+--- a/hw/xquartz/X11Application.m	2026-10-03 19:08:39
++++ b/hw/xquartz/X11Application.m	2026-10-03 19:08:39
 @@ -243,6 +243,8 @@
      [self activateX:NO];
  }
@@ -75,9 +79,35 @@ diff -ruN a/hw/xquartz/X11Application.m b/hw/xquartz/X11Application.m
              NSPoint NSlocation = [e locationInWindow];
              NSWindow *window = [e window];
              NSRect NSframe, NSvisibleFrame;
+@@ -941,7 +948,24 @@
+                                     [e type] == NSLeftMouseUp;
+ #endif
+ 
+-        if (window != nil) {
++        /* SteamARM: a game's covering overlay (remoteLayerCocoa.m) is the
++         * X window under it: its motion is integrated from the deltas as
++         * over any X window, or a locked pointer (xquartz-pointer-confine)
++         * would never move the X sprite. */
++        if (window != nil && XQRemoteLayerIsOverlay(window)) {
++            NSRect frame = [window frame];
++            NSPoint g = [e locationInWindow];
++            g.x += frame.origin.x;
++            g.y += frame.origin.y;
++            if (hasUntrustedPointerDelta)
++                location = g;
++            else {
++                location.x = lastpt.x + [e deltaX];
++                location.y = lastpt.y - [e deltaY];
++            }
++            lastpt = g;
++        }
++        else if (window != nil) {
+             NSRect frame = [window frame];
+             location = [e locationInWindow];
+             location.x += frame.origin.x;
 diff -ruN a/hw/xquartz/remoteLayerCocoa.m b/hw/xquartz/remoteLayerCocoa.m
---- a/hw/xquartz/remoteLayerCocoa.m	2026-10-03 18:47:28
-+++ b/hw/xquartz/remoteLayerCocoa.m	2026-10-03 18:47:28
+--- a/hw/xquartz/remoteLayerCocoa.m	2026-10-03 19:08:39
++++ b/hw/xquartz/remoteLayerCocoa.m	2026-10-03 19:08:39
 @@ -10,6 +10,8 @@
   * the visible (clipped) part of the X window; the CALayerHost keeps the full
   * X window size and is offset inside it, the root layer clips.
@@ -262,7 +292,15 @@ diff -ruN a/hw/xquartz/remoteLayerCocoa.m b/hw/xquartz/remoteLayerCocoa.m
      }
  }
  
-@@ -322,24 +435,25 @@
+@@ -313,6 +426,7 @@
+                    (unsigned long)overlays.count);
+         }
+ 
++        NSInteger before = w.level;
+         [CATransaction begin];
+         [CATransaction setDisableActions:YES];
+         if (w.host.contextId != st->ctx)
+@@ -322,24 +436,25 @@
               * the primary screen, y up). */
              CGFloat H = NSScreen.screens.firstObject.frame.size.height;
              NSRect r = NSMakeRect(st->cx, H - (st->cy + st->ch), st->cw, st->ch);
@@ -301,3 +339,19 @@ diff -ruN a/hw/xquartz/remoteLayerCocoa.m b/hw/xquartz/remoteLayerCocoa.m
          }
          [CATransaction commit];
  
+@@ -348,9 +463,13 @@
+          * nothing of the overlay, and an orderWindow: of a window with a
+          * hosted layer is not free (the picture blinked at every click;
+          * MEASURED 2026-10-02). */
+-        BOOL placed = w.isVisible && w.nativeBelow == st->native &&
++        /* A level just dropped (another X window now above the game, from
++         * over the menu bar): the overlay went to the front of the lower
++         * level, over that window too; put it back right above its frame. */
++        BOOL dropped = st->visible && w.level < before;
++        BOOL placed = !dropped && w.isVisible && w.nativeBelow == st->native &&
+                       (rl_level(w) > w.baseLevel || rl_is_above(w, st->native));
+-        if (st->visible && !placed && (st->reorder || !w.isVisible ||
++        if (st->visible && !placed && (st->reorder || dropped || !w.isVisible ||
+                             w.nativeBelow != st->native)) {
+             w.nativeBelow = st->native;
+             [w orderWindow:NSWindowAbove relativeTo:st->native];
