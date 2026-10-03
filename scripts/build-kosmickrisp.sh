@@ -41,7 +41,21 @@
 #   10  VK_EXT_metal_objects (images' MTLTextures, timeline semaphores'
 #       MTLSharedEvents, the MTLDevice): the shim's MetalFX scaler encodes
 #       Apple's spatial upscaler between two of its submissions
-#       (LXRT_VK_SCALER=metalfx|auto, the default; tests/elf/vk_metalfx.c).
+#       (LXRT_VK_SCALER=metalfx|auto, the default; tests/elf/vk_metalfx.c);
+#   11  a pipeline cache: Mesa's disk cache and a device memory cache, and
+#       Metal's own compiled-shader cache moved to a directory of the
+#       application's (MTLSetShaderCachePath): Metal's default one is split
+#       into one slot per process holding it, and a game that landed on a
+#       slot Steam's other processes did not fill recompiled every pipeline
+#       (~160 ms each); KK_COMPILE_LOG=1, KK_METAL_CACHE_DIR;
+#   12  command memory: a Metal 4 command buffer keeps ~2.3 MB of allocator
+#       memory that reset never returns, and KosmicKrisp began one per render
+#       pass with up to 384 idle allocators. Render passes now share the
+#       command buffer (KK_CMDBUF_PER_PASS=1: one each), upload memory goes
+#       back to a device pool when the GPU is done, the idle allocators are
+#       capped by size (KK_ALLOCATOR_POOL_MB, 256) and only the part of the
+#       root table in use is uploaded (tests/elf/vk_resubmit.c);
+#   13  no autorelease pool in the per-draw Metal calls.
 #
 # Only Homebrew formulae and a Python virtualenv are installed. Re-running is
 # safe: the download is cached and the build is incremental. Needs macOS 26.

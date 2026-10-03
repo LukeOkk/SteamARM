@@ -1,0 +1,633 @@
+diff -ruN -x __pycache__ b11/src/kosmickrisp/bridge/mtl_command_buffer.h b12/src/kosmickrisp/bridge/mtl_command_buffer.h
+--- a/src/kosmickrisp/bridge/mtl_command_buffer.h	2026-10-02 23:50:37
++++ b/src/kosmickrisp/bridge/mtl_command_buffer.h	2026-10-02 23:50:37
+@@ -12,6 +12,8 @@
+ #include <stdint.h>
+ 
+ void mtl_command_allocator_reset(mtl_command_allocator *allocator);
++/* Memory the allocator holds; a reset keeps it for reuse. */
++uint64_t mtl_command_allocator_allocated_size(mtl_command_allocator *allocator);
+ 
+ void mtl_begin_command_buffer(mtl_command_buffer *command_buffer,
+                               mtl_command_allocator *allocator);
+diff -ruN -x __pycache__ b11/src/kosmickrisp/bridge/mtl_command_buffer.m b12/src/kosmickrisp/bridge/mtl_command_buffer.m
+--- a/src/kosmickrisp/bridge/mtl_command_buffer.m	2026-10-02 23:50:37
++++ b/src/kosmickrisp/bridge/mtl_command_buffer.m	2026-10-02 23:50:37
+@@ -11,6 +11,15 @@
+ #include <Metal/MTL4CommandBuffer.h>
+ #include <Metal/MTL4Counters.h>
+ 
++uint64_t
++mtl_command_allocator_allocated_size(mtl_command_allocator *allocator)
++{
++   @autoreleasepool {
++      id<MTL4CommandAllocator> alloc = (id<MTL4CommandAllocator>)allocator;
++      return [alloc allocatedSize];
++   }
++}
++
+ void
+ mtl_command_allocator_reset(mtl_command_allocator *allocator)
+ {
+diff -ruN -x __pycache__ b11/src/kosmickrisp/bridge/stubs/mtl_command_buffer.c b12/src/kosmickrisp/bridge/stubs/mtl_command_buffer.c
+--- a/src/kosmickrisp/bridge/stubs/mtl_command_buffer.c	2026-10-02 23:50:37
++++ b/src/kosmickrisp/bridge/stubs/mtl_command_buffer.c	2026-10-02 23:50:37
+@@ -11,6 +11,12 @@
+ {
+ }
+ 
++uint64_t
++mtl_command_allocator_allocated_size(mtl_command_allocator *allocator)
++{
++   return 0;
++}
++
+ void
+ mtl_begin_command_buffer(mtl_command_buffer *command_buffer,
+                          mtl_command_allocator *allocator)
+diff -ruN -x __pycache__ b11/src/kosmickrisp/vulkan/kk_cmd_buffer.c b12/src/kosmickrisp/vulkan/kk_cmd_buffer.c
+--- a/src/kosmickrisp/vulkan/kk_cmd_buffer.c	2026-10-02 23:50:37
++++ b/src/kosmickrisp/vulkan/kk_cmd_buffer.c	2026-10-02 23:50:37
+@@ -37,6 +37,10 @@
+ {
+    struct kk_cmd_pool *pool = kk_cmd_buffer_pool(cmd);
+ 
++   /* Destroyed or reset in the middle of a recording */
++   kk_cmd_buffer_close_mtl(cmd);
++   cmd->close_gfx_cmd_buf = false;
++
+    kk_cmd_release_dynamic_ds_state(cmd);
+    kk_descriptor_state_fini(cmd, &cmd->state.gfx.descriptors);
+    kk_descriptor_state_fini(cmd, &cmd->state.cs.descriptors);
+@@ -55,6 +59,10 @@
+       kk_device_put_allocator(dev, *allocator);
+    }
+    util_dynarray_clear(&cmd->allocators);
++   util_dynarray_clear(&cmd->ended_allocators);
++   cmd->gfx.allocator = NULL;
++   cmd->cmp[0].allocator = NULL;
++   cmd->cmp[1].allocator = NULL;
+ 
+    /* Release all BOs used as descriptor buffers for submissions */
+    util_dynarray_foreach(&cmd->large_bos, struct kk_bo *, bo) {
+@@ -97,6 +105,7 @@
+    kk_cmd_release_resources(dev, cmd);
+    util_dynarray_fini(&cmd->submit_cmd_bufs);
+    util_dynarray_fini(&cmd->allocators);
++   util_dynarray_fini(&cmd->ended_allocators);
+    util_dynarray_fini(&cmd->large_bos);
+ 
+    vk_free(&pool->vk.alloc, cmd);
+@@ -156,6 +165,7 @@
+ 
+    cmd->submit_cmd_bufs = UTIL_DYNARRAY_INIT;
+    cmd->allocators = UTIL_DYNARRAY_INIT;
++   cmd->ended_allocators = UTIL_DYNARRAY_INIT;
+    cmd->large_bos = UTIL_DYNARRAY_INIT;
+ 
+    cmd->vk.dynamic_graphics_state.vi = &cmd->state.gfx._dynamic_vi;
+@@ -186,15 +196,108 @@
+  * command buffer storage for each of them and kept them all: ~120 MB per
+  * allocator under Source 2 (MEASURED).
+  */
++static bool
++kk_cmd_buf_per_pass(void)
++{
++   static int on = -1;
++   if (on < 0) {
++      const char *e = getenv("KK_CMDBUF_PER_PASS");
++      on = e && e[0] == '1';
++   }
++   return on;
++}
++
++/* Ends the render passes' Metal command buffer left open, if any, and queues
++ * it for the commit: whatever begins next comes after it. */
++void
++kk_cmd_buffer_close_mtl(struct kk_cmd_buffer *cmd)
++{
++   if (!cmd->open_gfx_cmd_buf)
++      return;
++
++   mtl_end_command_buffer(cmd->open_gfx_cmd_buf);
++   util_dynarray_append(&cmd->ended_allocators, cmd->open_gfx_allocator);
++   util_dynarray_append(&cmd->submit_cmd_bufs, cmd->open_gfx_cmd_buf);
++   cmd->open_gfx_cmd_buf = NULL;
++   cmd->open_gfx_allocator = NULL;
++}
++
++/* A pipeline barrier or an event wait. Work the driver hoists before a
++ * render pass (pre_gfx: tessellation, predication, unrolling) goes into a
++ * command buffer committed before the gfx one; with passes sharing a
++ * command buffer that is before the earlier passes too. Harmless unless that
++ * work depends on them, which takes a dependency whose second scope reaches
++ * such work: then the shared command buffer is closed here. */
++void
++kk_cmd_buffer_dependency(struct kk_cmd_buffer *cmd, uint32_t count,
++                         const VkDependencyInfo *deps)
++{
++   const VkPipelineStageFlags2 hoisted =
++      VK_PIPELINE_STAGE_2_TOP_OF_PIPE_BIT |
++      VK_PIPELINE_STAGE_2_DRAW_INDIRECT_BIT |
++      VK_PIPELINE_STAGE_2_VERTEX_INPUT_BIT |
++      VK_PIPELINE_STAGE_2_INDEX_INPUT_BIT |
++      VK_PIPELINE_STAGE_2_VERTEX_ATTRIBUTE_INPUT_BIT |
++      VK_PIPELINE_STAGE_2_VERTEX_SHADER_BIT |
++      VK_PIPELINE_STAGE_2_TESSELLATION_CONTROL_SHADER_BIT |
++      VK_PIPELINE_STAGE_2_TESSELLATION_EVALUATION_SHADER_BIT |
++      VK_PIPELINE_STAGE_2_GEOMETRY_SHADER_BIT |
++      VK_PIPELINE_STAGE_2_PRE_RASTERIZATION_SHADERS_BIT |
++      VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT |
++      VK_PIPELINE_STAGE_2_CONDITIONAL_RENDERING_BIT_EXT |
++      VK_PIPELINE_STAGE_2_ALL_TRANSFER_BIT |
++      VK_PIPELINE_STAGE_2_COPY_BIT | VK_PIPELINE_STAGE_2_BLIT_BIT |
++      VK_PIPELINE_STAGE_2_CLEAR_BIT |
++      VK_PIPELINE_STAGE_2_ALL_GRAPHICS_BIT |
++      VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT;
++
++   VkPipelineStageFlags2 dst = 0;
++   for (uint32_t d = 0; d < count; d++) {
++      const VkDependencyInfo *dep = &deps[d];
++      for (uint32_t i = 0; i < dep->memoryBarrierCount; i++)
++         dst |= dep->pMemoryBarriers[i].dstStageMask;
++      for (uint32_t i = 0; i < dep->bufferMemoryBarrierCount; i++)
++         dst |= dep->pBufferMemoryBarriers[i].dstStageMask;
++      for (uint32_t i = 0; i < dep->imageMemoryBarrierCount; i++)
++         dst |= dep->pImageMemoryBarriers[i].dstStageMask;
++   }
++   if (!(dst & hoisted))
++      return;
++
++   kk_cmd_buffer_close_mtl(cmd);
++   if (cmd->gfx.encoder)
++      cmd->close_gfx_cmd_buf = true;
++}
++
+ static mtl_command_buffer *
+-kk_cmd_buffer_begin_mtl(struct kk_cmd_buffer *cmd)
++kk_cmd_buffer_begin_mtl(struct kk_cmd_buffer *cmd, struct kk_encoder_state *es)
+ {
+    struct kk_device *dev = kk_cmd_buffer_device(cmd);
+-   mtl_command_allocator *allocator = kk_device_get_allocator(dev);
++   mtl_command_allocator *allocator;
++
++   if (cmd->open_gfx_cmd_buf) {
++      if (es == &cmd->gfx) {
++         mtl_command_buffer *cmd_buf = cmd->open_gfx_cmd_buf;
++         es->allocator = cmd->open_gfx_allocator;
++         cmd->open_gfx_cmd_buf = NULL;
++         cmd->open_gfx_allocator = NULL;
++         return cmd_buf;
++      }
++      kk_cmd_buffer_close_mtl(cmd);
++   }
++
++   if (util_dynarray_num_elements(&cmd->ended_allocators,
++                                  mtl_command_allocator *) > 0) {
++      allocator =
++         util_dynarray_pop(&cmd->ended_allocators, mtl_command_allocator *);
++   } else {
++      allocator = kk_device_get_allocator(dev);
++      util_dynarray_append(&cmd->allocators, allocator);
++   }
+    mtl_command_buffer *cmd_buf = mtl_new_command_buffer(dev->mtl_handle);
+ 
+-   util_dynarray_append(&cmd->allocators, allocator);
+    mtl_begin_command_buffer(cmd_buf, allocator);
++   es->allocator = allocator;
+    return cmd_buf;
+ }
+ 
+@@ -212,7 +315,25 @@
+    empty = slot->allocators;
+    slot->allocators = cmd->allocators;
+    cmd->allocators = empty;
++   util_dynarray_clear(&cmd->ended_allocators);
+ 
++   /* The uploads go with the commit, back to the device when the GPU has
++    * finished it: an application that keeps thousands of executed command
++    * buffers without resetting them (Source 2) kept ~2.5 KB per draw in
++    * each of them until it reused it. */
++   struct kk_cmd_pool *pool = kk_cmd_buffer_pool(cmd);
++   list_for_each_entry_safe(struct kk_cmd_bo, bo, &cmd->uploader.bos, link) {
++      list_del(&bo->link);
++      util_dynarray_append(&slot->upload_bos, bo->bo);
++      vk_free(&pool->vk.alloc, bo);
++   }
++   cmd->uploader.bo = NULL;
++   cmd->uploader.offset = 0;
++
++   empty = slot->large_bos;
++   slot->large_bos = cmd->large_bos;
++   cmd->large_bos = empty;
++
+    return util_dynarray_begin(&slot->cmd_bufs);
+ }
+ 
+@@ -225,6 +346,8 @@
+     * Call twice since post_gfx will be moved to pre_gfx but not ended. */
+    cs_end(cmd);
+    cs_end(cmd);
++   kk_cmd_buffer_close_mtl(cmd);
++   cmd->close_gfx_cmd_buf = false;
+    kk_cmd_release_resources(dev, cmd);
+    if (cmd->drawable) {
+       mtl_release(cmd->drawable);
+@@ -279,6 +402,7 @@
+    /* Call twice since post_gfx will be moved to pre_gfx but not ended. */
+    cs_end(cmd);
+    cs_end(cmd);
++   kk_cmd_buffer_close_mtl(cmd);
+ 
+    return vk_command_buffer_end(&cmd->vk);
+ }
+@@ -303,7 +427,7 @@
+    uint32_t view_mask = state->render.view_mask;
+    assert(state->render_pass_descriptor);
+ 
+-   cmd->gfx.cmd_buf = kk_cmd_buffer_begin_mtl(cmd);
++   cmd->gfx.cmd_buf = kk_cmd_buffer_begin_mtl(cmd, &cmd->gfx);
+    cmd->gfx.encoder = mtl_new_render_command_encoder_with_descriptor(
+       cmd->gfx.cmd_buf, state->render_pass_descriptor);
+ 
+@@ -344,7 +468,7 @@
+ kk_start_compute_encoder(struct kk_cmd_buffer *cmd, struct kk_encoder_state *es,
+                          mtl_argument_table *argument_table)
+ {
+-   es->cmd_buf = kk_cmd_buffer_begin_mtl(cmd);
++   es->cmd_buf = kk_cmd_buffer_begin_mtl(cmd, es);
+    es->encoder = mtl_new_compute_command_encoder(es->cmd_buf);
+ 
+    /* Argument table won't ever change */
+@@ -433,7 +557,23 @@
+ 
+    util_dynarray_clear(&es->ts_resolves);
+ 
++   /* The next render pass may begin in this command buffer, unless compute
++    * work is open beside it (it must be committed after it). */
++   if (es == &cmd->gfx && !cmd->close_gfx_cmd_buf && !kk_cmd_buf_per_pass() &&
++       !cmd->pre_gfx->encoder && !cmd->post_gfx->encoder) {
++      assert(cmd->open_gfx_cmd_buf == NULL);
++      cmd->open_gfx_cmd_buf = es->cmd_buf;
++      cmd->open_gfx_allocator = es->allocator;
++      es->cmd_buf = NULL;
++      es->allocator = NULL;
++      return;
++   }
++   if (es == &cmd->gfx)
++      cmd->close_gfx_cmd_buf = false;
++
+    mtl_end_command_buffer(es->cmd_buf);
++   util_dynarray_append(&cmd->ended_allocators, es->allocator);
++   es->allocator = NULL;
+ 
+    util_dynarray_append(&cmd->submit_cmd_bufs, es->cmd_buf);
+    es->cmd_buf = NULL;
+@@ -482,6 +622,8 @@
+ {
+    VK_FROM_HANDLE(kk_cmd_buffer, cmd, commandBuffer);
+ 
++   kk_cmd_buffer_dependency(cmd, 1, pDependencyInfo);
++
+    /* TODO_KOSMICKRISP Don't break the render pass and add a single encoder
+     * barrier. This requires to read directly from the framebuffer which
+     * requires not reading input attachments as textures.
+@@ -567,6 +709,7 @@
+    }
+    assert(dyn_buffer_start <= KK_MAX_DYNAMIC_BUFFERS);
+    assert(next_dyn_offset <= info->dynamicOffsetCount);
++   desc->dynamic_buffer_count = MAX2(desc->dynamic_buffer_count, dyn_buffer_start);
+ 
+    desc->root_dirty = true;
+ }
+@@ -784,13 +927,17 @@
+ {
+    struct kk_descriptor_state *desc = kk_get_descriptors_state(cmd, bind_point);
+    struct kk_root_descriptor_table *root = &desc->root;
+-   struct kk_ptr root_ptr = kk_pool_alloc(cmd, sizeof(*root), 8u);
++   /* Shaders read dynamic_buffers only at the indices of the sets bound. */
++   const uint32_t size =
++      offsetof(struct kk_root_descriptor_table, dynamic_buffers) +
++      desc->dynamic_buffer_count * sizeof(root->dynamic_buffers[0]);
++   struct kk_ptr root_ptr = kk_pool_alloc(cmd, size, 8u);
+    if (unlikely(!root_ptr.gpu))
+       return 0u;
+ 
+    root->addr = root_ptr.gpu;
+ 
+-   memcpy(root_ptr.cpu, root, sizeof(*root));
++   memcpy(root_ptr.cpu, root, size);
+    desc->root_dirty = false;
+ 
+    return root_ptr.gpu;
+diff -ruN -x __pycache__ b11/src/kosmickrisp/vulkan/kk_cmd_buffer.h b12/src/kosmickrisp/vulkan/kk_cmd_buffer.h
+--- a/src/kosmickrisp/vulkan/kk_cmd_buffer.h	2026-10-02 23:50:37
++++ b/src/kosmickrisp/vulkan/kk_cmd_buffer.h	2026-10-02 23:50:37
+@@ -51,15 +51,26 @@
+    /* Descriptor set base addresses */
+    uint64_t sets[KK_MAX_SETS];
+ 
+-   /* Dynamic buffer bindings */
+-   struct kk_buffer_address dynamic_buffers[KK_MAX_DYNAMIC_BUFFERS];
+-
+    /* Start index in dynamic_buffers where each set starts */
+    uint8_t set_dynamic_buffer_start[KK_MAX_SETS];
++
++   /* Dynamic buffer bindings. Last: only the first
++    * kk_descriptor_state::dynamic_buffer_count are uploaded (1 KB of the
++    * table's 2.1 KB, copied at every draw that changes any of it). */
++   struct kk_buffer_address dynamic_buffers[KK_MAX_DYNAMIC_BUFFERS];
+ };
+ 
++/* The shaders read dynamic_buffers[] with 16-byte loads (load_root); moving
++ * set_dynamic_buffer_start in front of it left the offset aligned only by
++ * coincidence. */
++static_assert(offsetof(struct kk_root_descriptor_table, dynamic_buffers) % 16 == 0,
++              "dynamic_buffers must stay 16-byte aligned");
++
+ struct kk_descriptor_state {
+    bool root_dirty;
++   /* Highest dynamic buffer index bound since the command buffer began,
++    * plus one: how much of root.dynamic_buffers is uploaded. */
++   uint8_t dynamic_buffer_count;
+    struct kk_root_descriptor_table root;
+ 
+    uint32_t set_sizes[KK_MAX_SETS];
+@@ -217,6 +228,8 @@
+    /* either a mtl_compute_encoder or a mtl_render_encoder */
+    mtl_command_encoder *encoder;
+    mtl_command_buffer *cmd_buf;
++   /* The allocator cmd_buf was begun with (one of kk_cmd_buffer::allocators) */
++   mtl_command_allocator *allocator;
+    /* The encoder counted visibility results: they are read back through
+     * the buffer's address, which the barrier at its end has to allow for. */
+    bool wrote_visibility;
+@@ -238,6 +251,20 @@
+    struct kk_encoder_state *pre_gfx;
+    struct kk_encoder_state *post_gfx;
+ 
++   /* The Metal command buffer of the render pass that ended last, left open:
++    * the next render pass begins its encoder in it. Metal 4 gives every
++    * command buffer 2.3 MB of command memory at the least (MEASURED: 20
++    * passes in one command buffer 2.5 MB, in twenty 45 MB), and the driver
++    * began one per render pass. Closed (ended and queued for the commit)
++    * before any other Metal command buffer begins, at the end of the
++    * recording, and at a dependency on which compute work hoisted before a
++    * later pass (pre_gfx) could depend. KK_CMDBUF_PER_PASS=1: as before. */
++   mtl_command_buffer *open_gfx_cmd_buf;
++   mtl_command_allocator *open_gfx_allocator;
++   /* A dependency of that kind was recorded inside the current render
++    * pass: the encoder's command buffer is closed when it ends. */
++   bool close_gfx_cmd_buf;
++
+    void *drawable;
+    mtl_argument_table *argument_table;
+ 
+@@ -262,6 +289,12 @@
+     * last reset, borrowed from the device (mtl_command_allocator *). */
+ 
+    struct util_dynarray allocators;
++   /* Those of them whose Metal command buffer has ended: Metal lets an
++    * allocator begin the next command buffer then, so the next one begun in
++    * this recording takes one of these. (Each allocator holds 2.3 MB in 19
++    * VM regions after a single use, however small: MEASURED, Metal 4 on an
++    * M4; one per render pass was most of the driver's memory.) */
++   struct util_dynarray ended_allocators;
+ 
+    /* Owned large BOs */
+    struct util_dynarray large_bos;
+@@ -318,6 +351,9 @@
+ mtl_render_encoder *cs_get_render(struct kk_cmd_buffer *cmd);
+ mtl_compute_encoder *cs_get_compute(struct kk_cmd_buffer *cmd, bool pre_gfx);
+ void cs_end(struct kk_cmd_buffer *cmd);
++void kk_cmd_buffer_close_mtl(struct kk_cmd_buffer *cmd);
++void kk_cmd_buffer_dependency(struct kk_cmd_buffer *cmd, uint32_t count,
++                              const VkDependencyInfo *deps);
+ void kk_cmd_bind_root_to_argument_table(struct kk_cmd_buffer *cmd,
+                                         uint64_t addr);
+ 
+diff -ruN -x __pycache__ b11/src/kosmickrisp/vulkan/kk_cmd_pool.c b12/src/kosmickrisp/vulkan/kk_cmd_pool.c
+--- a/src/kosmickrisp/vulkan/kk_cmd_pool.c	2026-10-02 23:50:37
++++ b/src/kosmickrisp/vulkan/kk_cmd_pool.c	2026-10-02 23:50:37
+@@ -21,8 +21,10 @@
+    if (bo == NULL)
+       return vk_error(pool, VK_ERROR_OUT_OF_HOST_MEMORY);
+ 
++   bo->bo = kk_device_get_upload_bo(dev);
+    const VkResult result =
+-      kk_alloc_bo(dev, &pool->vk.base, KK_CMD_BO_SIZE, 0, &bo->bo);
++      bo->bo ? VK_SUCCESS
++             : kk_alloc_bo(dev, &pool->vk.base, KK_CMD_BO_SIZE, 0, &bo->bo);
+    if (result != VK_SUCCESS) {
+       vk_free(&pool->vk.alloc, bo);
+       return vk_error(pool, VK_ERROR_OUT_OF_DEVICE_MEMORY);
+diff -ruN -x __pycache__ b11/src/kosmickrisp/vulkan/kk_device.c b12/src/kosmickrisp/vulkan/kk_device.c
+--- a/src/kosmickrisp/vulkan/kk_device.c	2026-10-02 23:50:37
++++ b/src/kosmickrisp/vulkan/kk_device.c	2026-10-02 23:50:37
+@@ -397,6 +397,11 @@
+ {
+    simple_mtx_init(&dev->cmd_mem.lock, mtx_plain);
+    dev->cmd_mem.idle_count = 0;
++   dev->cmd_mem.idle_bytes = 0;
++   const char *mb = getenv("KK_ALLOCATOR_POOL_MB");
++   dev->cmd_mem.idle_bytes_max =
++      (uint64_t)(mb ? atoi(mb) : KK_ALLOCATOR_POOL_MB) << 20;
++   dev->cmd_mem.idle_upload_bo_count = 0;
+    dev->cmd_mem.free_slots = NULL;
+    dev->cmd_mem.in_flight = 0;
+ }
+@@ -407,8 +412,11 @@
+    mtl_command_allocator *allocator = NULL;
+ 
+    simple_mtx_lock(&dev->cmd_mem.lock);
+-   if (dev->cmd_mem.idle_count > 0)
+-      allocator = dev->cmd_mem.idle[--dev->cmd_mem.idle_count];
++   if (dev->cmd_mem.idle_count > 0) {
++      uint32_t i = --dev->cmd_mem.idle_count;
++      allocator = dev->cmd_mem.idle[i];
++      dev->cmd_mem.idle_bytes -= dev->cmd_mem.idle_size[i];
++   }
+    simple_mtx_unlock(&dev->cmd_mem.lock);
+ 
+    return allocator ? allocator : mtl_new_command_allocator(dev->mtl_handle);
+@@ -420,11 +428,15 @@
+ kk_device_put_allocator(struct kk_device *dev, mtl_command_allocator *allocator)
+ {
+    mtl_command_allocator_reset(allocator);
++   const uint64_t size = mtl_command_allocator_allocated_size(allocator);
+ 
+    simple_mtx_lock(&dev->cmd_mem.lock);
+-   if (dev->cmd_mem.idle_count < KK_ALLOCATOR_POOL_SIZE) {
++   if (dev->cmd_mem.idle_count < KK_ALLOCATOR_POOL_SIZE &&
++       dev->cmd_mem.idle_bytes + size <= dev->cmd_mem.idle_bytes_max) {
+       /* Last in, first out: the allocator whose memory is warm goes next. */
++      dev->cmd_mem.idle_size[dev->cmd_mem.idle_count] = size;
+       dev->cmd_mem.idle[dev->cmd_mem.idle_count++] = allocator;
++      dev->cmd_mem.idle_bytes += size;
+       allocator = NULL;
+    }
+    simple_mtx_unlock(&dev->cmd_mem.lock);
+@@ -433,7 +445,35 @@
+       mtl_release(allocator);
+ }
+ 
++/* An upload BO a finished commit gave back, or NULL. */
++struct kk_bo *
++kk_device_get_upload_bo(struct kk_device *dev)
++{
++   struct kk_bo *bo = NULL;
++
++   simple_mtx_lock(&dev->cmd_mem.lock);
++   if (dev->cmd_mem.idle_upload_bo_count > 0)
++      bo = dev->cmd_mem.idle_upload_bos[--dev->cmd_mem.idle_upload_bo_count];
++   simple_mtx_unlock(&dev->cmd_mem.lock);
++
++   return bo;
++}
++
+ static void
++kk_device_put_upload_bo(struct kk_device *dev, struct kk_bo *bo)
++{
++   simple_mtx_lock(&dev->cmd_mem.lock);
++   if (dev->cmd_mem.idle_upload_bo_count < KK_UPLOAD_BO_POOL_SIZE) {
++      dev->cmd_mem.idle_upload_bos[dev->cmd_mem.idle_upload_bo_count++] = bo;
++      bo = NULL;
++   }
++   simple_mtx_unlock(&dev->cmd_mem.lock);
++
++   if (bo)
++      kk_destroy_bo(dev, bo);
++}
++
++static void
+ kk_retire_slot_done(struct mtl_feedback_data *data)
+ {
+    struct kk_retire_slot *slot = data->user_data;
+@@ -466,6 +506,16 @@
+    }
+    util_dynarray_clear(&slot->allocators);
+ 
++   util_dynarray_foreach(&slot->upload_bos, struct kk_bo *, bo) {
++      kk_device_put_upload_bo(dev, *bo);
++   }
++   util_dynarray_clear(&slot->upload_bos);
++
++   util_dynarray_foreach(&slot->large_bos, struct kk_bo *, bo) {
++      kk_destroy_bo(dev, *bo);
++   }
++   util_dynarray_clear(&slot->large_bos);
++
+    simple_mtx_lock(&dev->cmd_mem.lock);
+    slot->next = dev->cmd_mem.free_slots;
+    dev->cmd_mem.free_slots = slot;
+@@ -494,6 +544,8 @@
+       slot->dev = dev;
+       slot->cmd_bufs = UTIL_DYNARRAY_INIT;
+       slot->allocators = UTIL_DYNARRAY_INIT;
++      slot->upload_bos = UTIL_DYNARRAY_INIT;
++      slot->large_bos = UTIL_DYNARRAY_INIT;
+    }
+ 
+    /* Options with exactly one handler, for exactly one commit. The options
+@@ -505,6 +557,8 @@
+    if (!slot->options) {
+       util_dynarray_fini(&slot->cmd_bufs);
+       util_dynarray_fini(&slot->allocators);
++      util_dynarray_fini(&slot->upload_bos);
++      util_dynarray_fini(&slot->large_bos);
+       vk_free(&dev->vk.alloc, slot);
+       return NULL;
+    }
+@@ -538,6 +592,10 @@
+    for (uint32_t i = 0; i < dev->cmd_mem.idle_count; i++)
+       mtl_release(dev->cmd_mem.idle[i]);
+    dev->cmd_mem.idle_count = 0;
++   dev->cmd_mem.idle_bytes = 0;
++   for (uint32_t i = 0; i < dev->cmd_mem.idle_upload_bo_count; i++)
++      kk_destroy_bo(dev, dev->cmd_mem.idle_upload_bos[i]);
++   dev->cmd_mem.idle_upload_bo_count = 0;
+    struct kk_retire_slot *slot = dev->cmd_mem.free_slots;
+    dev->cmd_mem.free_slots = NULL;
+    simple_mtx_unlock(&dev->cmd_mem.lock);
+@@ -548,6 +606,8 @@
+          mtl_release(slot->options);
+       util_dynarray_fini(&slot->cmd_bufs);
+       util_dynarray_fini(&slot->allocators);
++      util_dynarray_fini(&slot->upload_bos);
++      util_dynarray_fini(&slot->large_bos);
+       vk_free(&dev->vk.alloc, slot);
+       slot = next;
+    }
+diff -ruN -x __pycache__ b11/src/kosmickrisp/vulkan/kk_device.h b12/src/kosmickrisp/vulkan/kk_device.h
+--- a/src/kosmickrisp/vulkan/kk_device.h	2026-10-02 23:50:37
++++ b/src/kosmickrisp/vulkan/kk_device.h	2026-10-02 23:50:37
+@@ -27,6 +27,12 @@
+ /* Idle command allocators kept for reuse, each with the memory of one Metal
+  * command buffer; more than this are released. */
+ #define KK_ALLOCATOR_POOL_SIZE 384
++/* ... and at most this much memory in them (KK_ALLOCATOR_POOL_MB): an idle
++ * allocator keeps all it ever grew to, 2.3 MB at the least. */
++#define KK_ALLOCATOR_POOL_MB 256
++/* Upload BOs (KK_CMD_BO_SIZE, 128 KB) kept by the device once the GPU has
++ * finished the commit that used them: 32 MB. */
++#define KK_UPLOAD_BO_POOL_SIZE 256
+ 
+ struct kk_bo;
+ struct kk_physical_device;
+@@ -128,7 +134,12 @@
+    struct {
+       simple_mtx_t lock;
+       mtl_command_allocator *idle[KK_ALLOCATOR_POOL_SIZE];
++      uint64_t idle_size[KK_ALLOCATOR_POOL_SIZE];
+       uint32_t idle_count;
++      uint64_t idle_bytes, idle_bytes_max;
++      /* Upload BOs given back by finished commits (struct kk_bo *). */
++      struct kk_bo *idle_upload_bos[KK_UPLOAD_BO_POOL_SIZE];
++      uint32_t idle_upload_bo_count;
+       struct kk_retire_slot *free_slots;
+       uint32_t in_flight;
+    } cmd_mem;
+@@ -142,6 +153,11 @@
+    mtl_commit_options *options;
+    struct util_dynarray cmd_bufs;   /* mtl_command_buffer * */
+    struct util_dynarray allocators; /* mtl_command_allocator * */
++   /* What the commands uploaded (kk_pool_alloc): an upload is never used
++    * again once its commit has finished, since a command buffer submitted
++    * again is recorded again (rerecord_cmd_buffer). */
++   struct util_dynarray upload_bos; /* struct kk_bo *, KK_CMD_BO_SIZE */
++   struct util_dynarray large_bos;  /* struct kk_bo *, any size */
+    struct kk_retire_slot *next;
+    /* A drawable the commit rendered into: presented by the handler, when
+     * the GPU has finished it (kk_queue.c), and/or reported. */
+@@ -154,6 +170,7 @@
+ void kk_device_put_allocator(struct kk_device *dev,
+                              mtl_command_allocator *allocator);
+ struct kk_retire_slot *kk_device_get_retire_slot(struct kk_device *dev);
++struct kk_bo *kk_device_get_upload_bo(struct kk_device *dev);
+ void kk_device_init_cmd_mem(struct kk_device *dev);
+ void kk_device_finish_cmd_mem(struct kk_device *dev);
+ 
+diff -ruN -x __pycache__ b11/src/kosmickrisp/vulkan/kk_event.c b12/src/kosmickrisp/vulkan/kk_event.c
+--- a/src/kosmickrisp/vulkan/kk_event.c	2026-10-02 23:50:37
++++ b/src/kosmickrisp/vulkan/kk_event.c	2026-10-02 23:50:37
+@@ -112,5 +112,8 @@
+                   const VkEvent *pEvents,
+                   const VkDependencyInfo *pDependencyInfos)
+ {
+-   /* We do nothing, event should already be set by the time we are here. */
++   /* We do nothing, event should already be set by the time we are here.
++    * (But as a barrier, for the render passes' shared command buffer.) */
++   VK_FROM_HANDLE(kk_cmd_buffer, cmd, commandBuffer);
++   kk_cmd_buffer_dependency(cmd, eventCount, pDependencyInfos);
+ }
+diff -ruN -x __pycache__ b11/src/kosmickrisp/vulkan/kk_queue.c b12/src/kosmickrisp/vulkan/kk_queue.c
+--- a/src/kosmickrisp/vulkan/kk_queue.c	2026-10-02 23:50:37
++++ b/src/kosmickrisp/vulkan/kk_queue.c	2026-10-02 23:50:37
+@@ -28,6 +28,7 @@
+ 
+    cs_end(cmd);
+    cs_end(cmd);
++   kk_cmd_buffer_close_mtl(cmd);
+ 
+    /* Need to ensure the new buffers allocated at record are resident. */
+    kk_device_make_resources_resident(dev);

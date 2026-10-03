@@ -1,0 +1,107 @@
+diff -ruN a/src/kosmickrisp/bridge/mtl_argument_table.m b/src/kosmickrisp/bridge/mtl_argument_table.m
+--- a/src/kosmickrisp/bridge/mtl_argument_table.m
++++ b/src/kosmickrisp/bridge/mtl_argument_table.m
+@@ -42,8 +42,7 @@
+ void
+ mtl_set_address(mtl_argument_table *table, uint64_t address, uint32_t binding)
+ {
+-   @autoreleasepool {
+-      id<MTL4ArgumentTable> t = (id<MTL4ArgumentTable>)table;
+-      [t setAddress:address atIndex:binding];
+-   }
++   /* Hot (every draw): nothing here is autoreleased. */
++   id<MTL4ArgumentTable> t = (id<MTL4ArgumentTable>)table;
++   [t setAddress:address atIndex:binding];
+ }
+diff -ruN a/src/kosmickrisp/bridge/mtl_encoder.m b/src/kosmickrisp/bridge/mtl_encoder.m
+--- a/src/kosmickrisp/bridge/mtl_encoder.m
++++ b/src/kosmickrisp/bridge/mtl_encoder.m
+@@ -433,11 +433,10 @@
+                     uint32_t vertexCount, uint32_t instanceCount,
+                     uint32_t baseInstance)
+ {
+-   @autoreleasepool {
+-      id<MTL4RenderCommandEncoder> enc = (id<MTL4RenderCommandEncoder>)encoder;
+-      MTLPrimitiveType type = (MTLPrimitiveType)primitve_type;
+-      [enc drawPrimitives:type vertexStart:vertexStart vertexCount:vertexCount instanceCount:instanceCount baseInstance:baseInstance];
+-   }
++   /* Hot (every draw): nothing here is autoreleased. */
++   id<MTL4RenderCommandEncoder> enc = (id<MTL4RenderCommandEncoder>)encoder;
++   MTLPrimitiveType type = (MTLPrimitiveType)primitve_type;
++   [enc drawPrimitives:type vertexStart:vertexStart vertexCount:vertexCount instanceCount:instanceCount baseInstance:baseInstance];
+ }
+ 
+ void
+@@ -449,19 +448,18 @@
+                             uint32_t instance_count, int32_t base_vertex,
+                             uint32_t base_instance)
+ {
+-   @autoreleasepool {
+-      id<MTL4RenderCommandEncoder> enc = (id<MTL4RenderCommandEncoder>)encoder;
+-      MTLIndexType ndx_type = (MTLIndexType)index_type;
+-      MTLPrimitiveType primitive = (MTLPrimitiveType)primitve_type;
+-      [enc drawIndexedPrimitives:primitive
+-                      indexCount:index_count
+-                       indexType:ndx_type
+-                     indexBuffer:index_addr
+-               indexBufferLength:index_buffer_length
+-                   instanceCount:instance_count
+-                      baseVertex:base_vertex
+-                    baseInstance:base_instance];
+-   }
++   /* Hot (every draw): nothing here is autoreleased. */
++   id<MTL4RenderCommandEncoder> enc = (id<MTL4RenderCommandEncoder>)encoder;
++   MTLIndexType ndx_type = (MTLIndexType)index_type;
++   MTLPrimitiveType primitive = (MTLPrimitiveType)primitve_type;
++   [enc drawIndexedPrimitives:primitive
++                   indexCount:index_count
++                    indexType:ndx_type
++                  indexBuffer:index_addr
++            indexBufferLength:index_buffer_length
++                instanceCount:instance_count
++                   baseVertex:base_vertex
++                 baseInstance:base_instance];
+ }
+ 
+ void
+@@ -469,10 +467,9 @@
+                              enum mtl_primitive_type primitve_type,
+                              uint64_t addr)
+ {
+-   @autoreleasepool {
+-      id<MTL4RenderCommandEncoder> enc = (id<MTL4RenderCommandEncoder>)encoder;
+-      [enc drawPrimitives:(MTLPrimitiveType)primitve_type indirectBuffer:addr];
+-   }
++   /* Hot (every draw): nothing here is autoreleased. */
++   id<MTL4RenderCommandEncoder> enc = (id<MTL4RenderCommandEncoder>)encoder;
++   [enc drawPrimitives:(MTLPrimitiveType)primitve_type indirectBuffer:addr];
+ }
+ 
+ void
+@@ -483,16 +480,15 @@
+                                      uint64_t index_buffer_length,
+                                      uint64_t addr)
+ {
+-   @autoreleasepool {
+-      id<MTL4RenderCommandEncoder> enc = (id<MTL4RenderCommandEncoder>)encoder;
+-      MTLPrimitiveType type = (MTLPrimitiveType)primitve_type;
+-      MTLIndexType ndx_type = (MTLIndexType)index_type;
+-      [enc drawIndexedPrimitives:type
+-                       indexType:ndx_type
+-                     indexBuffer:index_addr
+-               indexBufferLength:index_buffer_length
+-                  indirectBuffer:addr];
+-   }
++   /* Hot (every draw): nothing here is autoreleased. */
++   id<MTL4RenderCommandEncoder> enc = (id<MTL4RenderCommandEncoder>)encoder;
++   MTLPrimitiveType type = (MTLPrimitiveType)primitve_type;
++   MTLIndexType ndx_type = (MTLIndexType)index_type;
++   [enc drawIndexedPrimitives:type
++                    indexType:ndx_type
++                  indexBuffer:index_addr
++            indexBufferLength:index_buffer_length
++               indirectBuffer:addr];
+ }
+ 
+ void
+

@@ -1,0 +1,395 @@
+diff -ruN a/src/kosmickrisp/bridge/mtl_device.h b/src/kosmickrisp/bridge/mtl_device.h
+--- a/src/kosmickrisp/bridge/mtl_device.h
++++ b/src/kosmickrisp/bridge/mtl_device.h
+@@ -19,6 +19,11 @@
+ /* Device creation */
+ mtl_device *mtl_device_create(void);
+ 
++/* Where Metal keeps the compiled libraries and pipelines of this process
++ * (Metal's own shader cache). Must be called before the first compilation;
++ * returns false when this Metal has no such setting. */
++bool mtl_set_shader_cache_path(const char *path);
++
+ /* Device operations */
+ void mtl_start_gpu_capture(mtl_device *mtl_dev_handle, const char *directory);
+ void mtl_stop_gpu_capture(void);
+diff -ruN a/src/kosmickrisp/bridge/mtl_device.m b/src/kosmickrisp/bridge/mtl_device.m
+--- a/src/kosmickrisp/bridge/mtl_device.m
++++ b/src/kosmickrisp/bridge/mtl_device.m
+@@ -14,6 +14,8 @@
+ #include <Metal/MTLCaptureManager.h>
+ #include <Metal/MTLDevice.h>
+ 
++#include <dlfcn.h>
++
+ /* Device creation */
+ mtl_device *
+ mtl_device_create()
+@@ -33,6 +35,26 @@
+    }
+ 
+    return device;
++}
++
++/* Metal's shader cache is one directory per bundle identifier (all processes
++ * without one share <DARWIN_USER_CACHE_DIR>/com.apple.metal) and, inside it,
++ * one set of files per process that has it open: the first process takes
++ * "libraries.data", the next one "libraries1.data", and so on. A program that
++ * is started while N other Metal programs of the user run therefore finds
++ * only what was compiled in the N-th set, usually nothing. */
++bool
++mtl_set_shader_cache_path(const char *path)
++{
++   void (*set_path)(NSString *) =
++      (void (*)(NSString *))dlsym(RTLD_DEFAULT, "MTLSetShaderCachePath");
++   if (set_path == NULL || path == NULL)
++      return false;
++
++   @autoreleasepool {
++      set_path([NSString stringWithUTF8String:path]);
++   }
++   return true;
+ }
+ 
+ /* Device operations */
+diff -ruN a/src/kosmickrisp/bridge/stubs/mtl_device.c b/src/kosmickrisp/bridge/stubs/mtl_device.c
+--- a/src/kosmickrisp/bridge/stubs/mtl_device.c
++++ b/src/kosmickrisp/bridge/stubs/mtl_device.c
+@@ -13,6 +13,12 @@
+    return NULL;
+ }
+ 
++bool
++mtl_set_shader_cache_path(const char *path)
++{
++   return false;
++}
++
+ /* Device operations */
+ void
+ mtl_start_gpu_capture(mtl_device *mtl_dev_handle, const char *directory)
+diff -ruN a/src/kosmickrisp/vulkan/kk_device.c b/src/kosmickrisp/vulkan/kk_device.c
+--- a/src/kosmickrisp/vulkan/kk_device.c
++++ b/src/kosmickrisp/vulkan/kk_device.c
+@@ -327,6 +327,18 @@
+       dev->has_queue = true;
+    }
+ 
++   /* The device's own pipeline cache: pipelines created without a
++    * VkPipelineCache are looked up in it, and through it in the disk cache,
++    * instead of being compiled again every time. */
++   struct vk_pipeline_cache_create_info cache_info = {
++      .weak_ref = true,
++   };
++   dev->vk.mem_cache = vk_pipeline_cache_create(&dev->vk, &cache_info, NULL);
++   if (dev->vk.mem_cache == NULL) {
++      result = VK_ERROR_OUT_OF_HOST_MEMORY;
++      goto fail_queue;
++   }
++
+    result = kk_device_init_meta(dev);
+    if (result != VK_SUCCESS)
+       goto fail_mem_cache;
+@@ -360,6 +372,9 @@
+ fail_meta:
+    kk_device_finish_meta(dev);
+ fail_mem_cache:
++   vk_pipeline_cache_destroy(dev->vk.mem_cache, NULL);
++   dev->vk.mem_cache = NULL;
++fail_queue:
+    if (dev->has_queue) {
+       kk_queue_finish(dev, &dev->queue);
+       dev->has_queue = false;
+@@ -556,6 +571,10 @@
+ 
+    /* Meta first since it may destroy Vulkan objects */
+    kk_device_finish_meta(dev);
++   if (dev->vk.mem_cache) {
++      vk_pipeline_cache_destroy(dev->vk.mem_cache, NULL);
++      dev->vk.mem_cache = NULL;
++   }
+    kk_device_finish_lib(dev);
+    kk_query_table_finish(dev, &dev->occlusion_queries);
+    kk_destroy_sampler_heap(dev, &dev->samplers);
+diff -ruN a/src/kosmickrisp/vulkan/kk_instance.c b/src/kosmickrisp/vulkan/kk_instance.c
+--- a/src/kosmickrisp/vulkan/kk_instance.c
++++ b/src/kosmickrisp/vulkan/kk_instance.c
+@@ -20,6 +20,83 @@
+ #include "util/mesa-blake3.h"
+ #include "util/u_debug.h"
+ 
++#include "kosmickrisp/bridge/mtl_bridge.h"
++
++#include <errno.h>
++#include <stdlib.h>
++#include <string.h>
++#include <sys/stat.h>
++#include <unistd.h>
++
++/* Gives this process a Metal shader cache of its own program's:
++ * <DARWIN_USER_CACHE_DIR>/org.mesa.kosmickrisp/<application>. Every process
++ * of SteamARM is the same bundle-less executable, so they all share Metal's
++ * default directory, where each running process takes a separate set of
++ * files; a game then finds its compiled pipelines only if it gets the same
++ * set as the last time, i.e. if the same number of other Metal processes
++ * (Steam's web helpers, ...) happen to run. A miss costs the whole MSL
++ * compilation again (tens to hundreds of ms per pipeline).
++ * KK_METAL_CACHE_DIR=<dir> chooses the directory, KK_METAL_CACHE_DIR=0 keeps
++ * Metal's default. Set once per process, before anything is compiled. */
++static void
++kk_init_metal_shader_cache(const VkInstanceCreateInfo *pCreateInfo)
++{
++   static bool done = false;
++   if (done)
++      return;
++   done = true;
++
++   const char *dir = getenv("KK_METAL_CACHE_DIR");
++   if (dir && (dir[0] == '\0' || !strcmp(dir, "0")))
++      return;
++
++   char path[1024];
++   if (dir) {
++      snprintf(path, sizeof(path), "%s", dir);
++   } else {
++      char base[512];
++      size_t n = confstr(_CS_DARWIN_USER_CACHE_DIR, base, sizeof(base));
++      if (n == 0 || n > sizeof(base))
++         return;
++
++      const VkApplicationInfo *app = pCreateInfo->pApplicationInfo;
++      const char *name = NULL;
++      if (app && app->pApplicationName && app->pApplicationName[0])
++         name = app->pApplicationName;
++      else if (app && app->pEngineName && app->pEngineName[0])
++         name = app->pEngineName;
++      else
++         name = getprogname();
++
++      char clean[65];
++      unsigned len = 0;
++      for (const char *c = name; c && *c && len < sizeof(clean) - 1; c++) {
++         bool ok = (*c >= 'a' && *c <= 'z') || (*c >= 'A' && *c <= 'Z') ||
++                   (*c >= '0' && *c <= '9') || *c == '.' || *c == '-' ||
++                   *c == '_';
++         clean[len++] = ok ? *c : '_';
++      }
++      clean[len] = '\0';
++      if (len == 0 || !strcmp(clean, ".") || !strcmp(clean, ".."))
++         snprintf(clean, sizeof(clean), "unnamed");
++
++      snprintf(path, sizeof(path), "%s/org.mesa.kosmickrisp/%s", base, clean);
++   }
++
++   /* mkdir -p */
++   for (char *p = path + 1; *p; p++) {
++      if (*p != '/')
++         continue;
++      *p = '\0';
++      mkdir(path, 0700);
++      *p = '/';
++   }
++   if (mkdir(path, 0700) != 0 && errno != EEXIST)
++      return;
++
++   mtl_set_shader_cache_path(path);
++}
++
+ VKAPI_ATTR VkResult VKAPI_CALL
+ kk_EnumerateInstanceVersion(uint32_t *pApiVersion)
+ {
+@@ -136,6 +213,7 @@
+    memcpy(instance->driver_build_sha, build_id_data(note), VK_UUID_SIZE);
+ 
+    kk_process_debug_variable();
++   kk_init_metal_shader_cache(pCreateInfo);
+ 
+    *pInstance = kk_instance_to_handle(instance);
+    return VK_SUCCESS;
+diff -ruN a/src/kosmickrisp/vulkan/kk_physical_device.c b/src/kosmickrisp/vulkan/kk_physical_device.c
+--- a/src/kosmickrisp/vulkan/kk_physical_device.c
++++ b/src/kosmickrisp/vulkan/kk_physical_device.c
+@@ -7,6 +7,7 @@
+ 
+ #include "kk_physical_device.h"
+ 
++#include "kk_debug.h"
+ #include "kk_entrypoints.h"
+ #include "kk_image.h"
+ #include "kk_instance.h"
+@@ -15,8 +16,10 @@
+ #include "kk_wsi.h"
+ 
+ #include "kosmickrisp/bridge/mtl_bridge.h"
++#include "kosmickrisp/bridge/ns_process_info.h"
+ 
+ #include "util/disk_cache.h"
++#include "util/hash_table.h"
+ #include "util/mesa-blake3.h"
+ #include "git_sha1.h"
+ 
+@@ -911,6 +914,30 @@
+    STATIC_ASSERT(BLAKE3_KEY_LEN >= VK_UUID_SIZE);
+    memcpy(pdev->vk.properties.pipelineCacheUUID, blake3, VK_UUID_SIZE);
+    memcpy(pdev->vk.properties.shaderBinaryUUID, blake3, VK_UUID_SIZE);
++
++#ifdef ENABLE_SHADER_CACHE
++   /* Mesa's disk cache: the MSL of every pipeline (vk_shader serialize) and
++    * the NIR of its stages, keyed by the build, so that a pipeline seen in an
++    * earlier run skips SPIR-V -> NIR -> MSL and goes straight to Metal (whose
++    * own cache then has the compiled library). What else changes the MSL:
++    * the GPU family, MESA_KK_DEBUG (robustness), MESA_KK_DISABLE_WORKAROUNDS
++    * and the OS version (kk_parse_device_environment_options). */
++   char renderer[32];
++   snprintf(renderer, sizeof(renderer), "kk_apple%u",
++            pdev->info.gpu_apple_family);
++
++   char timestamp[2 * VK_UUID_SIZE + 1];
++   for (unsigned i = 0; i < VK_UUID_SIZE; i++)
++      snprintf(timestamp + 2 * i, 3, "%02x", instance->driver_build_sha[i]);
++
++   const char *wa = getenv("MESA_KK_DISABLE_WORKAROUNDS");
++   uint64_t driver_flags = (uint64_t)kk_mesa_debug_flags;
++   driver_flags ^= (uint64_t)ns_is_os_version_at_least(27, 0, 0) << 40;
++   if (wa && wa[0])
++      driver_flags ^= (uint64_t)_mesa_hash_string(wa) << 8;
++
++   pdev->vk.disk_cache = disk_cache_create(renderer, timestamp, driver_flags);
++#endif
+ }
+ 
+ static void
+diff -ruN a/src/kosmickrisp/vulkan/kk_shader.c b/src/kosmickrisp/vulkan/kk_shader.c
+--- a/src/kosmickrisp/vulkan/kk_shader.c
++++ b/src/kosmickrisp/vulkan/kk_shader.c
+@@ -31,6 +31,21 @@
+ #include "vk_nir_convert_ycbcr.h"
+ #include "vk_pipeline.h"
+ 
++#include "util/os_time.h"
++
++/* KK_COMPILE_LOG=1: how long each pipeline spends in NIR->MSL and in Metal's
++ * compiler (vertex library, fragment library, pipeline state). */
++static bool
++kk_compile_log(void)
++{
++   static int on = -1;
++   if (on < 0) {
++      const char *e = getenv("KK_COMPILE_LOG");
++      on = e && e[0] == '1';
++   }
++   return on;
++}
++
+ static const nir_shader_compiler_options *
+ kk_get_nir_options(struct vk_physical_device *vk_pdev, mesa_shader_stage stage,
+                    UNUSED const struct vk_pipeline_robustness_state *rs)
+@@ -110,6 +125,10 @@
+ struct kk_vs_key {
+    bool is_points;
+    struct vk_vertex_input_state vi;
++   /* The Metal render pipeline is built into the vertex shader object
++    * (gather_graphics_pipeline_create_info): its topology class too. */
++   uint32_t primitive_topology;
++   uint32_t view_mask;
+ };
+ 
+ static void
+@@ -120,6 +139,8 @@
+    key->is_points =
+       (state->ia->primitive_topology == VK_PRIMITIVE_TOPOLOGY_POINT_LIST);
+    key->vi = *state->vi;
++   key->primitive_topology = state->ia->primitive_topology;
++   key->view_mask = state->mv ? state->mv->view_mask : 0;
+ }
+ 
+ struct kk_fs_key {
+@@ -140,6 +161,12 @@
+    uint8_t color_map[MESA_VK_MAX_COLOR_ATTACHMENTS];
+    bool alpha_to_coverage_enable;
+    bool alpha_to_one_enable;
++   /* Also taken from the state there and in kk_lower_fs: whether the
++    * depth/stencil state is static (has_ds), the input attachment index of
++    * depth (msl_ensure_depth_write), how many color attachments. */
++   bool has_static_ds;
++   bool ial_depth;
++   uint32_t color_attachment_count;
+ };
+ 
+ static void
+@@ -174,6 +201,10 @@
+    key->stencil_format = state->rp->stencil_attachment_format;
+    for (uint32_t i = 0; i < MESA_VK_MAX_COLOR_ATTACHMENTS; i++)
+       key->color_map[i] = state->cal ? state->cal->color_map[i] : i;
++   key->has_static_ds = has_static_depth_stencil_state(state);
++   key->ial_depth =
++      state->ial && state->ial->depth_att != MESA_VK_ATTACHMENT_NO_INDEX;
++   key->color_attachment_count = state->rp->color_attachment_count;
+ }
+ 
+ static void
+@@ -1447,6 +1478,7 @@
+    }
+ 
+    const struct msl_compile_data *vs_data = &vs->msl_data[vs_stage];
++   int64_t t0 = kk_compile_log() ? os_time_get_nano() : 0;
+    mtl_library *vertex_library = mtl_new_library(
+       device->mtl_compiler_handle, vs_data->code, MTL_MATH_MODE_FAST,
+       MTL_MATH_FLOATING_POINT_FUNCTIONS_FAST);
+@@ -1457,6 +1489,7 @@
+       mtl_new_library_function_descriptor(vertex_library,
+                                           vs_data->entrypoint_name);
+ 
++   int64_t t1 = kk_compile_log() ? os_time_get_nano() : 0;
+    const struct msl_compile_data *fs_data = &vs->msl_data[MESA_SHADER_FRAGMENT];
+    mtl_library *fragment_library = mtl_new_library(
+       device->mtl_compiler_handle, fs_data->code, MTL_MATH_MODE_FAST,
+@@ -1509,10 +1542,19 @@
+          pipeline_descriptor, vs->info.vs.has_alpha_to_one_enabled);
+    }
+ 
++   int64_t t2 = kk_compile_log() ? os_time_get_nano() : 0;
+    pipe->gfx.render =
+       mtl_new_render_pipeline(device->mtl_compiler_handle, pipeline_descriptor);
+    if (pipe->gfx.render == NULL)
+       result = VK_ERROR_INVALID_SHADER_NV;
++   if (kk_compile_log()) {
++      int64_t t3 = os_time_get_nano();
++      fprintf(stderr,
++              "kk compile: metal vs-lib %.2f fs-lib %.2f pipeline %.2f ms "
++              "(msl %zu+%zu bytes)\n",
++              (t1 - t0) / 1e6, (t2 - t1) / 1e6, (t3 - t2) / 1e6,
++              strlen(vs_data->code), strlen(fs_data->code));
++   }
+ 
+    mtl_release(pipeline_descriptor);
+    mtl_release(fragment_function);
+@@ -1592,6 +1634,7 @@
+    nir_opt_varyings_bulk(nir_shaders, total_shaders, true, UINT32_MAX,
+                          UINT32_MAX, nir_opts, NULL);
+ 
++   int64_t tn = kk_compile_log() ? os_time_get_nano() : 0;
+    for (uint32_t i = 0; i < total_shaders; i++) {
+       struct kk_shader *prev_stage = i > 0 ? shaders[i - 1] : NULL;
+       result =
+@@ -1624,6 +1667,9 @@
+     * 2. Graphics with all stages (since we don't support GPL nor shader
+     * objects for now). This will be addressed later.
+     */
++   if (kk_compile_log())
++      fprintf(stderr, "kk compile: nir->msl %.2f ms (%u shaders)\n",
++              (os_time_get_nano() - tn) / 1e6, total_shaders);
+    if (shaders[0]->vk.stage == MESA_SHADER_COMPUTE) {
+       struct kk_shader *s = shaders[0];
+       uint32_t local_size_threads = s->info.cs.local_size.x *
+@@ -1751,6 +1797,9 @@
+    } else if (info.stage == MESA_SHADER_VERTEX) {
+       result = kk_compile_graphics_pipeline(dev, shader);
+    }
++   if (kk_compile_log())
++      fprintf(stderr, "kk compile: deserialized %s shader\n",
++              mesa_shader_stage_name(info.stage));
+ 
+    if (result != VK_SUCCESS)
+       goto fail;
+

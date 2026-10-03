@@ -1889,8 +1889,15 @@ static long pwait_common(int epfd, void *uevents, int maxevents,
         // main loop) is KEVENT_FLAG_IMMEDIATE, never a zero timespec, which
         // sleeps until the next timer deadline -- 12 us idle, ~90 us under a
         // game: see kev_to64() for the measurements.
+        // LXRT_EPOLL0_IMMEDIATE=0: the zero timespec again (the kernel's
+        // sleep), to compare.
+        static int immediate = -1;
+        if (immediate < 0) {
+            const char *e = getenv("LXRT_EPOLL0_IMMEDIATE");
+            immediate = !e || atoi(e) != 0;
+        }
         int n;
-        if (tsp && tsp->tv_sec == 0 && tsp->tv_nsec == 0)
+        if (immediate && tsp && tsp->tv_sec == 0 && tsp->tv_nsec == 0)
             n = kevent64(kq, NULL, 0, kv, kn, KEVENT_FLAG_IMMEDIATE, NULL);
         else
             n = kevent64(kq, NULL, 0, kv, kn, 0, tsp);

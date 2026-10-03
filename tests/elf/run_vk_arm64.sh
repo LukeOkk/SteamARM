@@ -136,6 +136,35 @@ else
         echo "  skip  vk_alphamask kosmickrisp steamarm (no $OWN: scripts/build-kosmickrisp.sh)"
     fi
 fi
+# vk_resubmit: the same command buffer submitted three times with other work
+# in between, and secondaries: KosmicKrisp records it again at every submit
+# and, since patches/kosmickrisp-12, returns the memory a recording uploads
+# into to a pool another command buffer takes from. Also with each render
+# pass in its own Metal command buffer (KK_CMDBUF_PER_PASS=1).
+exe8b="$ROOT/tmp/vktest/vk_resubmit"
+if ! "$CLANG" --target=aarch64-redhat-linux-gnu --sysroot="$STAGE" --gcc-install-dir="$GCCDIR" -fuse-ld=lld \
+        --ld-path=/opt/homebrew/opt/lld/bin/ld.lld -w -O2 -I/opt/homebrew/include -Itests/elf -o "$exe8b" \
+        tests/elf/vk_resubmit.c "$ROOT/usr/lib/libvulkan.so.1"; then
+    echo "  FAIL  vk_resubmit (build)"; fail=$((fail + 1))
+else
+    run_resubmit() { # label, then environment assignments
+        local label=$1; shift
+        local log="$ROOT/tmp/vktest/vk_resubmit_${label// /_}.log"
+        env OBJC_DISABLE_INITIALIZE_FORK_SAFETY=YES LXRT_ROOT="$ROOT" "$@" \
+            perl -e 'alarm 120; exec @ARGV' ./build/lxrun /tmp/vktest/vk_resubmit > "$log" 2>&1
+        if [ "$(grep -E '^== vk_resubmit' "$log" | tail -1)" = "== vk_resubmit: ok" ]; then
+            printf '  ok    vk_resubmit %s\n' "$label"; pass=$((pass + 1))
+        else
+            printf '  FAIL  vk_resubmit %s: %s (log %s)\n' "$label" "$(grep -B1 '^== vk_resubmit' "$log" | head -1)" "$log"
+            fail=$((fail + 1))
+        fi
+    }
+    run_resubmit moltenvk STEAMARM_VK_ICD=moltenvk
+    if [ -f "$OWN/libvulkan_kosmickrisp.dylib" ]; then
+        run_resubmit "kosmickrisp steamarm" STEAMARM_VK_ICD=kosmickrisp STEAMARM_KK_DIR="$OWN"
+        run_resubmit "kosmickrisp steamarm per pass" STEAMARM_VK_ICD=kosmickrisp STEAMARM_KK_DIR="$OWN" KK_CMDBUF_PER_PASS=1
+    fi
+fi
 # vk_vsonly: a depth prepass made of pipelines with no fragment shader,
 # through a VkPipelineCache: KosmicKrisp handed one the other's depth state
 # (patches/kosmickrisp-09). Homebrew's driver fails it with the cache.
