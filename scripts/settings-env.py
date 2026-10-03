@@ -370,7 +370,13 @@ def env_from_settings(s, total=None, chip=None, display=None):
             scale = float(rs)
         except ValueError:
             scale = 1.0
-        scale = 1.0 if not 0.5 <= scale < 0.995 else scale
+        # Down to a third: MetalFX enlarges up to 3x ("rendimiento máximo";
+        # its temporal scaler reports 1.0-3.0 on an M4).
+        scale = 1.0 if not 0.33 <= scale < 0.995 else scale
+    if scale >= 0.995 and flt == "metalfx-temporal":
+        # 100 % with MetalFX temporal: its temporal pass at the native size,
+        # as antialiasing (the game tool passes it to the game only).
+        env["STEAMARM_MFX_NATIVE"] = "1"
     if scale < 0.995:
         disp = display or main_display_size()
         env["STEAMARM_RENDER_SCALE"] = "%.4f" % scale

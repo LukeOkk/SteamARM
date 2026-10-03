@@ -142,6 +142,12 @@ class SettingsEnvironmentTests(unittest.TestCase):
         self.assertEqual(env["STEAMARM_RENDER_SIZE"], "1280x720")
         env = self.settings.env_from_settings({"scalingFilter": "metalfx-temporal"})
         self.assertEqual(env["LXRT_VK_SCALER"], "metalfx-temporal")
+        # 100 % with MetalFX temporal: antialiasing at the native size.
+        env = self.settings.env_from_settings({"scalingFilter": "metalfx-temporal", "renderScale": "1.0"})
+        self.assertEqual(env.get("STEAMARM_MFX_NATIVE"), "1")
+        self.assertNotIn("STEAMARM_RENDER_SCALE", env)
+        env = self.settings.env_from_settings({"scalingFilter": "metalfx", "renderScale": "1.0"})
+        self.assertNotIn("STEAMARM_MFX_NATIVE", env)
         env = self.settings.env_from_settings({"scalingFilter": "fsr", "fsrSharpness": 40})
         self.assertEqual((env["LXRT_VK_SCALER"], env["LXRT_VK_FSR_SHARPNESS"]), ("fsr", "40"))
         env = self.settings.env_from_settings({"scalingFilter": "fsr", "fsrSharpness": 500})
@@ -173,6 +179,7 @@ class SettingsEnvironmentTests(unittest.TestCase):
         self.assertEqual(scale("1.0"), (None, None))         # native: nothing for the shim
         self.assertEqual(scale("0.77"), ("0.7700", "1478x832"))
         self.assertEqual(scale("0.5"), ("0.5000", "960x540"))
+        self.assertEqual(scale("0.33"), ("0.3300", "634x356"))   # rendimiento máximo: MetalFX's 3x
         self.assertEqual(scale("bogus"), (None, None))
         self.assertEqual(scale("0.2"), (None, None))         # out of range: native
         self.assertEqual(scale("auto"), ("0.6667", "1280x720"))

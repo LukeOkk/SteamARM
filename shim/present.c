@@ -155,7 +155,15 @@ static int needs_stretch(VkDevice dev, const VkSwapchainCreateInfoKHR *ci, VkExt
         caps.currentExtent.height = lh;
     }
     *window = caps.currentExtent;
-    return caps.currentExtent.width != ci->imageExtent.width || caps.currentExtent.height != ci->imageExtent.height;
+    if (caps.currentExtent.width != ci->imageExtent.width || caps.currentExtent.height != ci->imageExtent.height)
+        return 1;
+    // LXRT_VK_SCALER_NATIVE=1 (the game only, tools/steamarm-fex-proton) with
+    // the MetalFX temporal filter: the picture goes through the scaler at its
+    // own size -- MetalFX's temporal pass as antialiasing at the native
+    // resolution, the 100 % of "Calidad de MetalFX". Game-sized windows only.
+    const char *nat = getenv("LXRT_VK_SCALER_NATIVE"), *flt = getenv("LXRT_VK_SCALER");
+    return nat && *nat == '1' && flt && (s_ieq(flt, "metalfx-temporal") || s_ieq(flt, "metalfx_temporal")) &&
+           caps.currentExtent.width >= 1024;
 }
 
 // shim/scaler.c: the other filters (LXRT_VK_SCALER), or an error when MoltenVK

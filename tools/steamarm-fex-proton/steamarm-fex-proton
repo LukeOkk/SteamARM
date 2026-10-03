@@ -208,6 +208,11 @@ fi
 # for the game only, not for Steam's own windows; the Vulkan shim applies it
 # to a game window that covers the screen and enlarges the picture with the
 # scaling filter (MetalFX where the driver can; shim/wsi.c render_scale).
+# MetalFX temporal at the native size (antialiasing, scale 100 %): for the
+# game's window only, as the render scale (Steam's windows stay untouched).
+if [ -n "${STEAMARM_MFX_NATIVE:-}" ] && [ -z "${LXRT_VK_SCALER_NATIVE:-}" ]; then
+    export LXRT_VK_SCALER_NATIVE="$STEAMARM_MFX_NATIVE"
+fi
 if [ -n "${STEAMARM_RENDER_SCALE:-}" ] && [ -z "${LXRT_VK_RENDER_SCALE:-}" ]; then
     export LXRT_VK_RENDER_SCALE="$STEAMARM_RENDER_SCALE"
 fi

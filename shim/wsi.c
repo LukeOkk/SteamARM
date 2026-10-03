@@ -365,7 +365,7 @@ static double render_scale(void)
     if (v < 0) {
         const char *e = getenv("LXRT_VK_RENDER_SCALE");
         double d = e && *e ? strtod(e, 0) : 1.0;
-        v = d >= 0.5 && d < 0.995 ? d : 1.0;
+        v = d >= 0.33 && d < 0.995 ? d : 1.0;          // MetalFX: up to 3x (its temporal scaler: 1.0-3.0, MEASURED)
     }
     return v;
 }

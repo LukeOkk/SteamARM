@@ -1563,11 +1563,12 @@ enum AndroidApps {
 enum RenderScaleChoice {
     static let options: [(String, String)] = [
         ("auto", "Automático (recomendada para este Mac)"),
-        ("1.0", "100 % (nativa)"),
-        ("0.77", "77 % (ultra calidad)"),
-        ("0.67", "67 % (calidad)"),
-        ("0.59", "59 % (equilibrado)"),
-        ("0.5", "50 % (rendimiento)"),
+        ("1.0", "Nativa (100 %; con MetalFX temporal, antialiasing)"),
+        ("0.77", "Calidad ultra (77 %, 1,3x)"),
+        ("0.67", "Calidad (67 %, 1,5x)"),
+        ("0.59", "Equilibrado (59 %, 1,7x)"),
+        ("0.5", "Rendimiento (50 %, 2x)"),
+        ("0.33", "Rendimiento máximo (33 %, 3x)"),
     ]
 
     static func label(_ value: String) -> String {
@@ -1577,12 +1578,12 @@ enum RenderScaleChoice {
     static func note(_ value: String) -> String {
         let scope = " Sólo para juegos Vulkan o Direct3D (DXVK, VKD3D) a pantalla completa (con o sin bordes); la interfaz de Steam y las ventanas más pequeñas quedan a tamaño real. Desactiva el FSR del propio juego para no escalar dos veces."
         if value == "1.0" {
-            return "Los juegos dibujan a la resolución de la pantalla." + scope
+            return "Los juegos dibujan a la resolución de la pantalla. Con el filtro MetalFX temporal, la imagen pasa igualmente por MetalFX a su tamaño: antialiasing a resolución nativa (bordes más estables)." + scope
         }
         if value == "auto" {
             return "El juego dibuja a la escala que el chip de este Mac puede mover (núcleos de GPU y generación) y se agranda a la pantalla con el filtro de abajo: MetalFX espacial de Apple en KosmicKrisp y MoltenVK." + scope
         }
-        return "El juego dibuja a esa fracción de la pantalla por eje y se agranda con el filtro de abajo." + scope
+        return "El juego dibuja a esa fracción de la pantalla por eje y se agranda con el filtro de abajo (MetalFX espacial o temporal): de Calidad ultra (más nítido) a Rendimiento máximo (más fotogramas; MetalFX admite hasta 3x)." + scope
     }
 }
 
