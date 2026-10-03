@@ -308,8 +308,60 @@ void lxrt_inner_vkCmdDrawIndirectByteCountEXT(VkCommandBuffer cb, uint32_t inst,
                                               uint64_t off, uint32_t coff, uint32_t stride)
 { (void)cb; (void)inst; (void)first; (void)b; (void)off; (void)coff; (void)stride; }
 
+static VkResult enum_device_exts(VkPhysicalDevice pd, const char *layer, uint32_t *count,
+                                 VkExtensionProperties *props);
+
+// LXRT_VK_HIDE_EXTS=name,name: device extensions the program is not told
+// about. A diagnostic: VK_EXT_shader_module_identifier hidden makes a game
+// that creates pipelines from cached identifiers hand over its SPIR-V.
+static int ext_hidden(const char *name)
+{
+    static const char *list = (const char *)1;
+    if (list == (const char *)1)
+        list = getenv("LXRT_VK_HIDE_EXTS");
+    if (!list || !*list)
+        return 0;
+    for (const char *p = list; *p; ) {
+        const char *q = p;
+        while (*q && *q != ',') q++;
+        size_t n = (size_t)(q - p), i = 0;
+        while (i < n && name[i] == p[i]) i++;
+        if (i == n && !name[n])
+            return 1;
+        p = *q ? q + 1 : q;
+    }
+    return 0;
+}
+
 VkResult lxrt_inner_vkEnumerateDeviceExtensionProperties(VkPhysicalDevice pd, const char *layer, uint32_t *count,
                                                          VkExtensionProperties *props)
+{
+    const char *list = getenv("LXRT_VK_HIDE_EXTS");
+    if (!list || !*list || layer)
+        return enum_device_exts(pd, layer, count, props);
+    enum { MAXE = 512 };
+    static VkExtensionProperties all[MAXE];
+    uint32_t n = MAXE;
+    VkResult r = enum_device_exts(pd, 0, &n, all);
+    if (r < 0)
+        return r;
+    uint32_t k = 0;
+    for (uint32_t i = 0; i < n; i++)
+        if (!ext_hidden(all[i].extensionName))
+            all[k++] = all[i];
+    if (!props) {
+        *count = k;
+        return VK_SUCCESS;
+    }
+    uint32_t w = *count < k ? *count : k;
+    for (uint32_t i = 0; i < w; i++)
+        props[i] = all[i];
+    *count = w;
+    return w < k ? VK_INCOMPLETE : VK_SUCCESS;
+}
+
+static VkResult enum_device_exts(VkPhysicalDevice pd, const char *layer, uint32_t *count,
+                                 VkExtensionProperties *props)
 {
     unsigned mask = spoof_on() && !layer ? emu_mask(pd) : 0;
     if (!mask)
@@ -492,9 +544,16 @@ static VkResult create_pipelines_counted(VkDevice dev, VkPipelineCache cache, ui
 }
 
 // Depth clip state -> depth clamp, per pipeline, then restore.
+// LXRT_VK_DUMP_SPIRV (shim/spirv_names.c): shader code given inline to a
+// pipeline (VK_KHR_maintenance5), which never passes through
+// vkCreateShaderModule.
+void lxrt_spirv_dump_stages(const void *stages, uint32_t count);
+
 VkResult lxrt_inner_vkCreateGraphicsPipelines(VkDevice dev, VkPipelineCache cache, uint32_t n,
                                    const VkGraphicsPipelineCreateInfo *cis, const void *alloc, VkPipeline *out)
 {
+    for (uint32_t i = 0; cis && i < n; i++)
+        lxrt_spirv_dump_stages(cis[i].pStages, cis[i].stageCount);
     enum { MAXP = 64 };
     if (!spoof_on() || n > MAXP)
         return create_pipelines_counted(dev, cache, n, cis, alloc, out);

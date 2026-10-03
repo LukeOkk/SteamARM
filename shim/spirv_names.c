@@ -82,9 +82,58 @@ uint32_t *lxrt_spirv_fix_names(const uint32_t *code, size_t size)
 VkResult lxrt_mvk_vkCreateShaderModule(VkDevice, const VkShaderModuleCreateInfo *, const VkAllocationCallbacks *,
                                        VkShaderModule *);
 
+// LXRT_VK_DUMP_SPIRV=<guest directory>: every shader module a program
+// creates, once each, as <directory>/<FNV-1a of the words>.spv -- to find
+// a game's own passes (Counter-Strike 2's FSR) by what they contain.
+extern char *getenv(const char *);
+extern int open(const char *, int, ...);
+extern long write(int, const void *, size_t);
+extern int close(int);
+extern int snprintf(char *, size_t, const char *, ...);
+void lxrt_spirv_dump(const uint32_t *code, size_t size)
+{
+    static const char *dir = (const char *)1;
+    if (dir == (const char *)1) {
+        dir = getenv("LXRT_VK_DUMP_SPIRV");
+        if (dir && !*dir) dir = 0;
+    }
+    if (!dir || !code || size < 20)
+        return;
+    uint64_t h = 1469598103934665603ull;
+    for (size_t i = 0; i < size / 4; i++) {
+        h ^= code[i];
+        h *= 1099511628211ull;
+    }
+    char path[512];
+    snprintf(path, sizeof path, "%s/%016llx.spv", dir, (unsigned long long)h);
+    int fd = open(path, 01 | 0100 | 0200, 0644);       // O_WRONLY|O_CREAT|O_EXCL (Linux)
+    static int said;
+    if (!said++) {
+        extern int dprintf(int, const char *, ...);
+        dprintf(2, "[shim] spirv dump: first module (%zu bytes) -> %s: %s\n", size, path, fd >= 0 ? "written" : "open failed");
+    }
+    if (fd >= 0) {
+        write(fd, code, size);
+        close(fd);
+    }
+}
+
+// Stages of a graphics pipeline (shim/features.c), code given inline.
+void lxrt_spirv_dump_stages(const void *stages, uint32_t count)
+{
+    const VkPipelineShaderStageCreateInfo *st = stages;
+    for (uint32_t i = 0; st && i < count; i++)
+        for (const VkBaseInStructure *b = st[i].pNext; b; b = b->pNext)
+            if (b->sType == VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO)
+                lxrt_spirv_dump(((const VkShaderModuleCreateInfo *)b)->pCode,
+                                ((const VkShaderModuleCreateInfo *)b)->codeSize);
+}
+
 VkResult lxrt_inner_vkCreateShaderModule(VkDevice dev, const VkShaderModuleCreateInfo *ci,
                                          const VkAllocationCallbacks *alloc, VkShaderModule *out)
 {
+    if (ci)
+        lxrt_spirv_dump(ci->pCode, ci->codeSize);
     uint32_t *fixed = ci ? lxrt_spirv_fix_names(ci->pCode, ci->codeSize) : NULL;
     if (!fixed)
         return lxrt_mvk_vkCreateShaderModule(dev, ci, alloc, out);

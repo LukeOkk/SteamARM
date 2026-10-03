@@ -52,6 +52,7 @@ extern char *getenv(const char *);
 extern int dprintf(int, const char *, ...);
 extern void *calloc(size_t, size_t);
 extern void free(void *);
+extern void *malloc(size_t);
 struct lx_timespec { long tv_sec, tv_nsec; };
 extern int clock_gettime(int, struct lx_timespec *);
 extern int nanosleep(const struct lx_timespec *, struct lx_timespec *);
@@ -226,6 +227,68 @@ static int probing(void)
         on = e && (*e == '1' || *e == '2') ? *e - '0' : 0;
     }
     return on;
+}
+
+// LXRT_VK_SNAPSHOT=<guest directory>: when <directory>/request exists, the
+// next frame shown is read back and written as <directory>/frame.ppm at
+// half size, and the request removed -- the game's own picture, for tests
+// that must see a menu. The top right of the picture (13 % of its height)
+// is left black: that is where a game shows the player's name and avatar.
+extern int access(const char *, int);
+extern int unlink(const char *);
+extern int open(const char *, int, ...);
+extern long write(int, const void *, size_t);
+extern int close(int);
+static const char *snap_dir(void)
+{
+    static const char *d = (const char *)1;
+    if (d == (const char *)1) {
+        d = getenv("LXRT_VK_SNAPSHOT");
+        if (d && !*d) d = 0;
+    }
+    return d;
+}
+
+static int snap_requested(void)
+{
+    extern int snprintf(char *, size_t, const char *, ...);
+    const char *d = snap_dir();
+    if (!d) return 0;
+    char p[512];
+    snprintf(p, sizeof p, "%s/request", d);
+    return access(p, 0) == 0;
+}
+
+static void snap_write(const mailbox *m)
+{
+    extern int snprintf(char *, size_t, const char *, ...);
+    const char *d = snap_dir();
+    char p[512];
+    uint32_t w = m->ext.width / 2, h = m->ext.height / 2, top = h * 13 / 100;
+    int bgr = m->format == VK_FORMAT_B8G8R8A8_UNORM || m->format == VK_FORMAT_B8G8R8A8_SRGB;
+    snprintf(p, sizeof p, "%s/frame.ppm", d);
+    int fd = open(p, 01 | 0100 | 01000, 0644);              // O_WRONLY|O_CREAT|O_TRUNC (Linux)
+    if (fd >= 0) {
+        char hdr[64];
+        int n = snprintf(hdr, sizeof hdr, "P6\n%u %u\n255\n", w, h);
+        write(fd, hdr, (size_t)n);
+        unsigned char *row = malloc((size_t)w * 3);
+        for (uint32_t y = 0; row && y < h; y++) {
+            for (uint32_t x = 0; x < w; x++) {
+                const unsigned char *px = m->probe_map + 4 * ((size_t)(2 * y) * m->ext.width + 2 * x);
+                unsigned char *o = row + 3 * x;
+                if (y < top && x >= w / 2) { o[0] = o[1] = o[2] = 0; continue; }
+                o[0] = bgr ? px[2] : px[0];
+                o[1] = px[1];
+                o[2] = bgr ? px[0] : px[2];
+            }
+            write(fd, row, (size_t)w * 3);
+        }
+        free(row);
+        close(fd);
+    }
+    snprintf(p, sizeof p, "%s/request", d);
+    unlink(p);
 }
 
 // The read-back buffer, made at the first probe. 0 if there is none.
@@ -719,7 +782,8 @@ VkResult lxrt_mailbox_present(VkQueue q, VkSwapchainKHR sc, uint32_t i, const Vk
                            { 0, 0, 0 }, { m->ext.width, m->ext.height, 1 } };
     lxrt_mvk_vkCmdCopyImage(cb, m->virt[i], VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, m->real[real],
                             VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
-    int probe = probing() && (probing() == 2 || m->shown % 120 == 119) && probe_buffer(m);
+    int snap = snap_requested();
+    int probe = ((probing() && (probing() == 2 || m->shown % 120 == 119)) || snap) && probe_buffer(m);
     if (probe) {
         VkBufferImageCopy out = { .imageSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 },
                                   .imageExtent = { m->ext.width, m->ext.height, 1 } };
@@ -761,8 +825,12 @@ VkResult lxrt_mailbox_present(VkQueue q, VkSwapchainKHR sc, uint32_t i, const Vk
     m->shown++;
     m->last_shown_ns = now_ns();
     *shown = 1;
-    if (probe && lxrt_mvk_vkWaitForFences(m->dev, 1, &m->fence[slot], VK_TRUE, UINT64_MAX) == VK_SUCCESS)
-        probe_report(m);
+    if (probe && lxrt_mvk_vkWaitForFences(m->dev, 1, &m->fence[slot], VK_TRUE, UINT64_MAX) == VK_SUCCESS) {
+        if (snap)
+            snap_write(m);
+        if (probing())
+            probe_report(m);
+    }
 
     // The driver's present is done: the next acquire may start.
     if (r == VK_SUCCESS || r == VK_SUBOPTIMAL_KHR) {

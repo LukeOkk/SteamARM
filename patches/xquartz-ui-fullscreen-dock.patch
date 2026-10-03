@@ -1,0 +1,91 @@
+SteamARM: a game covering a display hides the Dock and the menu bar
+
+In "fullscreen windowed" a game's layer covers the whole display, but the
+Dock and the menu bar stayed over it ("el dock siempre se ve por encima",
+the user, Counter-Strike 2): not fullscreen at all on a Mac. The hiding
+(XQUARTZ_RL_PRESENTATION) is now on by default, while the X server is the
+active application; another application brings them back, as for every
+fullscreen program. A layer that leaves for a moment (a swapchain made
+again) is given 400 ms before the Dock returns. The blinking measured with
+the 100 ms overlay watch on as well stays avoided: the watch is off.
+XQUARTZ_RL_PRESENTATION=0 restores the old behaviour.
+diff -ruN a/hw/xquartz/remoteLayerCocoa.m b/hw/xquartz/remoteLayerCocoa.m
+--- a/hw/xquartz/remoteLayerCocoa.m	2026-10-03 06:16:05
++++ b/hw/xquartz/remoteLayerCocoa.m	2026-10-03 06:16:05
+@@ -61,7 +61,7 @@
+  * Otherwise it is at the frame's level, directly above it, as before. */
+ /* XQUARTZ_RL_LEVEL (default 1): the overlay one level above its frame while
+  * its window is on top. XQUARTZ_RL_WATCH (default 0): the 100 ms check that
+- * an overlay is above its frame. XQUARTZ_RL_PRESENTATION (default 0): hide
++ * an overlay is above its frame. XQUARTZ_RL_PRESENTATION (default 1): hide
+  * the menu bar and the Dock under a layer that covers a display. With the
+  * last two on, Counter-Strike 2's picture blinked every few hundred
+  * milliseconds by itself; with the first alone it did not, and a click no
+@@ -155,19 +155,52 @@
+ 
+ /* A layer that takes a whole display is a game in fullscreen: the menu bar
+  * and the Dock are hidden while this application is the active one (they
+- * come back with any other application, as for every fullscreen program). */
++ * come back with any other application, as for every fullscreen program).
++ * On by default since 2026-10-03: with the Dock and the menu bar over it, a
++ * game in "fullscreen windowed" was not fullscreen at all on the Mac (the
++ * user, with Counter-Strike 2). The blinking measured on 2026-10-02 came with
++ * the 100 ms watch on as well; the watch stays off. A layer that leaves for a
++ * moment -- a swapchain made again, a mode change -- does not bring the Dock
++ * back: the return is checked again 400 ms later. */
++static void rl_presentation_apply(BOOL full);
++
++static BOOL
++rl_presentation_wanted(void)
++{
++    if (!NSApp.active)
++        return NO;
++    for (XQRemoteLayerWindow *w in overlays.allValues)
++        if (w.isVisible && w.coversScreen)
++            return YES;
++    return NO;
++}
++
+ static void
+ rl_presentation(void)
+ {
+     static int on = -1;
++    static BOOL pending;
+     if (on < 0)
+-        on = rl_switch("XQUARTZ_RL_PRESENTATION", 0);
++        on = rl_switch("XQUARTZ_RL_PRESENTATION", 1);
+     if (!on)
+         return;
+-    BOOL full = NO;
+-    for (XQRemoteLayerWindow *w in overlays.allValues)
+-        if (w.isVisible && w.coversScreen)
+-            full = YES;
++    BOOL full = rl_presentation_wanted();
++    if (full || NSApp.presentationOptions == NSApplicationPresentationDefault) {
++        rl_presentation_apply(full);
++        return;
++    }
++    if (pending)
++        return;
++    pending = YES;
++    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 400 * NSEC_PER_MSEC), dispatch_get_main_queue(), ^{
++        pending = NO;
++        rl_presentation_apply(rl_presentation_wanted());
++    });
++}
++
++static void
++rl_presentation_apply(BOOL full)
++{
+     NSApplicationPresentationOptions want = full
+         ? NSApplicationPresentationHideDock | NSApplicationPresentationHideMenuBar
+         : NSApplicationPresentationDefault;
+@@ -230,7 +263,7 @@
+         [observerActive retain];
+         [observerUnhide retain];
+         [[nc addObserverForName:NSApplicationDidBecomeActiveNotification object:nil queue:nil
+-                     usingBlock:^(NSNotification *n) { rl_relevel_all(); }] retain];
++                     usingBlock:^(NSNotification *n) { rl_relevel_all(); rl_presentation(); }] retain];
+         [[nc addObserverForName:NSApplicationDidResignActiveNotification object:nil queue:nil
+                      usingBlock:^(NSNotification *n) { rl_relevel_all(); }] retain];
+         dispatch_source_t timer = dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER, 0, 0, dispatch_get_main_queue());

@@ -1,0 +1,67 @@
+SteamARM: a large window of fixed size can be resized like a Mac window
+
+A game in a window sets its size hints min = max (Counter-Strike 2), and
+quartz-wm then gave the window no resize edges and no zoom: it could not be
+made bigger or fitted to the screen ("no se puede redimensionar la ventana",
+the user). A fixed window of at least 640x400 is now resizable (edges and
+green button) and its own min = max no longer binds the user; the game hears
+of the new size, and a picture it keeps at its own resolution is scaled to
+the window by SteamARM's Vulkan shim. Small fixed windows (dialogs) stay
+fixed. QUARTZ_WM_RESIZE_FIXED=0 restores the old behaviour.
+diff -ruN a/src/x-window.h b/src/x-window.h
+--- a/src/x-window.h	2026-10-03 06:15:07
++++ b/src/x-window.h	2026-10-03 06:15:07
+@@ -82,6 +82,7 @@
+     unsigned _decorated :1;
+     unsigned _fullscreen :1;
+     unsigned _resizable :1;
++    unsigned _fixed_game :1;   /* SteamARM: a large fixed-size window made resizable (update_size_hints) */
+     unsigned _animating :1;		/* (by the dock) */
+     unsigned _shaded :1;
+     unsigned _hidden :1;
+diff -ruN a/src/x-window.m b/src/x-window.m
+--- a/src/x-window.m	2026-10-03 06:15:07
++++ b/src/x-window.m	2026-10-03 06:15:07
+@@ -27,6 +27,7 @@
+ #endif
+ 
+ #include "quartz-wm.h"
++#include <stdlib.h>
+ #import "x-window.h"
+ #include "frame.h"
+ #include "utils.h"
+@@ -1168,10 +1169,21 @@
+ {
+     XGetWMNormalHints (x_dpy, _id, &_size_hints, &_size_hints_supplied);
+ 
++    _fixed_game = NO;
+     if ((_size_hints.flags & (PMinSize | PMaxSize)) == (PMinSize | PMaxSize) &&
+         _size_hints.min_width >= _size_hints.max_width &&
+         _size_hints.min_height >= _size_hints.max_height) {
+-        _resizable = NO;
++        /* SteamARM: a large window of fixed size is a game in a window
++         * (Counter-Strike 2 sets min = max). On the Mac it is resized like
++         * any other window, edges and green button: the game hears of its
++         * new size, and a picture it keeps at its own resolution is scaled
++         * to the window by SteamARM's Vulkan shim. Small fixed windows
++         * (dialogs) stay fixed. QUARTZ_WM_RESIZE_FIXED=0: as before. */
++        const char *e = getenv ("QUARTZ_WM_RESIZE_FIXED");
++        if ((!e || e[0] != '0') && _size_hints.min_width >= 640 && _size_hints.min_height >= 400)
++            _fixed_game = YES;
++        else
++            _resizable = NO;
+     }
+ }
+ 
+@@ -2560,6 +2572,11 @@
+     int base[2], min[2], max[2], inc[2];
+ 
+     decode_size_hints (&_size_hints, base, min, max, inc);
++    if (_fixed_game) {
++        /* SteamARM: the game's own min = max does not bind the user. */
++        min[0] = 320; min[1] = 200;
++        max[0] = max[1] = 0;
++    }
+ 
+     DB("w1: %d base: %d min: %d max: %d inc: %d", r.width, base[0], min[0], max[0], inc[0]);
+     DB("h1: %d base: %d min: %d max: %d inc: %d", r.height, base[1], min[1], max[1], inc[1]);

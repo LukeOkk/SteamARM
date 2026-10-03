@@ -64,10 +64,19 @@ static VkShaderModule stub_module(VkDevice dev)
     return m;
 }
 
+void lxrt_spirv_dump(const uint32_t *code, size_t size);   // spirv_names.c (LXRT_VK_DUMP_SPIRV)
+
 VkResult lxrt_inner_vkCreateComputePipelines(VkDevice dev, VkPipelineCache cache, uint32_t n,
                                              const VkComputePipelineCreateInfo *cis,
                                              const VkAllocationCallbacks *alloc, VkPipeline *out)
 {
+    // Shader code given inline (VK_KHR_maintenance5) never passes through
+    // vkCreateShaderModule: dumped here too.
+    for (uint32_t i = 0; cis && i < n; i++)
+        for (const VkBaseInStructure *b = cis[i].stage.pNext; b; b = b->pNext)
+            if (b->sType == VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO)
+                lxrt_spirv_dump(((const VkShaderModuleCreateInfo *)b)->pCode,
+                                ((const VkShaderModuleCreateInfo *)b)->codeSize);
     VkResult r = lxrt_mvk_vkCreateComputePipelines(dev, cache, n, cis, alloc, out);
     if (r != VK_ERROR_INITIALIZATION_FAILED)
         return r;
