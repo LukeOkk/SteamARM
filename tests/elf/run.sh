@@ -1587,6 +1587,21 @@ else
     echo "  skip  SHM_MREMAP (no $STAGE)"
 fi
 
+# PI_MUTEX: priority-inheritance mutexes (FUTEX_LOCK_PI / TRYLOCK_PI /
+# UNLOCK_PI, runtime/futex_ops.c). Without them glibc fails every
+# pthread_mutex_init(PTHREAD_PRIO_INHERIT) with ENOTSUP and no PipeWire client
+# starts (wpctl, which Steam runs for its audio settings, died at 0x10).
+if [ -f "$STAGE/usr/lib64/libc.a" ] && [ -n "$GCCDIR" ]; then
+    if err=$(glibc_cc -static-pie -O2 -o build/pi_mutex tests/elf/pi_mutex.c -lpthread); then
+        out=$(deadline 120 perl -e 'setpgrp(0,0); exec @ARGV' ./build/lxrun "$PWD/build/pi_mutex" 2>&1); rc=$?
+        if [ "$rc" -eq 0 ] && grep -q '== pi mutex: ok' <<<"$out"; then
+            ok "PI_MUTEX: contended, trylock, timedlock, EDEADLK, process-shared ($(grep -o 'ETIMEDOUT after [0-9]* ms' <<<"$out"))"
+        else bad "PI_MUTEX" "rc=$rc $(grep -E 'MAL|->' <<<"$out" | head -3 | tr '\n' ' ')"; fi
+    else bad "build pi_mutex" "$err"; fi
+else
+    echo "  skip  PI_MUTEX (no $STAGE)"
+fi
+
 echo
 summary="== $PASS passed, $FAIL failed"
 [ "$XFAIL" -eq 0 ] || summary="$summary ($XFAIL expected failures)"

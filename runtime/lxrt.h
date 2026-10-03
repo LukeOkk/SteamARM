@@ -187,6 +187,7 @@ int lxrt_subpage_prot_at(uint64_t addr);   // -1: no record (ask the kernel)
 void lxrt_subpage_forget(uint64_t addr, uint64_t len);
 void lxrt_subpage_reapply(uint64_t addr, uint64_t len);
 long lxrt_subpage_mmap_noreplace(uint64_t addr, uint64_t len, int prot, bool anon, int fd, uint64_t off);
+int lxrt_subpage_describe_last(char *buf, size_t n);   // fault report: the mapping in progress
 // uap: the faulting ucontext_t (NULL: no store emulation, flip only).
 bool lxrt_subpage_handle_fault(uint64_t pc, uint64_t fault_addr, void *uap);
 
@@ -365,6 +366,8 @@ bool lxrt_lowptr_fixup(void *uap, uint64_t fault_addr);
 // Flight recorder of address-space changes (runtime/memlog.c).
 void lxrt_memlog(char op, uint64_t addr, uint64_t len, long a, long b, long ret);
 void lxrt_memlog_dump(uint64_t fault_addr, const char *why);
+void lxrt_memlog_dump_fd(int fd, uint64_t fault_addr, const char *why);
+void lxrt_fault_note(const char *fmt, ...) __attribute__((format(printf, 1, 2)));
 // Where the main ELF image (FEX, under the Steam work) was loaded: a fault
 // report can then say "FEX+0x..." for an offline symboliser.
 extern uint64_t lxrt_main_image_base, lxrt_main_image_span;

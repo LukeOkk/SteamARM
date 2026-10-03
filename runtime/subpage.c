@@ -245,17 +245,87 @@ static int union_prot(uint64_t hpage)
 // Is this host page a file mapping? Asked of the region that contains it
 // (external pager): proc_regionfilename() answers for the NEXT file-backed
 // region when this one is anonymous, so it cannot be used on its own.
-static bool page_is_file_backed(uint64_t p)
+// 1: a file mapping, 0: not, -1: the kernel did not say (*why: its answer).
+// A failed query used to read as "not a file": the page was then made
+// writable in place and the copy into it raised SIGBUS when it was a file
+// page past the end of its file.
+// What the last page_file_state() saw, for the repair note below.
+static _Thread_local char g_region_seen[160];
+
+static int page_file_state(uint64_t p, kern_return_t *why)
 {
     mach_vm_address_t ra = p;
     mach_vm_size_t rs = 0;
     vm_region_extended_info_data_t ri;
     mach_msg_type_number_t rc = VM_REGION_EXTENDED_INFO_COUNT;
     mach_port_t obj = MACH_PORT_NULL;
-    if (mach_vm_region(mach_task_self(), &ra, &rs, VM_REGION_EXTENDED_INFO,
-                       (vm_region_info_t)&ri, &rc, &obj) != KERN_SUCCESS || ra > p)
-        return false;
+    memset(&ri, 0, sizeof ri);
+    kern_return_t kr = mach_vm_region(mach_task_self(), &ra, &rs, VM_REGION_EXTENDED_INFO,
+                                      (vm_region_info_t)&ri, &rc, &obj);
+    if (why) *why = kr;
+    snprintf(g_region_seen, sizeof g_region_seen,
+             "kr %d region 0x%llx+0x%llx prot %d share %d pager %d refs %d tag %d resident %u",
+             kr, (unsigned long long)ra, (unsigned long long)rs, ri.protection, ri.share_mode,
+             ri.external_pager, ri.ref_count, ri.user_tag, ri.pages_resident);
+    if (kr != KERN_SUCCESS)
+        return -1;
+    if (ra > p)
+        return 0;                   // nothing mapped at p
     return ri.external_pager != 0;
+}
+
+
+// The sub-page mapping in progress and what back_range did to each of its
+// host pages, for the fault report (main.c): a SIGBUS inside the copy below
+// (once in eight ARM64 Steam starts, 2026-10-03) hit a host page that was a
+// file mapping again, and nothing said how it had got there.
+static struct {
+    uint64_t addr, len, off;
+    int fd, anon, n;
+    struct { uint64_t p; int kr, how, region_kr, tries; } pg[8];   // how: 1 allocated 2 file page made anonymous 3 made writable
+} g_last;
+
+static void note_page(uint64_t p, int kr, int how)
+{
+    if (g_last.n < 8)
+        g_last.pg[g_last.n++] = (typeof(g_last.pg[0])){ p, kr, how, 0, 0 };
+}
+
+int lxrt_subpage_describe_last(char *buf, size_t n)
+{
+    int w = snprintf(buf, n, "[lxrt] last sub-page mapping: 0x%llx+0x%llx %s fd %d off 0x%llx;",
+                     (unsigned long long)g_last.addr, (unsigned long long)g_last.len,
+                     g_last.anon ? "anon" : "file", g_last.fd, (unsigned long long)g_last.off);
+    static const char *how[] = { "?", "allocated", "file page made anonymous", "made writable" };
+    for (int i = 0; i < g_last.n && w > 0 && (size_t)w < n; i++)
+        w += snprintf(buf + w, n - w, " page 0x%llx kr %d %s (region query %d, %d tries);",
+                      (unsigned long long)g_last.pg[i].p, g_last.pg[i].kr, how[g_last.pg[i].how & 3],
+                      g_last.pg[i].region_kr, g_last.pg[i].tries);
+    return w;
+}
+
+// Replace the host page at p by an anonymous one with the same bytes (what is
+// readable of them; the rest reads as zeros, as past a file's end on Linux).
+static bool make_page_anonymous(uint64_t p)
+{
+    static _Thread_local uint8_t keep[LXRT_HOST_PAGE];
+    memset(keep, 0, sizeof keep);
+    // Guest page by guest page: one unreadable 4 KiB (past the end of the
+    // file) must not lose the readable ones beside it.
+    for (uint64_t g = 0; g < LXRT_HOST_PAGE; g += GUEST_PAGE) {
+        mach_vm_size_t got = 0;
+        (void)mach_vm_read_overwrite(mach_task_self(), p + g, GUEST_PAGE,
+                                     (mach_vm_address_t)(keep + g), &got);
+    }
+    // A read-only MAP_SHARED view in this page (KUSER_SHARED_DATA)
+    // keeps following the file through shmirror.c.
+    uint64_t view = lxrt_shmirror_take_view(p);
+    if (mmap((void *)p, LXRT_HOST_PAGE, PROT_READ | PROT_WRITE,
+             MAP_PRIVATE | MAP_ANON | MAP_FIXED, -1, 0) == MAP_FAILED)
+        return false;
+    memcpy((void *)p, keep, LXRT_HOST_PAGE);
+    lxrt_shmirror_adopt(p, view);
+    return true;
 }
 
 static bool back_range(uint64_t hstart, uint64_t hend)
@@ -266,6 +336,8 @@ static bool back_range(uint64_t hstart, uint64_t hend)
                                             LXRT_HOST_PAGE, VM_FLAGS_FIXED);
         if (kr != KERN_SUCCESS && kr != KERN_NO_SPACE)
             return false;           // genuinely unusable address
+        if (kr == KERN_SUCCESS)
+            note_page(p, kr, 1);
         // KERN_NO_SPACE means it is already mapped, which is fine and normal:
         // a second 4 KiB mapping inside a host page the first one created.
         //
@@ -279,24 +351,62 @@ static bool back_range(uint64_t hstart, uint64_t hend)
         // bytes: what the mapping showed becomes a private copy, which is what
         // MAP_PRIVATE meant anyway. mach_vm_read_overwrite fails, rather than
         // faults, on the part past EOF, and that part reads as zeros on Linux.
-        if (kr == KERN_NO_SPACE && page_is_file_backed(p)) {
-            static _Thread_local uint8_t keep[LXRT_HOST_PAGE];
-            memset(keep, 0, sizeof keep);
-            mach_vm_size_t got = 0;
-            (void)mach_vm_read_overwrite(mach_task_self(), p, LXRT_HOST_PAGE,
-                                         (mach_vm_address_t)keep, &got);
-            // A read-only MAP_SHARED view in this page (KUSER_SHARED_DATA)
-            // keeps following the file through shmirror.c.
-            uint64_t view = lxrt_shmirror_take_view(p);
-            if (mmap((void *)p, LXRT_HOST_PAGE, PROT_READ | PROT_WRITE,
-                     MAP_PRIVATE | MAP_ANON | MAP_FIXED, -1, 0) == MAP_FAILED)
+        int state = 0, tries = 0;
+        kern_return_t why = KERN_SUCCESS;
+        char before[160] = "";
+        if (kr == KERN_NO_SPACE) {
+            // Asked again when the kernel does not answer; still no answer:
+            // treated as a file page (an anonymous copy is right for any
+            // private page; making it writable in place is not).
+            while ((state = page_file_state(p, &why)) < 0 && ++tries < 4)
+                ;
+            memcpy(before, g_region_seen, sizeof before);
+            if (state < 0) {
+                static _Atomic int said;
+                if (atomic_fetch_add(&said, 1) < 4)
+                    lxrt_fault_note("subpage: no region answer for host page 0x%llx "
+                                    "(kern_return %d, %d tries): made anonymous", (unsigned long long)p, why, tries);
+            }
+        }
+        if (kr == KERN_NO_SPACE && state != 0) {
+            if (!make_page_anonymous(p))
                 return false;
-            memcpy((void *)p, keep, LXRT_HOST_PAGE);
-            lxrt_shmirror_adopt(p, view);
+            note_page(p, kr, 2);
+            if (g_last.n) g_last.pg[g_last.n - 1].region_kr = why, g_last.pg[g_last.n - 1].tries = tries;
             continue;
         }
         if (mprotect((void *)p, LXRT_HOST_PAGE, PROT_READ | PROT_WRITE) != 0)
             return false;
+        if (kr == KERN_NO_SPACE) {
+            note_page(p, kr, 3);
+            if (g_last.n) g_last.pg[g_last.n - 1].region_kr = why, g_last.pg[g_last.n - 1].tries = tries;
+            // Writable now: every byte of it must also be readable, or the
+            // copy that follows is a store into a page the kernel cannot
+            // supply -- SIGBUS. A file page past the file's end is one: in
+            // Steam's web helper, libGLX_mesa.so's first mapping (its whole
+            // 0x82318-byte span, from a 0x52320-byte file) was still in the
+            // host page its last segment was mapped into, and this branch had
+            // taken it for anonymous memory (once in ten Steam starts,
+            // 2026-10-03; /tmp/lxrt-faults.log). Whatever the reason, a page
+            // that cannot be read in full is replaced by an anonymous copy.
+            static _Thread_local uint8_t probe[LXRT_HOST_PAGE];
+            mach_vm_size_t got = 0;
+            if (mach_vm_read_overwrite(mach_task_self(), p, LXRT_HOST_PAGE,
+                                       (mach_vm_address_t)probe, &got) != KERN_SUCCESS ||
+                got != LXRT_HOST_PAGE) {
+                static _Atomic int said;
+                if (atomic_fetch_add(&said, 1) < 4) {
+                    kern_return_t k2 = KERN_SUCCESS;
+                    int st2 = page_file_state(p, &k2);
+                    lxrt_fault_note("subpage: host page 0x%llx was writable but not readable in full "
+                                    "(file state now %d [%s]; before %d [%s], %d tries); made anonymous",
+                                    (unsigned long long)p, st2, g_region_seen, state, before, tries);
+                }
+                if (!make_page_anonymous(p))
+                    return false;
+                note_page(p, kr, 2);
+            }
+        }
     }
     return true;
 }
@@ -451,6 +561,8 @@ long lxrt_subpage_mmap_noreplace(uint64_t addr, uint64_t len, int prot, bool ano
 static long subpage_mmap_locked(uint64_t addr, uint64_t len, int prot, bool anon,
                                 int fd, uint64_t off)
 {
+    g_last.addr = addr; g_last.len = len; g_last.off = off;
+    g_last.fd = fd; g_last.anon = anon; g_last.n = 0;
     long fast_result;
     if (!getenv("LXRT_NO_FAST_SUBPAGE") && !anon && fd >= 0 &&
         fast_file_interior(addr, len, prot, fd, off, &fast_result)) {

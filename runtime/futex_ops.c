@@ -48,6 +48,7 @@ extern int __ulock_wait(uint32_t operation, void *addr, uint64_t value,
 extern int __ulock_wake(uint32_t operation, void *addr, uint64_t wake_value);
 
 extern bool lxrt_trace_on(void);
+int lxrt_gettid(void);
 
 // ------------------------------------------- ulock flavours, and why two
 //
@@ -772,27 +773,134 @@ static long wake_op(uint32_t *uaddr, uint32_t val, uint64_t val2,
 
 // -------------------------------------------------------- PI operations
 //
-// Not implemented, and not faked.
+// LOCK_PI, LOCK_PI2, TRYLOCK_PI and UNLOCK_PI keep Linux's ownership protocol
+// on the futex word -- the owner's TID in bits 0-29, FUTEX_WAITERS (bit 31)
+// telling the owner to unlock through the kernel, FUTEX_OWNER_DIED (bit 30)
+// left as found -- without the priority inheritance: Darwin has no way to
+// tell the scheduler that one thread is blocking another (__ulock_* has an
+// unfair-lock flavour but no ownership; thread_policy_set moves a priority
+// and knows nothing about who waits on what). gVisor's PI futexes make the
+// same trade.
 //
-// A PI futex asks the kernel to record an owner in the futex word, boost that
-// owner to the priority of its highest-priority waiter, and hand ownership over
-// at unlock. Darwin has no equivalent: __ulock_* has an unfair-lock flavour but
-// no ownership, no inheritance, and no way to tell the scheduler that thread A
-// is blocking thread B. Mach's thread_policy_set moves a priority but knows
-// nothing about who is waiting on what, so nothing here can be reconstructed
-// from it.
+// They used to answer ENOSYS, on the grounds that a PI mutex without the
+// inheritance can invert priorities under load. The price of that was
+// higher: glibc probes PI support once per process with UNLOCK_PI on a free
+// word and, on ENOSYS, makes every pthread_mutex_init with
+// PTHREAD_PRIO_INHERIT fail with ENOTSUP. PipeWire's event loop takes such a
+// mutex, so no PipeWire client could start: wpctl, which Steam runs for its
+// audio settings, died at address 0x10 after "can't make support.loop
+// handle: Operation not supported" -- 180 times in fifteen Steam starts
+// (2026-10-03, /tmp/lxrt-faults.log).
 //
-// The two ways to fake it both end badly. Mapping LOCK_PI onto a plain wait
-// drops the inheritance, which turns a bounded wait into an unbounded priority
-// inversion -- the exact failure PI mutexes exist to prevent, and one that
-// appears as an occasional multi-second stall under load rather than as a bug.
-// Returning success without taking the lock corrupts the ownership field and
-// deadlocks the next unlock. -ENOSYS is worse than working and better than
-// either: glibc's PI paths test for it, and pthread_cond_broadcast's
-// FUTEX_CMP_REQUEUE_PI attempt falls back to a plain wake on any error from it.
+// The protocol here:
+//   LOCK_PI    a free word (no TID) is taken with FUTEX_WAITERS set -- a
+//              thread that came through the kernel has had company, and others
+//              may still be parked, so the owner's unlock must come back here;
+//              a word this thread owns is EDEADLK; otherwise FUTEX_WAITERS is
+//              set and the thread parks on the word until it changes, then
+//              tries again. The timeout is absolute: CLOCK_REALTIME for
+//              LOCK_PI, CLOCK_MONOTONIC for LOCK_PI2 unless it carries
+//              FUTEX_CLOCK_REALTIME. Signals that run no handler do not end
+//              the wait (Linux restarts it).
+//   TRYLOCK_PI the same take without the wait: EAGAIN (EWOULDBLOCK) if owned.
+//   UNLOCK_PI  EPERM unless this thread owns the word; then the word goes to
+//              0 and every parked waiter is woken to compete for it: one takes
+//              it (setting FUTEX_WAITERS again for the rest), the others park
+//              again. Linux instead hands the lock to the top waiter; waking
+//              all of them is what keeps a waiter whose timeout expired at the
+//              same moment from stranding the rest.
+// WAIT_REQUEUE_PI and CMP_REQUEUE_PI stay ENOSYS: glibc's condition variables
+// have not used them since 2.25, and pthread_cond_broadcast's attempt falls
+// back to a plain wake on any error from them.
+#define FUTEX_WAITERS    0x80000000u
+#define FUTEX_OWNER_DIED 0x40000000u
+#define FUTEX_TID_MASK   0x3fffffffu
+
 static long pi_unsupported(void)
 {
     return LERR(ENOSYS);
+}
+
+static long pi_lock(uint32_t *uaddr, uint64_t utime, bool realtime, bool shared, bool try_only)
+{
+    if (!aligned(uaddr))
+        return LERR(EINVAL);
+    if (!guest_word_ok(uaddr, VM_PROT_READ | VM_PROT_WRITE))
+        return LERR(EFAULT);
+    bool timed = false;
+    int64_t deadline = 0;
+    if (utime && !try_only) {
+        const struct guest_timespec *ts = (const struct guest_timespec *)(uintptr_t)utime;
+        if (!guest_range_ok(ts, sizeof(*ts), VM_PROT_READ))
+            return LERR(EFAULT);
+        int64_t sec = ts->tv_sec, nsec = ts->tv_nsec;
+        if (sec < 0 || nsec < 0 || nsec >= NS_PER_S)
+            return LERR(EINVAL);
+        if (sec < GUEST_SEC_MAX) {
+            timed = true;
+            deadline = sec * NS_PER_S + nsec;
+        }
+    }
+    uint32_t tid = (uint32_t)lxrt_gettid() & FUTEX_TID_MASK;
+    _Atomic uint32_t *w = (_Atomic uint32_t *)uaddr;
+    uint32_t flavour = ((shared && truly_shared(uaddr)) ? UL_COMPARE_AND_WAIT_SHARED : UL_COMPARE_AND_WAIT) | ULF_NO_ERRNO;
+    for (;;) {
+        uint32_t cur = atomic_load_explicit(w, memory_order_acquire);
+        uint32_t owner = cur & FUTEX_TID_MASK;
+        if (owner == 0) {
+            uint32_t want = tid | (cur & FUTEX_OWNER_DIED) |
+                            (try_only ? (cur & FUTEX_WAITERS) : FUTEX_WAITERS);
+            if (atomic_compare_exchange_strong_explicit(w, &cur, want, memory_order_acq_rel,
+                                                        memory_order_acquire))
+                return 0;
+            continue;
+        }
+        if (owner == tid)
+            return LERR(EDEADLK);
+        if (try_only)
+            return LERR(EAGAIN);
+        if (!(cur & FUTEX_WAITERS)) {
+            uint32_t marked = cur | FUTEX_WAITERS;
+            if (!atomic_compare_exchange_strong_explicit(w, &cur, marked, memory_order_acq_rel,
+                                                         memory_order_acquire))
+                continue;
+            cur = marked;
+        }
+        uint32_t us = 0;
+        if (timed) {
+            int64_t left = deadline - now_ns(realtime);
+            if (left <= 0)
+                return LERR(ETIMEDOUT);
+            int64_t left_us = (left + 999) / 1000;
+            us = left_us > (int64_t)ULOCK_MAX_US ? ULOCK_MAX_US : (uint32_t)left_us;
+        }
+        lxrt_futex_park_enter(uaddr);
+        int r = __ulock_wait(flavour, uaddr, cur, us);
+        lxrt_futex_park_leave(uaddr);
+        if (r >= 0 || -r == EINTR || -r == ETIMEDOUT)
+            continue;           // the word changed, a signal, or a chunk ended: look again
+        return LERR(-r);
+    }
+}
+
+static long pi_unlock(uint32_t *uaddr, bool shared)
+{
+    if (!aligned(uaddr))
+        return LERR(EINVAL);
+    if (!guest_word_ok(uaddr, VM_PROT_READ | VM_PROT_WRITE))
+        return LERR(EFAULT);
+    uint32_t tid = (uint32_t)lxrt_gettid() & FUTEX_TID_MASK;
+    _Atomic uint32_t *w = (_Atomic uint32_t *)uaddr;
+    uint32_t cur = atomic_load_explicit(w, memory_order_acquire);
+    for (;;) {
+        if ((cur & FUTEX_TID_MASK) != tid)
+            return LERR(EPERM);
+        if (atomic_compare_exchange_weak_explicit(w, &cur, 0, memory_order_acq_rel, memory_order_acquire))
+            break;
+    }
+    if (cur & FUTEX_WAITERS)
+        wake_up_to(uaddr, INT32_MAX, shared);
+    return 0;
 }
 
 // ---------------------------------------------------------- entry point
@@ -890,7 +998,7 @@ long lxrt_futex_ext(uint32_t *uaddr, int op, uint32_t val, uint64_t val2,
 
     if (op & (FUTEX_ROBUST_UNLOCK | FUTEX_ROBUST_LIST32))
         return LERR(ENOSYS);
-    if ((op & FUTEX_CLOCK_REALTIME) && cmd != FUTEX_WAIT_BITSET)
+    if ((op & FUTEX_CLOCK_REALTIME) && cmd != FUTEX_WAIT_BITSET && cmd != FUTEX_LOCK_PI2)
         return LERR(ENOSYS);
 
     switch (cmd) {
@@ -921,12 +1029,14 @@ long lxrt_futex_ext(uint32_t *uaddr, int op, uint32_t val, uint64_t val2,
     case FUTEX_WAKE_OP:
         return wake_op(uaddr, val, val2, uaddr2, val3, shared);
 
-    // FUTEX_LOCK_PI2 (13) is LOCK_PI with a monotonic timeout; it is refused
-    // with the rest because the reason has nothing to do with the clock.
     case FUTEX_LOCK_PI:
+        return pi_lock(uaddr, val2, true, shared, false);
     case FUTEX_LOCK_PI2:
-    case FUTEX_UNLOCK_PI:
+        return pi_lock(uaddr, val2, (op & FUTEX_CLOCK_REALTIME) != 0, shared, false);
     case FUTEX_TRYLOCK_PI:
+        return pi_lock(uaddr, 0, false, shared, true);
+    case FUTEX_UNLOCK_PI:
+        return pi_unlock(uaddr, shared);
     case FUTEX_WAIT_REQUEUE_PI:
     case FUTEX_CMP_REQUEUE_PI:
         return pi_unsupported();

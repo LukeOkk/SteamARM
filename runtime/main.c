@@ -6,6 +6,7 @@
 #include "binder.h"
 #include "props.h"
 #include "ids.h"
+#include <crt_externs.h>
 #include <dlfcn.h>
 #include <libproc.h>
 #include <mach/mach.h>
@@ -207,6 +208,49 @@ static void fault_report(int sig, siginfo_t *info, void *uap)
                   lxrt_dispatch_last_unimplemented(),
                   (unsigned long long)lxrt_dispatch_unimplemented_count());
     write(2, buf, (size_t)n);
+    // A copy in /tmp/lxrt-faults.log: a helper whose stderr its parent sent
+    // to /dev/null (Steam's) otherwise left only an unreadable crash report.
+    // The guest program's path, never its arguments (they can carry account
+    // data).
+    int ff = open("/tmp/lxrt-faults.log", O_WRONLY | O_APPEND | O_CREAT | O_CLOEXEC, 0600);
+    if (ff >= 0) {
+        char **av = *_NSGetArgv();
+        dprintf(ff, "\n[lxrt] pid %d ppid %d %s\n", (int)getpid(), (int)getppid(),
+                *_NSGetArgc() > 1 && av[1] ? av[1] : "?");
+        write(ff, buf, (size_t)n);
+    }
+    // A fault in the runtime's own code on a memory access: the file mapped
+    // at the address, the sub-page mapping in progress, and the guest's
+    // recent memory operations on that host page.
+    if ((sig == SIGBUS || sig == SIGSEGV) && info &&
+        (!g_img || pc < (uint64_t)g_img->base || pc >= (uint64_t)g_img->base + g_img->span)) {
+        uint64_t fa = (uint64_t)(uintptr_t)info->si_addr;
+        mach_vm_address_t ra = fa;
+        mach_vm_size_t rs = 0;
+        vm_region_basic_info_data_64_t ri;
+        mach_msg_type_number_t cnt = VM_REGION_BASIC_INFO_COUNT_64;
+        mach_port_t obj = MACH_PORT_NULL;
+        char fname[512] = "";
+        if (mach_vm_region(mach_task_self(), &ra, &rs, VM_REGION_BASIC_INFO_64,
+                           (vm_region_info_t)&ri, &cnt, &obj) == KERN_SUCCESS && ra <= fa &&
+            proc_regionfilename(getpid(), ra, fname, sizeof fname) > 0)
+            n = snprintf(buf, sizeof buf, "[lxrt] fault address in a mapping of %s at offset 0x%llx of the region (region start 0x%llx, offset %llu)\n",
+                         fname, (unsigned long long)(fa - ra), (unsigned long long)ra,
+                         (unsigned long long)ri.offset);
+        else
+            n = 0;
+        n += lxrt_subpage_describe_last(buf + n, sizeof buf - n - 2);
+        if (n > (int)sizeof buf - 2) n = (int)sizeof buf - 2;
+        buf[n++] = '\n';
+        write(2, buf, (size_t)n);
+        lxrt_memlog_dump(fa, "runtime fault page history");
+        if (ff >= 0) {
+            write(ff, buf, (size_t)n);
+            lxrt_memlog_dump_fd(ff, fa, "runtime fault page history");
+        }
+    }
+    if (ff >= 0)
+        close(ff);
     _exit(128 + sig);
 }
 

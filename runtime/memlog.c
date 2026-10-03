@@ -55,28 +55,34 @@ void lxrt_memlog(char op, uint64_t addr, uint64_t len, long a, long b, long ret)
 
 // op letters: m mmap(prot, flags)  u munmap  p mprotect(prot)  a madvise(advice)
 //             r mremap(new_len, flags)  s shmat(shmid, flags)  d shmdt
-void lxrt_memlog_dump(uint64_t fault_addr, const char *why)
+// To a file descriptor (the fault report also keeps a copy in a file).
+void lxrt_memlog_dump_fd(int fd, uint64_t fault_addr, const char *why)
 {
     uint64_t lo = LXRT_ALIGN_DOWN(fault_addr, LXRT_HOST_PAGE);
     uint64_t hi = lo + LXRT_HOST_PAGE;
     uint64_t end = atomic_load_explicit(&g_next, memory_order_relaxed);
     uint64_t start = end > MEMLOG_N ? end - MEMLOG_N : 0;
-    FILE *f = lxrt_trace_stream();
-    fprintf(f, "[lxrt] memlog (pid %d): %s at 0x%llx; ops touching host page 0x%llx, oldest first:\n",
+    dprintf(fd, "[lxrt] memlog (pid %d): %s at 0x%llx; ops touching host page 0x%llx, oldest first:\n",
             (int)getpid(), why, (unsigned long long)fault_addr, (unsigned long long)lo);
     int shown = 0;
     for (uint64_t s = start; s < end; s++) {
         const struct memlog_ent *e = &g_ring[s % MEMLOG_N];
         if (e->seq != s + 1 || e->addr >= hi || e->addr + e->len <= lo)
             continue;
-        fprintf(f, "[lxrt]   #%llu tid %d %c 0x%llx+0x%llx a=0x%lx b=0x%lx -> %ld (lr 0x%llx)\n",
+        dprintf(fd, "[lxrt]   #%llu tid %d %c 0x%llx+0x%llx a=0x%lx b=0x%lx -> %ld (lr 0x%llx)\n",
                 (unsigned long long)e->seq, e->tid, e->op, (unsigned long long)e->addr,
                 (unsigned long long)e->len, e->a, e->b, e->ret, (unsigned long long)e->lr);
         shown++;
     }
-    fprintf(f, "[lxrt] memlog: %d of the last %llu ops\n", shown,
+    dprintf(fd, "[lxrt] memlog: %d of the last %llu ops\n", shown,
             (unsigned long long)(end - start));
+}
+
+void lxrt_memlog_dump(uint64_t fault_addr, const char *why)
+{
+    FILE *f = lxrt_trace_stream();
     fflush(f);
+    lxrt_memlog_dump_fd(fileno(f), fault_addr, why);
 }
 
 // File-backed mappings, kept only under LXRT_GUEST_FAULTS: a guest fault
@@ -129,4 +135,27 @@ bool lxrt_memlog_file_lookup(uint64_t addr, char *path, size_t n, uint64_t *off)
     }
     pthread_mutex_unlock(&g_fmap_lock);
     return found;
+}
+
+// One line in /tmp/lxrt-faults.log (and the trace stream): something the
+// runtime caught and repaired that would otherwise have been a crash, from a
+// process whose stderr may go nowhere. The guest program's path, never its
+// arguments.
+#include <crt_externs.h>
+#include <fcntl.h>
+#include <stdarg.h>
+void lxrt_fault_note(const char *fmt, ...)
+{
+    char line[512];
+    va_list ap;
+    va_start(ap, fmt);
+    vsnprintf(line, sizeof line, fmt, ap);
+    va_end(ap);
+    fprintf(lxrt_trace_stream(), "[lxrt] %s\n", line);
+    int ff = open("/tmp/lxrt-faults.log", O_WRONLY | O_APPEND | O_CREAT | O_CLOEXEC, 0600);
+    if (ff >= 0) {
+        char **av = *_NSGetArgv();
+        dprintf(ff, "[lxrt] pid %d %s: %s\n", (int)getpid(), *_NSGetArgc() > 1 && av[1] ? av[1] : "?", line);
+        close(ff);
+    }
 }
