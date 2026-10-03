@@ -130,8 +130,16 @@ class SettingsEnvironmentTests(unittest.TestCase):
         self.assertNotIn(";", env["LXRT_EXEC_ARGS"])
 
     def test_scaling_filter(self):
-        env = self.settings.env_from_settings({})
+        # AUTO by default: the shim's choice, with this chip's render scale
+        # (the exact ratio of the mode the policy snaps to).
+        m4 = self.settings.apple_chip("Apple M4", 10)
+        env = self.settings.env_from_settings({}, chip=m4, display=(1920, 1080))
+        self.assertEqual((env["LXRT_VK_SCALER"], env["STEAMARM_RENDER_SCALE"], env["STEAMARM_RENDER_SIZE"]),
+                         ("auto", "0.6667", "1280x720"))
+        # The render scale does not depend on the filter.
+        env = self.settings.env_from_settings({"scalingFilter": "linear"}, chip=m4, display=(1920, 1080))
         self.assertNotIn("LXRT_VK_SCALER", env)
+        self.assertEqual(env["STEAMARM_RENDER_SIZE"], "1280x720")
         env = self.settings.env_from_settings({"scalingFilter": "fsr", "fsrSharpness": 40})
         self.assertEqual((env["LXRT_VK_SCALER"], env["LXRT_VK_FSR_SHARPNESS"]), ("fsr", "40"))
         env = self.settings.env_from_settings({"scalingFilter": "fsr", "fsrSharpness": 500})
@@ -142,6 +150,47 @@ class SettingsEnvironmentTests(unittest.TestCase):
         self.assertNotIn("LXRT_VK_SCALER", self.settings.env_from_settings({"scalingFilter": "bogus"}))
         merged = self.settings.with_overrides({"scalingFilter": "linear"}, {"scalingFilter": "nearest"})
         self.assertEqual(self.settings.env_from_settings(merged)["LXRT_VK_SCALER"], "nearest")
+
+    def test_render_scale(self):
+        m4 = self.settings.apple_chip("Apple M4", 10)
+        def scale(value):
+            env = self.settings.env_from_settings({"renderScale": value}, chip=m4, display=(1920, 1080))
+            return env.get("STEAMARM_RENDER_SCALE"), env.get("STEAMARM_RENDER_SIZE")
+        self.assertEqual(scale("1.0"), (None, None))         # native: nothing for the shim
+        self.assertEqual(scale("0.77"), ("0.7700", "1478x832"))
+        self.assertEqual(scale("0.5"), ("0.5000", "960x540"))
+        self.assertEqual(scale("bogus"), (None, None))
+        self.assertEqual(scale("0.2"), (None, None))         # out of range: native
+        self.assertEqual(scale("auto"), ("0.6667", "1280x720"))
+
+    def test_upscaling_policy(self):
+        chip = self.settings.apple_chip
+        policy = self.settings.upscaling_policy
+        self.assertIsNone(chip("Intel(R) Core(TM) i9-9980HK CPU @ 2.40GHz", 0))
+        self.assertEqual(policy(None)["filter"], "fsr")
+        m4 = chip("Apple M4", 10)
+        self.assertEqual((m4["generation"], m4["tier"], m4["gpu_cores"]), (4, "base", 10))
+        self.assertEqual(chip("Apple M3 Max", 40)["tier"], "Max")
+        # Without the IORegistry's count: the smallest GPU of the tier.
+        with patch.object(self.settings, "_run", return_value=""):
+            self.assertEqual(chip("Apple M2 Pro")["gpu_cores"], 14)
+        cases = [  # chip, GPU cores, display -> scale, render size
+            ("Apple M1", 8, (1920, 1080), 0.5, [960, 540]),
+            ("Apple M2", 10, (1920, 1080), 0.59, [1152, 648]),
+            ("Apple M4", 10, (1920, 1080), 0.67, [1280, 720]),
+            ("Apple M4", 10, (2560, 1440), 0.5, [1280, 720]),
+            ("Apple M4 Pro", 20, (1920, 1080), 0.77, [1366, 768]),
+            ("Apple M4 Pro", 20, (2560, 1440), 0.67, [1600, 900]),
+            ("Apple M3 Max", 40, (1920, 1080), 1.0, [1920, 1080]),
+            ("Apple M3 Max", 40, (3840, 2160), 0.59, [2304, 1296]),
+            ("Apple M2 Ultra", 76, (2560, 1440), 1.0, [2560, 1440]),
+        ]
+        for brand, cores, display, scale, render in cases:
+            got = policy(chip(brand, cores), display)
+            self.assertEqual((got["filter"], got["scale"], got["render"]), ("metalfx", scale, render),
+                             (brand, cores, display))
+        # A display no common mode fits: the scaled size, even.
+        self.assertEqual(policy(m4, (1512, 982))["render"], [1164, 756])
 
     def test_antialiasing(self):
         for value in (2, 4, 8):

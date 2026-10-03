@@ -7,6 +7,7 @@ with_overrides(); run-steam.sh evaluates --shell.
   scripts/settings-env.py --json  [settings.json]   the environment as JSON
   scripts/settings-env.py --volume [settings.json]  output volume, empty when muted
   scripts/settings-env.py --emulate-modeset [settings.json]  "on" or "off" (Escala de resolución)
+  scripts/settings-env.py --upscaling        this Mac's upscaling recommendation as JSON
 
 Also writes $STATE/launcher/limits.env (the memory ceiling the guard reads).
 Games inherit Steam's environment, so a change reaches them when Steam starts.
@@ -22,7 +23,7 @@ STATE = os.environ.get("STEAMARM_STATE") or os.path.expanduser("~/SteamARM-roots
 SHIM = os.path.join(STATE, "steamroot", "usr", "lib", "lxrt-emu", "libvulkan.so.1")
 ICD_MARKER = b"STEAMARM_VK_ICD"
 OVERRIDABLE = ("display", "vsync", "synchronization", "graphicsBackend", "scalingFilter")
-SCALING_FILTERS = ("linear", "nearest", "fsr", "metalfx")
+SCALING_FILTERS = ("auto", "linear", "nearest", "fsr", "metalfx")
 STEAM_UI_GPU_SWITCHES = ("--use-gl=angle", "--use-angle=vulkan",
                          "--enable-features=Vulkan,VulkanFromANGLE,DefaultANGLEVulkan",
                          "--ignore-gpu-blocklist")
@@ -105,6 +106,129 @@ def usable_gb(total=None):
     return max(2, t - 2 if t <= 8 else t - 4)
 
 
+# Upscaling, "Filtro de escalado" AUTO (the default): the Vulkan shim takes
+# Apple's MetalFX spatial scaler where the driver exports its Metal objects
+# (MoltenVK; SteamARM's KosmicKrisp from patches/kosmickrisp-10 on) and FSR
+# 1.0 where it does not (LXRT_VK_SCALER=auto, shim/scaler.c). MetalFX
+# temporal needs depth, motion vectors and the camera jitter of the 3D scene,
+# which a picture handed to vkQueuePresentKHR does not have: spatial only.
+# What depends on the chip is how far below the display a game should render
+# for the shim to enlarge: the largest of FSR 1.0's scales (render size per
+# axis) that the GPU's budget allows, as STEAMARM_RENDER_SCALE and
+# STEAMARM_RENDER_SIZE (the launcher shows them; in Counter-Strike 2, the
+# resolution to choose).
+RENDER_SCALES = ((1.0, "nativa"), (0.77, "ultra calidad"), (0.67, "calidad"),
+                 (0.59, "equilibrado"), (0.5, "rendimiento"))
+# Relative GPU throughput per core by generation (M4 = 1). M1-M3 from the
+# public per-core results of the Metal benchmarks, rounded; an assumption,
+# not measured here.
+GPU_CORE_SPEED = {1: 0.70, 2: 0.80, 3: 0.90, 4: 1.00}
+# Pixels per frame one M4 GPU core shades at a game's highest settings and
+# the rate it is played at, calibrated on this machine's one data point:
+# Counter-Strike 2, everything at its highest with 4x MSAA, 1920x1080, M4 with
+# 10 GPU cores, 33-40 frames a second, GPU-bound (benchmarks/stage53): 10
+# cores x 93,000 = 0.67^2 x 1920x1080, the "calidad" scale.
+PIXELS_PER_CORE = 93000
+# Resolutions games list (16:9 and 16:10): the render size is the largest of
+# these with the display's shape that fits the scale, so that it can be
+# picked in a game's menu.
+COMMON_MODES = ((3840, 2160), (3200, 1800), (2880, 1620), (2560, 1440), (2304, 1296), (2048, 1152),
+                (1920, 1080), (1600, 900), (1366, 768), (1280, 720), (1152, 648), (1024, 576), (960, 540),
+                (854, 480), (640, 360), (2560, 1600), (2304, 1440), (1920, 1200), (1680, 1050), (1440, 900),
+                (1280, 800), (1152, 720), (1024, 640), (960, 600))
+
+
+def render_size(display, scale):
+    """The resolution to render at for `scale` of `display` (w, h)."""
+    w, h = display
+    if scale >= 1.0:
+        return [w, h]
+    rw, rh = w * scale, h * scale
+    shape = float(w) / h
+    fits = [m for m in COMMON_MODES
+            if abs(float(m[0]) / m[1] - shape) <= 0.01 * shape and m[0] <= rw * 1.02 and m[0] < w]
+    if fits:
+        return list(max(fits))
+    return [max(2, int(round(rw / 2.0)) * 2), max(2, int(round(rh / 2.0)) * 2)]
+
+
+def _run(argv):
+    try:
+        return subprocess.run(argv, capture_output=True, text=True, check=True, timeout=5).stdout
+    except (OSError, subprocess.SubprocessError):
+        return ""
+
+
+def apple_chip(brand=None, gpu_cores=None):
+    """This Mac's chip: {"brand", "generation", "tier", "gpu_cores", "p_cores",
+    "e_cores"}, or None where it is not Apple silicon. `brand` and `gpu_cores`
+    override what sysctl(8) and the IORegistry say (tests)."""
+    if brand is None:
+        brand = _run(["/usr/sbin/sysctl", "-n", "machdep.cpu.brand_string"]).strip()
+    words = brand.split()
+    if len(words) < 2 or words[0] != "Apple" or not words[1].startswith("M") or not words[1][1:].isdigit():
+        return None
+    tier = words[2] if len(words) > 2 and words[2] in ("Pro", "Max", "Ultra") else "base"
+    if gpu_cores is None:
+        # AGXAccelerator's "gpu-core-count" (MEASURED on the M4: 10, the
+        # same as GPUConfigurationVariable num_cores).
+        for line in _run(["/usr/sbin/ioreg", "-r", "-c", "AGXAccelerator", "-d", "1"]).splitlines():
+            if '"gpu-core-count"' in line:
+                try:
+                    gpu_cores = int(line.split("=")[1])
+                except (IndexError, ValueError):
+                    pass
+                break
+    if not gpu_cores:
+        # The smallest GPU of the tier, where the IORegistry does not say.
+        gpu_cores = {"base": 7, "Pro": 14, "Max": 24, "Ultra": 48}[tier]
+
+    def cores(level):
+        out = _run(["/usr/sbin/sysctl", "-n", "hw.perflevel%d.physicalcpu" % level]).strip()
+        return int(out) if out.isdigit() else 0
+    return {"brand": brand, "generation": int(words[1][1:]), "tier": tier, "gpu_cores": int(gpu_cores),
+            "p_cores": cores(0), "e_cores": cores(1)}
+
+
+def main_display_size():
+    """The main display's size in the units the X screen has (CoreGraphics'
+    points: 1920x1080 on the test display, MEASURED), or None."""
+    try:
+        import ctypes
+        cg = ctypes.CDLL("/System/Library/Frameworks/CoreGraphics.framework/CoreGraphics")
+        cg.CGMainDisplayID.restype = ctypes.c_uint32
+        for f in (cg.CGDisplayPixelsWide, cg.CGDisplayPixelsHigh):
+            f.restype = ctypes.c_size_t
+            f.argtypes = [ctypes.c_uint32]
+        d = cg.CGMainDisplayID()
+        w, h = int(cg.CGDisplayPixelsWide(d)), int(cg.CGDisplayPixelsHigh(d))
+        return (w, h) if w > 0 and h > 0 else None
+    except (OSError, AttributeError, ValueError):
+        return None
+
+
+def upscaling_policy(chip, display=None):
+    """What AUTO means on `chip` (apple_chip()) for a display of `display`
+    (w, h; default 1920x1080): {"filter", "scale", "preset", "render", ...}."""
+    w, h = display or (1920, 1080)
+    if chip is None:
+        return {"filter": "fsr", "scale": 1.0, "preset": "nativa", "render": [w, h], "display": [w, h],
+                "chip": None, "reason": "no Apple silicon: no MetalFX"}
+    speed = GPU_CORE_SPEED.get(chip["generation"], max(GPU_CORE_SPEED.values()))
+    ideal = (chip["gpu_cores"] * speed * PIXELS_PER_CORE / float(w * h)) ** 0.5
+    # The largest scale the budget allows (a hundredth of slack: 0.6697
+    # is "calidad"); "rendimiento" below that.
+    scale, preset = RENDER_SCALES[-1]
+    for value, name in RENDER_SCALES:
+        if ideal + 0.01 >= value:
+            scale, preset = value, name
+            break
+    return {"filter": "metalfx", "scale": scale, "preset": preset, "render": render_size((w, h), scale),
+            "display": [w, h],
+            "chip": "%s, GPU de %d núcleos" % (chip["brand"], chip["gpu_cores"]),
+            "reason": "MetalFX espacial (temporal: imposible al presentar)"}
+
+
 def host_timezone():
     # /etc/localtime -> /var/db/timezone/zoneinfo/<Area>/<City>
     try:
@@ -116,7 +240,7 @@ def host_timezone():
     return link[i + len(marker):] if i >= 0 else None
 
 
-def env_from_settings(s, total=None):
+def env_from_settings(s, total=None, chip=None, display=None):
     env = {}
     dxvk = []
 
@@ -220,11 +344,38 @@ def env_from_settings(s, total=None):
         env["WINE_DISABLE_FULLSCREEN_HACK"] = "1"
         env["LXRT_VK_PADDED_FULLSCREEN"] = "1"
     # A picture smaller than its window: the Vulkan shim's scaling pass
-    # (shim/scaler.c). "linear" is MoltenVK's own stretch.
+    # (shim/scaler.c). "linear" is MoltenVK's own stretch; AUTO (the
+    # default) is MetalFX where the driver can, FSR 1.0 where not, and the
+    # render scale this chip is recommended (upscaling_policy).
     # MEASURED: tests/win/run.sh modeset_* (benchmarks/stage44).
-    flt = s.get("scalingFilter") or "linear"
+    flt = s.get("scalingFilter") or "auto"
     if flt in SCALING_FILTERS and flt != "linear":
         env["LXRT_VK_SCALER"] = flt
+    # "Escala de render": games whose window covers the screen render at this
+    # fraction of it (the game tool passes STEAMARM_RENDER_SCALE to the game
+    # only as LXRT_VK_RENDER_SCALE; shim/wsi.c render_scale) and the shim
+    # enlarges their picture with the filter above. AUTO (the default): the
+    # chip's recommendation (upscaling_policy).
+    rs = str(s.get("renderScale") or "auto")
+    if rs == "auto":
+        disp = display or main_display_size()
+        pol = upscaling_policy(chip if chip is not None else apple_chip(), disp)
+        scale = pol["scale"]
+        # The policy snaps to a common mode (1280x720 for 0.67 at 1080p):
+        # the exact ratio, so that the shim lands on that size.
+        if disp and pol.get("render") and pol["render"][0] and scale < 0.995:
+            scale = pol["render"][0] / float(disp[0])
+    else:
+        try:
+            scale = float(rs)
+        except ValueError:
+            scale = 1.0
+        scale = 1.0 if not 0.5 <= scale < 0.995 else scale
+    if scale < 0.995:
+        disp = display or main_display_size()
+        env["STEAMARM_RENDER_SCALE"] = "%.4f" % scale
+        if disp:
+            env["STEAMARM_RENDER_SIZE"] = "%dx%d" % (int(disp[0] * scale + 0.5) & ~1, int(disp[1] * scale + 0.5) & ~1)
         if flt == "fsr":
             try:
                 sharp = int(s.get("fsrSharpness", 90))
@@ -324,6 +475,11 @@ def main(argv):
     mode = argv[1] if len(argv) > 1 else "--shell"
     path = argv[2] if len(argv) > 2 else os.path.join(STATE, "launcher", "settings.json")
     s = load(path)
+    if mode == "--upscaling":
+        # Answers only, as --emulate-modeset.
+        print(json.dumps(upscaling_policy(apple_chip(), main_display_size()), indent=1, sort_keys=True,
+                         ensure_ascii=False))
+        return
     if mode == "--emulate-modeset":
         # "Escala de resolución" (scripts/wine-prefix-options.py): on or off.
         # Answers only: no limits file is written for this question.

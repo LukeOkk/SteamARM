@@ -38,6 +38,10 @@
 #   09  a pipeline with no fragment shader (a depth or shadow prepass) hashes
 #       its render-pass and depth state too: through a VkPipelineCache it was
 #       handed another's depth state (tests/elf/vk_vsonly.c).
+#   10  VK_EXT_metal_objects (images' MTLTextures, timeline semaphores'
+#       MTLSharedEvents, the MTLDevice): the shim's MetalFX scaler encodes
+#       Apple's spatial upscaler between two of its submissions
+#       (LXRT_VK_SCALER=metalfx|auto, the default; tests/elf/vk_metalfx.c).
 #
 # Only Homebrew formulae and a Python virtualenv are installed. Re-running is
 # safe: the download is cached and the build is incremental. Needs macOS 26.

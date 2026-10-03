@@ -75,6 +75,7 @@ VkResult lxrt_mvk_vkGetPhysicalDeviceSurfaceCapabilities2KHR(VkPhysicalDevice, c
 VkResult vkCreateMetalSurfaceEXT(VkInstance, const VkMetalSurfaceCreateInfoEXT *, const void *, VkSurfaceKHR *);
 // vulkan_shim.c (generated): a driver reached through the loader-ICD interface.
 extern char *getenv(const char *);   // the guest's libc
+extern double strtod(const char *, char **);
 extern int dprintf(int, const char *, ...);
 extern int lxrt_vk_icd;
 void lxrt_vk_icd_fill(VkInstance);
@@ -349,6 +350,41 @@ static void follow_window(VkSurfaceKHR surface)
 // A game shown on its full-screen toplevel (present_window) still gets its
 // own window's size: its swapchain stays at the game's resolution and the
 // shim enlarges it to the layer (present.c, scaler.c: lxrt_wsi_layer_extent).
+//
+// Render scale (LXRT_VK_RENDER_SCALE, 0.5-1; the game tool sets it for the
+// game only, from the launcher's render scale, "auto" being the chip's
+// recommendation, scripts/settings-env.py upscaling_policy): a game whose
+// window covers its screen (fullscreen, borderless or not) is told an extent
+// that much smaller, renders at it, and the shim enlarges its picture to the
+// window with the scaling filter (MetalFX where the driver exports its Metal
+// objects; scaler.c). What CS2's own FSR does to its 3D scene, for the whole
+// picture and with Apple's scaler. Smaller windows keep their size.
+static double render_scale(void)
+{
+    static double v = -1;
+    if (v < 0) {
+        const char *e = getenv("LXRT_VK_RENDER_SCALE");
+        double d = e && *e ? strtod(e, 0) : 1.0;
+        v = d >= 0.5 && d < 0.995 ? d : 1.0;
+    }
+    return v;
+}
+
+static int covers_screen(void *conn, uint32_t win, uint32_t w, uint32_t h)
+{
+    xcb_get_geometry_reply_t *r = X.get_geometry_reply(conn, X.get_geometry(conn, win), 0);
+    if (!r)
+        return 0;
+    uint32_t root = r->root;
+    free(r);
+    r = X.get_geometry_reply(conn, X.get_geometry(conn, root), 0);
+    if (!r)
+        return 0;
+    int full = w >= r->width && h >= r->height;
+    free(r);
+    return full;
+}
+
 static void window_extents(VkSurfaceKHR surface, void *caps)
 {
     wsi_surface *s = find(surface);
@@ -361,6 +397,18 @@ static void window_extents(VkSurfaceKHR surface, void *caps)
     if (s->shown != s->window && window_size(s->conn, s->window, &w, &h)) {
         c[2] = w;
         c[3] = h;
+    }
+    double scale = render_scale();
+    if (scale < 1.0 && c[2] >= 1024 && covers_screen(s->conn, s->shown, c[2], c[3])) {
+        uint32_t sw = (uint32_t)(c[2] * scale + 0.5) & ~1u, sh = (uint32_t)(c[3] * scale + 0.5) & ~1u;
+        static uint32_t said_w, said_h;
+        if ((sw != said_w || sh != said_h) && getenv("LXRT_VK_DEBUG")) {
+            dprintf(2, "[shim] render scale %.2f: %ux%u for a %ux%u window\n", scale, sw, sh, c[2], c[3]);
+            said_w = sw;
+            said_h = sh;
+        }
+        c[2] = sw;
+        c[3] = sh;
     }
     c[4] = c[6] = c[2];
     c[5] = c[7] = c[3];

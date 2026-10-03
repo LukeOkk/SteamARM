@@ -186,8 +186,9 @@ struct LauncherSettings: Codable, Equatable {
     var anisotropy: Int = 0
     var antialiasing: Int = 0          // MSAA samples DXVK forces on D3D9 swapchains; 0 = the game's
     var resolutionScaling: Bool = false // Wine's display-mode emulation in the game prefixes
-    var scalingFilter: String = "linear" // a picture smaller than its window: linear, nearest, fsr, metalfx (shim/scaler.c)
+    var scalingFilter: String = "auto"   // a picture smaller than its window: auto, linear, nearest, fsr, metalfx (shim/scaler.c)
     var fsrSharpness: Int = 90         // FSR's RCAS strength, percent
+    var renderScale: String = "auto"   // games covering the screen render at this scale, the shim enlarges: auto (this Mac's chip), 1.0, 0.77, 0.67, 0.59, 0.5
     var steamUIAcceleration: Bool = true // ARM64 Steam's webhelper on ANGLE/Vulkan (LXRT_EXEC_ARGS)
     var frameRateLimit: Int = 0
     var dxvkHud: String = "off"
@@ -239,8 +240,9 @@ struct LauncherSettings: Codable, Equatable {
         anisotropy = try c.decodeIfPresent(Int.self, forKey: .anisotropy) ?? 0
         antialiasing = try c.decodeIfPresent(Int.self, forKey: .antialiasing) ?? 0
         resolutionScaling = try c.decodeIfPresent(Bool.self, forKey: .resolutionScaling) ?? false
-        scalingFilter = try c.decodeIfPresent(String.self, forKey: .scalingFilter) ?? "linear"
+        scalingFilter = try c.decodeIfPresent(String.self, forKey: .scalingFilter) ?? "auto"
         fsrSharpness = try c.decodeIfPresent(Int.self, forKey: .fsrSharpness) ?? 90
+        renderScale = try c.decodeIfPresent(String.self, forKey: .renderScale) ?? "auto"
         steamUIAcceleration = try c.decodeIfPresent(Bool.self, forKey: .steamUIAcceleration) ?? true
         frameRateLimit = try c.decodeIfPresent(Int.self, forKey: .frameRateLimit) ?? 0
         dxvkHud = try c.decodeIfPresent(String.self, forKey: .dxvkHud) ?? "off"

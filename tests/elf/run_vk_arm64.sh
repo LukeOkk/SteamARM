@@ -162,6 +162,35 @@ else
         run_vsonly "kosmickrisp steamarm cache" cache STEAMARM_VK_ICD=kosmickrisp STEAMARM_KK_DIR="$OWN"
     fi
 fi
+# vk_metalfx: MetalFX between two Vulkan submissions, as the shim's scaler
+# encodes it (shim/scaler.c, runtime/metalfx.m), without a window: the
+# driver's Metal objects (VK_EXT_metal_objects; SteamARM's KosmicKrisp from
+# patches/kosmickrisp-10 on), Apple's spatial scaler on the driver's queue
+# (MoltenVK) or the runtime's own (KosmicKrisp), the pixels read back.
+# Homebrew's KosmicKrisp has no such extension: the program says skip.
+exe8="$ROOT/tmp/vktest/vk_metalfx"
+if ! "$CLANG" --target=aarch64-redhat-linux-gnu --sysroot="$STAGE" --gcc-install-dir="$GCCDIR" -fuse-ld=lld \
+        --ld-path=/opt/homebrew/opt/lld/bin/ld.lld -w -O2 -I/opt/homebrew/include -Iruntime/include -o "$exe8" \
+        tests/elf/vk_metalfx.c "$ROOT/usr/lib/libvulkan.so.1"; then
+    echo "  FAIL  vk_metalfx (build)"; fail=$((fail + 1))
+else
+    run_metalfx() { # label, then environment assignments
+        local label=$1; shift
+        local log="$ROOT/tmp/vktest/vk_metalfx_${label// /_}.log"
+        env OBJC_DISABLE_INITIALIZE_FORK_SAFETY=YES LXRT_ROOT="$ROOT" "$@" \
+            perl -e 'alarm 60; exec @ARGV' ./build/lxrun /tmp/vktest/vk_metalfx > "$log" 2>&1
+        if [ "$(grep -E '^== vk_metalfx' "$log" | tail -1)" = "== vk_metalfx: ok" ]; then
+            printf '  ok    vk_metalfx %s (%s)\n' "$label" "$(grep -o 'MetalFX [0-9.]* ms' "$log")"; pass=$((pass + 1))
+        else
+            printf '  FAIL  vk_metalfx %s: %s (log %s)\n' "$label" "$(grep -B1 '^== vk_metalfx' "$log" | head -1)" "$log"
+            fail=$((fail + 1))
+        fi
+    }
+    run_metalfx moltenvk STEAMARM_VK_ICD=moltenvk
+    if [ -f "$OWN/libvulkan_kosmickrisp.dylib" ]; then
+        run_metalfx "kosmickrisp steamarm" STEAMARM_VK_ICD=kosmickrisp STEAMARM_KK_DIR="$OWN"
+    fi
+fi
 # vk_x11_present: a swapchain on an X window of SteamARM's X server. With
 # IMMEDIATE the shim's mailbox (shim/mailbox.c) must not wait for the display
 # (the layer is shown by another process and takes one drawable per refresh:

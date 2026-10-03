@@ -18,6 +18,10 @@
 //                            encodes it (runtime/metalfx.m) between two of
 //                            the shim's submissions, ordered by a timeline
 //                            semaphore's MTLSharedEvent (VK_EXT_metal_objects)
+//                  auto      metalfx where the driver exports its Metal
+//                            objects (MoltenVK; SteamARM's KosmicKrisp with
+//                            patches/kosmickrisp-10-metal-objects.patch),
+//                            fsr where it does not
 //   LXRT_VK_FSR_SHARPNESS=0..100
 //                            RCAS strength in percent (default 90): 100 is
 //                            FSR's maximum (0 stops), 0 is 2 stops softer
@@ -25,12 +29,23 @@
 //                            pixels the pass wrote at the window's centre and
 //                            corner (tests/win/run.sh modeset_*)
 //
-// MoltenVK only, and only to enlarge (a picture larger than its window keeps
-// MoltenVK's stretch). Index i of vkAcquireNextImageKHR is the swapchain's
-// and the game's at once: virtual[i] is free again whenever image i is, since
-// the pass that reads it ends before image i is presented, and so before it
-// can be acquired again. If anything here fails, the swapchain is created the
+// Only to enlarge (a picture larger than its window keeps MoltenVK's
+// stretch). Index i of vkAcquireNextImageKHR is the swapchain's and the
+// game's at once: virtual[i] is free again whenever image i is, since the
+// pass that reads it ends before image i is presented, and so before it can
+// be acquired again. If anything here fails, the swapchain is created the
 // plain way and MoltenVK stretches it.
+//
+// The swapchain at the window's size is shim/mailbox.c's when the mailbox
+// wants it (IMMEDIATE, MAILBOX, and FIFO: V-Sync): the scaled picture then
+// goes through the same presents as an unscaled one, instead of the driver's
+// own FIFO, which cost a GPU-bound game a third of its rate (Counter-Strike
+// 2: 23.5 against 35 frames a second, benchmarks/stage53). "real" images are
+// then the mailbox's images for the game, and the passes here are submitted
+// under its queue lock (lxrt_inner_vkQueueSubmit). Its acquire hands index i
+// back after its other images without waiting for anything: virtual[i] is
+// then reused in queue order, as the mailbox's own images are, and a pass
+// waits for the fence of the one before on the same image.
 #include <stdint.h>
 #include <stddef.h>
 #include <stdbool.h>
@@ -134,8 +149,19 @@ void lxrt_mvk_vkCmdCopyImage(VkCommandBuffer, VkImage, VkImageLayout, VkImage, V
 void lxrt_mvk_vkCmdClearColorImage(VkCommandBuffer, VkImage, VkImageLayout, const VkClearColorValue *, uint32_t,
                                    const VkImageSubresourceRange *);
 void lxrt_mvk_vkExportMetalObjectsEXT(VkDevice, VkExportMetalObjectsInfoEXT *);
+VkResult lxrt_mvk_vkEnumerateDeviceExtensionProperties(VkPhysicalDevice, const char *, uint32_t *,
+                                                       VkExtensionProperties *);
+// shim/mailbox.c: the queue's submissions, which take turns with the
+// mailbox's acquire batches while a mailbox exists, and the mailbox under a
+// scaled swapchain.
+VkResult lxrt_inner_vkQueueSubmit(VkQueue, uint32_t, const VkSubmitInfo *, VkFence);
+int lxrt_mailbox_wanted(const VkSwapchainCreateInfoKHR *);
+VkResult lxrt_mailbox_create(VkDevice, VkPhysicalDevice, const VkSwapchainCreateInfoKHR *,
+                             const VkAllocationCallbacks *, VkSwapchainKHR *);
+VkResult lxrt_mailbox_images(VkSwapchainKHR sc, uint32_t *count, VkImage *images);
+int lxrt_mailbox_destroy(VkDevice dev, VkSwapchainKHR sc, const VkAllocationCallbacks *alloc);
 
-enum { F_LINEAR, F_NEAREST, F_FSR, F_METALFX, F_LINEAR_BLIT };
+enum { F_LINEAR, F_NEAREST, F_FSR, F_METALFX, F_LINEAR_BLIT, F_AUTO };
 extern const char *lxrt_vk_driver;   // vulkan_shim.c: the driver in use
 
 // runtime/metalfx.m
@@ -195,6 +221,7 @@ typedef struct {
     void *event, *mfx, *mtl_queue;
     VkQueue mtl_q;
     int mfx_broken;
+    int mb;             // sc is a mailbox's (shim/mailbox.c): real[] are its images for the game
 } scaled;
 
 static scaled *g_sc[16];
@@ -224,7 +251,40 @@ static int filter_wanted(void)
         return F_FSR;
     if (s_eq(e, "metalfx"))
         return F_METALFX;
+    if (s_eq(e, "auto"))
+        return F_AUTO;
     return F_LINEAR;
+}
+
+// 1 if the device lists VK_EXT_metal_objects: MoltenVK, and SteamARM's
+// KosmicKrisp from patch 10 on. Asked of the driver, not of the shim's
+// table: an unpatched KosmicKrisp answers vkExportMetalObjectsEXT with a
+// trampoline into an empty slot, which faulted (MEASURED). Once per device.
+static struct { VkPhysicalDevice pd; int has; } g_mo[4];
+
+static int has_metal_objects(VkPhysicalDevice pd)
+{
+    if (!pd)
+        return 0;
+    for (int i = 0; i < 4; i++)
+        if (g_mo[i].pd == pd)
+            return g_mo[i].has;
+    int has = 0;
+    uint32_t n = 0;
+    if (lxrt_mvk_vkEnumerateDeviceExtensionProperties(pd, 0, &n, 0) >= 0 && n) {
+        VkExtensionProperties *p = calloc(n, sizeof *p);
+        if (p && lxrt_mvk_vkEnumerateDeviceExtensionProperties(pd, 0, &n, p) >= 0)
+            for (uint32_t i = 0; i < n && !has; i++)
+                has = s_eq(p[i].extensionName, VK_EXT_METAL_OBJECTS_EXTENSION_NAME);
+        free(p);
+    }
+    for (int i = 0; i < 4; i++)
+        if (!g_mo[i].pd) {
+            g_mo[i].has = has;
+            g_mo[i].pd = pd;
+            break;
+        }
+    return has;
 }
 
 static int sharpness_percent(void)
@@ -647,10 +707,11 @@ static void *export_texture(scaled *s, VkImage img)
 static VkResult setup_mfx(scaled *s, VkPhysicalDevice pd)
 {
     VkDevice d = s->dev;
-    // MoltenVK's exported entry point: vkGetDeviceProcAddr answers NULL for
-    // it unless the game enabled VK_EXT_metal_objects (none does), and
-    // MoltenVK's export does not depend on that (MEASURED: setup failed with
-    // -7 through vkGetDeviceProcAddr).
+    // The driver's entry point: vkGetDeviceProcAddr answers NULL for it
+    // unless the game enabled VK_EXT_metal_objects (none does), and neither
+    // MoltenVK's export nor KosmicKrisp's (patch 10) depends on that
+    // (MEASURED on MoltenVK: setup failed with -7 through
+    // vkGetDeviceProcAddr). Only called when the device lists the extension.
     s->export_fn = lxrt_mvk_vkExportMetalObjectsEXT;
     VkImageCreateInfo ii = {
         .sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO,
@@ -706,11 +767,17 @@ VkResult lxrt_scaler_create(VkDevice dev, VkPhysicalDevice pd, const VkSwapchain
 {
     int f = filter_wanted();
     // MoltenVK stretches by itself (present.c); another driver gets a
-    // bilinear blit here. MetalFX needs MoltenVK's Metal objects.
+    // bilinear blit here. MetalFX needs the driver's Metal objects
+    // (VK_EXT_metal_objects): MoltenVK's, or KosmicKrisp's from patch 10 on.
+    // An unpatched KosmicKrisp has no vkExportMetalObjectsEXT: asking for it
+    // there faulted (MEASURED), so it gets FSR (auto) or the blit (metalfx).
     int mvk = s_eq(lxrt_vk_driver, "moltenvk");
-    // (KosmicKrisp has no vkExportMetalObjectsEXT: asking MoltenVK's thunk for
-    // it there faulted, MEASURED.)
-    if (!mvk && (f == F_LINEAR || f == F_METALFX))
+    int mo = (f == F_METALFX || f == F_AUTO) && has_metal_objects(pd);
+    if (f == F_AUTO)
+        f = mo ? F_METALFX : F_FSR;
+    if (f == F_METALFX && !mo)
+        f = mvk ? F_LINEAR : F_LINEAR_BLIT;
+    if (!mvk && f == F_LINEAR)
         f = F_LINEAR_BLIT;
     if (f == F_LINEAR || ci->imageArrayLayers != 1 || ci->imageExtent.width > window.width ||
         ci->imageExtent.height > window.height || !ci->imageExtent.width || !ci->imageExtent.height)
@@ -730,13 +797,18 @@ VkResult lxrt_scaler_create(VkDevice dev, VkPhysicalDevice pd, const VkSwapchain
     c.imageUsage |= VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
     if (probe_wanted())
         c.imageUsage |= VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
-    VkResult r = lxrt_mvk_vkCreateSwapchainKHR(dev, &c, alloc, &s->sc);
+    VkResult r = VK_ERROR_FEATURE_NOT_PRESENT;
+    if (lxrt_mailbox_wanted(&c))
+        r = lxrt_mailbox_create(dev, pd, &c, alloc, &s->sc);
+    s->mb = r == VK_SUCCESS;
+    if (!s->mb)
+        r = lxrt_mvk_vkCreateSwapchainKHR(dev, &c, alloc, &s->sc);
     if (r) {
         free(s);
         return r;
     }
     uint32_t n = MAXI;
-    r = lxrt_mvk_vkGetSwapchainImagesKHR(dev, s->sc, &n, s->real);
+    r = s->mb ? lxrt_mailbox_images(s->sc, &n, s->real) : lxrt_mvk_vkGetSwapchainImagesKHR(dev, s->sc, &n, s->real);
     if (r != VK_SUCCESS)
         goto fail;
     s->n = n;
@@ -782,22 +854,22 @@ VkResult lxrt_scaler_create(VkDevice dev, VkPhysicalDevice pd, const VkSwapchain
         goto fail;
     }
     if (debug())
-        dprintf(2, "[shim] scaler %s %ux%u -> %ux%u, %u images, sharpness %d%%\n", filter_name(f), s->in.width,
-                s->in.height, s->out.width, s->out.height, n, f == F_FSR ? sharpness_percent() : 0);
+        dprintf(2, "[shim] scaler %s %ux%u -> %ux%u, %u images, sharpness %d%%%s\n", filter_name(f), s->in.width,
+                s->in.height, s->out.width, s->out.height, n, f == F_FSR ? sharpness_percent() : 0,
+                s->mb ? ", through the mailbox" : "");
     *out = s->sc;
     return VK_SUCCESS;
 fail:
     if (debug())
         dprintf(2, "[shim] scaler %s: setup failed (%d), MoltenVK stretches instead\n", filter_name(f), (int)r);
-    lxrt_mvk_vkDestroySwapchainKHR(dev, s->sc, alloc);
+    if (!s->mb || !lxrt_mailbox_destroy(dev, s->sc, alloc))
+        lxrt_mvk_vkDestroySwapchainKHR(dev, s->sc, alloc);
     destroy(s);
     return r ? r : VK_ERROR_INITIALIZATION_FAILED;
 }
 
 // shim/mailbox.c: swapchains that do not wait for the display.
 int lxrt_mailbox_is(VkSwapchainKHR sc);
-VkResult lxrt_mailbox_images(VkSwapchainKHR sc, uint32_t *count, VkImage *images);
-int lxrt_mailbox_destroy(VkDevice dev, VkSwapchainKHR sc, const VkAllocationCallbacks *alloc);
 VkResult lxrt_mailbox_acquire(VkSwapchainKHR sc, VkSemaphore sem, VkFence fence, uint32_t *index);
 VkResult lxrt_mailbox_present(VkQueue q, VkSwapchainKHR sc, uint32_t i, const VkSemaphore *waits, uint32_t nwaits,
                               int *shown);
@@ -805,11 +877,13 @@ void lxrt_mailbox_stats(unsigned *shown, unsigned *dropped, unsigned *acq_avg_us
 
 VkResult lxrt_inner_vkGetSwapchainImagesKHR(VkDevice dev, VkSwapchainKHR sc, uint32_t *count, VkImage *images)
 {
-    if (lxrt_mailbox_is(sc))
-        return lxrt_mailbox_images(sc, count, images);
+    // A scaled swapchain first: it may be a mailbox's too, whose images
+    // are the scaler's own at the window's size.
     lock();
     scaled *s = find(sc);
     unlock();
+    if (!s && lxrt_mailbox_is(sc))
+        return lxrt_mailbox_images(sc, count, images);
     if (!s)
         return lxrt_mvk_vkGetSwapchainImagesKHR(dev, sc, count, images);
     if (!images) {
@@ -825,16 +899,18 @@ VkResult lxrt_inner_vkGetSwapchainImagesKHR(VkDevice dev, VkSwapchainKHR sc, uin
 
 void lxrt_inner_vkDestroySwapchainKHR(VkDevice dev, VkSwapchainKHR sc, const VkAllocationCallbacks *alloc)
 {
-    if (lxrt_mailbox_destroy(dev, sc, alloc))
-        return;
     lock();
     scaled *s = find(sc);
     for (int i = 0; s && i < 16; i++)
         if (g_sc[i] == s)
             g_sc[i] = 0;
     unlock();
+    // The scaler's passes are waited for first; then the mailbox under it,
+    // if any, goes with the driver's swapchain.
     if (s)
         destroy(s);
+    if (lxrt_mailbox_destroy(dev, sc, alloc))
+        return;
     lxrt_mvk_vkDestroySwapchainKHR(dev, sc, alloc);
 }
 
@@ -1135,11 +1211,14 @@ static VkResult present_mfx(scaled *s, VkQueue q, uint32_t i, const VkSubmitInfo
     a.pNext = &ta;
     a.signalSemaphoreCount = 1;
     a.pSignalSemaphores = &s->tl;
-    VkResult r = lxrt_mvk_vkQueueSubmit(q, 1, &a, 0);
+    VkResult r = lxrt_inner_vkQueueSubmit(q, 1, &a, 0);
     if (r)
         return r;
+    // A driver that exports no MTLCommandQueue (KosmicKrisp: its queue is
+    // an MTL4CommandQueue) leaves mtl_queue 0, and the runtime encodes on a
+    // queue of its own; the shared event orders it either way.
     struct lxrt_mfx_run run = { s->mfx, s->mtl_queue, s->tex_in[i], s->tex_out[i], s->event, in_done, scaled_done };
-    long e = s->mtl_queue ? lxrt_syscall2(LXRT_NR_MFX_ENCODE, (long)(uintptr_t)&run, 0) : -22;
+    long e = lxrt_syscall2(LXRT_NR_MFX_ENCODE, (long)(uintptr_t)&run, 0);
     s->mfx = run.scaler;
     if (e) {
         // The runtime made nothing wait for tlv+1 or signal tlv+2: cbf[i]
@@ -1163,7 +1242,7 @@ static VkResult present_mfx(scaled *s, VkQueue q, uint32_t i, const VkSubmitInfo
         .pSignalSemaphores = &s->done[i],
     };
     s->tlv = scaled_done;
-    return lxrt_mvk_vkQueueSubmit(q, 1, &b, s->fence[i]);
+    return lxrt_inner_vkQueueSubmit(q, 1, &b, s->fence[i]);
 }
 
 // LXRT_VK_TIMING=1: how long vkAcquireNextImageKHR and vkQueuePresentKHR
@@ -1284,9 +1363,6 @@ VkResult lxrt_inner_vkQueuePresentKHR(VkQueue q, const VkPresentInfoKHR *pi)
 
 static VkResult present_inner(VkQueue q, const VkPresentInfoKHR *pi)
 {
-    for (uint32_t j = 0; j < pi->swapchainCount; j++)
-        if (lxrt_mailbox_is(pi->pSwapchains[j]))
-            return present_mailboxes(q, pi);
     scaled *ss[16];
     uint32_t k = 0, nsc = pi->swapchainCount < 16 ? pi->swapchainCount : 16;
     lock();
@@ -1294,6 +1370,13 @@ static VkResult present_inner(VkQueue q, const VkPresentInfoKHR *pi)
         if ((ss[j] = find(pi->pSwapchains[j])))
             k++;
     unlock();
+    // Mailboxes with nothing to scale: as they are. A scaled one that is a
+    // mailbox's too is presented through it after its pass (below).
+    int any_mb = 0;
+    for (uint32_t j = 0; j < pi->swapchainCount; j++)
+        any_mb |= lxrt_mailbox_is(pi->pSwapchains[j]);
+    if (any_mb && !k)
+        return present_mailboxes(q, pi);
     if (!k && probe_wanted()) {
         // A swapchain the scaler leaves alone (MoltenVK's stretch, Proton's
         // own scaling): its image read once, between the game's semaphores
@@ -1369,7 +1452,7 @@ static VkResult present_inner(VkQueue q, const VkPresentInfoKHR *pi)
                 break;
             goto submitted;
         }
-        if ((r = lxrt_mvk_vkQueueSubmit(q, 1, &si, s->fence[i])))
+        if ((r = lxrt_inner_vkQueueSubmit(q, 1, &si, s->fence[i])))
             break;
     submitted:
         s->pending[i] = 1;
@@ -1388,5 +1471,5 @@ static VkResult present_inner(VkQueue q, const VkPresentInfoKHR *pi)
     // the first pass took them all) stay out; the passes' take their place.
     p.waitSemaphoreCount = nwait;
     p.pWaitSemaphores = waits;
-    return lxrt_mvk_vkQueuePresentKHR(q, &p);
+    return any_mb ? present_mailboxes(q, &p) : lxrt_mvk_vkQueuePresentKHR(q, &p);
 }

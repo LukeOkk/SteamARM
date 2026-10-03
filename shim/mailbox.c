@@ -33,8 +33,9 @@
 // and lost a third of its rate (Counter-Strike 2: 23.5 against 33 frames a
 // second; MEASURED, benchmarks/stage53).
 // LXRT_VK_MAILBOX=0 leaves every swapchain to the driver; =immediate only
-// takes IMMEDIATE and MAILBOX ones (as before stage 53). Those the scaler
-// takes (a picture smaller than its window) are not touched.
+// takes IMMEDIATE and MAILBOX ones (as before stage 53). A picture smaller
+// than its window: shim/scaler.c makes its window-sized swapchain one of
+// these, and its pass draws into the images here before each present.
 // LXRT_VK_DEBUG=1 reports frames shown and dropped.
 // LXRT_VK_PROBE=1 reads back one shown frame in every 120 and prints the
 // mean colour of eight zones of it (4 x 2): what the game drew, without a

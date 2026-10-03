@@ -1554,11 +1554,47 @@ enum AndroidApps {
     }
 }
 
+/// Settings "Escala de render": a game whose window covers the screen renders at
+/// this fraction of it and the Vulkan shim enlarges the picture with the
+/// "Filtro de escalado" (MetalFX on KosmicKrisp and MoltenVK): what a game's
+/// own FSR does to its 3D scene, for the whole picture. scripts/settings-env.py
+/// turns "auto" into this Mac's recommendation (upscaling_policy) and the game
+/// tool passes it to the game only (LXRT_VK_RENDER_SCALE, shim/wsi.c).
+enum RenderScaleChoice {
+    static let options: [(String, String)] = [
+        ("auto", "Automático (recomendada para este Mac)"),
+        ("1.0", "100 % (nativa)"),
+        ("0.77", "77 % (ultra calidad)"),
+        ("0.67", "67 % (calidad)"),
+        ("0.59", "59 % (equilibrado)"),
+        ("0.5", "50 % (rendimiento)"),
+    ]
+
+    static func label(_ value: String) -> String {
+        options.first { $0.0 == value }?.1 ?? "Automático (recomendada para este Mac)"
+    }
+
+    static func note(_ value: String) -> String {
+        let scope = " Sólo para juegos Vulkan o Direct3D (DXVK, VKD3D) a pantalla completa (con o sin bordes); la interfaz de Steam y las ventanas más pequeñas quedan a tamaño real. Desactiva el FSR del propio juego para no escalar dos veces."
+        if value == "1.0" {
+            return "Los juegos dibujan a la resolución de la pantalla." + scope
+        }
+        if value == "auto" {
+            return "El juego dibuja a la escala que el chip de este Mac puede mover (núcleos de GPU y generación) y se agranda a la pantalla con el filtro de abajo: MetalFX espacial de Apple en KosmicKrisp y MoltenVK." + scope
+        }
+        return "El juego dibuja a esa fracción de la pantalla por eje y se agranda con el filtro de abajo." + scope
+    }
+}
+
 /// Settings "Filtro de escalado": how a game's picture smaller than its window
 /// ("Escala de resolución") is enlarged. scripts/settings-env.py passes it to
-/// the Vulkan shim as LXRT_VK_SCALER (shim/scaler.c).
+/// the Vulkan shim as LXRT_VK_SCALER (shim/scaler.c). "auto", the default:
+/// MetalFX where the driver exports its Metal objects, FSR 1.0 where not,
+/// and the render scale recommended for this Mac's chip
+/// (settings-env.py upscaling_policy, STEAMARM_RENDER_SIZE).
 enum ScalingFilterChoice {
     static let options: [(String, String)] = [
+        ("auto", "Automático (recomendado)"),
         ("linear", "Bilineal"),
         ("fsr", "AMD FidelityFX Super Resolution 1.0"),
         ("metalfx", "Apple MetalFX (espacial)"),
@@ -1566,12 +1602,14 @@ enum ScalingFilterChoice {
     ]
 
     static func label(_ value: String) -> String {
-        options.first { $0.0 == value }?.1 ?? "Bilineal"
+        options.first { $0.0 == value }?.1 ?? "Automático (recomendado)"
     }
 
     static func note(_ value: String) -> String {
         let scope = " Actúa cuando un juego Vulkan o Direct3D (DXVK, VKD3D) dibuja más pequeño que su ventana; no en OpenGL (WineD3D)."
         switch value {
+        case "auto":
+            return "MetalFX espacial de Apple con KosmicKrisp (parche 10) o MoltenVK; FSR 1.0 si el driver no lo permite. Actúa con la Escala de render de arriba o cuando el juego dibuja más pequeño que su ventana. MetalFX temporal no es posible al presentar: le faltan la profundidad y los vectores de movimiento del juego." + scope
         case "fsr":
             return "FSR 1.0 de AMD: agranda respetando los bordes (EASU) y afila (RCAS); la nitidez va de suave (0 %) al máximo de FSR (100 %)." + scope
         case "metalfx":

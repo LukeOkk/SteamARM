@@ -1,0 +1,164 @@
+diff -ruN a/src/kosmickrisp/vulkan/kk_metal_objects.c b/src/kosmickrisp/vulkan/kk_metal_objects.c
+--- a/src/kosmickrisp/vulkan/kk_metal_objects.c
++++ b/src/kosmickrisp/vulkan/kk_metal_objects.c
+@@ -0,0 +1,135 @@
++/*
++ * Copyright 2026 SteamARM contributors
++ * SPDX-License-Identifier: MIT
++ */
++
++/* VK_EXT_metal_objects: the Metal objects behind Vulkan ones, for a layer
++ * that encodes Metal work of its own between two of the application's
++ * submissions (SteamARM's Vulkan shim: MetalFX upscaling at present time).
++ *
++ * What is exported, without a retain (the extension's rule: the Vulkan
++ * object owns it):
++ *   - the MTLDevice;
++ *   - an image's (or an image view's) MTLTexture, per plane;
++ *   - a device memory's MTLBuffer (the buffer that aliases its MTLHeap);
++ *   - a timeline semaphore's MTLSharedEvent (kk_sync.c: every timeline is
++ *     one; binary semaphores are emulated on top of one and are not
++ *     exported, since their values are the emulation's).
++ * Not exported (left NULL): the command queue, which is an MTL4CommandQueue
++ * and not the id<MTLCommandQueue> the extension promises -- a caller makes a
++ * queue of its own on the device and orders it with the shared event --
++ * IOSurfaces, and VkEvents.
++ */
++
++#include "kk_buffer.h"
++#include "kk_device.h"
++#include "kk_device_memory.h"
++#include "kk_entrypoints.h"
++#include "kk_image.h"
++#include "kk_image_view.h"
++#include "kk_sync.h"
++
++#include "vk_semaphore.h"
++#include "vk_util.h"
++
++#include "util/log.h"
++
++#ifdef VK_USE_PLATFORM_METAL_EXT
++
++static uint8_t
++plane_of(VkImageAspectFlagBits plane)
++{
++   switch (plane) {
++   case VK_IMAGE_ASPECT_PLANE_1_BIT:
++      return 1;
++   case VK_IMAGE_ASPECT_PLANE_2_BIT:
++      return 2;
++   default:
++      return 0;
++   }
++}
++
++static void *
++texture_of(const VkExportMetalTextureInfoEXT *info)
++{
++   uint8_t plane = plane_of(info->plane);
++   if (info->image != VK_NULL_HANDLE) {
++      VK_FROM_HANDLE(kk_image, image, info->image);
++      return plane < image->plane_count ? image->planes[plane].mtl_handle
++                                        : NULL;
++   }
++   if (info->imageView != VK_NULL_HANDLE) {
++      VK_FROM_HANDLE(kk_image_view, view, info->imageView);
++      if (plane >= view->plane_count)
++         return NULL;
++      return view->planes[plane].mtl_handle_sampled
++                ? view->planes[plane].mtl_handle_sampled
++                : view->planes[plane].mtl_handle_render;
++   }
++   return NULL;
++}
++
++static void *
++shared_event_of(VkSemaphore handle)
++{
++   VK_FROM_HANDLE(vk_semaphore, semaphore, handle);
++   if (semaphore == NULL || semaphore->type != VK_SEMAPHORE_TYPE_TIMELINE)
++      return NULL;
++   struct vk_sync *sync = vk_semaphore_get_active_sync(semaphore);
++   if (sync->type != &kk_sync_type)
++      return NULL;
++   return container_of(sync, struct kk_sync_timeline, base)->mtl_handle;
++}
++
++VKAPI_ATTR void VKAPI_CALL
++kk_ExportMetalObjectsEXT(VkDevice device,
++                         VkExportMetalObjectsInfoEXT *pMetalObjectsInfo)
++{
++   VK_FROM_HANDLE(kk_device, dev, device);
++
++   /* pNext is const in the header, yet the chain is the output. */
++   vk_foreach_struct(ext, (void *)pMetalObjectsInfo->pNext) {
++      switch (ext->sType) {
++      case VK_STRUCTURE_TYPE_EXPORT_METAL_DEVICE_INFO_EXT: {
++         VkExportMetalDeviceInfoEXT *info = (void *)ext;
++         info->mtlDevice = (MTLDevice_id)dev->mtl_handle;
++         break;
++      }
++      case VK_STRUCTURE_TYPE_EXPORT_METAL_COMMAND_QUEUE_INFO_EXT: {
++         VkExportMetalCommandQueueInfoEXT *info = (void *)ext;
++         info->mtlCommandQueue = NULL;
++         break;
++      }
++      case VK_STRUCTURE_TYPE_EXPORT_METAL_BUFFER_INFO_EXT: {
++         VkExportMetalBufferInfoEXT *info = (void *)ext;
++         VK_FROM_HANDLE(kk_device_memory, mem, info->memory);
++         info->mtlBuffer =
++            mem && mem->bo ? (MTLBuffer_id)mem->bo->map : NULL;
++         break;
++      }
++      case VK_STRUCTURE_TYPE_EXPORT_METAL_TEXTURE_INFO_EXT: {
++         VkExportMetalTextureInfoEXT *info = (void *)ext;
++         info->mtlTexture = (MTLTexture_id)texture_of(info);
++         break;
++      }
++      case VK_STRUCTURE_TYPE_EXPORT_METAL_IO_SURFACE_INFO_EXT: {
++         VkExportMetalIOSurfaceInfoEXT *info = (void *)ext;
++         info->ioSurface = NULL;
++         break;
++      }
++      case VK_STRUCTURE_TYPE_EXPORT_METAL_SHARED_EVENT_INFO_EXT: {
++         VkExportMetalSharedEventInfoEXT *info = (void *)ext;
++         info->mtlSharedEvent =
++            info->semaphore != VK_NULL_HANDLE
++               ? (MTLSharedEvent_id)shared_event_of(info->semaphore)
++               : NULL;
++         break;
++      }
++      default:
++         vk_debug_ignored_stype(ext->sType);
++         break;
++      }
++   }
++}
++
++#endif /* VK_USE_PLATFORM_METAL_EXT */
+diff -ruN a/src/kosmickrisp/vulkan/kk_physical_device.c b/src/kosmickrisp/vulkan/kk_physical_device.c
+--- a/src/kosmickrisp/vulkan/kk_physical_device.c
++++ b/src/kosmickrisp/vulkan/kk_physical_device.c
+@@ -172,6 +172,10 @@
+       .EXT_image_2d_view_of_3d = true,
+       .EXT_load_store_op_none = true,
+       .EXT_memory_budget = true,
++#ifdef VK_USE_PLATFORM_METAL_EXT
++      /* kk_metal_objects.c: textures, buffers, timeline semaphores. */
++      .EXT_metal_objects = true,
++#endif
+       .EXT_multi_draw = true,
+       .EXT_mutable_descriptor_type = true,
+       .EXT_nested_command_buffer = true,
+diff -ruN a/src/kosmickrisp/vulkan/meson.build b/src/kosmickrisp/vulkan/meson.build
+--- a/src/kosmickrisp/vulkan/meson.build
++++ b/src/kosmickrisp/vulkan/meson.build
+@@ -88,6 +88,7 @@
+   'kk_image.c',
+   'kk_instance.h',
+   'kk_instance.c',
++  'kk_metal_objects.c',
+   'kk_nir_lower_descriptors.c',
+   'kk_nir_lower_multiview.c',
+   'kk_nir_lower_null_images.c',

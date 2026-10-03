@@ -125,6 +125,34 @@ MEASURED, `benchmarks/stage53-fullscreen-layer-order.txt`:
   hidden menu bar. UNKNOWN: Mission Control and Stage Manager with a
   fullscreen layer.
 
+## Upscaling (MetalFX)
+
+A swapchain smaller than the layer it is shown on is enlarged by the
+shim's scaler (`shim/scaler.c`, `LXRT_VK_SCALER`; Settings "Filtro de
+escalado"). AUTO, the default, is Apple's MetalFX spatial scaler where the
+driver exports its Metal objects (`VK_EXT_metal_objects`: MoltenVK, and
+SteamARM's KosmicKrisp from `patches/kosmickrisp-10-metal-objects.patch`
+on) and FSR 1.0 where it does not. The runtime encodes MetalFX between two
+of the shim's submissions, ordered by a timeline semaphore's
+`MTLSharedEvent`, on MoltenVK's queue or, with KosmicKrisp (whose queue is
+an `MTL4CommandQueue`), on a queue of its own (`runtime/metalfx.m`).
+`tests/elf/vk_metalfx.c` (no window): 960x540 to 1920x1080, pixels right on
+both drivers, 0.63-0.77 ms per frame for the whole chain against
+0.17-0.25 ms for a bilinear blit (MEASURED on the M4 while another
+program used the GPU). MetalFX temporal is not offered: it needs the 3D
+scene's depth, motion vectors and camera jitter, which a picture handed to
+`vkQueuePresentKHR` (the interface already drawn on it) does not carry.
+
+What size to render at depends on the chip: `scripts/settings-env.py
+--upscaling` prints the recommendation (FSR 1.0's scales, from the GPU's
+core count and generation and the display's size; the M4 with 10 GPU cores
+at 1920x1080: 0.67, 1280x720), and AUTO exports it as
+`STEAMARM_RENDER_SCALE` and `STEAMARM_RENDER_SIZE`. The scaler only acts
+when the game's swapchain is smaller than its layer: UNKNOWN whether
+Counter-Strike 2, whose fullscreen mode request for another size is now
+refused (above), then keeps its swapchain at the chosen resolution;
+`LXRT_VK_DEBUG=1` prints `[shim] scaler metalfx WxH -> WxH` when it does.
+
 ## Pointer confinement (mouse-look)
 
 `patches/xquartz-pointer-confine.patch`, MEASURED 2026-10-02 (stage 55):
@@ -201,7 +229,10 @@ image into it if one is ready and drops the frame if not (no tearing).
 `vk_x11_present` with IMMEDIATE on KosmicKrisp: 0.33 ms per frame instead
 of 6.06 (MEASURED, `benchmarks/stage52-mailbox-present.txt`;
 `tests/elf/run_vk_arm64.sh`). `LXRT_VK_MAILBOX=0` leaves such swapchains to
-the driver; FIFO swapchains and scaled ones are not touched.
+the driver. A scaled swapchain (a game smaller than its window,
+`shim/scaler.c`) presents through the mailbox too: its window-sized
+swapchain is the mailbox's, and the scaling pass draws into the mailbox's
+images before each present (before, it kept the driver's own FIFO).
 
 A FIFO swapchain of the game's (V-Sync on) goes through the mailbox too
 since stage 53, with no frame ever dropped: the game waits for a driver

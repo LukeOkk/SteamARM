@@ -378,6 +378,9 @@ struct SettingsView: View {
                 Toggle("Escala de resolución (experimental)", isOn: $draft.resolutionScaling)
                 Text("Los juegos ofrecen resoluciones menores que la de la pantalla; al elegir una dentro del juego, se dibuja a ese tamaño (más rápido) y se agranda a toda la pantalla con el filtro de abajo, conservando su proporción. Se aplica a los prefijos de los juegos al abrir Steam o una app, con ningún juego abierto; un juego nuevo, desde su segundo arranque.")
                     .font(.caption).foregroundStyle(.secondary)
+                choice("Escala de render", $draft.renderScale, RenderScaleChoice.options)
+                Text(RenderScaleChoice.note(draft.renderScale))
+                    .font(.caption).foregroundStyle(.secondary)
                 choice("Filtro de escalado", $draft.scalingFilter, ScalingFilterChoice.options)
                 if draft.scalingFilter == "fsr" {
                     LabeledContent("Nitidez FSR") {

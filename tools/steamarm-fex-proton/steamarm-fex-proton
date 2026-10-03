@@ -204,6 +204,13 @@ if [ "$linux" = 1 ]; then
 else
     export HOME="$X86_HOME"
 fi
+# The render scale (scripts/settings-env.py, launcher "Escala de render"):
+# for the game only, not for Steam's own windows; the Vulkan shim applies it
+# to a game window that covers the screen and enlarges the picture with the
+# scaling filter (MetalFX where the driver can; shim/wsi.c render_scale).
+if [ -n "${STEAMARM_RENDER_SCALE:-}" ] && [ -z "${LXRT_VK_RENDER_SCALE:-}" ]; then
+    export LXRT_VK_RENDER_SCALE="$STEAMARM_RENDER_SCALE"
+fi
 export FEX_GUESTBASE=1 FEX_SMCCHECKS="${FEX_SMCCHECKS:-mtrack}" FEX_SILENTLOG=0 FEX_OUTPUTLOG=stderr
 export OBJC_DISABLE_INITIALIZE_FORK_SAFETY=YES
 export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
