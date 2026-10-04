@@ -129,17 +129,42 @@ void lxrt_spirv_dump_stages(const void *stages, uint32_t count)
                                 ((const VkShaderModuleCreateInfo *)b)->codeSize);
 }
 
+// shim/spirv_dref.c: shadow compares on their own variable (MoltenVK only)
+uint32_t *lxrt_spirv_split_dref(const uint32_t *code, size_t size, size_t *out_size);
+int lxrt_spirv_split_dref_wanted(void);
+extern const char *lxrt_vk_driver;   // vulkan_shim.c (generated): the driver in use
+
+static int on_moltenvk(void)
+{
+    static int on = -1;
+    if (on < 0) {
+        const char *a = lxrt_vk_driver, *b = "moltenvk";
+        while (*a && *a == *b) a++, b++;
+        on = !*a && !*b;
+    }
+    return on;
+}
+
 VkResult lxrt_inner_vkCreateShaderModule(VkDevice dev, const VkShaderModuleCreateInfo *ci,
                                          const VkAllocationCallbacks *alloc, VkShaderModule *out)
 {
     if (ci)
         lxrt_spirv_dump(ci->pCode, ci->codeSize);
     uint32_t *fixed = ci ? lxrt_spirv_fix_names(ci->pCode, ci->codeSize) : NULL;
-    if (!fixed)
+    VkShaderModuleCreateInfo c = ci ? *ci : (VkShaderModuleCreateInfo){0};
+    if (fixed)
+        c.pCode = fixed;
+    uint32_t *split = NULL;
+    size_t split_size = 0;
+    if (ci && on_moltenvk() && lxrt_spirv_split_dref_wanted() &&
+        (split = lxrt_spirv_split_dref(c.pCode, c.codeSize, &split_size))) {
+        c.pCode = split;
+        c.codeSize = split_size;
+    }
+    if (!fixed && !split)
         return lxrt_mvk_vkCreateShaderModule(dev, ci, alloc, out);
-    VkShaderModuleCreateInfo c = *ci;
-    c.pCode = fixed;
     VkResult r = lxrt_mvk_vkCreateShaderModule(dev, &c, alloc, out);
     free(fixed);
+    free(split);
     return r;
 }
