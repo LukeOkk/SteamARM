@@ -1,0 +1,131 @@
+SteamARM: vertex shaders without fused multiply-adds across statements
+
+Counter-Strike 2 draws foliage and palm trunks in a depth prepass and then
+with depth test EQUAL. Metal's fast math fuses multiplies and adds where
+it sees fit, and two pipelines with the same vertex code (the prepass and
+the colour pass) could round the position differently: wherever they came
+out a rounding apart the pixel was not drawn -- clusters of black on the
+palm trunks, dotted hanging fronds, on de_dust2 (the user's screenshots,
+2026-10-04; MoltenVK shows the same).
+
+Vertex shaders are now compiled with "#pragma METAL fp contract(off)"
+(KK_CONTRACT_OFF=vertex, the default; fragment, all or none to compare).
+MEASURED in the game: the trunks whole at 71-74 fps, as fast as before;
+with the fusion off in fragment shaders too, 62 fps; Metal's safe math,
+60-63; relaxed math with precise functions left the black clusters.
+KK_MATH_MODE (fast, the default; relaxed; safe) and KK_MATH_FUNCTIONS
+(fast, the default; precise) choose Metal's math for the application's
+shaders, for comparisons.
+diff -ruN a/src/kosmickrisp/vulkan/kk_shader.c b/src/kosmickrisp/vulkan/kk_shader.c
+--- a/src/kosmickrisp/vulkan/kk_shader.c	2026-10-04 14:26:39
++++ b/src/kosmickrisp/vulkan/kk_shader.c	2026-10-04 14:26:39
+@@ -838,6 +838,68 @@
+ 
+ static const struct vk_shader_ops kk_shader_ops;
+ 
++/* SteamARM: the Metal math mode of the application's shaders. Fast math
++ * lets the compiler assume no NaN or infinity ever happens; Counter-Strike 2
++ * makes some (a normal of length 0 and the like) that desktop GPUs settle the
++ * IEEE way, and with fast math they came out as single pixels of wrong
++ * colours all over the picture, de_dust2's palms speckled above all (the
++ * user's screenshots, 2026-10-04). Relaxed keeps the fast optimisations but
++ * the IEEE handling of NaN and infinity. KK_MATH_MODE=fast|relaxed|safe. */
++static enum mtl_math_mode
++kk_math_mode(void)
++{
++   static int mode = -1;
++   if (mode < 0) {
++      const char *e = getenv("KK_MATH_MODE");
++      mode = e && !strcmp(e, "fast") ? MTL_MATH_MODE_FAST
++           : e && !strcmp(e, "safe") ? MTL_MATH_MODE_SAFE
++           : e && !strcmp(e, "relaxed") ? MTL_MATH_MODE_RELAXED
++           : MTL_MATH_MODE_FAST;
++   }
++   return (enum mtl_math_mode)mode;
++}
++
++/* Vertex shaders compiled without fused multiply-adds across statements.
++ * Fast math fuses them where it sees fit, differently in two pipelines with
++ * the same vertex code: Counter-Strike 2 draws its foliage and palm trunks
++ * in a depth prepass and then with depth test EQUAL, and wherever the two
++ * positions came out a rounding apart the pixel was not drawn -- clusters of
++ * black on the trunks, dotted fronds (the user's screenshots, 2026-10-04).
++ * Without the fusion in vertex shaders the trunks were whole, at the same
++ * frame rate (72-74 fps; without it in fragment shaders as well, 62).
++ * KK_CONTRACT_OFF=vertex (the default)|fragment|all|none. The source to
++ * compile, to be freed when it is not the one given. */
++static const char *
++kk_msl_contract(const char *code, bool fragment)
++{
++   const char *e = getenv("KK_CONTRACT_OFF");
++   if (!e || !e[0])
++      e = "vertex";
++   if (!(strcmp(e, "all") == 0 || strcmp(e, fragment ? "fragment" : "vertex") == 0))
++      return code;
++   static const char pragma[] = "#pragma METAL fp contract(off)\n";
++   size_t n = strlen(code);
++   char *s = malloc(sizeof(pragma) + n);
++   if (!s)
++      return code;
++   memcpy(s, pragma, sizeof(pragma) - 1);
++   memcpy(s + sizeof(pragma) - 1, code, n + 1);
++   return s;
++}
++
++/* And of its functions (sqrt, pow, exp...): KK_MATH_FUNCTIONS=fast|precise. */
++static enum mtl_math_floating_point_functions
++kk_math_functions(void)
++{
++   static int fns = -1;
++   if (fns < 0) {
++      const char *e = getenv("KK_MATH_FUNCTIONS");
++      fns = e && !strcmp(e, "precise") ? MTL_MATH_FLOATING_POINT_FUNCTIONS_PRECISE
++                                       : MTL_MATH_FLOATING_POINT_FUNCTIONS_FAST;
++   }
++   return (enum mtl_math_floating_point_functions)fns;
++}
++
+ static void
+ kk_shader_destroy(struct vk_device *vk_dev, struct kk_shader *shader,
+                   const VkAllocationCallbacks *pAllocator)
+@@ -1246,8 +1308,8 @@
+                             mtl_compute_pipeline_state **pipe)
+ {
+    mtl_library *library = mtl_new_library(
+-      device->mtl_compiler_handle, data->code, MTL_MATH_MODE_FAST,
+-      MTL_MATH_FLOATING_POINT_FUNCTIONS_FAST);
++      device->mtl_compiler_handle, data->code, kk_math_mode(),
++      kk_math_functions());
+    if (library == NULL)
+       return VK_ERROR_INVALID_SHADER_NV;
+ 
+@@ -1495,9 +1557,12 @@
+ 
+    const struct msl_compile_data *vs_data = &vs->msl_data[vs_stage];
+    int64_t t0 = kk_compile_log() ? os_time_get_nano() : 0;
++   const char *vs_code = kk_msl_contract(vs_data->code, false);
+    mtl_library *vertex_library = mtl_new_library(
+-      device->mtl_compiler_handle, vs_data->code, MTL_MATH_MODE_FAST,
+-      MTL_MATH_FLOATING_POINT_FUNCTIONS_FAST);
++      device->mtl_compiler_handle, vs_code, kk_math_mode(),
++      kk_math_functions());
++   if (vs_code != vs_data->code)
++      free((void *)vs_code);
+    if (vertex_library == NULL)
+       return VK_ERROR_INVALID_SHADER_NV;
+ 
+@@ -1507,9 +1572,12 @@
+ 
+    int64_t t1 = kk_compile_log() ? os_time_get_nano() : 0;
+    const struct msl_compile_data *fs_data = &vs->msl_data[MESA_SHADER_FRAGMENT];
++   const char *fs_code = kk_msl_contract(fs_data->code, true);
+    mtl_library *fragment_library = mtl_new_library(
+-      device->mtl_compiler_handle, fs_data->code, MTL_MATH_MODE_FAST,
+-      MTL_MATH_FLOATING_POINT_FUNCTIONS_FAST);
++      device->mtl_compiler_handle, fs_code, kk_math_mode(),
++      kk_math_functions());
++   if (fs_code != fs_data->code)
++      free((void *)fs_code);
+    if (fragment_library == NULL) {
+       result = VK_ERROR_INVALID_SHADER_NV;
+       goto destroy_vertex;
