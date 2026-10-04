@@ -529,9 +529,21 @@ extern int lxrt_vk_calls_on;
 struct lxrt_ts2 { long tv_sec, tv_nsec; };
 extern int clock_gettime(int, struct lxrt_ts2 *);
 
+int lxrt_pipe_log_on(void);                 // spirv_names.c
+uint64_t lxrt_module_hash(uint64_t module);   // spirv_names.c
+
 static VkResult create_pipelines_counted(VkDevice dev, VkPipelineCache cache, uint32_t n,
                                          const VkGraphicsPipelineCreateInfo *cis, const void *alloc, VkPipeline *out)
 {
+    if (lxrt_pipe_log_on())
+        for (uint32_t i = 0; i < n; i++) {
+            // VkPipelineShaderStageCreateInfo: sType, pNext, flags, stage, module, ...
+            struct stage { int32_t sType; const void *pNext; uint32_t flags, stage; uint64_t module; const char *name; const void *spec; };
+            const struct stage *st = cis[i].pStages;
+            for (uint32_t j = 0; st && j < cis[i].stageCount; j++)
+                if (st[j].stage == 0x10 /* FRAGMENT */)
+                    dprintf(2, "[shim] pipeline fs %016llx\n", (unsigned long long)lxrt_module_hash(st[j].module));
+        }
     if (!lxrt_vk_calls_on)
         return lxrt_mvk_vkCreateGraphicsPipelines(dev, cache, n, cis, alloc, out);
     struct lxrt_ts2 a, b;

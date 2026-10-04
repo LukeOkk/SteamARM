@@ -1,0 +1,320 @@
+SteamARM: Source 2's bilinear upsample done by MetalFX too
+
+Counter-Strike 2's FSR "Calidad ultra" renders at 77 % a side and enlarges
+the picture with a bilinear upsample instead of FSR's EASU, so patch 14
+(which recognises EASU by its constants) never took it: the other FSR
+modes went through MetalFX, this one did not (reported by the user,
+2026-10-04). Found with the shim's pipeline log (LXRT_VK_PIPE_LOG): the
+pipelines made only in that mode use a fragment shader that is a single
+sample of set 1 binding 30 (EASU's input) with the sampler at binding 14,
+stored ("MainPs", 153 words).
+
+Such a shader is marked (kk_shader_info.fsr_bilinear) and its draw is
+replaced by MetalFX's spatial scaler the way patch 14 replaces EASU's,
+under the same conditions (a plain 2D output drawn whole from its origin,
+a combination MetalFX accepts). It has no constants, so the picture is the
+viewport last drawn into level 0 of its input from the origin, which every
+draw notes on its first colour attachment's image (kk_image.fsr_drawn_*);
+only an upscale of a part of the input is replaced (1.05x to 3x a side).
+Measured: "kk: bilinear upsample by MetalFX: picture 1478x831 -> 1920x1080"
+with Counter-Strike 2 at Calidad ultra; the picture is right. The texture
+registry now also keeps the image a sampled view belongs to.
+diff -ruN a/src/kosmickrisp/vulkan/kk_cmd_draw.c b/src/kosmickrisp/vulkan/kk_cmd_draw.c
+--- a/src/kosmickrisp/vulkan/kk_cmd_draw.c	2026-10-04 10:02:18
++++ b/src/kosmickrisp/vulkan/kk_cmd_draw.c	2026-10-04 10:02:18
+@@ -2098,7 +2098,7 @@
+    struct kk_shader *fs = cmd->state.shaders[MESA_SHADER_FRAGMENT];
+    struct kk_rendering_state *render = &cmd->state.gfx.render;
+ 
+-   if (!fs || !fs->info.fsr_easu || !kk_fsr_metalfx_enabled() ||
++   if (!fs || !(fs->info.fsr_easu || fs->info.fsr_bilinear) || !kk_fsr_metalfx_enabled() ||
+        render->color_att_count < 1 || !render->color_att[0].iview ||
+        render->view_mask || render->layer_count > 1 ||
+        cmd->state.cond_render.enabled)
+@@ -2119,13 +2119,38 @@
+        dyn->vp.viewports[0].height != (float)ov->extent.height)
+       return false;
+ 
+-   mtl_texture *in = kk_fsr_easu_input(cmd);
++   struct kk_image *in_image = NULL;
++   mtl_texture *in = kk_fsr_easu_input(cmd, &in_image);
+    mtl_texture *out = oiv->planes[0].mtl_handle_render;
+    uint32_t in_w, in_h;
+-   if (!in || !out ||
+-       !kk_fsr_easu_content(cmd, ov->extent.width, ov->extent.height, &in_w,
+-                            &in_h))
++   if (!in || !out)
+       return false;
++   if (fs->info.fsr_easu) {
++      if (!kk_fsr_easu_content(cmd, ov->extent.width, ov->extent.height, &in_w,
++                               &in_h))
++         return false;
++   } else {
++      /* The bilinear upsample has no constants: the picture is what was
++       * last drawn into its input, from the origin -- only an upscale of a
++       * part of the input (FSR's ratios, 1.05x to 3x a side). */
++      if (!in_image)
++         return false;
++      in_w = in_image->fsr_drawn_w;
++      in_h = in_image->fsr_drawn_h;
++      if (!in_w || !in_h || in_w > in_image->vk.extent.width ||
++          in_h > in_image->vk.extent.height ||
++          (in_w == in_image->vk.extent.width && in_h == in_image->vk.extent.height) ||
++          ov->extent.width * 100 < in_w * 105 || ov->extent.width > in_w * 3 ||
++          ov->extent.height * 100 < in_h * 105 || ov->extent.height > in_h * 3)
++         return false;
++      static uint32_t told_w, told_h;
++      if (in_w != told_w || in_h != told_h) {
++         fprintf(stderr, "kk: bilinear upsample by MetalFX: picture %ux%u -> %ux%u\n", in_w, in_h,
++                 ov->extent.width, ov->extent.height);
++         told_w = in_w;
++         told_h = in_h;
++      }
++   }
+ 
+    struct kk_device *dev = kk_cmd_buffer_device(cmd);
+    /* Asked before the pass is split: a combination MetalFX cannot take is
+@@ -2161,6 +2186,8 @@
+ {
+    if (kk_fsr_metalfx_draw(cmd))
+       return;
++   if (kk_fsr_metalfx_enabled())
++      kk_fsr_note_drawn(cmd);
+ 
+    kk_flush_gfx_state(cmd);
+ 
+diff -ruN a/src/kosmickrisp/vulkan/kk_fsr_metalfx.c b/src/kosmickrisp/vulkan/kk_fsr_metalfx.c
+--- a/src/kosmickrisp/vulkan/kk_fsr_metalfx.c	2026-10-04 10:02:18
++++ b/src/kosmickrisp/vulkan/kk_fsr_metalfx.c	2026-10-04 10:02:18
+@@ -30,6 +30,8 @@
+ #include "kk_descriptor_set.h"
+ #include "kk_descriptor_set_layout.h"
+ #include "kk_descriptor_types.h"
++#include "kk_image.h"
++#include "kk_image_view.h"
+ 
+ #include "nir.h"
+ #include "util/hash_table.h"
+@@ -82,18 +84,59 @@
+    return a && b;
+ }
+ 
++bool
++kk_nir_is_fsr_bilinear(nir_shader *nir)
++{
++   if (nir->info.stage != MESA_SHADER_FRAGMENT)
++      return false;
++
++   unsigned tex = 0;
++   bool ok = false;
++   nir_foreach_function_impl(impl, nir) {
++      nir_foreach_block(block, impl) {
++         nir_foreach_instr(instr, block) {
++            if (instr->type != nir_instr_type_tex)
++               continue;
++            nir_tex_instr *t = nir_instr_as_tex(instr);
++            tex++;
++            int ti = nir_tex_instr_src_index(t, nir_tex_src_texture_deref);
++            int si = nir_tex_instr_src_index(t, nir_tex_src_sampler_deref);
++            if (t->op != nir_texop_tex || ti < 0 || si < 0)
++               return false;
++            nir_variable *tv = nir_deref_instr_get_variable(nir_src_as_deref(t->src[ti].src));
++            nir_variable *sv = nir_deref_instr_get_variable(nir_src_as_deref(t->src[si].src));
++            ok = tv && sv && tv->data.descriptor_set == 1 && tv->data.binding == FSR_EASU_BINDING &&
++                 sv->data.descriptor_set == 1 && sv->data.binding == 14;
++         }
++      }
++   }
++   return tex == 1 && ok && !kk_nir_is_fsr_easu(nir);
++}
++
++struct fsr_texture {
++   mtl_texture *texture;
++   struct kk_image *image;
++};
++
+ static simple_mtx_t textures_lock = SIMPLE_MTX_INITIALIZER;
+ static struct hash_table_u64 *textures;
+ 
+ void
+-kk_fsr_register_texture(uint64_t gpu_resource_id, mtl_texture *texture)
++kk_fsr_register_texture(uint64_t gpu_resource_id, mtl_texture *texture,
++                        struct kk_image *image)
+ {
+    if (!gpu_resource_id || !kk_fsr_metalfx_enabled())
+       return;
++   struct fsr_texture *t = malloc(sizeof(*t));
++   if (!t)
++      return;
++   t->texture = texture;
++   t->image = image;
+    simple_mtx_lock(&textures_lock);
+    if (!textures)
+       textures = _mesa_hash_table_u64_create(NULL);
+-   _mesa_hash_table_u64_insert(textures, gpu_resource_id, texture);
++   free(_mesa_hash_table_u64_search(textures, gpu_resource_id));
++   _mesa_hash_table_u64_insert(textures, gpu_resource_id, t);
+    simple_mtx_unlock(&textures_lock);
+ }
+ 
+@@ -103,13 +146,32 @@
+    if (!gpu_resource_id || !kk_fsr_metalfx_enabled())
+       return;
+    simple_mtx_lock(&textures_lock);
+-   if (textures)
++   if (textures) {
++      free(_mesa_hash_table_u64_search(textures, gpu_resource_id));
+       _mesa_hash_table_u64_remove(textures, gpu_resource_id);
++   }
+    simple_mtx_unlock(&textures_lock);
+ }
+ 
++void
++kk_fsr_note_drawn(struct kk_cmd_buffer *cmd)
++{
++   struct kk_rendering_state *render = &cmd->state.gfx.render;
++   const struct vk_dynamic_graphics_state *dyn = &cmd->vk.dynamic_graphics_state;
++   if (render->color_att_count < 1 || !render->color_att[0].iview ||
++       dyn->vp.viewport_count < 1 || dyn->vp.viewports[0].x != 0.0f ||
++       dyn->vp.viewports[0].y != 0.0f)
++      return;
++   const struct kk_image_view *iv = render->color_att[0].iview;
++   if (iv->vk.base_mip_level)
++      return;
++   struct kk_image *image = container_of(iv->vk.image, struct kk_image, vk);
++   image->fsr_drawn_w = (uint32_t)dyn->vp.viewports[0].width;
++   image->fsr_drawn_h = (uint32_t)dyn->vp.viewports[0].height;
++}
++
+ mtl_texture *
+-kk_fsr_easu_input(struct kk_cmd_buffer *cmd)
++kk_fsr_easu_input(struct kk_cmd_buffer *cmd, struct kk_image **image)
+ {
+    struct kk_descriptor_set *set = cmd->state.gfx.descriptors.sets[1];
+    if (!set || !set->layout ||
+@@ -127,9 +189,12 @@
+       (const void *)((const char *)set->mapped_ptr + bl->offset);
+    mtl_texture *texture = NULL;
+    simple_mtx_lock(&textures_lock);
+-   if (textures)
+-      texture = _mesa_hash_table_u64_search(textures,
+-                                            desc->image_gpu_resource_id);
++   struct fsr_texture *t = textures ? _mesa_hash_table_u64_search(textures, desc->image_gpu_resource_id) : NULL;
++   if (t) {
++      texture = t->texture;
++      if (image)
++         *image = t->image;
++   }
+    simple_mtx_unlock(&textures_lock);
+    return texture;
+ }
+diff -ruN a/src/kosmickrisp/vulkan/kk_fsr_metalfx.h b/src/kosmickrisp/vulkan/kk_fsr_metalfx.h
+--- a/src/kosmickrisp/vulkan/kk_fsr_metalfx.h	2026-10-04 10:02:18
++++ b/src/kosmickrisp/vulkan/kk_fsr_metalfx.h	2026-10-04 10:02:18
+@@ -21,14 +21,28 @@
+ /* The fragment shader is FSR 1's EASU (its two constants). */
+ bool kk_nir_is_fsr_easu(nir_shader *nir);
+ 
++/* The fragment shader is Source 2's bilinear upsample (the one its FSR
++ * modes without EASU use, Counter-Strike 2's "Calidad ultra"): a single
++ * sample of set 1 binding 30 with the sampler at binding 14, stored. */
++bool kk_nir_is_fsr_bilinear(nir_shader *nir);
++
++struct kk_image;
++
+ /* Sampled texture of an image view, by the resource id its descriptors
+- * hold. */
+-void kk_fsr_register_texture(uint64_t gpu_resource_id, mtl_texture *texture);
++ * hold, with the image it views. */
++void kk_fsr_register_texture(uint64_t gpu_resource_id, mtl_texture *texture,
++                             struct kk_image *image);
+ void kk_fsr_unregister_texture(uint64_t gpu_resource_id);
+ 
+ /* The EASU draw about to be made: its input texture (set 1, binding 30, the
+- * first image of the pass's descriptors), or NULL. */
+-mtl_texture *kk_fsr_easu_input(struct kk_cmd_buffer *cmd);
++ * first image of the pass's descriptors), or NULL; *image, if asked, the
++ * image it views. */
++mtl_texture *kk_fsr_easu_input(struct kk_cmd_buffer *cmd,
++                               struct kk_image **image);
++
++/* A draw about to be made: the viewport it draws into level 0 of its first
++ * colour attachment is noted on that image (kk_image.fsr_drawn_*). */
++void kk_fsr_note_drawn(struct kk_cmd_buffer *cmd);
+ 
+ /* Memory the application can map, by GPU address: EASU's constants are read
+  * from it. */
+diff -ruN a/src/kosmickrisp/vulkan/kk_image.h b/src/kosmickrisp/vulkan/kk_image.h
+--- a/src/kosmickrisp/vulkan/kk_image.h	2026-10-04 10:02:18
++++ b/src/kosmickrisp/vulkan/kk_image.h	2026-10-04 10:02:18
+@@ -52,6 +52,10 @@
+ 
+    uint8_t plane_count;
+    struct kk_image_plane planes[3];
++
++   /* SteamARM: the viewport last drawn into level 0, from its origin
++    * (kk_fsr_metalfx.c: the picture a bilinear upsample enlarges). */
++   uint32_t fsr_drawn_w, fsr_drawn_h;
+ };
+ 
+ #define kk_foreach_slice(ndx, image, subresource_member)                       \
+diff -ruN a/src/kosmickrisp/vulkan/kk_image_view.c b/src/kosmickrisp/vulkan/kk_image_view.c
+--- a/src/kosmickrisp/vulkan/kk_image_view.c	2026-10-04 10:02:18
++++ b/src/kosmickrisp/vulkan/kk_image_view.c	2026-10-04 10:02:18
+@@ -183,7 +183,7 @@
+             mtl_texture_get_gpu_resource_id(
+                view->planes[view_plane].mtl_handle_sampled);
+          kk_fsr_register_texture(view->planes[view_plane].sampled_gpu_resource_id,
+-                                 view->planes[view_plane].mtl_handle_sampled);
++                                 view->planes[view_plane].mtl_handle_sampled, image);
+       }
+ 
+       if (view->vk.usage & VK_IMAGE_USAGE_STORAGE_BIT) {
+diff -ruN a/src/kosmickrisp/vulkan/kk_shader.c b/src/kosmickrisp/vulkan/kk_shader.c
+--- a/src/kosmickrisp/vulkan/kk_shader.c	2026-10-04 10:02:18
++++ b/src/kosmickrisp/vulkan/kk_shader.c	2026-10-04 10:02:18
+@@ -1613,7 +1613,7 @@
+     * optimization. */
+    const struct vk_pipeline_robustness_state *vertex_robustness = &rs_none;
+    bool a2c_lowered = false;
+-   bool fsr_easu = false;
++   bool fsr_easu = false, fsr_bilinear = false;
+    for (uint32_t i = 0u; i < shader_count; ++i) {
+       const struct vk_shader_compile_info *info = &infos[i];
+       nir_shader *nir = info->nir;
+@@ -1627,6 +1627,14 @@
+                     kk_fsr_metalfx_enabled() ? ": MetalFX draws it" : " (KK_FSR_METALFX=0)");
+          told = true;
+       }
++      if (nir->info.stage == MESA_SHADER_FRAGMENT && kk_nir_is_fsr_bilinear(nir)) {
++         fsr_bilinear = true;
++         static bool told_bilinear;
++         if (!told_bilinear)
++            fprintf(stderr, "kk: bilinear upsample found%s\n",
++                    kk_fsr_metalfx_enabled() ? ": MetalFX draws it" : " (KK_FSR_METALFX=0)");
++         told_bilinear = true;
++      }
+ 
+       /* For tessellation pipelines, some stages may be emulated in compute */
+       bool emulated_stage = tess && (nir->info.stage == MESA_SHADER_VERTEX ||
+@@ -1688,6 +1696,7 @@
+       if (shaders[i]->info.stage == MESA_SHADER_FRAGMENT) {
+          shaders[i]->info.a2c_lowered = a2c_lowered;
+          shaders[i]->info.fsr_easu = fsr_easu && i < shader_count;
++         shaders[i]->info.fsr_bilinear = fsr_bilinear && i < shader_count;
+       }
+    }
+ 
+diff -ruN a/src/kosmickrisp/vulkan/kk_shader.h b/src/kosmickrisp/vulkan/kk_shader.h
+--- a/src/kosmickrisp/vulkan/kk_shader.h	2026-10-04 10:02:18
++++ b/src/kosmickrisp/vulkan/kk_shader.h	2026-10-04 10:02:18
+@@ -63,6 +63,9 @@
+     * (kk_fsr_metalfx.c). */
+    bool fsr_easu;
+ 
++   /* Fragment: Source 2's bilinear upsample, likewise (patch 16). */
++   bool fsr_bilinear;
++
+    /* Required for fragment shader cull distance discards. */
+    uint8_t num_cull_distances;
+ 

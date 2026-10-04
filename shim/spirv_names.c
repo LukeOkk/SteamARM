@@ -129,6 +129,51 @@ void lxrt_spirv_dump_stages(const void *stages, uint32_t count)
                                 ((const VkShaderModuleCreateInfo *)b)->codeSize);
 }
 
+// LXRT_VK_PIPE_LOG=1: which shader modules each graphics pipeline uses, by
+// the hash LXRT_VK_DUMP_SPIRV names its files with (shim/features.c prints
+// them), to tell which shaders a game mode draws with.
+#define MOD_SLOTS 65536
+static uint64_t mod_key[MOD_SLOTS], mod_hash[MOD_SLOTS];
+
+int lxrt_pipe_log_on(void)
+{
+    static int on = -1;
+    if (on < 0) {
+        const char *e = getenv("LXRT_VK_PIPE_LOG");
+        on = e && *e == '1';
+    }
+    return on;
+}
+
+static void module_note(uint64_t module, const uint32_t *code, size_t size)
+{
+    uint64_t h = 1469598103934665603ull;
+    for (size_t i = 0; i < size / 4; i++) {
+        h ^= code[i];
+        h *= 1099511628211ull;
+    }
+    for (uint32_t i = (uint32_t)(module >> 4) & (MOD_SLOTS - 1), n = 0; n < MOD_SLOTS; n++, i = (i + 1) & (MOD_SLOTS - 1)) {
+        uint64_t zero = 0;
+        if (__atomic_compare_exchange_n(&mod_key[i], &zero, module, 0, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE) ||
+            zero == module) {
+            __atomic_store_n(&mod_hash[i], h, __ATOMIC_RELEASE);
+            return;
+        }
+    }
+}
+
+uint64_t lxrt_module_hash(uint64_t module)
+{
+    for (uint32_t i = (uint32_t)(module >> 4) & (MOD_SLOTS - 1), n = 0; n < MOD_SLOTS; n++, i = (i + 1) & (MOD_SLOTS - 1)) {
+        uint64_t k = __atomic_load_n(&mod_key[i], __ATOMIC_ACQUIRE);
+        if (k == module)
+            return __atomic_load_n(&mod_hash[i], __ATOMIC_ACQUIRE);
+        if (!k)
+            return 0;
+    }
+    return 0;
+}
+
 // shim/spirv_dref.c: shadow compares on their own variable (MoltenVK only)
 uint32_t *lxrt_spirv_split_dref(const uint32_t *code, size_t size, size_t *out_size);
 int lxrt_spirv_split_dref_wanted(void);
@@ -161,9 +206,10 @@ VkResult lxrt_inner_vkCreateShaderModule(VkDevice dev, const VkShaderModuleCreat
         c.pCode = split;
         c.codeSize = split_size;
     }
-    if (!fixed && !split)
-        return lxrt_mvk_vkCreateShaderModule(dev, ci, alloc, out);
-    VkResult r = lxrt_mvk_vkCreateShaderModule(dev, &c, alloc, out);
+    VkResult r = (!fixed && !split) ? lxrt_mvk_vkCreateShaderModule(dev, ci, alloc, out)
+                                     : lxrt_mvk_vkCreateShaderModule(dev, &c, alloc, out);
+    if (r == VK_SUCCESS && ci && out && lxrt_pipe_log_on())
+        module_note((uint64_t)*out, ci->pCode, ci->codeSize);   // the game's code, as dumped
     free(fixed);
     free(split);
     return r;
