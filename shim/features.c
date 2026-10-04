@@ -531,9 +531,25 @@ extern int clock_gettime(int, struct lxrt_ts2 *);
 
 int lxrt_pipe_log_on(void);                 // spirv_names.c
 uint64_t lxrt_module_hash(uint64_t module);   // spirv_names.c
+const void *lxrt_a2c_pipelines(uint32_t count, const void *cis, void **to_free);   // a2c.c
+void lxrt_a2c_free(void *to_free);                                                 // a2c.c
 
+static VkResult create_pipelines_raw(VkDevice dev, VkPipelineCache cache, uint32_t n,
+                                     const VkGraphicsPipelineCreateInfo *cis, const void *alloc, VkPipeline *out);
+
+// One-sample alpha-to-coverage as a cut at alpha 0.5 (shim/a2c.c).
 static VkResult create_pipelines_counted(VkDevice dev, VkPipelineCache cache, uint32_t n,
                                          const VkGraphicsPipelineCreateInfo *cis, const void *alloc, VkPipeline *out)
+{
+    void *to_free = 0;
+    const VkGraphicsPipelineCreateInfo *use = lxrt_a2c_pipelines(n, cis, &to_free);
+    VkResult r = create_pipelines_raw(dev, cache, n, use, alloc, out);
+    lxrt_a2c_free(to_free);
+    return r;
+}
+
+static VkResult create_pipelines_raw(VkDevice dev, VkPipelineCache cache, uint32_t n,
+                                     const VkGraphicsPipelineCreateInfo *cis, const void *alloc, VkPipeline *out)
 {
     if (lxrt_pipe_log_on())
         for (uint32_t i = 0; i < n; i++) {

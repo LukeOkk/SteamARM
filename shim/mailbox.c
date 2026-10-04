@@ -231,7 +231,7 @@ static int probing(void)
 
 // LXRT_VK_SNAPSHOT=<guest directory>: when <directory>/request exists, the
 // next frame shown is read back and written as <directory>/frame.ppm at
-// half size, and the request removed -- the game's own picture, for tests
+// half size (LXRT_VK_SNAPSHOT_FULL=1: full size), and the request removed -- the game's own picture, for tests
 // that must see a menu. The top right of the picture (13 % of its height)
 // is left black: that is where a game shows the player's name and avatar.
 extern int access(const char *, int);
@@ -264,7 +264,9 @@ static void snap_write(const mailbox *m)
     extern int snprintf(char *, size_t, const char *, ...);
     const char *d = snap_dir();
     char p[512];
-    uint32_t w = m->ext.width / 2, h = m->ext.height / 2, top = h * 13 / 100;
+    const char *full = getenv("LXRT_VK_SNAPSHOT_FULL");
+    uint32_t k = full && *full == '1' ? 1 : 2;
+    uint32_t w = m->ext.width / k, h = m->ext.height / k, top = h * 13 / 100;
     int bgr = m->format == VK_FORMAT_B8G8R8A8_UNORM || m->format == VK_FORMAT_B8G8R8A8_SRGB;
     snprintf(p, sizeof p, "%s/frame.ppm", d);
     int fd = open(p, 01 | 0100 | 01000, 0644);              // O_WRONLY|O_CREAT|O_TRUNC (Linux)
@@ -275,7 +277,7 @@ static void snap_write(const mailbox *m)
         unsigned char *row = malloc((size_t)w * 3);
         for (uint32_t y = 0; row && y < h; y++) {
             for (uint32_t x = 0; x < w; x++) {
-                const unsigned char *px = m->probe_map + 4 * ((size_t)(2 * y) * m->ext.width + 2 * x);
+                const unsigned char *px = m->probe_map + 4 * ((size_t)(k * y) * m->ext.width + k * x);
                 unsigned char *o = row + 3 * x;
                 if (y < top && x >= w / 2) { o[0] = o[1] = o[2] = 0; continue; }
                 o[0] = bgr ? px[2] : px[0];

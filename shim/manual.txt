@@ -49,6 +49,7 @@ vkGetDeviceQueue2
 vkDestroyDevice
 # spirv_names.c
 vkCreateShaderModule
+vkDestroyShaderModule
 # mailbox.c
 vkQueueSubmit
 vkQueueSubmit2

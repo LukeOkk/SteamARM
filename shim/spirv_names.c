@@ -81,6 +81,13 @@ uint32_t *lxrt_spirv_fix_names(const uint32_t *code, size_t size)
 
 VkResult lxrt_mvk_vkCreateShaderModule(VkDevice, const VkShaderModuleCreateInfo *, const VkAllocationCallbacks *,
                                        VkShaderModule *);
+void lxrt_mvk_vkDestroyShaderModule(VkDevice, VkShaderModule, const VkAllocationCallbacks *);
+
+// shim/a2c.c: one-sample alpha-to-coverage as a cut at alpha 0.5.
+int lxrt_a2c_wanted(void);
+uint32_t *lxrt_spirv_a2c(const uint32_t *code, size_t size, size_t *out_size);
+void lxrt_a2c_module_add(uint64_t module);
+void lxrt_a2c_module_remove(uint64_t module);
 
 // LXRT_VK_DUMP_SPIRV=<guest directory>: every shader module a program
 // creates, once each, as <directory>/<FNV-1a of the words>.spv -- to find
@@ -177,6 +184,9 @@ uint64_t lxrt_module_hash(uint64_t module)
 // shim/spirv_dref.c: shadow compares on their own variable (MoltenVK only)
 uint32_t *lxrt_spirv_split_dref(const uint32_t *code, size_t size, size_t *out_size);
 int lxrt_spirv_split_dref_wanted(void);
+// shim/spirv_invariant.c: an invariant position (MoltenVK only)
+int lxrt_invariant_wanted(void);
+uint32_t *lxrt_spirv_invariant(const uint32_t *code, size_t size, size_t *out_size);
 extern const char *lxrt_vk_driver;   // vulkan_shim.c (generated): the driver in use
 
 static int on_moltenvk(void)
@@ -206,11 +216,34 @@ VkResult lxrt_inner_vkCreateShaderModule(VkDevice dev, const VkShaderModuleCreat
         c.pCode = split;
         c.codeSize = split_size;
     }
-    VkResult r = (!fixed && !split) ? lxrt_mvk_vkCreateShaderModule(dev, ci, alloc, out)
-                                     : lxrt_mvk_vkCreateShaderModule(dev, &c, alloc, out);
+    uint32_t *inv = NULL;
+    size_t inv_size = 0;
+    if (ci && on_moltenvk() && lxrt_invariant_wanted() &&
+        (inv = lxrt_spirv_invariant(c.pCode, c.codeSize, &inv_size))) {
+        c.pCode = inv;
+        c.codeSize = inv_size;
+    }
+    uint32_t *cut = NULL;
+    size_t cut_size = 0;
+    if (ci && lxrt_a2c_wanted() && (cut = lxrt_spirv_a2c(c.pCode, c.codeSize, &cut_size))) {
+        c.pCode = cut;
+        c.codeSize = cut_size;
+    }
+    VkResult r = (!fixed && !split && !inv && !cut) ? lxrt_mvk_vkCreateShaderModule(dev, ci, alloc, out)
+                                                    : lxrt_mvk_vkCreateShaderModule(dev, &c, alloc, out);
+    if (r == VK_SUCCESS && out && cut)
+        lxrt_a2c_module_add((uint64_t)*out);
     if (r == VK_SUCCESS && ci && out && lxrt_pipe_log_on())
         module_note((uint64_t)*out, ci->pCode, ci->codeSize);   // the game's code, as dumped
     free(fixed);
     free(split);
+    free(inv);
+    free(cut);
     return r;
+}
+
+void lxrt_inner_vkDestroyShaderModule(VkDevice dev, VkShaderModule module, const VkAllocationCallbacks *alloc)
+{
+    lxrt_a2c_module_remove((uint64_t)module);
+    lxrt_mvk_vkDestroyShaderModule(dev, module, alloc);
 }

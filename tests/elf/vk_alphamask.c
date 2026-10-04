@@ -14,6 +14,10 @@
 // with "cache" as the second argument every pipeline goes through one
 // VkPipelineCache, where KosmicKrisp handed an alpha-to-coverage pipeline
 // the one compiled without it (patches/kosmickrisp-08).
+// The "1x" cases draw at one sample, straight into the read-back image:
+// alpha-to-coverage there must cut at alpha 0.5 (shim/a2c.c does), so a
+// left-to-right alpha gradient comes out blue on the left half and red on
+// the right, every pixel; KosmicKrisp dithered it in a depth prepass.
 // Usage: vk_alphamask [case-substring|""] [cache]
 // Prints one line per case and "== vk_alphamask: ok" or "== vk_alphamask: FAIL".
 //
@@ -28,6 +32,7 @@
 //   smask.frag:     tex.frag, and gl_SampleMask[0] = a < 0.5 ? 0 : -1
 //   smaskc.frag:    coord.frag's test as gl_SampleMask[0], alpha 1
 //   half.frag:      o = vec4(1,0,0,0.5)
+//   grad.frag:      o = vec4(1,0,0, gl_FragCoord.x / 64)
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -110,6 +115,7 @@ struct pipe_desc {
     int no_color;     // a depth-only pipeline (no colour attachment)
 };
 static VkFormat color_format = VK_FORMAT_R8G8B8A8_UNORM;
+static VkSampleCountFlagBits samples = VK_SAMPLE_COUNT_4_BIT;
 
 static VkPipeline pipeline(const struct pipe_desc *d)
 {
@@ -125,7 +131,7 @@ static VkPipeline pipeline(const struct pipe_desc *d)
     VkPipelineRasterizationStateCreateInfo rs = { VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO };
     rs.lineWidth = 1;
     VkPipelineMultisampleStateCreateInfo ms = { VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO, 0, 0,
-                                                VK_SAMPLE_COUNT_4_BIT, 0, 0, d->mask, d->a2c, 0 };
+                                                samples, 0, 0, d->mask, d->a2c, 0 };
     VkPipelineDepthStencilStateCreateInfo ds = { VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO, 0, 0,
                                                  d->depth_test, d->depth_write, d->op };
     VkPipelineColorBlendAttachmentState ba = { d->blend, VK_BLEND_FACTOR_ONE, VK_BLEND_FACTOR_ZERO,
@@ -211,8 +217,8 @@ int main(int argc, char **argv)
 
     static const VkFormat formats[3] = { VK_FORMAT_R8G8B8A8_UNORM, VK_FORMAT_B10G11R11_UFLOAT_PACK32,
                                          VK_FORMAT_R16G16B16A16_SFLOAT };
-    VkImage ms_cs[3], ress[3], ms_d, tex;
-    VkImageView ms_cvs[3], resvs[3], ms_dv, texv;
+    VkImage ms_cs[3], ress[3], ms_d, d1, tex;
+    VkImageView ms_cvs[3], resvs[3], ms_dv, d1v, texv;
     for (int f = 0; f < 3; f++) {
         make_image(W, H, formats[f], VK_SAMPLE_COUNT_4_BIT, VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT,
                    VK_IMAGE_ASPECT_COLOR_BIT, &ms_cs[f], &ms_cvs[f]);
@@ -222,6 +228,8 @@ int main(int argc, char **argv)
     }
     make_image(W, H, VK_FORMAT_D32_SFLOAT, VK_SAMPLE_COUNT_4_BIT, VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT,
                VK_IMAGE_ASPECT_DEPTH_BIT, &ms_d, &ms_dv);
+    make_image(W, H, VK_FORMAT_D32_SFLOAT, VK_SAMPLE_COUNT_1_BIT, VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT,
+               VK_IMAGE_ASPECT_DEPTH_BIT, &d1, &d1v);
     make_image(2, 1, VK_FORMAT_R8G8B8A8_UNORM, VK_SAMPLE_COUNT_1_BIT,
                VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT, VK_IMAGE_ASPECT_COLOR_BIT, &tex, &texv);
     VkBuffer out, up;
@@ -276,7 +284,8 @@ int main(int argc, char **argv)
 #define FS(x) vam_##x, sizeof vam_##x
 #define LESS 1, 1, VK_COMPARE_OP_LESS
     struct pipe_desc opaque_eq = { FS(texopaque), 0, 0, rgba, 1, 0, VK_COMPARE_OP_EQUAL };
-    struct { const char *name; int fmt; struct pipe_desc a, b; int two; int need_demote; int split; int opaque; } cases[] = {
+    // one: 1 draws at one sample; 2 also checks every pixel of a row.
+    struct { const char *name; int fmt; struct pipe_desc a, b; int two; int need_demote; int split; int opaque; int one; } cases[] = {
         // The same shaders and state without alpha-to-coverage first: a
         // driver that caches the compiled pipeline without the flag in its
         // key hands the next case this one.
@@ -308,6 +317,10 @@ int main(int argc, char **argv)
         { "prepass a2c r11g11b10 + EQ", 1, { FS(tex), 1, 0, 0, LESS }, opaque_eq, 1 },
         { "depth-only a2c + EQ",     0, { FS(tex), 1, 0, 0, LESS, 0, 1 }, opaque_eq, 1, 0, 1 },
         { "depth-only discard + EQ", 0, { FS(discard), 0, 0, 0, LESS, 0, 1 }, opaque_eq, 1, 0, 1 },
+        { "1x no a2c gradient (opaque)", 0, { FS(grad), 0, 0, rgba, LESS }, {0}, 0, 0, 0, 1, 2 },
+        { "1x a2c tex",              0, { FS(tex), 1, 0, rgba, LESS }, {0}, 0, 0, 0, 0, 1 },
+        { "1x a2c gradient",         0, { FS(grad), 1, 0, rgba, LESS }, {0}, 0, 0, 0, 0, 2 },
+        { "1x a2c gradient + EQ",    0, { FS(grad), 1, 0, 0, LESS }, opaque_eq, 1, 0, 0, 0, 2 },
     };
     int fails = 0;
     for (unsigned k = 0; k < sizeof cases / sizeof cases[0]; k++) {
@@ -317,21 +330,23 @@ int main(int argc, char **argv)
             printf("  skip  %-26s (no demote)\n", cases[k].name);
             continue;
         }
-        int f = cases[k].fmt;
-        VkImage ms_c = ms_cs[f], res = ress[f];
+        int f = cases[k].fmt, one = cases[k].one != 0;
+        VkImage ms_c = one ? ress[f] : ms_cs[f], res = ress[f], dimg = one ? d1 : ms_d;
         color_format = formats[f];
+        samples = one ? VK_SAMPLE_COUNT_1_BIT : VK_SAMPLE_COUNT_4_BIT;
         VkPipeline pa = pipeline(&cases[k].a), pb = cases[k].two ? pipeline(&cases[k].b) : 0;
         CHECK(vkBeginCommandBuffer(cb, &cbi));
         barrier(cb, ms_c, VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
         barrier(cb, res, VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
-        barrier(cb, ms_d, VK_IMAGE_ASPECT_DEPTH_BIT, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL);
-        VkRenderingAttachmentInfo ca = { VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO, 0, ms_cvs[f],
-                                         VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_RESOLVE_MODE_AVERAGE_BIT, resvs[f],
+        barrier(cb, dimg, VK_IMAGE_ASPECT_DEPTH_BIT, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL);
+        VkRenderingAttachmentInfo ca = { VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO, 0, one ? resvs[f] : ms_cvs[f],
+                                         VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+                                         one ? VK_RESOLVE_MODE_NONE : VK_RESOLVE_MODE_AVERAGE_BIT, one ? 0 : resvs[f],
                                          VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_ATTACHMENT_LOAD_OP_CLEAR,
                                          VK_ATTACHMENT_STORE_OP_STORE };
         ca.clearValue.color.float32[2] = 1;
         ca.clearValue.color.float32[3] = 1;
-        VkRenderingAttachmentInfo da = { VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO, 0, ms_dv,
+        VkRenderingAttachmentInfo da = { VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO, 0, one ? d1v : ms_dv,
                                          VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL, 0, 0, 0, VK_ATTACHMENT_LOAD_OP_CLEAR,
                                          VK_ATTACHMENT_STORE_OP_STORE };
         da.clearValue.depthStencil.depth = 1;
@@ -376,13 +391,23 @@ int main(int argc, char **argv)
         float l[3], r[3];
         texel(outmap, f, 16, 32, l);
         texel(outmap, f, 48, 32, r);
-        int ok = cases[k].opaque == 2 ?
+        // Every pixel of row 32: blue up to x 31 and red from x 32 (all red
+        // when opaque); a dithered coverage leaves dots of the other colour.
+        int stray = 0;
+        for (int x = 0; cases[k].one == 2 && x < W; x++) {
+            float p[3];
+            texel(outmap, f, x, 32, p);
+            int red = p[0] > 0.97f && p[2] < 0.03f, blue = p[0] < 0.03f && p[2] > 0.97f;
+            stray += cases[k].opaque || x >= 32 ? !red : !blue;
+        }
+        int ok = stray ? 0 : cases[k].opaque == 2 ?
                  l[0] > 0.4f && l[0] < 0.6f && l[2] > 0.4f && l[2] < 0.6f && r[0] > 0.4f && r[0] < 0.6f :
                  (cases[k].opaque ? l[0] > 0.97f && l[2] < 0.03f : l[0] < 0.03f && l[2] > 0.97f) &&
                  r[0] > 0.97f && r[2] < 0.03f;
         printf("  %-4s  %-26s left %.2f,%.2f,%.2f  right %.2f,%.2f,%.2f%s\n", ok ? "ok" : "FAIL", cases[k].name,
                l[0], l[1], l[2], r[0], r[1], r[2],
-               ok ? "" : cases[k].opaque ? "  <- wrong" : (l[0] > 0.03f ? "  <- transparent half drawn" : "  <- opaque half missing"));
+               ok ? "" : stray ? "  <- dithered (pixels of the wrong colour in row 32)"
+               : cases[k].opaque ? "  <- wrong" : (l[0] > 0.03f ? "  <- transparent half drawn" : "  <- opaque half missing"));
         fails += !ok;
         vkDestroyPipeline(dev, pa, 0);
         if (pb)
