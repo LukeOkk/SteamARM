@@ -1,0 +1,240 @@
+SteamARM: textures Metal can compress; render-pass statistics
+
+KosmicKrisp gave every image that can be a transfer destination Metal's
+shader-write usage, and that usage keeps a texture out of Metal's lossless
+compression. Every transfer write here is a Metal copy or a render pass
+(clears, blits, resolves), never a shader, so shader-write is now only for
+storage images and atomic formats. Counter-Strike 2 with 4x MSAA, where
+every multisampled colour and depth target is stored and loaded again at
+each of ~90 render-pass changes a frame (about 2 GB of samples before
+compression): the main menu at 44.2 fps before (43.9, 44.0, 44.6), 48.1
+after (48.7, 47.0, 48.7), Dust2 48.8 (MEASURED 2026-10-04). Vulkan tests
+40/40. KK_IMAGE_COMPRESS=0 restores the old usage.
+
+Not done: the pixel-format-view usage of mutable images stays (Metal
+accepts sRGB/UNORM views without it, but KosmicKrisp's own copies and
+resolves view images in other formats: without it the game crashed at
+start), and so does that of depth/stencil (a stencil view needs it).
+
+KK_PASS_STATS=1 prints every 120 frames the render encoders per frame,
+their stores (all and multisampled, in MB before compression) and why
+encoders ended (barrier, compute or copy, a pass on other attachments, end
+of a pass, state change).
+diff -ruN a/src/kosmickrisp/vulkan/kk_cmd_buffer.c b/src/kosmickrisp/vulkan/kk_cmd_buffer.c
+--- a/src/kosmickrisp/vulkan/kk_cmd_buffer.c	2026-10-04 20:08:02
++++ b/src/kosmickrisp/vulkan/kk_cmd_buffer.c	2026-10-04 20:08:02
+@@ -517,8 +517,11 @@
+    mtl_compute_encoder *encoder;
+    /* Compute work after a render pass whose encoder is still open runs
+     * after that pass: end it now. */
+-   if (cmd->state.gfx.pending_end)
++   if (cmd->state.gfx.pending_end) {
++      void kk_stat_end(struct kk_cmd_buffer *cmd, int reason);
++      kk_stat_end(cmd, 1);
+       cs_end(cmd);
++   }
+    /* If we are not inside a render, we can just take pre_gfx. */
+    if (!cmd->gfx.encoder || pre_gfx) {
+       if (!cmd->pre_gfx->encoder) {
+@@ -669,6 +672,8 @@
+        * barrier was about its own attachments; whatever else comes ends the
+        * encoder, and every encoder ends with a barrier of all stages. */
+    } else if (cmd->gfx.encoder) {
++      void kk_stat_end(struct kk_cmd_buffer *cmd, int reason);
++      kk_stat_end(cmd, 0);
+       cs_end(cmd);
+       cs_start_render(cmd);
+    } else if (cmd->pre_gfx->encoder) {
+diff -ruN a/src/kosmickrisp/vulkan/kk_cmd_draw.c b/src/kosmickrisp/vulkan/kk_cmd_draw.c
+--- a/src/kosmickrisp/vulkan/kk_cmd_draw.c	2026-10-04 20:08:02
++++ b/src/kosmickrisp/vulkan/kk_cmd_draw.c	2026-10-04 20:08:02
+@@ -147,13 +147,57 @@
+              : MTL_STORE_ACTION_DONT_CARE;
+ }
+ 
++/* SteamARM, diagnostics: KK_PASS_STATS=1 prints, every 120 frames
++ * (kk_queue.c), the render encoders per frame, what they store (all and
++ * multisampled, in megabytes before compression) and why encoders ended.
++ * It found Counter-Strike 2's 4x MSAA cost: about 90 encoders a frame, 75
++ * of them ended by a pass on other attachments, storing ~2 GB of samples. */
++uint64_t kk_stat_encoders, kk_stat_ms_stores, kk_stat_ms_store_bytes, kk_stat_stores, kk_stat_store_bytes;
++/* Why render encoders ended: 0 barrier inside a pass, 1 compute or copy after
++ * a pass, 2 next pass on other attachments, 3 end of a pass (resolve, flags),
++ * 4 render state change, 5 other. */
++uint64_t kk_stat_end_reason[6];
++void kk_stat_end(struct kk_cmd_buffer *cmd, int reason);
+ void
++kk_stat_end(struct kk_cmd_buffer *cmd, int reason)
++{
++   if (cmd->gfx.encoder)
++      __atomic_fetch_add(&kk_stat_end_reason[reason], 1, __ATOMIC_RELAXED);
++}
++static void
++kk_stat_store(const struct kk_attachment *att, enum mtl_store_action a)
++{
++   if (a != MTL_STORE_ACTION_STORE || !att->iview)
++      return;
++   const struct vk_image *img = att->iview->vk.image;
++   uint64_t b = (uint64_t)img->extent.width * img->extent.height * img->samples *
++                vk_format_get_blocksize(att->iview->vk.format);
++   if (img->samples > 1) {
++      __atomic_fetch_add(&kk_stat_ms_stores, 1, __ATOMIC_RELAXED);
++      __atomic_fetch_add(&kk_stat_ms_store_bytes, b, __ATOMIC_RELAXED);
++   }
++   __atomic_fetch_add(&kk_stat_stores, 1, __ATOMIC_RELAXED);
++   __atomic_fetch_add(&kk_stat_store_bytes, b, __ATOMIC_RELAXED);
++}
++
++void
+ kk_cmd_set_store_actions(struct kk_cmd_buffer *cmd)
+ {
+    struct kk_rendering_state *render = &cmd->state.gfx.render;
+    mtl_render_encoder *enc = cmd->gfx.encoder;
+    bool final = (cmd->state.gfx.render_ending || cmd->state.gfx.pending_end) &&
+                 !(render->flags & VK_RENDERING_SUSPENDING_BIT);
++   static int stats = -1;
++   if (stats < 0)
++      stats = getenv("KK_PASS_STATS") && getenv("KK_PASS_STATS")[0] == '1';
++   if (stats) {
++      __atomic_fetch_add(&kk_stat_encoders, 1, __ATOMIC_RELAXED);
++      for (uint32_t i = 0; i < ARRAY_SIZE(render->color_att); i++)
++         if (render->color_att[i].iview && render->color_map[i] != MESA_VK_ATTACHMENT_UNUSED)
++            kk_stat_store(&render->color_att[i], kk_end_store_action(&render->color_att[i], final));
++      if (render->depth_att.iview)
++         kk_stat_store(&render->depth_att, kk_end_store_action(&render->depth_att, final));
++   }
+ 
+    for (uint32_t i = 0; i < ARRAY_SIZE(render->color_att); i++) {
+       const struct kk_attachment *att = &render->color_att[i];
+@@ -380,8 +424,10 @@
+       merged = kk_can_continue_render(cmd, pRenderingInfo);
+       if (merged)
+          cmd->state.gfx.pending_end = false;
+-      else
++      else {
++         kk_stat_end(cmd, 2);
+          cs_end(cmd);
++      }
+    }
+ 
+    memset(render, 0, sizeof(*render));
+@@ -720,6 +766,7 @@
+ 
+    /* Clean up previous encoder */
+    cmd->state.gfx.render_ending = true;
++   kk_stat_end(cmd, 3);
+    cs_end(cmd);
+    cmd->state.gfx.render_ending = false;
+    mtl_release(cmd->state.gfx.render_pass_descriptor);
+@@ -1071,6 +1118,7 @@
+     * current encoder and prepare to restart it */
+    bool active_render = cmd->gfx.encoder != NULL;
+    if (needs_restart && active_render) {
++      kk_stat_end(cmd, 4);
+       cs_end(cmd);
+       kk_cmd_buffer_dirty_all_gfx(cmd);
+       cmd->state.gfx.need_to_start_render_pass = true;
+diff -ruN a/src/kosmickrisp/vulkan/kk_image_layout.c b/src/kosmickrisp/vulkan/kk_image_layout.c
+--- a/src/kosmickrisp/vulkan/kk_image_layout.c	2026-10-04 20:08:02
++++ b/src/kosmickrisp/vulkan/kk_image_layout.c	2026-10-04 20:08:02
+@@ -6,6 +6,9 @@
+ 
+ #include "kk_image_layout.h"
+ 
++#include <stdio.h>
++#include <stdlib.h>
++
+ #include "kk_device.h"
+ #include "kk_format.h"
+ 
+@@ -37,6 +40,17 @@
+    }
+ }
+ 
++bool
++kk_image_compression(void)
++{
++   static int on = -1;
++   if (on < 0) {
++      const char *e = getenv("KK_IMAGE_COMPRESS");
++      on = !(e && e[0] == '0');
++   }
++   return on;
++}
++
+ static enum mtl_texture_usage
+ vk_image_usage_flags_to_mtl_texture_usage(VkImageUsageFlags usage_flags,
+                                           VkImageCreateFlags create_flags,
+@@ -217,6 +231,14 @@
+       image->usage, image->tiling, image->create_flags, format);
+    layout->usage = vk_image_usage_flags_to_mtl_texture_usage(
+       image->usage, image->create_flags, supported_format->atomic);
++   /* SteamARM: shader-write usage only for storage images. Every transfer
++    * write here is a Metal copy or a render pass (clears, blits, resolves),
++    * never a shader, and shader-write usage keeps a texture from Metal's
++    * lossless compression: with it on Counter-Strike 2's 4x MSAA targets
++    * the main menu ran at 43.8 fps, without it at 48.2 (three runs each,
++    * MEASURED 2026-10-04). KK_IMAGE_COMPRESS=0: as before. */
++   if (kk_image_compression() && !(image->usage & VK_IMAGE_USAGE_STORAGE_BIT) && !supported_format->atomic)
++      layout->usage &= ~MTL_TEXTURE_USAGE_SHADER_WRITE;
+    layout->create_flags = image->create_flags;
+    layout->format.pipe = format;
+    layout->format.mtl = supported_format->mtl_pixel_format;
+@@ -235,6 +257,13 @@
+       layout->usage |= MTL_TEXTURE_USAGE_PIXEL_FORMAT_VIEW;
+    }
+ 
++   if (image->samples > 1 && getenv("KK_PASS_STATS") && getenv("KK_PASS_STATS")[0] == '1') {
++      static unsigned n;
++      if (n++ < 30)
++         fprintf(stderr, "kk: msaa image %ux%u x%u vk format %d usage 0x%llx flags 0x%llx -> mtl format %u usage 0x%x\n",
++                 image->extent.width, image->extent.height, image->samples, image->format, (unsigned long long)image->usage,
++                 (unsigned long long)image->create_flags, (unsigned)layout->format.mtl, (unsigned)layout->usage);
++   }
+    if (layout->linear) {
+       kk_image_layout_calc_linear(dev, layout);
+    } else {
+diff -ruN a/src/kosmickrisp/vulkan/kk_image_layout.h b/src/kosmickrisp/vulkan/kk_image_layout.h
+--- a/src/kosmickrisp/vulkan/kk_image_layout.h	2026-10-04 20:08:02
++++ b/src/kosmickrisp/vulkan/kk_image_layout.h	2026-10-04 20:08:02
+@@ -214,6 +214,10 @@
+                                   VkImageCreateFlags flags,
+                                   enum pipe_format format);
+ 
++/* SteamARM: textures without usages that stop Metal's lossless
++ * compression where they are not needed (KK_IMAGE_COMPRESS=0: off). */
++bool kk_image_compression(void);
++
+ void kk_image_layout_init(const struct kk_device *dev,
+                           const struct vk_image *image, enum pipe_format format,
+                           const uint8_t width_scale, const uint8_t height_scale,
+diff -ruN a/src/kosmickrisp/vulkan/kk_queue.c b/src/kosmickrisp/vulkan/kk_queue.c
+--- a/src/kosmickrisp/vulkan/kk_queue.c	2026-10-04 20:08:02
++++ b/src/kosmickrisp/vulkan/kk_queue.c	2026-10-04 20:08:02
+@@ -95,6 +95,26 @@
+                   log = e && e[0] == '1';
+                }
+                slot->present_seq = ++seq;
++               {
++                  static int stats = -1;
++                  static uint32_t frames;
++                  if (stats < 0)
++                     stats = getenv("KK_PASS_STATS") && getenv("KK_PASS_STATS")[0] == '1';
++                  extern uint64_t kk_stat_encoders, kk_stat_ms_stores, kk_stat_ms_store_bytes, kk_stat_stores,
++                     kk_stat_store_bytes;
++                  if (stats && ++frames == 120) {
++                     extern uint64_t kk_stat_end_reason[6];
++                     fprintf(stderr, "kk: per frame: %.1f render passes, %.1f stores (%.0f MB), %.1f of them multisampled (%.0f MB); ends: barrier %.1f, compute %.1f, other pass %.1f, pass end %.1f, state %.1f\n",
++                             kk_stat_encoders / 120.0, kk_stat_stores / 120.0, kk_stat_store_bytes / 120.0 / 1e6,
++                             kk_stat_ms_stores / 120.0, kk_stat_ms_store_bytes / 120.0 / 1e6,
++                             kk_stat_end_reason[0] / 120.0, kk_stat_end_reason[1] / 120.0, kk_stat_end_reason[2] / 120.0,
++                             kk_stat_end_reason[3] / 120.0, kk_stat_end_reason[4] / 120.0);
++                     for (int r = 0; r < 6; r++)
++                        kk_stat_end_reason[r] = 0;
++                     kk_stat_encoders = kk_stat_ms_stores = kk_stat_ms_store_bytes = kk_stat_stores = kk_stat_store_bytes = 0;
++                     frames = 0;
++                  }
++               }
+                slot->present_log = log;
+                if (mode & 1)
+                   mtl_command_queue_wait_for_drawable(queue->mtl_handle,
