@@ -53,3 +53,7 @@ vkCreateShaderModule
 vkQueueSubmit
 vkQueueSubmit2
 vkQueueSubmit2KHR
+# mvkfix.c
+vkCmdBindDescriptorSets
+vkCmdBindDescriptorSets2
+vkCmdBindDescriptorSets2KHR

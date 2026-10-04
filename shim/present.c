@@ -191,9 +191,9 @@ VkResult lxrt_inner_vkCreateSwapchainKHR(VkDevice dev, const VkSwapchainCreateIn
     VkExtent2D window = { 0, 0 };
     int stretch = ci && needs_stretch(dev, ci, &window);
     if (dbg && ci)
-        dprintf(2, "[shim] vkCreateSwapchainKHR extent %ux%u usage 0x%x flags 0x%x images %u, surface %ux%u\n",
+        dprintf(2, "[shim] vkCreateSwapchainKHR extent %ux%u usage 0x%x flags 0x%x images %u, surface %ux%u, format %d colorspace %d\n",
                 ci->imageExtent.width, ci->imageExtent.height, (unsigned)ci->imageUsage, (unsigned)ci->flags,
-                ci->minImageCount, window.width, window.height);
+                ci->minImageCount, window.width, window.height, (int)ci->imageFormat, (int)ci->imageColorSpace);
     // The swapchain this one replaces: its thread leaves the driver first.
     if (ci)
         lxrt_mailbox_retire(ci->oldSwapchain);

@@ -454,6 +454,12 @@ static VkResult create_device(VkPhysicalDevice pd, const VkDeviceCreateInfo *cci
     const char *const *old_names = ci->ppEnabledExtensionNames;
     uint32_t old_count = ci->enabledExtensionCount;
     const char *names[512];
+    {
+        const char *d = getenv("LXRT_VK_DEBUG");
+        if (d && *d == '1')
+            for (uint32_t i = 0; i < old_count; i++)
+                dprintf(2, "[shim] device extension requested: %s\n", old_names[i]);
+    }
     if (mask) {
         for (unsigned k = 0; k < N_EMU; k++)
             if (mask & (1u << k))
