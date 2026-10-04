@@ -116,6 +116,24 @@ static pthread_mutex_t g_ui_lock = PTHREAD_MUTEX_INITIALIZER;
 static pthread_cond_t g_ui_cond = PTHREAD_COND_INITIALIZER;
 static bool g_ui_wanted;
 
+// The Metal HUD (MTL_HUD_ENABLED) installs its present hooks from a block it
+// puts on the main queue (libMTLHud HUDInitInterposeCA: dispatch_after on the
+// main queue), and this thread never ran that queue for a game, which shows
+// its picture through a remote layer and no window: the HUD loaded and never
+// drew (the user, 2026-10-04). With the HUD loaded (remote_layer.m asks),
+// the wait below runs the main queue instead -- CFRunLoop in 20 ms slices,
+// no AppKit (MEASURED in a window-less test: about 44 wake-ups a second, the
+// HUD tracked every present). Without the HUD nothing changes.
+static bool g_mainq_wanted;
+
+void lxrt_window_want_main_queue(void)
+{
+    pthread_mutex_lock(&g_ui_lock);
+    g_mainq_wanted = true;
+    pthread_cond_broadcast(&g_ui_cond);
+    pthread_mutex_unlock(&g_ui_lock);
+}
+
 void lxrt_window_want_ui(void)
 {
     pthread_mutex_lock(&g_ui_lock);
@@ -128,6 +146,13 @@ void lxrt_window_pump(volatile bool *guest_running)
 {
     pthread_mutex_lock(&g_ui_lock);
     while (*guest_running && !g_ui_wanted) {
+        if (g_mainq_wanted) {
+            pthread_mutex_unlock(&g_ui_lock);
+            CFRunLoopRunInMode(kCFRunLoopDefaultMode, 0.02, true);
+            lxrt_signal_rescue_stranded();
+            pthread_mutex_lock(&g_ui_lock);
+            continue;
+        }
         struct timespec ts;
         clock_gettime(CLOCK_REALTIME, &ts);
         ts.tv_nsec += 20 * 1000 * 1000;

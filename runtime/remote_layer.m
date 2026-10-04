@@ -22,6 +22,8 @@
 #import <Metal/Metal.h>
 #include <stdint.h>
 
+void lxrt_window_want_main_queue(void);   // window.m: the Metal HUD's hooks
+
 @interface CAContext : NSObject
 + (instancetype)contextWithCGSConnection:(uint32_t)c options:(NSDictionary *)o;
 @property(readonly) uint32_t contextId;
@@ -54,6 +56,10 @@ void *lxrt_remote_layer_create(uint32_t w, uint32_t h, uint32_t *ctx_id)
         ctx.layer = layer;
         [CATransaction commit];
         [CATransaction flush];
+        // The Metal HUD loaded: its hooks come from the main queue
+        // (runtime/window.m lxrt_window_want_main_queue).
+        if (NSClassFromString(@"HUDMTLLayerTracking"))
+            lxrt_window_want_main_queue();
         g_contexts[[NSValue valueWithPointer:(__bridge void *)layer]] = ctx;
         if (ctx_id)
             *ctx_id = ctx.contextId;
