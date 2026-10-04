@@ -104,6 +104,9 @@ unset LD_LIBRARY_PATH FEX_ROOTFS FEX_GUESTBASE
 export OBJC_DISABLE_INITIALIZE_FORK_SAFETY=YES
 export LXRT_ROOT="$LINK" LXRT_GUEST_PAGE=4096 HOME=/tmp/armhome
 export LXRT_X18_ALL_TEXT="${LXRT_X18_ALL_TEXT-libcef.so}"
+# No libusb for SDL's hidapi: it failed and was reloaded at every controller
+# poll (scripts/settings-env.py says why).
+export SDL_HIDAPI_LIBUSB="${SDL_HIDAPI_LIBUSB-0}"
 # The environment the root names for its guests (the Steam Frame root's
 # indirect GLX, scripts/mkframeroot.sh); a variable the caller set wins.
 . scripts/guest-env.sh

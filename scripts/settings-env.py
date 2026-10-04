@@ -445,6 +445,15 @@ def env_from_settings(s, total=None, chip=None, display=None):
         env["SDL_AUDIO_DRIVER"] = "pulseaudio"     # SDL 3
         env["SDL_AUDIODRIVER"] = "pulseaudio"      # SDL 2
 
+    # Mandos: no libusb for SDL's hidapi. The client's SDL tried to start it at
+    # every controller poll, four times a second; libusb needs the udev netlink
+    # socket, which the runtime refuses the client (runtime/socket.c), so it
+    # failed and was unloaded, to be loaded again at the next poll -- and each
+    # load and unload left runtime memory behind: the Steam client grew about
+    # 0.9 GB an hour (MEASURED 2026-10-04). Controllers reach guests as evdev
+    # nodes (steamarm-inputd), never through libusb.
+    env["SDL_HIDAPI_LIBUSB"] = "0"
+
     # Registros / Depuración
     if s.get("protonLog"):
         env["PROTON_LOG"] = "1"
