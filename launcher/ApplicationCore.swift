@@ -1581,7 +1581,7 @@ enum RenderScaleChoice {
             return "Los juegos dibujan a la resolución de la pantalla. Con el filtro MetalFX temporal, la imagen pasa igualmente por MetalFX a su tamaño: antialiasing a resolución nativa (bordes más estables)." + scope
         }
         if value == "auto" {
-            return "El juego dibuja a la escala que el chip de este Mac puede mover (núcleos de GPU y generación) y se agranda a la pantalla con el filtro de abajo: MetalFX espacial de Apple en KosmicKrisp y MoltenVK." + scope
+            return "El juego dibuja a la escala con la que este Mac saca más fotogramas sin que la imagen se emborrone (núcleos de GPU y generación; en un M4 a 1080p, Equilibrado: por debajo ya manda la CPU) y se agranda a la pantalla con el filtro de abajo." + scope
         }
         return "El juego dibuja a esa fracción de la pantalla por eje y se agranda con el filtro de abajo (MetalFX espacial o temporal): de Calidad ultra (más nítido) a Rendimiento máximo (más fotogramas; MetalFX admite hasta 3x)." + scope
     }
@@ -1611,13 +1611,13 @@ enum ScalingFilterChoice {
         let scope = " Actúa cuando un juego Vulkan o Direct3D (DXVK, VKD3D) dibuja más pequeño que su ventana; no en OpenGL (WineD3D)."
         switch value {
         case "auto":
-            return "MetalFX espacial de Apple con KosmicKrisp (parche 10) o MoltenVK; FSR 1.0 si el driver no lo permite. Actúa con la Escala de render de arriba o cuando el juego dibuja más pequeño que su ventana. Para MetalFX temporal, elígelo abajo." + scope
+            return "FSR 1.0 de AMD con la nitidez de abajo: el filtro más rápido en las pruebas (Counter-Strike 2, M4: 7-9 fps más que MetalFX espacial, que en SteamARM espera a la cola del juego). Actúa con la Escala de render de arriba o cuando el juego dibuja más pequeño que su ventana." + scope
         case "fsr":
             return "FSR 1.0 de AMD: agranda respetando los bordes (EASU) y afila (RCAS); la nitidez va de suave (0 %) al máximo de FSR (100 %)." + scope
         case "metalfx":
             return "El escalador espacial de Apple, en la GPU del Mac. Si macOS lo rechaza, se vuelve a bilineal." + scope
         case "metalfx-temporal":
-            return "El escalador temporal de Apple: acumula los fotogramas anteriores donde la imagen no cambia (bordes más estables, menos parpadeo) y se fía solo del fotograma actual donde algo se mueve, para no dejar estelas. El juego no da su profundidad, sus vectores de movimiento ni su jitter, así que no recupera el detalle extra de un temporal integrado en el juego. Si macOS lo rechaza, se vuelve a bilineal." + scope
+            return "Más lento y con tirones en las pruebas. El escalador temporal de Apple: acumula los fotogramas anteriores donde la imagen no cambia (bordes más estables, menos parpadeo) y se fía solo del fotograma actual donde algo se mueve, para no dejar estelas. El juego no da su profundidad, sus vectores de movimiento ni su jitter, así que no recupera el detalle extra de un temporal integrado en el juego. Si macOS lo rechaza, se vuelve a bilineal." + scope
         case "nearest":
             return "Cada píxel del juego se repite tal cual: aspecto pixelado, sin suavizado." + scope
         default:

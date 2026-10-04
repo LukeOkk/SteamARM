@@ -106,12 +106,16 @@ def usable_gb(total=None):
     return max(2, t - 2 if t <= 8 else t - 4)
 
 
-# Upscaling, "Filtro de escalado" AUTO (the default): the Vulkan shim takes
-# Apple's MetalFX spatial scaler where the driver exports its Metal objects
-# (MoltenVK; SteamARM's KosmicKrisp from patches/kosmickrisp-10 on) and FSR
-# 1.0 where it does not (LXRT_VK_SCALER=auto, shim/scaler.c). MetalFX
-# temporal needs depth, motion vectors and the camera jitter of the 3D scene,
-# which a picture handed to vkQueuePresentKHR does not have: spatial only.
+# Upscaling, "Filtro de escalado" AUTO (the default): AMD's FSR 1.0 in the
+# Vulkan shim (LXRT_VK_SCALER=fsr, shim/scaler.c). It was the fastest
+# filter in every measurement, 7-9 frames a second over MetalFX spatial,
+# which the shim runs on a Metal queue of its own that has to wait for the
+# game's (Counter-Strike 2, Dust2 with bots, M4, KosmicKrisp, 2026-10-03:
+# at 67 % FSR 57.4, bilinear 57.0, MetalFX spatial 49.7 and temporal 50.3;
+# at 59 % FSR 68.8, MetalFX 59.4). MetalFX temporal needs depth, motion
+# vectors and the camera jitter of the 3D scene, which a picture handed to
+# vkQueuePresentKHR does not have. MoltenVK: Counter-Strike 2 crashed
+# loading a match.
 # What depends on the chip is how far below the display a game should render
 # for the shim to enlarge: the largest of FSR 1.0's scales (render size per
 # axis) that the GPU's budget allows, as STEAMARM_RENDER_SCALE and
@@ -123,12 +127,14 @@ RENDER_SCALES = ((1.0, "nativa"), (0.77, "ultra calidad"), (0.67, "calidad"),
 # public per-core results of the Metal benchmarks, rounded; an assumption,
 # not measured here.
 GPU_CORE_SPEED = {1: 0.70, 2: 0.80, 3: 0.90, 4: 1.00}
-# Pixels per frame one M4 GPU core shades at a game's highest settings and
-# the rate it is played at, calibrated on this machine's one data point:
-# Counter-Strike 2, everything at its highest with 4x MSAA, 1920x1080, M4 with
-# 10 GPU cores, 33-40 frames a second, GPU-bound (benchmarks/stage53): 10
-# cores x 93,000 = 0.67^2 x 1920x1080, the "calidad" scale.
-PIXELS_PER_CORE = 93000
+# Pixels per frame one M4 GPU core shades at a game's highest settings for
+# the game to reach the rate the CPU allows, calibrated on this machine:
+# Counter-Strike 2, everything at its highest with 4x MSAA, 1920x1080, M4
+# with 10 GPU cores, FSR 1.0 (2026-10-03, 90 s on Dust2 with bots, averages):
+# 67 % 57.4, 59 % 68.8 (worst tenth 59.5), 50 % 69.0, 33 % 76.2 -- from 59 %
+# down the GPU is no longer what limits it, and 33 % looks blurred. 10 cores
+# x 72,000 = 0.59^2 x 1920x1080, the "equilibrado" scale.
+PIXELS_PER_CORE = 72000
 # Resolutions games list (16:9 and 16:10): the render size is the largest of
 # these with the display's shape that fits the scale, so that it can be
 # picked in a game's menu.
@@ -223,10 +229,10 @@ def upscaling_policy(chip, display=None):
         if ideal + 0.01 >= value:
             scale, preset = value, name
             break
-    return {"filter": "metalfx", "scale": scale, "preset": preset, "render": render_size((w, h), scale),
+    return {"filter": "fsr", "scale": scale, "preset": preset, "render": render_size((w, h), scale),
             "display": [w, h],
             "chip": "%s, GPU de %d núcleos" % (chip["brand"], chip["gpu_cores"]),
-            "reason": "MetalFX espacial (temporal: imposible al presentar)"}
+            "reason": "FSR 1.0: el filtro más rápido medido (MetalFX espacial, 7-9 fps menos)"}
 
 
 def host_timezone():
@@ -350,7 +356,8 @@ def env_from_settings(s, total=None, chip=None, display=None):
     # MEASURED: tests/win/run.sh modeset_* (benchmarks/stage44).
     flt = s.get("scalingFilter") or "auto"
     if flt in SCALING_FILTERS and flt != "linear":
-        env["LXRT_VK_SCALER"] = flt
+        # AUTO is FSR 1.0 (see upscaling_policy), with its sharpness.
+        env["LXRT_VK_SCALER"] = "fsr" if flt == "auto" else flt
     # A game's own FSR 1 upscale (its EASU pass) is drawn by MetalFX in
     # SteamARM's KosmicKrisp (patches/kosmickrisp-14) unless another filter
     # than MetalFX was chosen: "FSR" keeps the game's FSR as it is.
@@ -390,7 +397,7 @@ def env_from_settings(s, total=None, chip=None, display=None):
             def side(n):
                 return max(int(n * scale + 0.5) & ~1, (n + 5) // 6 * 2)
             env["STEAMARM_RENDER_SIZE"] = "%dx%d" % (side(disp[0]), side(disp[1]))
-        if flt == "fsr":
+        if flt in ("fsr", "auto"):
             try:
                 sharp = int(s.get("fsrSharpness", 90))
             except (TypeError, ValueError):

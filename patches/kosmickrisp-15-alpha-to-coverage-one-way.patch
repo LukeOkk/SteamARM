@@ -1,0 +1,36 @@
+SteamARM: one alpha-to-coverage algorithm for a multisampled frame
+
+Patch 08 chose, per pipeline, between Metal's hardware alpha-to-coverage
+and a dither computed in the shader. The two set different samples for the
+same alpha, and Source 2 draws foliage as a depth prepass (no colour:
+Metal's) and a colour pass with depth EQUAL (often the shader's): only the
+intersection got colour and the rest kept leaf depth with the clear colour,
+so leaf edges eroded or speckled at MSAA 4x (Counter-Strike 2's palms on
+Dust2, reported by the user the day MSAA 4x was turned on). With more than
+one sample every pipeline now takes the shader's; one the pass cannot lower
+still keeps Metal's (a2c_lowered). KK_A2C_SELECT=1: per pipeline, as before.
+diff -ruN a/src/kosmickrisp/vulkan/kk_shader.c b/src/kosmickrisp/vulkan/kk_shader.c
+--- a/src/kosmickrisp/vulkan/kk_shader.c	2026-10-03 20:00:43
++++ b/src/kosmickrisp/vulkan/kk_shader.c	2026-10-03 20:00:43
+@@ -423,6 +423,21 @@
+    if (!state->ms || !state->ms->alpha_to_coverage_enable || !state->rp)
+       return false;
+ 
++   /* SteamARM: one algorithm for every pipeline of a multisampled frame.
++    * Choosing per pipeline mixed Metal's coverage with this dither: a depth
++    * prepass without colour (Metal) and its colour pass (shader) covered
++    * different samples at the same alpha, so leaf edges eroded or kept the
++    * clear colour (Counter-Strike 2's palms at MSAA 4x). A shader the pass
++    * cannot lower still keeps Metal's (a2c_lowered stays false).
++    * KK_A2C_SELECT=1: the per-pipeline choice below, as before. */
++   static int select = -1;
++   if (select < 0) {
++      const char *e = getenv("KK_A2C_SELECT");
++      select = e && e[0] == '1';
++   }
++   if (!select && state->ms->rasterization_samples > 1)
++      return true;
++
+    const struct vk_render_pass_state *rp = state->rp;
+    for (uint32_t i = 0u; i < rp->color_attachment_count; ++i) {
+       if (kk_get_logical_color_att_index(state, i) != 0u)

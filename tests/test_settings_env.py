@@ -130,16 +130,17 @@ class SettingsEnvironmentTests(unittest.TestCase):
         self.assertNotIn(";", env["LXRT_EXEC_ARGS"])
 
     def test_scaling_filter(self):
-        # AUTO by default: the shim's choice, with this chip's render scale
-        # (the exact ratio of the mode the policy snaps to).
+        # AUTO by default: FSR 1.0 (the fastest measured) with its sharpness,
+        # at this chip's render scale (the exact ratio of the mode the policy
+        # snaps to).
         m4 = self.settings.apple_chip("Apple M4", 10)
         env = self.settings.env_from_settings({}, chip=m4, display=(1920, 1080))
-        self.assertEqual((env["LXRT_VK_SCALER"], env["STEAMARM_RENDER_SCALE"], env["STEAMARM_RENDER_SIZE"]),
-                         ("auto", "0.6667", "1280x720"))
+        self.assertEqual((env["LXRT_VK_SCALER"], env["STEAMARM_RENDER_SCALE"], env["STEAMARM_RENDER_SIZE"],
+                          env["LXRT_VK_FSR_SHARPNESS"]), ("fsr", "0.6000", "1152x648", "90"))
         # The render scale does not depend on the filter.
         env = self.settings.env_from_settings({"scalingFilter": "linear"}, chip=m4, display=(1920, 1080))
         self.assertNotIn("LXRT_VK_SCALER", env)
-        self.assertEqual(env["STEAMARM_RENDER_SIZE"], "1280x720")
+        self.assertEqual(env["STEAMARM_RENDER_SIZE"], "1152x648")
         env = self.settings.env_from_settings({"scalingFilter": "metalfx-temporal"})
         self.assertEqual(env["LXRT_VK_SCALER"], "metalfx-temporal")
         # 100 % with MetalFX temporal: antialiasing at the native size.
@@ -186,7 +187,7 @@ class SettingsEnvironmentTests(unittest.TestCase):
         self.assertEqual(scale("0.33"), ("0.3300", "640x360"))   # rendimiento máximo: MetalFX's 3x, no more
         self.assertEqual(scale("bogus"), (None, None))
         self.assertEqual(scale("0.2"), (None, None))         # out of range: native
-        self.assertEqual(scale("auto"), ("0.6667", "1280x720"))
+        self.assertEqual(scale("auto"), ("0.6000", "1152x648"))
 
     def test_upscaling_policy(self):
         chip = self.settings.apple_chip
@@ -201,21 +202,21 @@ class SettingsEnvironmentTests(unittest.TestCase):
             self.assertEqual(chip("Apple M2 Pro")["gpu_cores"], 14)
         cases = [  # chip, GPU cores, display -> scale, render size
             ("Apple M1", 8, (1920, 1080), 0.5, [960, 540]),
-            ("Apple M2", 10, (1920, 1080), 0.59, [1152, 648]),
-            ("Apple M4", 10, (1920, 1080), 0.67, [1280, 720]),
+            ("Apple M2", 10, (1920, 1080), 0.5, [960, 540]),
+            ("Apple M4", 10, (1920, 1080), 0.59, [1152, 648]),
             ("Apple M4", 10, (2560, 1440), 0.5, [1280, 720]),
             ("Apple M4 Pro", 20, (1920, 1080), 0.77, [1366, 768]),
-            ("Apple M4 Pro", 20, (2560, 1440), 0.67, [1600, 900]),
+            ("Apple M4 Pro", 20, (2560, 1440), 0.59, [1366, 768]),
             ("Apple M3 Max", 40, (1920, 1080), 1.0, [1920, 1080]),
-            ("Apple M3 Max", 40, (3840, 2160), 0.59, [2304, 1296]),
+            ("Apple M3 Max", 40, (3840, 2160), 0.5, [1920, 1080]),
             ("Apple M2 Ultra", 76, (2560, 1440), 1.0, [2560, 1440]),
         ]
         for brand, cores, display, scale, render in cases:
             got = policy(chip(brand, cores), display)
-            self.assertEqual((got["filter"], got["scale"], got["render"]), ("metalfx", scale, render),
+            self.assertEqual((got["filter"], got["scale"], got["render"]), ("fsr", scale, render),
                              (brand, cores, display))
         # A display no common mode fits: the scaled size, even.
-        self.assertEqual(policy(m4, (1512, 982))["render"], [1164, 756])
+        self.assertEqual(policy(m4, (1512, 982))["render"], [1014, 658])
 
     def test_antialiasing(self):
         for value in (2, 4, 8):

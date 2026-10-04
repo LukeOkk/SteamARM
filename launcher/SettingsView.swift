@@ -382,7 +382,7 @@ struct SettingsView: View {
                 Text(RenderScaleChoice.note(draft.renderScale))
                     .font(.caption).foregroundStyle(.secondary)
                 choice("Filtro de escalado", $draft.scalingFilter, ScalingFilterChoice.options)
-                if draft.scalingFilter == "fsr" {
+                if draft.scalingFilter == "fsr" || draft.scalingFilter == "auto" {
                     LabeledContent("Nitidez FSR") {
                         Slider(value: Binding(get: { Double(draft.fsrSharpness) }, set: { draft.fsrSharpness = Int($0) }),
                                in: 0...100, step: 5)
