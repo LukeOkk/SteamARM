@@ -156,6 +156,9 @@ enum DisplayMode: String, Codable, CaseIterable {
 struct LauncherSettings: Codable, Equatable {
     var metalHud: Bool = false
     var display: DisplayMode = .native
+    /// ExecutionBackend raw value: "auto", or "lightningJIT" (FEX's JIT set
+    /// for speed, scripts/settings-env.py) with native windows.
+    var execution: String = "auto"
     var resolution: String = "1600x900"
     var projectDir: String? = nil
     var extraEnv: [String: String] = [:]
@@ -188,7 +191,7 @@ struct LauncherSettings: Codable, Equatable {
     var resolutionScaling: Bool = false // Wine's display-mode emulation in the game prefixes
     var scalingFilter: String = "auto"   // a picture smaller than its window: auto, linear, nearest, fsr, metalfx, metalfx-temporal (shim/scaler.c)
     var fsrSharpness: Int = 90         // FSR's RCAS strength, percent
-    var renderScale: String = "auto"   // games covering the screen render at this scale, the shim enlarges: auto (this Mac's chip), 1.0, 0.77, 0.67, 0.59, 0.5
+    var renderScale: String = "1.0"    // games covering the screen render at this scale, the shim enlarges: 1.0 (native, the default), 0.77, 0.67, 0.59, 0.5, 0.33; an old "auto" is native
     var steamUIAcceleration: Bool = true // ARM64 Steam's webhelper on ANGLE/Vulkan (LXRT_EXEC_ARGS)
     var frameRateLimit: Int = 0
     var dxvkHud: String = "off"
@@ -208,6 +211,15 @@ struct LauncherSettings: Codable, Equatable {
     var synchronizationBackend: SynchronizationBackend { SynchronizationBackend(rawValue: synchronization) ?? .auto }
     var graphics: GraphicsBackend { GraphicsBackend(rawValue: graphicsBackend) ?? .auto }
     var fallback: FallbackPolicy { FallbackPolicy(rawValue: fallbackPolicy) ?? .auto }
+    var executionBackend: ExecutionBackend {
+        let e = ExecutionBackend(rawValue: execution) ?? .auto
+        return e.usesVirtualMachine ? .auto : e
+    }
+    /// The launcher preset these settings select.
+    var backendPreset: ApplicationBackendPreset {
+        if display == .vnc { return .vncScreenSharing }
+        return executionBackend == .lightningJIT ? .lightningJIT : .nativeWindows
+    }
 
     /// Keys of settings.json that are no longer properties, read once to migrate.
     private enum LegacyKeys: String, CodingKey { case esync, fsync }
@@ -242,7 +254,8 @@ struct LauncherSettings: Codable, Equatable {
         resolutionScaling = try c.decodeIfPresent(Bool.self, forKey: .resolutionScaling) ?? false
         scalingFilter = try c.decodeIfPresent(String.self, forKey: .scalingFilter) ?? "auto"
         fsrSharpness = try c.decodeIfPresent(Int.self, forKey: .fsrSharpness) ?? 90
-        renderScale = try c.decodeIfPresent(String.self, forKey: .renderScale) ?? "auto"
+        renderScale = try c.decodeIfPresent(String.self, forKey: .renderScale) ?? "1.0"
+        if renderScale == "auto" { renderScale = "1.0" }   // was 59 % on an M4: the whole picture blurred
         steamUIAcceleration = try c.decodeIfPresent(Bool.self, forKey: .steamUIAcceleration) ?? true
         frameRateLimit = try c.decodeIfPresent(Int.self, forKey: .frameRateLimit) ?? 0
         dxvkHud = try c.decodeIfPresent(String.self, forKey: .dxvkHud) ?? "off"
@@ -259,6 +272,7 @@ struct LauncherSettings: Codable, Equatable {
         metalHud = try c.decodeIfPresent(Bool.self, forKey: .metalHud) ?? false
         let d: String? = try? c.decodeIfPresent(String.self, forKey: .display) ?? nil
         display = d.flatMap { DisplayMode(rawValue: $0) } ?? .native
+        execution = try c.decodeIfPresent(String.self, forKey: .execution) ?? "auto"
         resolution = try c.decodeIfPresent(String.self, forKey: .resolution) ?? "1600x900"
         projectDir = try c.decodeIfPresent(String.self, forKey: .projectDir)
         extraEnv = try c.decodeIfPresent([String: String].self, forKey: .extraEnv) ?? [:]

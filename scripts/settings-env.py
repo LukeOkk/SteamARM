@@ -307,6 +307,22 @@ def env_from_settings(s, total=None, chip=None, display=None):
         env["FEX_SMCCHECKS"] = smc
     if s.get("fexX87Reduced"):
         env["FEX_X87REDUCEDPRECISION"] = "1"
+    # Lightning JIT (launcher "Backend de la aplicación"): native windows and
+    # FEX's JIT set for speed, over the choices above -- the code cache on
+    # disk (no translating the same code again at the next start), memory
+    # ordering kept for ordinary loads and stores but not for vector ones and
+    # memcpy/memset (the "fast" TSO), whole multi-block translation, x87 at
+    # double precision. Self-modifying code stays tracked (mtrack): games with
+    # JITs of their own (.NET, Unity, LuaJIT) need it. Experimental: the
+    # relaxed ordering can break a game that relies on it.
+    if s.get("execution") == "lightningJIT":
+        env["FEX_DISKCACHE"] = "1"
+        env["FEX_TSOENABLED"] = "1"
+        env["FEX_VECTORTSOENABLED"] = "0"
+        env["FEX_MEMCPYSETTSOENABLED"] = "0"
+        env.pop("FEX_MULTIBLOCK", None)
+        env.pop("FEX_SMCCHECKS", None)
+        env["FEX_X87REDUCEDPRECISION"] = "1"
 
     # Gráficos. The shim loads MoltenVK unless STEAMARM_VK_ICD names another
     # driver; only a shim that reads the variable gets it. AUTO is MoltenVK.
@@ -365,17 +381,15 @@ def env_from_settings(s, total=None, chip=None, display=None):
     # "Escala de render": games whose window covers the screen render at this
     # fraction of it (the game tool passes STEAMARM_RENDER_SCALE to the game
     # only as LXRT_VK_RENDER_SCALE; shim/wsi.c render_scale) and the shim
-    # enlarges their picture with the filter above. AUTO (the default): the
-    # chip's recommendation (upscaling_policy).
-    rs = str(s.get("renderScale") or "auto")
+    # enlarges their picture with the filter above. Native (100 %) unless
+    # the user picks a scale: "auto" used to be the chip's recommendation
+    # (upscaling_policy, 59 % on an M4 at 1080p) and it scaled the whole
+    # picture, menus and text included -- Counter-Strike 2's text came out
+    # blurred (the user, 2026-10-04: "siempre al 100 %"). A game's own FSR
+    # scales only its 3D scene. "auto" in an old settings.json is native.
+    rs = str(s.get("renderScale") or "1.0")
     if rs == "auto":
-        disp = display or main_display_size()
-        pol = upscaling_policy(chip if chip is not None else apple_chip(), disp)
-        scale = pol["scale"]
-        # The policy snaps to a common mode (1280x720 for 0.67 at 1080p):
-        # the exact ratio, so that the shim lands on that size.
-        if disp and pol.get("render") and pol["render"][0] and scale < 0.995:
-            scale = pol["render"][0] / float(disp[0])
+        scale = 1.0
     else:
         try:
             scale = float(rs)
@@ -397,12 +411,14 @@ def env_from_settings(s, total=None, chip=None, display=None):
             def side(n):
                 return max(int(n * scale + 0.5) & ~1, (n + 5) // 6 * 2)
             env["STEAMARM_RENDER_SIZE"] = "%dx%d" % (side(disp[0]), side(disp[1]))
-        if flt in ("fsr", "auto"):
-            try:
-                sharp = int(s.get("fsrSharpness", 90))
-            except (TypeError, ValueError):
-                sharp = 90
-            env["LXRT_VK_FSR_SHARPNESS"] = str(max(0, min(100, sharp)))
+    # FSR's sharpness: for the render scale and for a game that draws smaller
+    # than its window (a lower mode picked in the game).
+    if flt in ("fsr", "auto"):
+        try:
+            sharp = int(s.get("fsrSharpness", 90))
+        except (TypeError, ValueError):
+            sharp = 90
+        env["LXRT_VK_FSR_SHARPNESS"] = str(max(0, min(100, sharp)))
     # The ARM64 clients' web helper (Chromium) on ANGLE over Vulkan: the
     # Steam Frame root has only indirect GLX, its GPU process could not start
     # GL ES and Steam fell back to software ("Disabling GPU acceleration").
@@ -412,13 +428,19 @@ def env_from_settings(s, total=None, chip=None, display=None):
         # The browser process only (no --type=): Chromium passes the
         # switches on to its GPU process itself.
         env["LXRT_EXEC_ARGS"] = ("steamwebhelper!--type=:" + " ".join(STEAM_UI_GPU_SWITCHES))
+    # Anisotropic filtering and the frame-rate limit: DXVK and VKD3D for
+    # Direct3D games, and the Vulkan shim for every Vulkan program -- a native
+    # Vulkan game (Counter-Strike 2) got nothing from either before
+    # (LXRT_VK_ANISOTROPY: shim/features.c; LXRT_VK_FPS_LIMIT: shim/scaler.c).
     aniso = int(s.get("anisotropy") or 0)
     if aniso in (2, 4, 8, 16):
         dxvk += ["d3d11.samplerAnisotropy = %d" % aniso, "d3d9.samplerAnisotropy = %d" % aniso]
+        env["LXRT_VK_ANISOTROPY"] = str(aniso)
     fps = int(s.get("frameRateLimit") or 0)
     if fps > 0:
         dxvk += ["dxgi.maxFrameRate = %d" % fps, "d3d9.maxFrameRate = %d" % fps]
         env["VKD3D_FRAME_RATE"] = str(fps)
+        env["LXRT_VK_FPS_LIMIT"] = str(fps)
     hud = s.get("dxvkHud") or "off"
     if hud == "fps":
         env["DXVK_HUD"] = "fps"

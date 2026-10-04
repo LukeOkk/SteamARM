@@ -190,12 +190,14 @@ struct SettingsView: View {
             }
             Section("Pantalla") {
                 Picker("Backend de la aplicación", selection: Binding(
-                    get: { draft.display == .vnc ? ApplicationBackendPreset.vncScreenSharing : .nativeWindows },
+                    get: { draft.backendPreset },
                     set: { preset in
+                        guard model.capabilities.status(of: preset).usable else { return }
                         switch preset {
-                        case .nativeWindows: if model.capabilities.status(of: preset).usable { draft.display = .native }
-                        case .vncScreenSharing: if model.capabilities.status(of: preset).usable { draft.display = .vnc }
-                        default: break
+                        case .nativeWindows: draft.display = .native; draft.execution = ExecutionBackend.auto.rawValue
+                        case .vncScreenSharing: draft.display = .vnc; draft.execution = ExecutionBackend.auto.rawValue
+                        case .lightningJIT: draft.display = .native; draft.execution = ExecutionBackend.lightningJIT.rawValue
+                        case .appleHypervisor: break
                         }
                     })) {
                     ForEach(ApplicationBackendPreset.allCases.filter { $0.offered(in: model.capabilities) }, id: \.self) { preset in
@@ -206,6 +208,8 @@ struct SettingsView: View {
                 }
                 Text(draft.display == .vnc
                      ? "Las apps se dibujan en Xvnc y se ven en Compartir Pantalla."
+                     : draft.backendPreset == .lightningJIT
+                     ? "Ventanas nativas, y el x86 con el JIT de FEX ajustado para velocidad: sustituye los ajustes de Procesador (FEX). Experimental."
                      : "Cada ventana de la app es una ventana normal de macOS (servidor X nativo).")
                     .font(.caption).foregroundStyle(.secondary)
                 ForEach(ApplicationBackendPreset.allCases.filter { $0.offered(in: model.capabilities) && !model.capabilities.status(of: $0).usable }, id: \.self) { preset in
@@ -213,7 +217,7 @@ struct SettingsView: View {
                     Text("\(preset.label): \(status.state.label.lowercased()) — \(status.reason).")
                         .font(.caption).foregroundStyle(.secondary)
                 }
-                let selected = draft.display == .vnc ? ApplicationBackendPreset.vncScreenSharing : .nativeWindows
+                let selected = draft.backendPreset
                 Text("Modo de sesión: \(SessionVirtualizationMode(selected.execution).label)")
                     .font(.caption).foregroundStyle(.secondary)
                     .help("Ningún backend que se pueda elegir usa una máquina virtual.")
@@ -369,7 +373,11 @@ struct SettingsView: View {
             Section("Funcionalidades y mejoras") {
                 Toggle("Caché de sombreadores", isOn: $draft.shaderCache)
                 integerChoice("Filtrado anisotrópico", $draft.anisotropy, [0, 2, 4, 8, 16], zero: "Automático")
+                Text("Un mínimo para todos los juegos (Direct3D por DXVK y Vulkan nativo como Counter-Strike 2): si el juego pide más, se queda con lo suyo. Automático: lo que elija el juego.")
+                    .font(.caption).foregroundStyle(.secondary)
                 integerChoice("Límite de FPS", $draft.frameRateLimit, [0, 30, 60, 90, 120, 144], zero: "Sin límite")
+                Text("Para todos los juegos (Direct3D por DXVK/VKD3D y Vulkan nativo); se aplica al abrir el juego.")
+                    .font(.caption).foregroundStyle(.secondary)
                 choice("HUD de DXVK", $draft.dxvkHud, [("off", "Desactivado"), ("fps", "FPS"), ("full", "Completo")])
                 Toggle("Mostrar Metal HUD", isOn: $draft.metalHud)
                 integerChoice("Suavizado de bordes (MSAA)", $draft.antialiasing, [0, 2, 4, 8], zero: "El del juego")

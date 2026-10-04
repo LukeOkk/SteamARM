@@ -424,8 +424,10 @@ VkQueue lxrt_scaler_a_queue(VkDevice dev)
 }
 
 void lxrt_mvk_vkDestroyDevice(VkDevice, const VkAllocationCallbacks *);
+void lxrt_aniso_forget(VkDevice dev);   // features.c: a later device may get this handle
 void lxrt_inner_vkDestroyDevice(VkDevice dev, const VkAllocationCallbacks *alloc)
 {
+    lxrt_aniso_forget(dev);
     lock();
     for (int i = 0; i < 32; i++)
         if (g_q[i].dev == dev)
@@ -1386,9 +1388,44 @@ static VkResult present_mailboxes(VkQueue q, const VkPresentInfoKHR *pi)
     return worst;
 }
 
+// LXRT_VK_FPS_LIMIT=<fps> (launcher "Límite de FPS", scripts/settings-env.py):
+// presents paced to that rate in every Vulkan program. DXVK and VKD3D have a
+// limiter of their own; a native Vulkan game (Counter-Strike 2) had none and
+// the setting did nothing there (the user, 2026-10-04). The wait comes before
+// the present, as DXVK's does; a frame that is late starts a new schedule
+// instead of letting the next ones catch up in a burst.
+extern int nanosleep(const struct lxrt_ts *, struct lxrt_ts *);
+static void fps_limit_wait(void)
+{
+    static long limit = -1;
+    static uint64_t next;
+    if (limit < 0) {
+        const char *e = getenv("LXRT_VK_FPS_LIMIT");
+        long v = 0;
+        for (; e && *e >= '0' && *e <= '9'; e++)
+            v = v * 10 + (*e - '0');
+        limit = v >= 10 && v <= 1000 ? v : 0;
+    }
+    if (!limit)
+        return;
+    const uint64_t interval = 1000000000ull / (uint64_t)limit;
+    uint64_t now = now_ns();
+    if (next > now) {
+        uint64_t d = next - now;
+        if (d > 1500000) {      // sleep to within a millisecond and a half, then spin: nanosleep oversleeps
+            struct lxrt_ts nap = { 0, (long)(d - 1500000) };
+            nanosleep(&nap, 0);
+        }
+        while ((now = now_ns()) < next)
+            ;
+    }
+    next = now > next + interval ? now + interval : next + interval;
+}
+
 static VkResult present_inner(VkQueue q, const VkPresentInfoKHR *pi);
 VkResult lxrt_inner_vkQueuePresentKHR(VkQueue q, const VkPresentInfoKHR *pi)
 {
+    fps_limit_wait();
     if (!timing_on())
         return present_inner(q, pi);
     uint64_t t0 = now_ns();

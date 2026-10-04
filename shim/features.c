@@ -49,7 +49,8 @@ typedef uint64_t VkPipeline;
 #define VK_INCOMPLETE 5
 
 #define N_FEATURES 55
-enum { F_GEOMETRY_SHADER = 4, F_DEPTH_CLAMP = 11, F_FILL_MODE_NON_SOLID = 13, F_SHADER_CULL_DISTANCE = 38 };
+enum { F_GEOMETRY_SHADER = 4, F_DEPTH_CLAMP = 11, F_FILL_MODE_NON_SOLID = 13, F_SAMPLER_ANISOTROPY = 19,
+       F_SHADER_CULL_DISTANCE = 38 };
 static const int k_spoof[] = { F_GEOMETRY_SHADER, F_FILL_MODE_NON_SOLID, F_SHADER_CULL_DISTANCE };
 #define N_SPOOF (sizeof k_spoof / sizeof k_spoof[0])
 
@@ -424,6 +425,52 @@ static void chain_relink(struct unlink *undo, int n)
 // Clear, in the caller's own structures, every spoofed feature the device
 // does not really have, drop the emulated extensions and their feature
 // structures, call MoltenVK, and put everything back.
+// LXRT_VK_ANISOTROPY=<2|4|8|16> (launcher "Filtrado anisotrópico"): samplers
+// that filter linearly across mip levels get at least that much anisotropic
+// filtering (lxrt_inner_vkCreateSampler). DXVK applies its own to Direct3D
+// games; a native Vulkan game (Counter-Strike 2) got nothing from the setting
+// (the user, 2026-10-04). A game asking for more keeps its own. It needs the
+// device feature, turned on here when the driver has it.
+static int aniso_level(void)
+{
+    static int n = -1;
+    if (n < 0) {
+        const char *e = getenv("LXRT_VK_ANISOTROPY");
+        int v = 0;
+        for (; e && *e >= '0' && *e <= '9'; e++)
+            v = v * 10 + (*e - '0');
+        n = (v == 2 || v == 4 || v == 8 || v == 16) ? v : 0;
+    }
+    return n;
+}
+#define ANISO_DEVICES 16
+static VkDevice aniso_devices[ANISO_DEVICES];
+
+static void aniso_note(VkDevice d)
+{
+    for (int i = 0; i < ANISO_DEVICES; i++) {
+        VkDevice zero = 0;
+        if (__atomic_compare_exchange_n(&aniso_devices[i], &zero, d, 0, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE) || zero == d)
+            return;
+    }
+}
+
+static int aniso_has(VkDevice d)
+{
+    for (int i = 0; i < ANISO_DEVICES; i++)
+        if (__atomic_load_n(&aniso_devices[i], __ATOMIC_ACQUIRE) == d)
+            return 1;
+    return 0;
+}
+
+void lxrt_aniso_forget(VkDevice d)
+{
+    for (int i = 0; i < ANISO_DEVICES; i++) {
+        VkDevice cur = d;
+        __atomic_compare_exchange_n(&aniso_devices[i], &cur, (VkDevice)0, 0, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE);
+    }
+}
+
 static VkResult create_device(VkPhysicalDevice pd, const VkDeviceCreateInfo *cci, const void *alloc, VkDevice *out)
 {
     if (!spoof_on() || !cci)
@@ -491,8 +538,33 @@ static VkResult create_device(VkPhysicalDevice pd, const VkDeviceCreateInfo *cci
         rob->nullDescriptor &= rob_real.nullDescriptor;
     }
 
+    // Anisotropic filtering for the samplers (aniso_level): the feature on.
+    VkBool32 aniso_saved[2] = { 0, 0 };
+    VkPhysicalDeviceFeatures aniso_only;
+    const VkPhysicalDeviceFeatures *old_enabled = ci->pEnabledFeatures;
+    int aniso = aniso_level() && real.f[F_SAMPLER_ANISOTROPY];
+    if (aniso) {
+        for (int s = 0; s < nsets; s++) {
+            aniso_saved[s] = sets[s]->f[F_SAMPLER_ANISOTROPY];
+            sets[s]->f[F_SAMPLER_ANISOTROPY] = 1;
+        }
+        if (!nsets) {
+            for (int i = 0; i < N_FEATURES; i++)
+                aniso_only.f[i] = 0;
+            aniso_only.f[F_SAMPLER_ANISOTROPY] = 1;
+            ci->pEnabledFeatures = &aniso_only;
+        }
+    }
+
     VkResult r = lxrt_mvk_vkCreateDevice(pd, ci, alloc, out);
 
+    if (aniso) {
+        for (int s = 0; s < nsets; s++)
+            sets[s]->f[F_SAMPLER_ANISOTROPY] = aniso_saved[s];
+        ci->pEnabledFeatures = old_enabled;
+        if (r == VK_SUCCESS && out)
+            aniso_note(*out);
+    }
     if (rob) {
         rob->robustBufferAccess2 = rob_saved.robustBufferAccess2;
         rob->robustImageAccess2 = rob_saved.robustImageAccess2;
@@ -510,6 +582,33 @@ static VkResult create_device(VkPhysicalDevice pd, const VkDeviceCreateInfo *cci
 }
 
 void lxrt_note_device(VkDevice dev, VkPhysicalDevice pd);   // present.c
+
+typedef struct {
+    int32_t sType; const void *pNext; uint32_t flags;
+    int32_t magFilter, minFilter, mipmapMode, addressModeU, addressModeV, addressModeW;
+    float mipLodBias; VkBool32 anisotropyEnable; float maxAnisotropy;
+    VkBool32 compareEnable; int32_t compareOp; float minLod, maxLod;
+    int32_t borderColor; VkBool32 unnormalizedCoordinates;
+} VkSamplerCreateInfo;
+VkResult lxrt_mvk_vkCreateSampler(VkDevice, const VkSamplerCreateInfo *, const void *, uint64_t *);
+
+// The samplers aniso_level() applies to: linear in both directions, with mip
+// levels to filter across, no depth compare (shadow lookups), normalized
+// coordinates, and no extension structure (YCbCr conversions and reduction
+// modes do not take anisotropy).
+VkResult lxrt_inner_vkCreateSampler(VkDevice dev, const VkSamplerCreateInfo *ci, const void *alloc, uint64_t *out)
+{
+    int n = aniso_level();
+    if (n && ci && !ci->pNext && ci->magFilter == 1 && ci->minFilter == 1 && !ci->compareEnable &&
+        !ci->unnormalizedCoordinates && ci->maxLod > ci->minLod &&
+        (!ci->anisotropyEnable || ci->maxAnisotropy < (float)n) && aniso_has(dev)) {
+        VkSamplerCreateInfo c = *ci;
+        c.anisotropyEnable = 1;
+        c.maxAnisotropy = (float)n;
+        return lxrt_mvk_vkCreateSampler(dev, &c, alloc, out);
+    }
+    return lxrt_mvk_vkCreateSampler(dev, ci, alloc, out);
+}
 
 VkResult lxrt_inner_vkCreateDevice(VkPhysicalDevice pd, const VkDeviceCreateInfo *cci, const void *alloc, VkDevice *out)
 {

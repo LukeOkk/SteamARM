@@ -130,17 +130,17 @@ class SettingsEnvironmentTests(unittest.TestCase):
         self.assertNotIn(";", env["LXRT_EXEC_ARGS"])
 
     def test_scaling_filter(self):
-        # AUTO by default: FSR 1.0 (the fastest measured) with its sharpness,
-        # at this chip's render scale (the exact ratio of the mode the policy
-        # snaps to).
+        # AUTO filter by default: FSR 1.0 (the fastest measured) with its
+        # sharpness, at the native size (no render scale).
         m4 = self.settings.apple_chip("Apple M4", 10)
         env = self.settings.env_from_settings({}, chip=m4, display=(1920, 1080))
-        self.assertEqual((env["LXRT_VK_SCALER"], env["STEAMARM_RENDER_SCALE"], env["STEAMARM_RENDER_SIZE"],
-                          env["LXRT_VK_FSR_SHARPNESS"]), ("fsr", "0.6000", "1152x648", "90"))
+        self.assertEqual((env["LXRT_VK_SCALER"], env["LXRT_VK_FSR_SHARPNESS"]), ("fsr", "90"))
+        self.assertNotIn("STEAMARM_RENDER_SCALE", env)
         # The render scale does not depend on the filter.
-        env = self.settings.env_from_settings({"scalingFilter": "linear"}, chip=m4, display=(1920, 1080))
+        env = self.settings.env_from_settings({"scalingFilter": "linear", "renderScale": "0.59"},
+                                              chip=m4, display=(1920, 1080))
         self.assertNotIn("LXRT_VK_SCALER", env)
-        self.assertEqual(env["STEAMARM_RENDER_SIZE"], "1152x648")
+        self.assertEqual(env["STEAMARM_RENDER_SIZE"], "1132x636")
         env = self.settings.env_from_settings({"scalingFilter": "metalfx-temporal"})
         self.assertEqual(env["LXRT_VK_SCALER"], "metalfx-temporal")
         # 100 % with MetalFX temporal: antialiasing at the native size.
@@ -187,7 +187,9 @@ class SettingsEnvironmentTests(unittest.TestCase):
         self.assertEqual(scale("0.33"), ("0.3300", "640x360"))   # rendimiento máximo: MetalFX's 3x, no more
         self.assertEqual(scale("bogus"), (None, None))
         self.assertEqual(scale("0.2"), (None, None))         # out of range: native
-        self.assertEqual(scale("auto"), ("0.6000", "1152x648"))
+        self.assertEqual(scale("auto"), (None, None))        # "auto" is native now: it blurred menus and text
+        env = self.settings.env_from_settings({}, chip=m4, display=(1920, 1080))
+        self.assertNotIn("STEAMARM_RENDER_SCALE", env)      # the default is native
 
     def test_upscaling_policy(self):
         chip = self.settings.apple_chip

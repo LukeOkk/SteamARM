@@ -18,6 +18,7 @@ vkGetPhysicalDeviceFeatures2KHR
 vkEnumerateDeviceExtensionProperties
 vkCreateDevice
 vkCreateGraphicsPipelines
+vkCreateSampler
 vkGetDeviceProcAddr
 vkGetPhysicalDeviceProperties2
 vkGetPhysicalDeviceProperties2KHR

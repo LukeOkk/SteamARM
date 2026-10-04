@@ -524,10 +524,10 @@ enum FallbackPolicy: String, Codable, CaseIterable {
 extension ApplicationBackendPreset {
     /// Whether Settings shows the preset at all. The two presentation presets
     /// always (disabled, with their reason, when they cannot work here); an
-    /// execution backend only when this tree has it -- Lightning JIT and Apple
-    /// Hypervisor do not exist in it, and an option that can never be chosen
-    /// is a false control (docs/APPLICATION_MANAGER.md). They come back by
-    /// themselves if their capability ever becomes usable.
+    /// execution backend only when this tree has it -- Lightning JIT (FEX set
+    /// for speed) does; Apple Hypervisor does not, and an option that can
+    /// never be chosen is a false control (docs/APPLICATION_MANAGER.md). It
+    /// comes back by itself if its capability ever becomes usable.
     func offered(in caps: RuntimeCapabilities) -> Bool {
         switch self {
         case .nativeWindows, .vncScreenSharing: return true
@@ -718,7 +718,7 @@ struct RuntimeCapabilities {
         ],
         execution: [
             .auto: .init(state: .ready, reason: "lxrun: aarch64 directamente, x86/i386 con FEX; sin máquina virtual"),
-            .lightningJIT: .init(state: .unavailable, reason: "no existe ningún Lightning JIT en este repositorio"),
+            .lightningJIT: .init(state: .experimental, reason: "lxrun con el JIT de FEX ajustado para velocidad: caché de código en disco, orden de memoria rápido (sin TSO vectorial ni en memcpy), x87 de doble precisión; sin máquina virtual. Un juego que dependa del orden estricto puede fallar"),
             .appleHypervisorLegacy: .init(state: .unavailable, reason: "la ruta con máquina virtual se retiró el 2026-09-27 (docs/history); SteamARM es ZERO-VM"),
         ],
         synchronization: [
@@ -1557,13 +1557,12 @@ enum AndroidApps {
 /// Settings "Escala de render": a game whose window covers the screen renders at
 /// this fraction of it and the Vulkan shim enlarges the picture with the
 /// "Filtro de escalado" (MetalFX on KosmicKrisp and MoltenVK): what a game's
-/// own FSR does to its 3D scene, for the whole picture. scripts/settings-env.py
-/// turns "auto" into this Mac's recommendation (upscaling_policy) and the game
-/// tool passes it to the game only (LXRT_VK_RENDER_SCALE, shim/wsi.c).
+/// own FSR does to its 3D scene, for the whole picture (menus and text too).
+/// Native unless the user picks a scale; the game tool passes it to the game
+/// only (LXRT_VK_RENDER_SCALE, shim/wsi.c).
 enum RenderScaleChoice {
     static let options: [(String, String)] = [
-        ("auto", "Automático (recomendada para este Mac)"),
-        ("1.0", "Nativa (100 %; con MetalFX temporal, antialiasing)"),
+        ("1.0", "Nativa (100 %, recomendada; con MetalFX temporal, antialiasing)"),
         ("0.77", "Calidad ultra (77 %, 1,3x)"),
         ("0.67", "Calidad (67 %, 1,5x)"),
         ("0.59", "Equilibrado (59 %, 1,7x)"),
@@ -1572,7 +1571,7 @@ enum RenderScaleChoice {
     ]
 
     static func label(_ value: String) -> String {
-        options.first { $0.0 == value }?.1 ?? "Automático (recomendada para este Mac)"
+        options.first { $0.0 == value }?.1 ?? "Nativa (100 %, recomendada; con MetalFX temporal, antialiasing)"
     }
 
     static func note(_ value: String) -> String {
@@ -1580,10 +1579,7 @@ enum RenderScaleChoice {
         if value == "1.0" {
             return "Los juegos dibujan a la resolución de la pantalla. Con el filtro MetalFX temporal, la imagen pasa igualmente por MetalFX a su tamaño: antialiasing a resolución nativa (bordes más estables)." + scope
         }
-        if value == "auto" {
-            return "El juego dibuja a la escala con la que este Mac saca más fotogramas sin que la imagen se emborrone (núcleos de GPU y generación; en un M4 a 1080p, Equilibrado: por debajo ya manda la CPU) y se agranda a la pantalla con el filtro de abajo." + scope
-        }
-        return "El juego dibuja a esa fracción de la pantalla por eje y se agranda con el filtro de abajo (MetalFX espacial o temporal): de Calidad ultra (más nítido) a Rendimiento máximo (más fotogramas; MetalFX admite hasta 3x)." + scope
+        return "El juego entero, menús y texto incluidos, dibuja a esa fracción de la pantalla por eje y se agranda con el filtro de abajo (MetalFX espacial o temporal): de Calidad ultra (más nítido) a Rendimiento máximo (más fotogramas; MetalFX admite hasta 3x). Si el juego tiene su propio FSR (Counter-Strike 2), mejor ese: escala solo la escena 3D y el texto queda nítido." + scope
     }
 }
 
