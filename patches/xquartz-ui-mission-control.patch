@@ -1,0 +1,394 @@
+SteamARM: X windows with a layer in Mission Control
+
+Mission Control lays the overlay NSWindows (remoteLayerCocoa.m) out as
+windows of their own, with the game's picture, but leaves the Xplugin
+frames where they are: the window server does not hand them to it. Under a
+layer a frame's pixels are the X window's background, so a white window
+stood in the middle of Mission Control, at the X window's place; and a
+window whose whole area is a descendant's layer -- steamwebhelper's
+toplevel, under the GPU process's child with the picture -- showed as an
+empty window beside it (the user's screenshots, 2026-10-04).
+
+While Mission Control is open -- WindowManager's shield window, at the
+utility level and a display's size, is on screen; checked every 100 ms
+while an overlay is, the window descriptions read only when the windows on
+screen change -- the frames under layers are made transparent
+(SLSSetWindowAlpha) and the covered overlays (XQRemoteLayerState.covered,
+xprRemoteLayer.c) ordered out; both come back when it closes (a covered
+overlay once its frame is on screen again, so one closed on another Space
+stays with it). Ordering the overlay into its frame's window-server group,
+or making it transient, did not change what Mission Control showed
+(measured with the user). XQUARTZ_RL_MISSION_CONTROL=0 leaves it as
+before.
+diff -ruN a/hw/xquartz/remoteLayerCocoa.m b/hw/xquartz/remoteLayerCocoa.m
+--- a/hw/xquartz/remoteLayerCocoa.m	2026-10-04 11:23:50
++++ b/hw/xquartz/remoteLayerCocoa.m	2026-10-04 11:46:12
+@@ -12,6 +12,7 @@
+  */
+ #include <string.h>
+ #include <stdlib.h>
++#include <dlfcn.h>
+ #import <Cocoa/Cocoa.h>
+ #import <QuartzCore/QuartzCore.h>
+ #include "xpr/xprRemoteLayer.h"
+@@ -31,6 +32,9 @@
+ @property (nonatomic) BOOL top;
+ @property (nonatomic) BOOL coversScreen;
+ @property (nonatomic, retain) CALayerHost *host;
++@property (nonatomic) BOOL covered;
++@property (nonatomic) BOOL wanted;      /* the X side's st->visible */
++@property (nonatomic) BOOL mcHidden;    /* ordered out for Mission Control */
+ @end
+ 
+ @implementation XQRemoteLayerWindow
+@@ -46,6 +50,179 @@
+ static NSMutableDictionary<NSNumber *, XQRemoteLayerWindow *> *overlays;
+ static id observerActive, observerUnhide;
+ 
++/* Mission Control lays the overlays out as windows of their own, with the
++ * game's picture, but leaves the Xplugin frames where they are: the window
++ * server does not give them to it. Under a layer a frame's pixels are the X
++ * window's background, so a white window stood in the middle of Mission
++ * Control, and a window whose whole area is a descendant's layer
++ * (st->covered) was an empty one beside the picture (the user's
++ * screenshots, 2026-10-04). While Mission Control is open -- WindowManager's
++ * shield window, at the utility level and a display's size, is on screen --
++ * the frames under layers are made transparent and covered overlays ordered
++ * out (a transparent one still had its place in Mission Control).
++ * Ordering the overlay into its frame's window-server group, or making it
++ * transient, did not change how Mission Control showed them (MEASURED with
++ * the user). XQUARTZ_RL_MISSION_CONTROL=0: as before. */
++typedef int (*rl_cid_f)(void);
++typedef int (*rl_alpha_f)(int, uint32_t, float);
++static BOOL rl_mc_open;
++static NSMutableSet<NSNumber *> *rl_mc_frames;   /* made transparent */
++
++static void
++rl_frame_alpha(uint32_t frame, float alpha)
++{
++    static rl_cid_f cid;
++    static rl_alpha_f set_alpha;
++    static BOOL looked;
++    static unsigned told;
++    if (!looked) {
++        void *h = dlopen("/System/Library/PrivateFrameworks/SkyLight.framework/SkyLight", RTLD_NOW);
++        cid = h ? (rl_cid_f)dlsym(h, "SLSMainConnectionID") : NULL;
++        set_alpha = h ? (rl_alpha_f)dlsym(h, "SLSSetWindowAlpha") : NULL;
++        looked = YES;
++    }
++    if (!cid || !set_alpha)
++        return;
++    int r = set_alpha(cid(), frame, alpha);
++    if (r && told++ < 10)
++        ErrorF("remote layer: frame %u alpha %.0f failed (%d)\n", frame, alpha, r);
++}
++
++static void
++rl_mc_hide(XQRemoteLayerWindow *w)
++{
++    if (!rl_mc_open || !w.isVisible || !w.nativeBelow)
++        return;
++    if (w.covered) {
++        [w orderOut:nil];
++        w.mcHidden = YES;
++        return;
++    }
++    NSNumber *f = @(w.nativeBelow);
++    if (![rl_mc_frames containsObject:f]) {
++        rl_frame_alpha(w.nativeBelow, 0.0f);
++        [rl_mc_frames addObject:f];
++    }
++}
++
++/* A frame no visible overlay is over any more gets its picture back at
++ * once (a layer removed with Mission Control open: the X window stays). */
++static void
++rl_mc_release_unused(void)
++{
++    for (NSNumber *f in rl_mc_frames.allObjects) {
++        BOOL used = NO;
++        for (XQRemoteLayerWindow *w in overlays.allValues)
++            if (w.isVisible && w.nativeBelow == f.unsignedIntValue)
++                used = YES;
++        if (!used) {
++            rl_frame_alpha(f.unsignedIntValue, 1.0f);
++            [rl_mc_frames removeObject:f];
++        }
++    }
++}
++
++/* The window list with descriptions costs about 1 ms; the ids alone, a
++ * sixth of that: the descriptions are read only when the windows on screen
++ * have changed. */
++static BOOL
++rl_mc_shield_up(void)
++{
++    static uint64_t last_ids;
++    static BOOL last_up;
++    const CGWindowListOption on_screen = kCGWindowListOptionOnScreenOnly | kCGWindowListExcludeDesktopElements;
++    CFArrayRef ids = CGWindowListCreate(on_screen, kCGNullWindowID);
++    if (!ids)
++        return NO;
++    uint64_t h = 1469598103934665603ull;
++    for (CFIndex i = 0; i < CFArrayGetCount(ids); i++) {
++        h ^= (uint64_t)(uintptr_t)(const void *)CFArrayGetValueAtIndex(ids, i);
++        h *= 1099511628211ull;
++    }
++    CFRelease(ids);
++    if (h == last_ids)
++        return last_up;
++    last_ids = h;
++
++    BOOL up = NO;
++    CFArrayRef list = CGWindowListCopyWindowInfo(on_screen, kCGNullWindowID);
++    if (!list) {
++        last_ids = 0;       /* asked again at the next check */
++        return last_up = NO;
++    }
++    for (NSDictionary *d in (NSArray *)list) {
++        if ([d[(id)kCGWindowLayer] intValue] != CGWindowLevelForKey(kCGUtilityWindowLevelKey) ||
++            ![d[(id)kCGWindowOwnerName] isEqual:@"WindowManager"])
++            continue;
++        CGRect b;
++        if (!CGRectMakeWithDictionaryRepresentation((CFDictionaryRef)d[(id)kCGWindowBounds], &b))
++            continue;
++        for (NSScreen *sc in NSScreen.screens)
++            if (CGSizeEqualToSize(b.size, sc.frame.size))
++                up = YES;
++    }
++    CFRelease(list);
++    return last_up = up;
++}
++
++/* A covered overlay ordered out for Mission Control goes back once its
++ * frame is on screen: closed on another Space, it would otherwise be
++ * ordered in there, away from its frame (and, covering a display, take the
++ * pointer there). Covered, it shows nothing in the meantime. */
++static void
++rl_mc_restore_hidden(void)
++{
++    for (XQRemoteLayerWindow *w in overlays.allValues) {
++        if (!w.mcHidden)
++            continue;
++        if (!w.wanted || !w.nativeBelow) {
++            w.mcHidden = NO;
++            continue;
++        }
++        CFArrayRef frame = CGWindowListCreate(kCGWindowListOptionOnScreenOnly | kCGWindowListOptionIncludingWindow,
++                                              (CGWindowID)w.nativeBelow);
++        BOOL shown = frame && CFArrayGetCount(frame) > 0;
++        if (frame)
++            CFRelease(frame);
++        if (!shown)
++            continue;
++        w.mcHidden = NO;
++        [w orderWindow:NSWindowAbove relativeTo:w.nativeBelow];
++    }
++}
++
++/* Every 100 ms, while an overlay is on screen. */
++static void
++rl_mc_check(void)
++{
++    static int on = -1;
++    if (on < 0)
++        on = getenv("XQUARTZ_RL_MISSION_CONTROL") == NULL || getenv("XQUARTZ_RL_MISSION_CONTROL")[0] != '0';
++    if (!on)
++        return;
++    BOOL any = NO;
++    for (XQRemoteLayerWindow *w in overlays.allValues)
++        if (w.isVisible)
++            any = YES;
++    BOOL open = any && rl_mc_shield_up();
++    if (!open)
++        rl_mc_restore_hidden();
++    if (open == rl_mc_open)
++        return;
++    rl_mc_open = open;
++    if (!rl_mc_frames)
++        rl_mc_frames = [[NSMutableSet alloc] init];
++    ErrorF("remote layer: Mission Control %s\n", open ? "open: frames under layers made transparent" : "closed");
++    if (open) {
++        for (XQRemoteLayerWindow *w in overlays.allValues)
++            rl_mc_hide(w);
++        return;
++    }
++    for (NSNumber *f in rl_mc_frames)
++        rl_frame_alpha(f.unsignedIntValue, 1.0f);
++    [rl_mc_frames removeAllObjects];
++}
++
+ /* A frame is put in front by the window manager's restack on every click in
+  * it, by Xplugin on its own thread, and the overlay is ordered above it
+  * again only afterwards: for a display frame or two the X window covered the
+@@ -392,7 +569,7 @@
+         dispatch_source_t timer = dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER, 0, 0, dispatch_get_main_queue());
+         dispatch_source_set_timer(timer, dispatch_time(DISPATCH_TIME_NOW, 100 * NSEC_PER_MSEC),
+                                   100 * NSEC_PER_MSEC, 10 * NSEC_PER_MSEC);
+-        dispatch_source_set_event_handler(timer, ^{ @autoreleasepool { rl_watch(); } });
++        dispatch_source_set_event_handler(timer, ^{ @autoreleasepool { rl_watch(); rl_mc_check(); } });
+         dispatch_resume(timer);     /* for the life of the server */
+     }
+     return w;
+@@ -410,9 +587,13 @@
+               st->xid, st->ctx, st->visible, st->cx, st->cy, st->cw, st->ch,
+               st->lx, st->ly, st->lw, st->lh, st->native, st->level, st->reorder);
+ 
++        if (w)
++            w.wanted = st->visible != 0;
+         if (!st->visible) {
+             if (w) {
+                 [w orderOut:nil];
++                w.mcHidden = NO;
++                rl_mc_release_unused();
+                 rl_presentation();
+             }
+             if (!w || !st->ctx)
+@@ -422,6 +603,7 @@
+             w = make_overlay();
+             overlays[key] = w;
+             [w release];
++            w.wanted = st->visible != 0;
+             ErrorF("remote layer: overlay for 0x%x created (%lu live)\n", st->xid,
+                    (unsigned long)overlays.count);
+         }
+@@ -441,6 +623,10 @@
+                 if (NSEqualRects(sc.frame, r) && st->lw == st->cw && st->lh == st->ch)
+                     covers = YES;
+             w.coversScreen = covers;
++            w.covered = st->covered != 0;
++            /* No longer covered with Mission Control open: back in below. */
++            if (w.mcHidden && !w.covered)
++                w.mcHidden = NO;
+             w.baseLevel = st->level;
+             w.top = st->top != 0;
+             NSRect wr = rl_cover_frame(w, r);
+@@ -469,7 +655,9 @@
+         BOOL dropped = st->visible && w.level < before;
+         BOOL placed = !dropped && w.isVisible && w.nativeBelow == st->native &&
+                       (rl_level(w) > w.baseLevel || rl_is_above(w, st->native));
+-        if (st->visible && !placed && (st->reorder || dropped || !w.isVisible ||
++        if (w.mcHidden)
++            w.nativeBelow = st->native;     /* put back when Mission Control closes */
++        else if (st->visible && !placed && (st->reorder || dropped || !w.isVisible ||
+                             w.nativeBelow != st->native)) {
+             w.nativeBelow = st->native;
+             [w orderWindow:NSWindowAbove relativeTo:st->native];
+@@ -488,6 +676,8 @@
+                 });
+             }
+         }
++        rl_mc_release_unused();
++        rl_mc_hide(w);
+         rl_presentation();
+     }
+ }
+@@ -503,6 +693,7 @@
+         [w orderOut:nil];
+         [w close];
+         [overlays removeObjectForKey:key];
++        rl_mc_release_unused();
+         ErrorF("remote layer: overlay for 0x%x removed (%lu live)\n", xid, (unsigned long)overlays.count);
+         rl_presentation();
+     }
+diff -ruN a/hw/xquartz/xpr/xprRemoteLayer.c b/hw/xquartz/xpr/xprRemoteLayer.c
+--- a/hw/xquartz/xpr/xprRemoteLayer.c	2026-10-04 11:23:50
++++ b/hw/xquartz/xpr/xprRemoteLayer.c	2026-10-04 11:27:47
+@@ -80,6 +80,29 @@
+     });
+ }
+ 
++/* The part of w inside every ancestor up to (and including) the toplevel,
++ * in screen coordinates: a child window only shows inside its parents.
++ * False when nothing of it is. */
++static Bool
++rl_clip(WindowPtr w, int *x1, int *y1, int *x2, int *y2)
++{
++    WindowPtr p;
++
++    *x1 = w->drawable.x;
++    *y1 = w->drawable.y;
++    *x2 = *x1 + w->drawable.width;
++    *y2 = *y1 + w->drawable.height;
++    for (p = w->parent; p && p->parent; p = p->parent) {
++        int px1 = p->drawable.x, py1 = p->drawable.y;
++        int px2 = px1 + p->drawable.width, py2 = py1 + p->drawable.height;
++        if (*x1 < px1) *x1 = px1;
++        if (*y1 < py1) *y1 = py1;
++        if (*x2 > px2) *x2 = px2;
++        if (*y2 > py2) *y2 = py2;
++    }
++    return *x2 > *x1 && *y2 > *y1;
++}
++
+ /* Snapshot the geometry of e->win in global CoreGraphics coordinates. */
+ static void
+ rl_compute(RLEntry *e, XQRemoteLayerState *st)
+@@ -112,26 +135,12 @@
+     gx = s->x + rootlessGlobalOffsetX;
+     gy = s->y + rootlessGlobalOffsetY;
+ 
+-    x1 = w->drawable.x;
+-    y1 = w->drawable.y;
+-    x2 = x1 + w->drawable.width;
+-    y2 = y1 + w->drawable.height;
+-    st->lx = x1 + gx;
+-    st->ly = y1 + gy;
++    st->lx = w->drawable.x + gx;
++    st->ly = w->drawable.y + gy;
+     st->lw = w->drawable.width;
+     st->lh = w->drawable.height;
+ 
+-    /* Clip to every ancestor's inside area up to (and including) the
+-     * toplevel: a child window only shows inside its parents. */
+-    for (p = w->parent; p && p->parent; p = p->parent) {
+-        int px1 = p->drawable.x, py1 = p->drawable.y;
+-        int px2 = px1 + p->drawable.width, py2 = py1 + p->drawable.height;
+-        if (x1 < px1) x1 = px1;
+-        if (y1 < py1) y1 = py1;
+-        if (x2 > px2) x2 = px2;
+-        if (y2 > py2) y2 = py2;
+-    }
+-    if (x2 <= x1 || y2 <= y1)
++    if (!rl_clip(w, &x1, &y1, &x2, &y2))
+         return;
+ 
+     st->cx = x1 + gx;
+@@ -154,6 +163,26 @@
+         if (p->drawable.x < x2 && p->drawable.x + p->drawable.width > x1 &&
+             p->drawable.y < y2 && p->drawable.y + p->drawable.height > y1) {
+             st->top = 0;
++            break;
++        }
++    }
++
++    /* All of it under a descendant's own layer: steamwebhelper's toplevel
++     * has a layer, and the GPU process's child window, with the picture in
++     * its layer, covers all of it. On screen the empty layer is hidden by
++     * the other; Mission Control showed it as an empty window of its own
++     * (remoteLayerCocoa.m). */
++    for (int i = 0; i < rl_count; i++) {
++        RLEntry *o = &rl_entries[i];
++        int ox1, oy1, ox2, oy2;
++        if (o == e || !o->win->realized || o->win->drawable.class != InputOutput)
++            continue;
++        for (p = o->win->parent; p && p != w; p = p->parent)
++            ;
++        if (!p || !rl_clip(o->win, &ox1, &oy1, &ox2, &oy2))
++            continue;
++        if (ox1 <= x1 && oy1 <= y1 && ox2 >= x2 && oy2 >= y2) {
++            st->covered = 1;
+             break;
+         }
+     }
+diff -ruN a/hw/xquartz/xpr/xprRemoteLayer.h b/hw/xquartz/xpr/xprRemoteLayer.h
+--- a/hw/xquartz/xpr/xprRemoteLayer.h	2026-10-04 11:23:50
++++ b/hw/xquartz/xpr/xprRemoteLayer.h	2026-10-04 11:27:47
+@@ -24,6 +24,7 @@
+     int level;            /* CGWindowLevel of that frame */
+     int reorder;          /* re-assert ordering above `native` */
+     int top;              /* no other X toplevel is stacked over the layer */
++    int covered;          /* a descendant's layer covers all of the visible area */
+ } XQRemoteLayerState;
+ 
+ /* AppKit side; must run on the main thread. */
