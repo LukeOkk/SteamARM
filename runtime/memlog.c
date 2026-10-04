@@ -88,9 +88,15 @@ void lxrt_memlog_dump(uint64_t fault_addr, const char *why)
 // File-backed mappings, kept only under LXRT_GUEST_FAULTS: a guest fault
 // report can then name the file and offset of a guest code address (the
 // runtime may have placed the content as a private copy, which the host
-// region no longer names). Newest entry wins; never pruned -- a debugging aid.
+// region no longer names). Newest entry wins. An entry goes when the guest
+// unmaps all of it (lxrt_memlog_file_forget): scripts/settings-env.py turns
+// LXRT_GUEST_FAULTS on by default, and the Steam client's controller thread
+// maps ld.so.cache and libusb (twice) in each of its dlopen/dlclose cycles,
+// about four a second -- a path copy each, never freed (MEASURED on the live
+// client).
 #include <fcntl.h>
 #include <limits.h>
+#include <signal.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -98,32 +104,100 @@ struct fmap_ent { uint64_t addr, len, off; char *path; };
 static struct fmap_ent *g_fmaps;
 static size_t g_nfmaps, g_capfmaps;
 static pthread_mutex_t g_fmap_lock = PTHREAD_MUTEX_INITIALIZER;
+LXRT_FORK_SAFE(memlog_fmap_lock, g_fmap_lock)
 
-void lxrt_memlog_file(uint64_t addr, uint64_t len, uint64_t off, int fd)
+// munmap takes this lock (lxrt_memlog_file_forget), and a guest signal
+// handler runs nested in the host handler and may call munmap: every holder
+// blocks the asynchronous signals (as offmap.c and wxsplit.c do).
+static void block_async(sigset_t *old)
+{
+    sigset_t all;
+    sigfillset(&all);
+    sigdelset(&all, SIGBUS);
+    sigdelset(&all, SIGSEGV);
+    sigdelset(&all, SIGILL);
+    sigdelset(&all, SIGTRAP);
+    pthread_sigmask(SIG_BLOCK, &all, old);
+}
+
+static void lock_nosig(sigset_t *old)
+{
+    block_async(old);
+    pthread_mutex_lock(&g_fmap_lock);
+}
+
+static void unlock_nosig(const sigset_t *old)
+{
+    pthread_mutex_unlock(&g_fmap_lock);
+    pthread_sigmask(SIG_SETMASK, old, NULL);
+}
+
+static bool fmaps_on(void)
 {
     static int on = -1;
     if (on < 0) on = getenv("LXRT_GUEST_FAULTS") ? 1 : 0;
-    if (!on || fd < 0 || !len)
+    return on;
+}
+
+// Drop the entries wholly inside [lo, hi), keeping the order of the rest
+// (the lookup prefers the newest). Caller holds the lock.
+static void drop_inside(uint64_t lo, uint64_t hi)
+{
+    size_t j = 0;
+    for (size_t i = 0; i < g_nfmaps; i++) {
+        if (g_fmaps[i].addr >= lo && g_fmaps[i].addr + g_fmaps[i].len <= hi)
+            free(g_fmaps[i].path);
+        else
+            g_fmaps[j++] = g_fmaps[i];
+    }
+    g_nfmaps = j;
+}
+
+void lxrt_memlog_file(uint64_t addr, uint64_t len, uint64_t off, int fd)
+{
+    if (!fmaps_on() || fd < 0 || !len)
         return;
     char p[PATH_MAX];
     if (fcntl(fd, F_GETPATH, p) != 0)
         return;
-    pthread_mutex_lock(&g_fmap_lock);
+    char *copy = strdup(p);
+    sigset_t old;
+    lock_nosig(&old);
+    drop_inside(addr, addr + LXRT_ALIGN_UP(len, 4096));   // mapped over: replaced
     if (g_nfmaps == g_capfmaps) {
         size_t n = g_capfmaps ? g_capfmaps * 2 : 1024;
         struct fmap_ent *m = realloc(g_fmaps, n * sizeof *m);
-        if (!m) { pthread_mutex_unlock(&g_fmap_lock); return; }
+        if (!m) { unlock_nosig(&old); free(copy); return; }
         g_fmaps = m; g_capfmaps = n;
     }
-    g_fmaps[g_nfmaps++] = (struct fmap_ent){ addr, len, off, strdup(p) };
-    pthread_mutex_unlock(&g_fmap_lock);
+    g_fmaps[g_nfmaps++] = (struct fmap_ent){ addr, len, off, copy };
+    unlock_nosig(&old);
 }
 
+// The guest unmapped [addr, addr+len) (dispatch.c passes the length rounded
+// up to 4 KiB, as Linux does: glibc's dlclose unmaps l_map_end - l_map_start,
+// 0x30188 for libusb, and the RW segment it mapped ends at the next 4 KiB).
+// An entry only partly unmapped stays.
+void lxrt_memlog_file_forget(uint64_t addr, uint64_t len)
+{
+    if (!fmaps_on() || !len)
+        return;
+    sigset_t old;
+    lock_nosig(&old);
+    drop_inside(addr, addr + len);
+    unlock_nosig(&old);
+}
+
+// From the fault reports, which may run inside a fault handler: never waits.
 bool lxrt_memlog_file_lookup(uint64_t addr, char *path, size_t n, uint64_t *off)
 {
     bool found = false;
-    if (pthread_mutex_trylock(&g_fmap_lock) != 0)
+    sigset_t old;
+    block_async(&old);
+    if (pthread_mutex_trylock(&g_fmap_lock) != 0) {
+        pthread_sigmask(SIG_SETMASK, &old, NULL);
         return false;
+    }
     for (size_t i = g_nfmaps; i-- > 0;) {
         struct fmap_ent *e = &g_fmaps[i];
         if (addr >= e->addr && addr < e->addr + e->len) {
@@ -133,7 +207,7 @@ bool lxrt_memlog_file_lookup(uint64_t addr, char *path, size_t n, uint64_t *off)
             break;
         }
     }
-    pthread_mutex_unlock(&g_fmap_lock);
+    unlock_nosig(&old);
     return found;
 }
 

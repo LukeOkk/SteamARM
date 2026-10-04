@@ -37,6 +37,7 @@ int lxrt_elf_exec_sections(int fd, uint64_t file_off, uint64_t len, uint64_t map
                            struct lxrt_range *out, int max);
 int lxrt_elf_exec_sections_path(const char *path, uint64_t load_bias,
                                 struct lxrt_range *out, int max);
+void lxrt_elf_forget(uint64_t addr, uint64_t len);
 bool lxrt_elf_gap_before_exec(int fd, uint64_t file_off, uint64_t map_base,
                               struct lxrt_range *gap);
 
@@ -378,6 +379,7 @@ extern uint64_t lxrt_start_stack;
 void lxrt_note_growsdown(uint64_t addr, uint64_t len, long prot);
 void lxrt_memlog_file(uint64_t addr, uint64_t len, uint64_t off, int fd);
 bool lxrt_memlog_file_lookup(uint64_t addr, char *path, size_t n, uint64_t *off);
+void lxrt_memlog_file_forget(uint64_t addr, uint64_t len);
 void lxrt_futex_shared_add(uint64_t addr, uint64_t len);
 long lxrt_sendto(int fd, const void *buf, size_t len, int lflags, const void *laddr, unsigned lalen);
 long lxrt_recvfrom(int fd, void *buf, size_t len, int lflags, void *laddr, uint32_t *lalen);

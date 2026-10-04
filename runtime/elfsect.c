@@ -17,6 +17,7 @@
 
 #include <errno.h>
 #include <pthread.h>
+#include <signal.h>
 #include <stdbool.h>
 #include <fcntl.h>
 #include <stdlib.h>
@@ -137,15 +138,44 @@ static bool read_all(int fd, uint64_t off, void *buf, size_t len)
 // pass off it downloaded, but real x18 uses corrupted its package checksums).
 // The compiler describes every function it emits in .eh_frame; the x18 pass
 // now touches only words inside an FDE's range when the file has FDEs.
+//
+// A table lives as long as its window: the guest's munmap of the whole window
+// frees it (lxrt_elf_forget). The Steam client's controller thread dlopens
+// and dlcloses one library (libusb, four executable sections) about four
+// times a second; every cycle used to leave four 16 KiB tables behind, each
+// holding every FDE of the file, and every lookup scanned all of them
+// (MEASURED on the live client).
 
 struct fn_set {
     uint64_t lo, hi;                // the code window the ranges belong to
-    struct lxrt_range *r;           // sorted, merged
+    struct lxrt_range *r;           // sorted, merged; only those reaching into the window
     int n;
 };
 static struct fn_set *g_fn;
 static int g_nfn, g_capfn;
 static pthread_mutex_t g_fn_lock = PTHREAD_MUTEX_INITIALIZER;
+LXRT_FORK_SAFE(elfsect_fn_lock, g_fn_lock)
+
+// munmap takes this lock (lxrt_elf_forget), and a guest signal handler runs
+// nested in the host handler and may call munmap: every holder blocks the
+// asynchronous signals (as offmap.c and wxsplit.c do).
+static void lock_nosig(sigset_t *old)
+{
+    sigset_t all;
+    sigfillset(&all);
+    sigdelset(&all, SIGBUS);
+    sigdelset(&all, SIGSEGV);
+    sigdelset(&all, SIGILL);
+    sigdelset(&all, SIGTRAP);
+    pthread_sigmask(SIG_BLOCK, &all, old);
+    pthread_mutex_lock(&g_fn_lock);
+}
+
+static void unlock_nosig(const sigset_t *old)
+{
+    pthread_mutex_unlock(&g_fn_lock);
+    pthread_sigmask(SIG_SETMASK, old, NULL);
+}
 
 static int cmp_range(const void *a, const void *b)
 {
@@ -153,9 +183,12 @@ static int cmp_range(const void *a, const void *b)
     return x->start < y->start ? -1 : x->start > y->start;
 }
 
+// The table takes `r` (n entries, none at all is fine): an empty table still
+// says "no function here" for its whole window.
 static void fn_register(uint64_t lo, uint64_t hi, struct lxrt_range *r, int n)
 {
-    qsort(r, (size_t)n, sizeof *r, cmp_range);
+    if (n > 1)
+        qsort(r, (size_t)n, sizeof *r, cmp_range);
     int m = 0;
     for (int i = 0; i < n; i++) {
         if (m && r[i].start <= r[m - 1].end) {
@@ -164,7 +197,16 @@ static void fn_register(uint64_t lo, uint64_t hi, struct lxrt_range *r, int n)
             r[m++] = r[i];
         }
     }
-    pthread_mutex_lock(&g_fn_lock);
+    if (!m) {
+        free(r);
+        r = NULL;
+    } else {                            // parse_eh_frame allocates 1024 at a time
+        struct lxrt_range *fit = realloc(r, (size_t)m * sizeof *r);
+        if (fit)
+            r = fit;
+    }
+    sigset_t old;
+    lock_nosig(&old);
     for (int i = 0; i < g_nfn; i++)       // the same window mapped again: replace
         if (g_fn[i].lo < hi && g_fn[i].hi > lo) {
             free(g_fn[i].r);
@@ -174,11 +216,31 @@ static void fn_register(uint64_t lo, uint64_t hi, struct lxrt_range *r, int n)
     if (g_nfn == g_capfn) {
         int cap = g_capfn ? g_capfn * 2 : 64;
         struct fn_set *nf = realloc(g_fn, (size_t)cap * sizeof *nf);
-        if (!nf) { pthread_mutex_unlock(&g_fn_lock); free(r); return; }
+        if (!nf) { unlock_nosig(&old); free(r); return; }
         g_fn = nf; g_capfn = cap;
     }
     g_fn[g_nfn++] = (struct fn_set){ lo, hi, r, m };
-    pthread_mutex_unlock(&g_fn_lock);
+    unlock_nosig(&old);
+}
+
+// The guest unmapped [addr, addr+len) (dispatch.c passes the length rounded
+// up to 4 KiB, as Linux does): free the table of every window wholly inside
+// it. A window only partly unmapped keeps its table -- the rest of it may
+// still be mapped code -- until that range is mapped again (fn_register).
+void lxrt_elf_forget(uint64_t addr, uint64_t len)
+{
+    if (!len)
+        return;
+    uint64_t end = addr + len;
+    sigset_t old;
+    lock_nosig(&old);
+    for (int i = 0; i < g_nfn; i++)
+        if (g_fn[i].lo >= addr && g_fn[i].hi <= end) {
+            free(g_fn[i].r);
+            g_fn[i] = g_fn[--g_nfn];
+            i--;
+        }
+    unlock_nosig(&old);
 }
 
 // Is `addr` an instruction as far as the function tables know? True when no
@@ -186,7 +248,8 @@ static void fn_register(uint64_t lo, uint64_t hi, struct lxrt_range *r, int n)
 bool lxrt_elf_in_function(uint64_t addr)
 {
     bool ok = true;
-    pthread_mutex_lock(&g_fn_lock);
+    sigset_t old;
+    lock_nosig(&old);
     for (int i = 0; i < g_nfn; i++) {
         if (addr < g_fn[i].lo || addr >= g_fn[i].hi)
             continue;
@@ -200,7 +263,7 @@ bool lxrt_elf_in_function(uint64_t addr)
         }
         break;
     }
-    pthread_mutex_unlock(&g_fn_lock);
+    unlock_nosig(&old);
     return ok;
 }
 
@@ -285,8 +348,11 @@ static int parse_eh_frame(const uint8_t *buf, size_t size, uint64_t sva, struct 
     return n;
 }
 
-// Register the function ranges of the file on `fd` for the exec section
-// [sh_addr, +size) mapped at `mapped` (vaddr -> mapped address by `delta`).
+// Register the function ranges of the file on `fd` for the exec window
+// [win_lo, win_hi) (vaddr -> mapped address by `delta`). Only the FDEs that
+// reach into the window are kept: a lookup never asks a table about an
+// address outside its window, and each window (.init, .plt, .text, .fini)
+// used to store every FDE of the file.
 static void register_functions(int fd, const struct elf64_ehdr_ *eh, const struct elf64_shdr_ *sh,
                                uint64_t win_lo, uint64_t win_hi, int64_t delta)
 {
@@ -310,8 +376,13 @@ static void register_functions(int fd, const struct elf64_ehdr_ *eh, const struc
             struct lxrt_range *r = NULL;
             int n = parse_eh_frame(buf, sh[i].sh_size, sh[i].sh_addr, &r);
             if (n > 0) {
-                for (int k = 0; k < n; k++) { r[k].start += (uint64_t)delta; r[k].end += (uint64_t)delta; }
-                fn_register(win_lo, win_hi, r, n);
+                int m = 0;
+                for (int k = 0; k < n; k++) {
+                    uint64_t s = r[k].start + (uint64_t)delta, e = r[k].end + (uint64_t)delta;
+                    if (s < win_hi && e > win_lo)
+                        r[m++] = (struct lxrt_range){ s, e };
+                }
+                fn_register(win_lo, win_hi, r, m);
             } else {
                 free(r);
             }

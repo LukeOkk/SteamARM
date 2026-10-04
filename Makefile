@@ -162,6 +162,12 @@ build/x18_check: tests/x18_check.c runtime/x18.c runtime/x18.h
 	@mkdir -p build
 	$(CC) $(LXRT_CFLAGS) -std=c17 tests/x18_check.c runtime/x18.c -o $@
 
+# Host-only: function tables and fault-report file names across many
+# dlopen/dlclose cycles of real libraries (tests/elfsect_unmap_check.c).
+build/elfsect_unmap_check: tests/elfsect_unmap_check.c runtime/elfsect.c runtime/memlog.c runtime/lxrt.h
+	@mkdir -p build
+	$(CC) $(LXRT_CFLAGS) tests/elfsect_unmap_check.c runtime/elfsect.c runtime/memlog.c -o $@
+
 # ---------------------------------------------------------------- launcher
 # The native SwiftUI launcher (launcher/SPEC.md): build/SteamARM.app with
 # SDL2 (sdl2-compat) and the SDL3 it loads at runtime bundled in Frameworks.

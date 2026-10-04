@@ -1016,6 +1016,18 @@ static long do_munmap_inner(uint64_t addr, uint64_t len)
     lxrt_jit_forget(addr, len);
     lxrt_wx_forget(addr, len);
     lxrt_privmap_forget(addr, len);
+    // What was mapped there: the x18 pass's function tables and the
+    // LXRT_GUEST_FAULTS file names, freed when wholly inside. Linux unmaps
+    // whole 4 KiB pages, and glibc's dlclose passes an unrounded length
+    // (l_map_end - l_map_start, 0x30188 for the libusb the Steam client
+    // reloads four times a second) while the RW segment it mapped runs to
+    // the next 4 KiB boundary: with the raw length that segment's file name
+    // stayed, one per cycle (tests/elfsect_unmap_check.c --raw-len). Only
+    // these two take the rounded length; the host-page decisions here keep
+    // the guest's.
+    uint64_t len4k = LXRT_ALIGN_UP(len, 4096);
+    lxrt_elf_forget(addr, len4k);
+    lxrt_memlog_file_forget(addr, len4k);
     if (hstart < hend && munmap((void *)hstart, (size_t)(hend - hstart)) != 0)
         return LERR(errno);
     if (hstart < hend)
