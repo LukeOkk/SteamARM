@@ -1,0 +1,65 @@
+SteamARM: MetalFX only for a draw that writes the whole output
+
+Patches 14 and 16 replace an upscale draw with MetalFX's spatial scaler,
+which writes every texel of the output and nothing else. Patch 16 takes
+Source 2's bilinear upsample by the shape of its shader, and Counter-
+Strike 2 draws other things with that shader, blended over the picture:
+the screen went black at every kill and stayed so, and with scalers made
+again and again for passes of many sizes the game stalled and its memory
+grew to 7 GB (the user, 2026-10-04).
+
+A draw is replaced only when it does what MetalFX does: one colour
+attachment, all four channels written, no blending or logic op, a scissor
+covering the output, no depth or stencil test. And past 12 scalers made,
+a size not kept is the game's own pass (logged once). Vulkan tests: the
+FSR cases (MetalFX, off, dynamic) pass.
+diff -ruN a/src/kosmickrisp/bridge/mtl_metalfx.m b/src/kosmickrisp/bridge/mtl_metalfx.m
+--- a/src/kosmickrisp/bridge/mtl_metalfx.m	2026-10-04 14:26:39
++++ b/src/kosmickrisp/bridge/mtl_metalfx.m	2026-10-04 14:26:39
+@@ -41,6 +41,20 @@
+          return s->scaler;
+    }
+ 
++   /* Made again and again (passes of many sizes taken for an upscale), each
++    * one compiled with its own textures: the game stalled and its memory
++    * grew to 7 GB (the user, Counter-Strike 2, 2026-10-04). Past a few, a
++    * size not kept is the game's own pass. */
++   static unsigned made;
++   if (made >= 3 * MFX_SCALERS) {
++      static bool told;
++      if (!told)
++         fprintf(stderr, "kk: FSR by MetalFX: %u scalers made, no more: the game's own passes from now on\n", made);
++      told = true;
++      return nil;
++   }
++   made++;
++
+    MTLFXSpatialScalerDescriptor *desc = [MTLFXSpatialScalerDescriptor new];
+    desc.inputWidth = in.width;
+    desc.inputHeight = in.height;
+diff -ruN a/src/kosmickrisp/vulkan/kk_cmd_draw.c b/src/kosmickrisp/vulkan/kk_cmd_draw.c
+--- a/src/kosmickrisp/vulkan/kk_cmd_draw.c	2026-10-04 14:26:39
++++ b/src/kosmickrisp/vulkan/kk_cmd_draw.c	2026-10-04 14:26:39
+@@ -2125,6 +2125,22 @@
+    uint32_t in_w, in_h;
+    if (!in || !out)
+       return false;
++   /* MetalFX writes every texel of the output and nothing else: the draw it
++    * replaces must do the same -- one colour attachment, all channels, no
++    * blending or logic op, no scissor inside it, no depth or stencil test.
++    * Counter-Strike 2 draws other things with the shader patch 16 takes for
++    * its upsample, blended over the picture (the screen went black at every
++    * kill and stayed so; the user, 2026-10-04). */
++   const struct vk_color_blend_attachment_state *cba = &dyn->cb.attachments[0];
++   for (uint32_t i = 1; i < render->color_att_count; i++)
++      if (render->color_att[i].iview)
++         return false;
++   if (dyn->cb.logic_op_enable || cba->blend_enable || (cba->write_mask & 0xf) != 0xf ||
++       !(dyn->cb.color_write_enables & 1) || dyn->ds.depth.test_enable || dyn->ds.stencil.test_enable ||
++       dyn->vp.scissor_count < 1 || dyn->vp.scissors[0].offset.x > 0 || dyn->vp.scissors[0].offset.y > 0 ||
++       dyn->vp.scissors[0].offset.x + (int64_t)dyn->vp.scissors[0].extent.width < ov->extent.width ||
++       dyn->vp.scissors[0].offset.y + (int64_t)dyn->vp.scissors[0].extent.height < ov->extent.height)
++      return false;
+    if (fs->info.fsr_easu) {
+       if (!kk_fsr_easu_content(cmd, ov->extent.width, ov->extent.height, &in_w,
+                                &in_h))
