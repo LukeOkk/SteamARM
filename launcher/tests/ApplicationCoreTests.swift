@@ -221,12 +221,12 @@ struct ApplicationCoreTests {
             check(caps.executionFallback(after: e) != .appleHypervisorLegacy, "no silent fallback to a VM after \(e)")
         }
         check(caps.execution[.appleHypervisorLegacy]?.usable == false, "no VM path in this tree")
-        check(caps.execution[.lightningJIT]?.usable == false, "no Lightning JIT in this tree")
-        check(!ApplicationBackendPreset.lightningJIT.offered(in: caps) && !ApplicationBackendPreset.appleHypervisor.offered(in: caps),
-              "Lightning JIT and Apple Hypervisor are not offered while they do not exist")
+        check(caps.execution[.lightningJIT]?.state == .experimental, "Lightning JIT: FEX set for speed, experimental")
+        check(ApplicationBackendPreset.lightningJIT.offered(in: caps) && !ApplicationBackendPreset.appleHypervisor.offered(in: caps),
+              "Lightning JIT is offered; Apple Hypervisor is not while it does not exist")
         check(ApplicationBackendPreset.nativeWindows.offered(in: caps) && ApplicationBackendPreset.vncScreenSharing.offered(in: caps),
               "the presentation presets are always offered")
-        check(ExecutionBackend.allCases.filter { $0.offered(in: caps) } == [.auto], "the status list shows lxrun only")
+        check(ExecutionBackend.allCases.filter { $0.offered(in: caps) } == [.auto, .lightningJIT], "the status list shows lxrun and Lightning JIT")
         var withJIT = caps
         withJIT.execution[.lightningJIT] = .init(state: .experimental, reason: "test")
         check(ApplicationBackendPreset.lightningJIT.offered(in: withJIT), "a usable Lightning JIT would be offered again")
@@ -265,7 +265,7 @@ struct ApplicationCoreTests {
         // Presets: the two ZERO-VM ones follow presentation; the others are never usable.
         check(caps.status(of: .nativeWindows).state == .ready, "native windows preset")
         check(caps.status(of: .vncScreenSharing).state == .experimental, "VNC preset")
-        check(!caps.status(of: .lightningJIT).usable && !caps.status(of: .appleHypervisor).usable, "JIT/VM presets unusable")
+        check(caps.status(of: .lightningJIT).usable && !caps.status(of: .appleHypervisor).usable, "JIT preset usable, VM preset not")
         check(!caps.status(of: .appleHypervisor).reason.isEmpty, "Apple Hypervisor says why")
 
         // Detection (scripts/compat-status.py --json) refines the table, never beyond it.
@@ -289,7 +289,8 @@ struct ApplicationCoreTests {
         check(d.synchronization[.esync]?.state == .experimental && d.synchronization[.esync]?.reason.contains("Proton 10.0") == true, "esync: Proton 10.0 only")
         check(d.synchronization[.fsync]?.state == .experimental && d.synchronization[.fsync]?.reason.contains("Proton 10.0") == true, "fsync: the Protons that have it")
         check(d.synchronization[.msync]?.state == .unavailable, "msync unchanged by detection")
-        check(d.execution[.appleHypervisorLegacy]?.usable == false && d.execution[.lightningJIT]?.usable == false, "detection never enables JIT or a VM")
+        check(d.execution[.appleHypervisorLegacy]?.usable == false, "detection never enables a VM")
+        check(d.execution[.lightningJIT]?.state == .experimental, "detection keeps Lightning JIT experimental")
         check(probe.opengl == .init(zink: true, glxDirect: false), "opengl decodes")
         check(d.graphics[.openGLWineD3D]?.state == .unavailable && d.graphics[.openGLWineD3D]?.reason.contains("GLX") == true,
               "WineD3D without direct GLX: unavailable, says why")
