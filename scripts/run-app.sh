@@ -315,6 +315,8 @@ if app.get("kind") == "windows":
 extra_args = os.environ.get("LXRT_EXEC_ARGS_EXTRA")
 if extra_args:
     env["LXRT_EXEC_ARGS"] = (env["LXRT_EXEC_ARGS"] + ";" if env.get("LXRT_EXEC_ARGS") else "") + extra_args
+GAME_ONLY = {"LXRT_VK_FPS_LIMIT": "STEAMARM_VK_FPS_LIMIT", "LXRT_VK_ANISOTROPY": "STEAMARM_VK_ANISOTROPY",
+             "MTL_HUD_ENABLED": "STEAMARM_METAL_HUD"}
 pairs = []
 for k, v in sorted(env.items()):
     # Translator settings are for x86 payloads only, never a native program:
@@ -322,6 +324,13 @@ for k, v in sorted(env.items()):
     # it starts through FEX (tools/steamarm-fex-proton turns them back).
     if arch == "aarch64" and str(k).startswith("FEX_"):
         k = "STEAMARM_FEXOPT_" + k[4:]
+    # Settings for games only, not for the Steam client's own windows (its
+    # web helper presents through the same Vulkan shim): the client carries
+    # them under other names and the game tools set them for the game
+    # (tools/steamarm-fex-*). The frame limit throttled Steam's interface
+    # and the Metal HUD would cover it.
+    if app.get("kind") == "steam" and k in GAME_ONLY:
+        k = GAME_ONLY[k]
     if re.match(r"^[A-Za-z_][A-Za-z0-9_]*$", str(k)):
         pairs.append("%s=%s" % (k, v))
 

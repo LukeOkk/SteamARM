@@ -718,7 +718,7 @@ struct RuntimeCapabilities {
         ],
         execution: [
             .auto: .init(state: .ready, reason: "lxrun: aarch64 directamente, x86/i386 con FEX; sin máquina virtual"),
-            .lightningJIT: .init(state: .experimental, reason: "lxrun con el JIT de FEX ajustado para velocidad: caché de código en disco, orden de memoria rápido (sin TSO vectorial ni en memcpy), x87 de doble precisión; sin máquina virtual. Un juego que dependa del orden estricto puede fallar"),
+            .lightningJIT: .init(state: .experimental, reason: "lxrun con el JIT de FEX ajustado para velocidad: el código ya traducido se guarda en disco (menos tirones al volver a abrir un juego) y las matemáticas x87 de los juegos antiguos van a doble precisión; sin máquina virtual. El resto, como AUTO"),
             .appleHypervisorLegacy: .init(state: .unavailable, reason: "la ruta con máquina virtual se retiró el 2026-09-27 (docs/history); SteamARM es ZERO-VM"),
         ],
         synchronization: [
@@ -1562,7 +1562,7 @@ enum AndroidApps {
 /// only (LXRT_VK_RENDER_SCALE, shim/wsi.c).
 enum RenderScaleChoice {
     static let options: [(String, String)] = [
-        ("1.0", "Nativa (100 %, recomendada; con MetalFX temporal, antialiasing)"),
+        ("1.0", "Nativa (100 %, recomendada)"),
         ("0.77", "Calidad ultra (77 %, 1,3x)"),
         ("0.67", "Calidad (67 %, 1,5x)"),
         ("0.59", "Equilibrado (59 %, 1,7x)"),
@@ -1571,13 +1571,13 @@ enum RenderScaleChoice {
     ]
 
     static func label(_ value: String) -> String {
-        options.first { $0.0 == value }?.1 ?? "Nativa (100 %, recomendada; con MetalFX temporal, antialiasing)"
+        options.first { $0.0 == value }?.1 ?? "Nativa (100 %, recomendada)"
     }
 
     static func note(_ value: String) -> String {
         let scope = " Sólo para juegos Vulkan o Direct3D (DXVK, VKD3D) a pantalla completa (con o sin bordes); la interfaz de Steam y las ventanas más pequeñas quedan a tamaño real. Desactiva el FSR del propio juego para no escalar dos veces."
         if value == "1.0" {
-            return "Los juegos dibujan a la resolución de la pantalla. Con el filtro MetalFX temporal, la imagen pasa igualmente por MetalFX a su tamaño: antialiasing a resolución nativa (bordes más estables)." + scope
+            return "Los juegos dibujan a la resolución de la pantalla, sin pases extra: lo más nítido." + scope
         }
         return "El juego entero, menús y texto incluidos, dibuja a esa fracción de la pantalla por eje y se agranda con el filtro de abajo (MetalFX espacial o temporal): de Calidad ultra (más nítido) a Rendimiento máximo (más fotogramas; MetalFX admite hasta 3x). Si el juego tiene su propio FSR (Counter-Strike 2), mejor ese: escala solo la escena 3D y el texto queda nítido." + scope
     }

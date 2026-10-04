@@ -191,6 +191,7 @@ struct LauncherSettings: Codable, Equatable {
     var resolutionScaling: Bool = false // Wine's display-mode emulation in the game prefixes
     var scalingFilter: String = "auto"   // a picture smaller than its window: auto, linear, nearest, fsr, metalfx, metalfx-temporal (shim/scaler.c)
     var fsrSharpness: Int = 90         // FSR's RCAS strength, percent
+    var metalfxNativeAA: Bool = false  // MetalFX temporal at 100 %: a temporal pass at the native size (softens; opt-in)
     var renderScale: String = "1.0"    // games covering the screen render at this scale, the shim enlarges: 1.0 (native, the default), 0.77, 0.67, 0.59, 0.5, 0.33; an old "auto" is native
     var steamUIAcceleration: Bool = true // ARM64 Steam's webhelper on ANGLE/Vulkan (LXRT_EXEC_ARGS)
     var frameRateLimit: Int = 0
@@ -273,6 +274,7 @@ struct LauncherSettings: Codable, Equatable {
         let d: String? = try? c.decodeIfPresent(String.self, forKey: .display) ?? nil
         display = d.flatMap { DisplayMode(rawValue: $0) } ?? .native
         execution = try c.decodeIfPresent(String.self, forKey: .execution) ?? "auto"
+        metalfxNativeAA = try c.decodeIfPresent(Bool.self, forKey: .metalfxNativeAA) ?? false
         resolution = try c.decodeIfPresent(String.self, forKey: .resolution) ?? "1600x900"
         projectDir = try c.decodeIfPresent(String.self, forKey: .projectDir)
         extraEnv = try c.decodeIfPresent([String: String].self, forKey: .extraEnv) ?? [:]

@@ -302,24 +302,25 @@ def env_from_settings(s, total=None, chip=None, display=None):
         env["FEX_MEMCPYSETTSOENABLED"] = "0"
     if s.get("fexMultiblock") is False:
         env["FEX_MULTIBLOCK"] = "0"
-    smc = {"none": "0", "mtrack": "1", "full": "2"}.get(s.get("fexSMC") or "mtrack")
-    if smc and smc != "1":
+    # FEX reads SMCChecks as text (Config.h SMCCheckHandler: "none", "mtrack",
+    # "full"); a number was taken as none, so "full" turned the checks off.
+    smc = s.get("fexSMC") or "mtrack"
+    if smc in ("none", "full"):
         env["FEX_SMCCHECKS"] = smc
     if s.get("fexX87Reduced"):
         env["FEX_X87REDUCEDPRECISION"] = "1"
     # Lightning JIT (launcher "Backend de la aplicación"): native windows and
-    # FEX's JIT set for speed, over the choices above -- the code cache on
-    # disk (no translating the same code again at the next start), memory
-    # ordering kept for ordinary loads and stores but not for vector ones and
-    # memcpy/memset (the "fast" TSO), whole multi-block translation, x87 at
-    # double precision. Self-modifying code stays tracked (mtrack): games with
-    # JITs of their own (.NET, Unity, LuaJIT) need it. Experimental: the
-    # relaxed ordering can break a game that relies on it.
+    # FEX's JIT set for speed over the choices above: the code cache on disk
+    # (code already translated is not translated again at the next start)
+    # and x87 at double precision (old games' maths). FEX's defaults already
+    # leave vector loads and memcpy/memset out of the memory ordering, and
+    # multi-block translation on; self-modifying code stays tracked (mtrack:
+    # games with JITs of their own -- .NET, Unity, LuaJIT -- need it).
     if s.get("execution") == "lightningJIT":
         env["FEX_DISKCACHE"] = "1"
-        env["FEX_TSOENABLED"] = "1"
-        env["FEX_VECTORTSOENABLED"] = "0"
-        env["FEX_MEMCPYSETTSOENABLED"] = "0"
+        env.pop("FEX_TSOENABLED", None)
+        env.pop("FEX_VECTORTSOENABLED", None)
+        env.pop("FEX_MEMCPYSETTSOENABLED", None)
         env.pop("FEX_MULTIBLOCK", None)
         env.pop("FEX_SMCCHECKS", None)
         env["FEX_X87REDUCEDPRECISION"] = "1"
@@ -398,9 +399,12 @@ def env_from_settings(s, total=None, chip=None, display=None):
         # Down to a third: MetalFX enlarges up to 3x ("rendimiento máximo";
         # its temporal scaler reports 1.0-3.0 on an M4).
         scale = 1.0 if not 0.33 <= scale < 0.995 else scale
-    if scale >= 0.995 and flt == "metalfx-temporal":
-        # 100 % with MetalFX temporal: its temporal pass at the native size,
-        # as antialiasing (the game tool passes it to the game only).
+    if scale >= 0.995 and flt == "metalfx-temporal" and s.get("metalfxNativeAA"):
+        # 100 % with MetalFX temporal, only when asked for: its temporal pass
+        # at the native size (the game tool passes it to the game only). It
+        # used to follow from the filter alone, and with no motion vectors or
+        # jitter from the game it softened every frame and cost frames:
+        # Counter-Strike 2's text blurred at 1080p (the user, 2026-10-04).
         env["STEAMARM_MFX_NATIVE"] = "1"
     if scale < 0.995:
         disp = display or main_display_size()

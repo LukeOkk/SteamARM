@@ -592,10 +592,12 @@ typedef struct {
 } VkSamplerCreateInfo;
 VkResult lxrt_mvk_vkCreateSampler(VkDevice, const VkSamplerCreateInfo *, const void *, uint64_t *);
 
-// The samplers aniso_level() applies to: linear in both directions, with mip
-// levels to filter across, no depth compare (shadow lookups), normalized
-// coordinates, and no extension structure (YCbCr conversions and reduction
-// modes do not take anisotropy).
+// The samplers aniso_level() applies to: linear magnification and
+// minification, mip levels to filter across (with either mip mode: a game's
+// "bilinear" setting is nearest between levels, and anisotropy works with
+// both), no depth compare (shadow lookups), normalized coordinates, and no
+// extension structure (YCbCr conversions and reduction modes do not take
+// anisotropy).
 VkResult lxrt_inner_vkCreateSampler(VkDevice dev, const VkSamplerCreateInfo *ci, const void *alloc, uint64_t *out)
 {
     int n = aniso_level();

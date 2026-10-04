@@ -143,8 +143,12 @@ class SettingsEnvironmentTests(unittest.TestCase):
         self.assertEqual(env["STEAMARM_RENDER_SIZE"], "1132x636")
         env = self.settings.env_from_settings({"scalingFilter": "metalfx-temporal"})
         self.assertEqual(env["LXRT_VK_SCALER"], "metalfx-temporal")
-        # 100 % with MetalFX temporal: antialiasing at the native size.
+        # 100 % with MetalFX temporal: no temporal pass at the native size
+        # unless asked for (it softened every frame).
         env = self.settings.env_from_settings({"scalingFilter": "metalfx-temporal", "renderScale": "1.0"})
+        self.assertNotIn("STEAMARM_MFX_NATIVE", env)
+        env = self.settings.env_from_settings({"scalingFilter": "metalfx-temporal", "renderScale": "1.0",
+                                               "metalfxNativeAA": True})
         self.assertEqual(env.get("STEAMARM_MFX_NATIVE"), "1")
         self.assertNotIn("STEAMARM_RENDER_SCALE", env)
         env = self.settings.env_from_settings({"scalingFilter": "metalfx", "renderScale": "1.0"})
@@ -219,6 +223,17 @@ class SettingsEnvironmentTests(unittest.TestCase):
                              (brand, cores, display))
         # A display no common mode fits: the scaled size, even.
         self.assertEqual(policy(m4, (1512, 982))["render"], [1014, 658])
+
+    def test_fex_smc_and_lightning_jit(self):
+        # FEX reads SMCChecks as text; a number meant none.
+        self.assertEqual(self.env({"fexSMC": "full"})["FEX_SMCCHECKS"], "full")
+        self.assertEqual(self.env({"fexSMC": "none"})["FEX_SMCCHECKS"], "none")
+        self.assertNotIn("FEX_SMCCHECKS", self.env({"fexSMC": "mtrack"}))
+        jit = self.env({"execution": "lightningJIT", "fexSMC": "none", "fexMultiblock": False})
+        self.assertEqual((jit["FEX_DISKCACHE"], jit["FEX_X87REDUCEDPRECISION"]), ("1", "1"))
+        self.assertNotIn("FEX_SMCCHECKS", jit)      # self-modifying code stays tracked
+        self.assertNotIn("FEX_MULTIBLOCK", jit)
+        self.assertNotIn("FEX_DISKCACHE", self.env({}))
 
     def test_antialiasing(self):
         for value in (2, 4, 8):

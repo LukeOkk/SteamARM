@@ -266,7 +266,14 @@ struct SettingsView: View {
                 Text("ON/OFF fijan DXVK (dxgi.syncInterval, d3d9.presentInterval) y VKD3D_SWAPCHAIN_PRESENT_MODE (FIFO / IMMEDIATE); Proton 10.0 no lee la variable de VKD3D. MoltenVK solo ofrece FIFO e IMMEDIATE, y el efecto en pantalla no se ha medido.")
                     .font(.caption).foregroundStyle(.secondary)
             }
-            Section("Memoria") { memory("DRAM", $draft.dramGB); memory("VRAM", $draft.vramGB) }
+            Section("Memoria") {
+                memory("Tope de memoria de las apps", $draft.dramGB)
+                Text("No da memoria a los juegos (ven toda la del Mac): es el límite a partir del cual el vigilante de SteamARM cierra todas las apps para que el Mac no se cuelgue.")
+                    .font(.caption).foregroundStyle(.secondary)
+                memory("VRAM que ven los juegos", $draft.vramGB)
+                Text("La memoria de vídeo que el juego cree tener. Automático: la que da Metal en este Mac. Bájala solo si un juego reserva de más.")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
             Section("Sincronización (Proton)") {
                 Picker("Sincronización", selection: Binding(get: { draft.synchronization }, set: { value in
                     guard let backend = SynchronizationBackend(rawValue: value),
@@ -373,20 +380,24 @@ struct SettingsView: View {
             Section("Funcionalidades y mejoras") {
                 Toggle("Caché de sombreadores", isOn: $draft.shaderCache)
                 integerChoice("Filtrado anisotrópico", $draft.anisotropy, [0, 2, 4, 8, 16], zero: "Automático")
-                Text("Un mínimo para todos los juegos (Direct3D por DXVK y Vulkan nativo como Counter-Strike 2): si el juego pide más, se queda con lo suyo. Automático: lo que elija el juego.")
+                Text("Un mínimo para los juegos (Direct3D por DXVK y Vulkan nativo como Counter-Strike 2): si el juego pide más, se queda con lo suyo. Automático: lo que elija el juego. Se aplica al reiniciar Steam.")
                     .font(.caption).foregroundStyle(.secondary)
                 integerChoice("Límite de FPS", $draft.frameRateLimit, [0, 30, 60, 90, 120, 144], zero: "Sin límite")
-                Text("Para todos los juegos (Direct3D por DXVK/VKD3D y Vulkan nativo); se aplica al abrir el juego.")
+                Text("Para los juegos (Direct3D por DXVK/VKD3D y Vulkan nativo), no para la interfaz de Steam. Se aplica al reiniciar Steam.")
                     .font(.caption).foregroundStyle(.secondary)
                 choice("HUD de DXVK", $draft.dxvkHud, [("off", "Desactivado"), ("fps", "FPS"), ("full", "Completo")])
+                Text("Solo juegos Direct3D 8 a 11 (DXVK).")
+                    .font(.caption).foregroundStyle(.secondary)
                 Toggle("Mostrar Metal HUD", isOn: $draft.metalHud)
+                Text("El HUD de rendimiento de Apple, arriba a la derecha de los juegos (no de la interfaz de Steam). Se aplica al reiniciar Steam.")
+                    .font(.caption).foregroundStyle(.secondary)
                 integerChoice("Suavizado de bordes (MSAA)", $draft.antialiasing, [0, 2, 4, 8], zero: "El del juego")
                 Text("Lo fuerza DXVK en los juegos Direct3D 9. Los Direct3D 10, 11 y 12 lo eligen dentro del juego: no hay un ajuste global para ellos.")
                     .font(.caption).foregroundStyle(.secondary)
                 Toggle("Escala de resolución (experimental)", isOn: $draft.resolutionScaling)
                 Text("Los juegos ofrecen resoluciones menores que la de la pantalla; al elegir una dentro del juego, se dibuja a ese tamaño (más rápido) y se agranda a toda la pantalla con el filtro de abajo, conservando su proporción. Se aplica a los prefijos de los juegos al abrir Steam o una app, con ningún juego abierto; un juego nuevo, desde su segundo arranque.")
                     .font(.caption).foregroundStyle(.secondary)
-                choice("Calidad de MetalFX (escala de render)", $draft.renderScale, RenderScaleChoice.options)
+                choice("Escala de render", $draft.renderScale, RenderScaleChoice.options)
                 Text(RenderScaleChoice.note(draft.renderScale))
                     .font(.caption).foregroundStyle(.secondary)
                 choice("Filtro de escalado", $draft.scalingFilter, ScalingFilterChoice.options)
@@ -399,6 +410,11 @@ struct SettingsView: View {
                 }
                 Text(ScalingFilterChoice.note(draft.scalingFilter))
                     .font(.caption).foregroundStyle(.secondary)
+                if draft.scalingFilter == "metalfx-temporal" && draft.renderScale == "1.0" {
+                    Toggle("MetalFX temporal también a resolución nativa", isOn: $draft.metalfxNativeAA)
+                    Text("Pasa cada fotograma por MetalFX temporal sin escalarlo. Sin los vectores de movimiento del juego suaviza la imagen (el texto se ve más borroso) y cuesta fotogramas; desactivado, la imagen queda tal cual.")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
                 Toggle("Interfaz de Steam ARM64 acelerada por GPU", isOn: $draft.steamUIAcceleration)
                 Text("La interfaz de Steam ARM64 y Steam Frame (Chromium) dibuja con Vulkan sobre Metal (el driver elegido arriba: MoltenVK o KosmicKrisp) en lugar de con la CPU. Sin ella, su proceso GPU no arranca en macOS y Steam pinta por software. Se aplica al abrir Steam; si su ventana se viera mal, desactívala.")
                     .font(.caption).foregroundStyle(.secondary)
