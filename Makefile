@@ -7,7 +7,7 @@ CC        := clang
 
 .PHONY: all clean
 
-all: lxrt shim launcher inputd wlmac
+all: lxrt shim launcher inputd wlmac ffx-metalfx
 
 # steamarm-inputd: the Mac's controllers as /dev/input for guests (tools/inputd).
 .PHONY: inputd
@@ -22,6 +22,21 @@ build/steamarm-inputd: tools/inputd/inputd.c
 	@mkdir -p build
 	$(CC) -std=c11 -Wall -Wextra -O2 -I/opt/homebrew/opt/sdl2/include/SDL2 $< \
 	    -L/opt/homebrew/opt/sdl2/lib -lSDL2 -o $@
+
+# SteamARM's FidelityFX API DLLs (tools/ffx-metalfx): x86_64 Wine builtins
+# over a Windows game's amd_fidelityfx_dx12/_vk/_upscaler_dx12.dll, for its
+# FSR 3.1 / FSR 4 to go to MetalFX. One source, one DLL per name; mingw-w64
+# builds them (scripts/setup.sh installs it), scripts/install-ffx-metalfx.sh
+# puts them in the x86 Steam root's /opt/steamarm/wine, and the game tool
+# (tools/steamarm-fex-proton) points Wine at them for STEAMARM_WIN_UPSCALER=metalfx.
+FFX_DIR  := build/ffx-metalfx/x86_64-windows
+FFX_DLLS := $(addprefix $(FFX_DIR)/,amd_fidelityfx_dx12.dll amd_fidelityfx_vk.dll amd_fidelityfx_upscaler_dx12.dll)
+FFX_SRCS := $(wildcard tools/ffx-metalfx/*.c tools/ffx-metalfx/*.h tools/ffx-metalfx/*.def) \
+            tools/ffx-metalfx/build.sh tools/ffx-metalfx/wine-builtin-mark.py
+.PHONY: ffx-metalfx
+ffx-metalfx: $(FFX_DLLS)
+$(FFX_DIR)/%.dll: $(FFX_SRCS)
+	FFX_OUT=$@ tools/ffx-metalfx/build.sh
 
 resources/AppIcon.icns: scripts/make-icon.py scripts/make-icns.sh
 	@python3 scripts/make-icon.py resources/icon.png

@@ -49,7 +49,7 @@ step_brew() {
 }
 
 step_make() {
-    log "make: runtime, Vulkan shim, launcher, controller daemon"
+    log "make: runtime, Vulkan shim, launcher, controller daemon, FidelityFX DLLs"
     make -j"$(sysctl -n hw.ncpu)" all
 }
 
@@ -128,6 +128,7 @@ step_steam() {
     scripts/install-fex-host.sh
     LXRT_ROOT=/tmp/lxrt-root scripts/build-fex-thunks.sh install
     scripts/install-steamroot-gfx.sh
+    scripts/install-ffx-metalfx.sh
 }
 
 step_frameroot() {

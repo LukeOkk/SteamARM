@@ -1,0 +1,7 @@
+# Steam app ids of games that never get SteamARM's FidelityFX DLLs, whatever
+# "Escalado del juego" says: one per line, '#' starts a comment. For games
+# with an anti-cheat the game tool (tools/steamarm-fex-proton) cannot see in
+# the game's files (it already skips any game whose install directory has
+# EasyAntiCheat/, EasyAntiCheat_EOS*, BattlEye/, BEService*.exe or
+# start_protected_game.exe). Installed next to the game tools
+# (scripts/install-fex-proton-tool.sh, scripts/install-ffx-metalfx.sh).

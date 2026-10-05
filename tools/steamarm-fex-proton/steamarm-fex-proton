@@ -42,6 +42,19 @@
 # ~/.steam (steam.pid, sdk64/steamclient.so), which is the ARM64 client's.
 # FEX's configuration still comes from the x86 home (FEX_APP_CONFIG_LOCATION).
 #
+# FSR 3.1 / FSR 4 -> MetalFX: with STEAMARM_WIN_UPSCALER=metalfx (launcher
+# "Escalado del juego", scripts/settings-env.py) and a Windows game without an
+# anti-cheat, Wine takes SteamARM's FidelityFX API DLLs from the x86 root's
+# /opt/steamarm/wine (scripts/install-ffx-metalfx.sh) over the game's own
+# (see "FSR 3.1 / FSR 4" below). Installed there under the name steamarm-ffx,
+# the same script does only that, for SteamARM's x86 Steam client, whose game
+# environment is Steam's own (scripts/run-steam.sh) and has no per-game step
+# of SteamARM's: a game's launch options there read
+#
+#   /opt/steamarm/wine/steamarm-ffx %command%
+#
+# and it sets the same environment (or none) and execs the command.
+#
 # STEAMARM_FEX_PROTON_DRYRUN=1 prints the checks and the command instead of
 # running them (tests/launcher/fex_proton_tool.sh).
 # STEAMARM_FEX_KEEP_LD_PRELOAD=1 keeps the client's LD_PRELOAD (the Steam
@@ -53,9 +66,163 @@
 set -u
 
 me=${0##*/}
-case "$me" in steamarm-fex-linux) linux=1 ;; *) me=steamarm-fex-proton linux=0 ;; esac
+ffx_only=0
+case "$me" in
+    steamarm-fex-linux) linux=1 ;;
+    steamarm-ffx) linux=0 ffx_only=1 ;;
+    *) me=steamarm-fex-proton linux=0 ;;
+esac
 say() { echo "$me: $*" >&2; }
 die() { local rc=$1; shift; say "$*"; exit "$rc"; }
+here=${BASH_SOURCE[0]%/*}
+[ "$here" != "${BASH_SOURCE[0]}" ] || here=.
+
+# ------------------------------------------- FSR 3.1 / FSR 4 -> MetalFX
+# SteamARM's FidelityFX API DLLs (tools/ffx-metalfx) are Wine builtins with
+# Wine's prefer-native flag, installed in the x86 root (FFX_DIR): Wine takes
+# them over a game's amd_fidelityfx_*.dll only where WINEDLLPATH has their
+# directory AND the load order says "b,n" (MEASURED, tests/win/run_ffx_load.sh),
+# and loads the game's own file otherwise. Both are set here only when
+# STEAMARM_WIN_UPSCALER=metalfx (Escalado del juego AUTO on KosmicKrisp) and
+# the game shows no anti-cheat -- a replaced module could get an account
+# flagged: in the directory of the program Proton runs and its parents up to
+# steamapps/common/<game> (and STEAM_COMPAT_INSTALL_PATH) no EasyAntiCheat/,
+# EasyAntiCheat_EOS*, BattlEye/, BEService*.exe or start_protected_game.exe
+# (any case), and the Steam app id not in anticheat-appids.txt (next to this
+# script; tools/ffx-metalfx/ in a checkout). Without the variable nothing at
+# all is set or said; when a game is left out, one line says why. Never the
+# game's loader DLL (amd_fidelityfx_loader_dx12.dll): it loads the DLLs
+# named here. Ours go IN FRONT of WINEDLLOVERRIDES: Wine lets a later entry
+# for the same DLL win, so the user's own overrides (and Proton's, which it
+# appends) keep the last word. WINEDLLPATH and PRESSURE_VESSEL_FILESYSTEMS_RO
+# get the directory appended: Proton puts its own directories first
+# (proton: dllpaths), and pressure-vessel shares the directory read-only.
+# SteamARM's container sees the x86 root's /opt without the latter (FEX's
+# rootfs is the x86 root; MEASURED, a Steam-style container launch), a stock
+# pressure-vessel would not.
+FFX_DIR=/opt/steamarm/wine
+FFX_DLLS=amd_fidelityfx_dx12,amd_fidelityfx_vk,amd_fidelityfx_upscaler_dx12
+ffx_list="$here/anticheat-appids.txt"
+[ -f "$ffx_list" ] || ffx_list="$here/../ffx-metalfx/anticheat-appids.txt"   # a checkout
+ffx_why="" ffx_found="" ffx_dirs=()
+ffx_add_dir() {
+    local d
+    [ -d "$1" ] || return 0
+    for d in ${ffx_dirs[@]+"${ffx_dirs[@]}"}; do [ "$d" != "$1" ] || return 0; done
+    ffx_dirs+=("$1")
+}
+ffx_game_dirs() {   # ffx_game_dirs EXE: its directory and the parents up to steamapps/common/<game>
+    local p=$1 base rest top
+    case "$p" in /*/*) p=${p%/*} ;; *) return 0 ;; esac
+    case "$p/" in
+        */steamapps/common/?*/*)
+            base=${p%%/steamapps/common/*}
+            rest=${p#"$base/steamapps/common/"}
+            top="$base/steamapps/common/${rest%%/*}"
+            while :; do
+                ffx_add_dir "$p"
+                [ "$p" != "$top" ] && [ "${p%/*}" != "$p" ] || break
+                p=${p%/*}
+            done ;;
+        *) ffx_add_dir "$p" ;;
+    esac
+}
+ffx_anticheat() {   # ffx_anticheat DIR: ffx_found = its anti-cheat's file (nocasematch on)
+    local f
+    for f in "$1"/*; do
+        case "${f##*/}" in
+            easyanticheat|battleye) [ -d "$f" ] || continue ;;
+            easyanticheat_eos*|beservice*.exe|start_protected_game.exe) ;;
+            *) continue ;;
+        esac
+        ffx_found=$f
+        return 0
+    done
+    return 1
+}
+ffx_denied() {   # ffx_denied APPID: the app id is in the deny list
+    local line
+    [ -n "$1" ] && [ -f "$ffx_list" ] || return 1
+    while IFS= read -r line || [ -n "$line" ]; do
+        line=${line%%#*}
+        line=${line//[[:space:]]/}
+        [ "$line" != "$1" ] || return 0
+    done < "$ffx_list"
+    return 1
+}
+ffx_decide() {   # ffx_decide EXE: ffx_why = why the game is left out, "" if it is not
+    local d appid=${STEAM_COMPAT_APP_ID:-${SteamAppId:-${SteamGameId:-}}}
+    ffx_why="" ffx_dirs=()
+    ffx_game_dirs "$1"
+    case "${STEAM_COMPAT_INSTALL_PATH:-}" in /?*) ffx_add_dir "${STEAM_COMPAT_INSTALL_PATH%/}" ;; esac
+    shopt -s nocasematch
+    for d in ${ffx_dirs[@]+"${ffx_dirs[@]}"}; do
+        if ffx_anticheat "$d"; then ffx_why="anti-cheat: $ffx_found"; break; fi
+    done
+    shopt -u nocasematch
+    if [ -z "$ffx_why" ] && ffx_denied "$appid"; then
+        ffx_why="app $appid is in $ffx_list"
+    fi
+}
+ffx_apply() {   # ffx_apply DIR: Wine takes the DLLs in DIR (a path in the x86 root)
+    case ":${WINEDLLPATH:-}:" in *":$1:"*) ;; *) export WINEDLLPATH="${WINEDLLPATH:+$WINEDLLPATH:}$1" ;; esac
+    case "${WINEDLLOVERRIDES:-}" in
+        "$FFX_DLLS=b,n"|"$FFX_DLLS=b,n;"*) ;;
+        *) export WINEDLLOVERRIDES="$FFX_DLLS=b,n${WINEDLLOVERRIDES:+;$WINEDLLOVERRIDES}" ;;
+    esac
+    case ":${PRESSURE_VESSEL_FILESYSTEMS_RO:-}:" in
+        *":$1:"*) ;;
+        *) export PRESSURE_VESSEL_FILESYSTEMS_RO="${PRESSURE_VESSEL_FILESYSTEMS_RO:+$PRESSURE_VESSEL_FILESYSTEMS_RO:}$1" ;;
+    esac
+}
+ffx_say() {   # the one line, either way
+    if [ -z "$ffx_why" ]; then
+        say "FSR 3.1/4 -> MetalFX: SteamARM's FidelityFX DLLs from $1 ($FFX_DLLS=b,n)"
+    else
+        say "FSR 3.1/4 -> MetalFX off for this game ($ffx_why): its own FidelityFX DLLs load untouched"
+    fi
+}
+show_ffx_env() {   # for the dry run
+    local v
+    for v in WINEDLLPATH WINEDLLOVERRIDES PRESSURE_VESSEL_FILESYSTEMS_RO; do
+        [ -z "${!v+x}" ] || echo "env: $v=${!v}"
+    done
+}
+
+# steamarm-ffx: the x86 client's launch-option wrapper, run in the x86 root
+# from this script's copy in FFX_DIR (scripts/install-ffx-metalfx.sh). The
+# game is the program after Proton's verb in Steam's command
+# (.../proton waitforexitandrun <game.exe>), else its first *.exe.
+if [ "$ffx_only" = 1 ]; then
+    case "${1:-}" in
+        ''|-h|--help) die 2 "usage: $me <command...>  (a game's launch options in SteamARM's x86 Steam client: $FFX_DIR/$me %command%)" ;;
+    esac
+    if [ "${STEAMARM_WIN_UPSCALER:-}" = metalfx ]; then
+        exe="" p1="" p2=""
+        for a in "$@"; do
+            case "$p2" in */proton) exe=$a; break ;; esac
+            p2=$p1 p1=$a
+        done
+        if [ -z "$exe" ]; then
+            for a in "$@"; do case "$a" in *.[eE][xX][eE]) exe=$a; break ;; esac; done
+        fi
+        dir=$(cd "$here" && pwd -P) || die 3 "cannot resolve $here"
+        ffx_decide "$exe"
+        if [ -z "$ffx_why" ]; then
+            for n in ${FFX_DLLS//,/ }; do
+                [ -f "$dir/x86_64-windows/$n.dll" ] || { ffx_why="no $dir/x86_64-windows/$n.dll (scripts/install-ffx-metalfx.sh)"; break; }
+            done
+        fi
+        [ -n "$ffx_why" ] || ffx_apply "$dir"
+        ffx_say "$dir"
+    fi
+    if [ "${STEAMARM_FEX_PROTON_DRYRUN:-}" = 1 ]; then
+        show_ffx_env
+        printf 'exec:'; printf ' [%s]' "$@"; echo
+        exit 0
+    fi
+    exec "$@"
+fi
 
 case "${1:-}" in
     ''|-h|--help) die 2 "usage: $me <verb> [command...]  (run by Steam: toolmanifest.vdf \"%verb%\")" ;;
@@ -66,8 +233,6 @@ case "$verb" in
 esac
 
 # --------------------------------------------------------------- settings
-here=${BASH_SOURCE[0]%/*}
-[ "$here" != "${BASH_SOURCE[0]}" ] || here=.
 X86_ROOT=/tmp/lxrt-steamroot
 X86_HOME=/tmp/fexhome
 X86_STEAM=/tmp/fexhome/.local/share/Steam
@@ -162,13 +327,25 @@ fi
 [ -f "$1$4/_v2-entry-point" ]    || m="$m runtime:$4"
 [ -f "$2/$5" ]                   || m="$m fex:$5"
 [ -S "$6" ]                      || m="$m fexserver"
+if [ -n "$8" ]; then
+for n in amd_fidelityfx_dx12 amd_fidelityfx_vk amd_fidelityfx_upscaler_dx12; do
+[ -f "$1$8/x86_64-windows/$n.dll" ] || { m="$m noffx"; break; }
+done
+fi
 echo "missing:$m"'
+# FSR 3.1 / FSR 4 (above): decided for a Windows game; its DLLs are checked
+# with the rest of the x86 side.
+ffx_check=""
+if [ "$linux" = 0 ] && [ "${STEAMARM_WIN_UPSCALER:-}" = metalfx ]; then
+    ffx_decide "${1:-}"
+    [ -n "$ffx_why" ] || ffx_check=$FFX_DIR
+fi
 if [ "${STEAMARM_FEX_PROTON_DRYRUN:-}" = 1 ]; then
-    echo "check: LXRT_MOUNTS=$(show_table "$check_mounts") [x86 root $X86_ROOT: $proton_dir/proton, $slr_dir/_v2-entry-point; $FEXDIR/$FEXBIN; FEXServer socket /tmp/lxrt-abstract-$uid/$uid.FEXServer.Socket]"
+    echo "check: LXRT_MOUNTS=$(show_table "$check_mounts") [x86 root $X86_ROOT: $proton_dir/proton, $slr_dir/_v2-entry-point; $FEXDIR/$FEXBIN; FEXServer socket /tmp/lxrt-abstract-$uid/$uid.FEXServer.Socket${ffx_check:+; FidelityFX DLLs $ffx_check/x86_64-windows}]"
     missing=""
 else
     out=$(LXRT_MOUNTS="$check_mounts" /bin/bash -c "$check_script" check "$x86" "$fex" \
-          "$proton_dir" "$slr_dir" "$FEXBIN" "$sock/$uid.FEXServer.Socket" "$PROTON" 2>/dev/null)
+          "$proton_dir" "$slr_dir" "$FEXBIN" "$sock/$uid.FEXServer.Socket" "$PROTON" "$ffx_check" 2>/dev/null)
     case "$out" in missing:*) missing=${out#missing:} ;; *) die 4 "could not check the x86 side (output: '$out')" ;; esac
 fi
 for m in $missing; do
@@ -177,6 +354,7 @@ for m in $missing; do
         arm64:*) die 6 "$PROTON in the x86 root is an ARM64 build: Proton ARM64 cannot run on macOS (benchmarks/stage18)" ;;
         runtime:*) die 4 "$RUNTIME is not installed in the x86 Steam root ($X86_ROOT: ${m#*:}); ${PROTON:-a native Linux game} requires it" ;;
         fex:*) die 4 "no FEX at $FEXDIR/$FEXBIN (scripts/setup.sh builds it)" ;;
+        noffx) ffx_why="SteamARM's FidelityFX DLLs are not in the x86 root ($X86_ROOT$FFX_DIR: scripts/install-ffx-metalfx.sh)" ;;
         fexserver) die 5 "FEXServer is not running (no /tmp/lxrt-abstract-$uid/$uid.FEXServer.Socket): start SteamARM's x86 side first (scripts/run-fex.sh /bin/true, or the launcher's Steam entry). Not starting one from here: a FEXServer started with a game's environment serves the wrong x86 root to every later FEX program (scripts/run-fex.sh)" ;;
     esac
 done
@@ -263,6 +441,11 @@ if [ -f "$root_env" ]; then
     done < "$root_env"
 fi
 [ -z "${dropped[*]-}" ] || say "not passing on the ARM64 root's own guest environment: ${dropped[*]}"
+# FSR 3.1 / FSR 4 -> MetalFX (above), after the drops: what it sets stays.
+if [ "$linux" = 0 ] && [ "${STEAMARM_WIN_UPSCALER:-}" = metalfx ]; then
+    [ -n "$ffx_why" ] || ffx_apply "$FFX_DIR"
+    ffx_say "$FFX_DIR in the x86 root"
+fi
 
 first=${1:-}
 say "$verb ${first##*/} (app ${SteamAppId:-${STEAM_COMPAT_APP_ID:-?}}) via x86 ${PROTON:+$PROTON + }$RUNTIME under FEX (root $X86_ROOT); client paths bound from $arm_root: ${binds[*]-none}"
@@ -276,6 +459,7 @@ if [ "${STEAMARM_FEX_PROTON_DRYRUN:-}" = 1 ]; then
         echo "env: $v=${!v}"
     done
     echo "env: LXRT_MOUNTS=$(show_table "$LXRT_MOUNTS")"
+    show_ffx_env
     for v in LXRT_GUEST_PAGE LXRT_X18_ALL_TEXT LD_LIBRARY_PATH LD_PRELOAD STEAM_COMPAT_EMULATOR ${dropped[@]+"${dropped[@]}"}; do
         [ -z "${!v:-}" ] || echo "env: $v still set"
     done
