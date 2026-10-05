@@ -55,12 +55,19 @@ cp -R build/SteamARM.app "$APP"
 # The source is exactly the committed tree. Never package local, untracked files.
 git archive --format=tar HEAD | gzip -n > "$APP/Contents/Resources/SteamARM-src.tar.gz"
 # Nothing personal may ship: fail on a home path or a user name in the tree.
-if tar -xzOf "$APP/Contents/Resources/SteamARM-src.tar.gz" 2>/dev/null | grep -aF "/Users/$(id -un)" >/dev/null; then
-    echo "make-release: the source contains /Users/$(id -un); refusing" >&2
+python3 -m unittest discover -s tests -p test_no_personal_data.py
+PRIVATE_HOME="/Users/$(id -un)"
+# GitHub's standard runner path is a public CI/example path, explicitly
+# allowed by the source privacy test. It is not this user's home directory.
+if [ "${GITHUB_ACTIONS:-}" = true ] && [ "$PRIVATE_HOME" = /Users/runner ]; then
+    PRIVATE_HOME=""
+fi
+if [ -n "$PRIVATE_HOME" ] && tar -xzOf "$APP/Contents/Resources/SteamARM-src.tar.gz" 2>/dev/null | grep -aF "$PRIVATE_HOME" >/dev/null; then
+    echo "make-release: the source contains a private build home; refusing" >&2
     exit 1
 fi
-if strings "$APP/Contents/MacOS/SteamARM" | grep -F "/Users/$(id -un)" >/dev/null; then
-    echo "make-release: the launcher binary contains /Users/$(id -un); refusing" >&2
+if [ -n "$PRIVATE_HOME" ] && strings "$APP/Contents/MacOS/SteamARM" | grep -F "$PRIVATE_HOME" >/dev/null; then
+    echo "make-release: the launcher binary contains a private build home; refusing" >&2
     exit 1
 fi
 
