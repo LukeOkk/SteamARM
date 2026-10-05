@@ -1,0 +1,43 @@
+SteamARM: accept a whole low-resolution input for a bilinear upscale
+
+The input's recorded viewport may occupy either part of a display-sized
+texture or the whole of a smaller texture. Both are valid upscales. Rejecting
+the latter silently skipped MetalFX in the Ultra Quality bilinear path.
+Keep the 1.05x..3x size bounds and all patch 17 protections: blended,
+clipped, depth/stencil-tested and partial-channel draws remain untouched.
+The bilinear log now follows a successful MetalFX encode, so it establishes
+that the pass ran, rather than only that it was considered.
+
+Regression: vk_fsr bilinear, full (49x49 -> 64x64), blend and scissor;
+read back the picture and check the actual-encode log as well.
+--- a/src/kosmickrisp/vulkan/kk_cmd_draw.c
++++ b/src/kosmickrisp/vulkan/kk_cmd_draw.c
+@@ -2198,2 +2198,2 @@
+-       * last drawn into its input, from the origin -- only an upscale of a
+-       * part of the input (FSR's ratios, 1.05x to 3x a side). */
++       * last drawn into its input, from the origin -- only an upscale of the
++       * recorded picture (FSR's ratios, 1.05x to 3x a side). */
+@@ -2206 +2205,0 @@
+-          (in_w == in_image->vk.extent.width && in_h == in_image->vk.extent.height) ||
+@@ -2210,7 +2208,0 @@
+-      static uint32_t told_w, told_h;
+-      if (in_w != told_w || in_h != told_h) {
+-         fprintf(stderr, "kk: bilinear upsample by MetalFX: picture %ux%u -> %ux%u\n", in_w, in_h,
+-                 ov->extent.width, ov->extent.height);
+-         told_w = in_w;
+-         told_h = in_h;
+-      }
+@@ -2237,0 +2230,13 @@
++      /* Report an actual encode, not a candidate MetalFX may refuse. */
++      if (fs->info.fsr_bilinear) {
++         static uint32_t told_w, told_h, told_out_w, told_out_h;
++         if (in_w != told_w || in_h != told_h ||
++             ov->extent.width != told_out_w || ov->extent.height != told_out_h) {
++            fprintf(stderr, "kk: bilinear upsample by MetalFX: picture %ux%u -> %ux%u\n",
++                    in_w, in_h, ov->extent.width, ov->extent.height);
++            told_w = in_w;
++            told_h = in_h;
++            told_out_w = ov->extent.width;
++            told_out_h = ov->extent.height;
++         }
++      }

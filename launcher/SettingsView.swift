@@ -5,6 +5,7 @@ import ApplicationServices
 enum SettingsSection: String, CaseIterable, Identifiable {
     case interface = "Interfaz", input = "Entrada", system = "Sistema", processor = "Procesador"
     case graphics = "Gráficos", runtime = "Runtime", sound = "Sonido", shortcuts = "Atajos", logs = "Registros", debug = "Depuración"
+    case about = "Acerca de"
     var id: String { rawValue }
     var symbol: String {
         switch self {
@@ -18,6 +19,7 @@ enum SettingsSection: String, CaseIterable, Identifiable {
         case .shortcuts: return "keyboard"
         case .logs: return "doc.text"
         case .debug: return "ladybug"
+        case .about: return "info.circle"
         }
     }
 }
@@ -164,7 +166,14 @@ struct SettingsView: View {
                 EnvEditor(env: $draft.extraEnv)
                 Text("Se exportan a todas las apps que lance SteamARM.").font(.caption).foregroundStyle(.secondary)
             }
+        case .about: aboutSection
         case .input: EmptyView()
+        }
+    }
+
+    private var aboutSection: some View {
+        Section("SteamARM") {
+            LabeledContent("Versión", value: Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "Desconocida")
         }
     }
 

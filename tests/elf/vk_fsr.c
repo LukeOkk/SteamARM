@@ -13,6 +13,11 @@
 // buffer at an offset, and set 0 has a dynamic uniform buffer of its own whose
 // data would also pass for con0 (0.9): the driver must find set 1's.
 // Usage: vk_fsr metalfx|shader [dynamic] (the result expected)
+//        vk_fsr metalfx|shader bilinear [full|blend|scissor|native]
+// Bilinear uses a 49x49 (77%) scene, either in a 64x64 allocation or a
+// whole 49x49 allocation. Blending and a partial scissor must keep the
+// original draw. Full-input readback alone cannot distinguish bilinear
+// from MetalFX: the runner must also check the successful-encode log.
 // Prints "== vk_fsr: ok" or "== vk_fsr: FAIL".
 //
 // The shaders (vk_fsr_spv.h, glslangValidator -V --target-env vulkan1.3):
@@ -25,9 +30,11 @@
 #include <string.h>
 #include <vulkan/vulkan.h>
 #include "vk_fsr_spv.h"
+#include "vk_fsr_bilinear_spv.h"
 
 #define CHECK(x) do { VkResult r_ = (x); if (r_ != VK_SUCCESS) { printf("%s -> %d\n== vk_fsr: FAIL\n", #x, r_); exit(1); } } while (0)
-enum { IW = 64, IH = 64, PW = 32, PH = 32, OW = 64, OH = 64 }; // input, its picture, output
+enum { OW = 64, OH = 64 };
+static unsigned IW = 64, IH = 64, PW = 32, PH = 32; // input, its picture, output
 
 static VkDevice dev;
 static VkPhysicalDevice pd;
@@ -93,6 +100,16 @@ int main(int argc, char **argv)
 {
     int want_metalfx = argc > 1 && !strcmp(argv[1], "metalfx");
     int dynamic = argc > 2 && !strcmp(argv[2], "dynamic");
+    int bilinear = argc > 2 && !strcmp(argv[2], "bilinear");
+    int full = argc > 3 && !strcmp(argv[3], "full");
+    int blend = argc > 3 && !strcmp(argv[3], "blend");
+    int clipped = argc > 3 && !strcmp(argv[3], "scissor");
+    int native = argc > 3 && !strcmp(argv[3], "native");
+    if (bilinear) {
+        PW = PH = 49;
+        if (full) IW = IH = 49;
+        if (native) PW = PH = IW = IH = 64;
+    }
     VkDescriptorType ubo_type = dynamic ? VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC : VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
     VkApplicationInfo app = { VK_STRUCTURE_TYPE_APPLICATION_INFO, 0, "vk_fsr", 1, 0, 0, VK_API_VERSION_1_3 };
     VkInstanceCreateInfo ici = { VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO, 0, 0, &app };
@@ -132,7 +149,8 @@ int main(int argc, char **argv)
 
     VkImage in, out;
     VkImageView in_view, out_view;
-    make_image(IW, IH, VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT, &in, &in_view);
+    make_image(IW, IH, VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT |
+                      VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT, &in, &in_view);
     make_image(OW, OH, VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT,
                &out, &out_view);
     VkBuffer up, down, ubo;
@@ -185,7 +203,8 @@ int main(int argc, char **argv)
         vkUpdateDescriptorSets(dev, 1, &w0, 0, 0);
     }
 
-    VkShaderModule vs = module(vfs_full, sizeof vfs_full), fs = module(vfs_easu, sizeof vfs_easu);
+    VkShaderModule vs = module(vfs_full, sizeof vfs_full);
+    VkShaderModule fs = bilinear ? module(vfs_bilinear, sizeof vfs_bilinear) : module(vfs_easu, sizeof vfs_easu);
     VkPipelineShaderStageCreateInfo st[2] = {
         { VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, 0, 0, VK_SHADER_STAGE_VERTEX_BIT, vs, "main" },
         { VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, 0, 0, VK_SHADER_STAGE_FRAGMENT_BIT, fs, "main" },
@@ -209,6 +228,18 @@ int main(int argc, char **argv)
                                         &rs, &ms, 0, &cbs, &dsi, pl };
     VkPipeline pipe;
     CHECK(vkCreateGraphicsPipelines(dev, 0, 1, &gi, 0, &pipe));
+    VkPipeline pattern = VK_NULL_HANDLE;
+    if (bilinear) {
+        st[1].module = module(vfs_pattern, sizeof vfs_pattern);
+        CHECK(vkCreateGraphicsPipelines(dev, 0, 1, &gi, 0, &pattern));
+        if (blend) {
+            st[1].module = fs;
+            ba.blendEnable = VK_TRUE;
+            ba.srcColorBlendFactor = ba.srcAlphaBlendFactor = VK_BLEND_FACTOR_ONE;
+            ba.dstColorBlendFactor = ba.dstAlphaBlendFactor = VK_BLEND_FACTOR_ZERO;
+            CHECK(vkCreateGraphicsPipelines(dev, 0, 1, &gi, 0, &pipe));
+        }
+    }
 
     VkCommandPoolCreateInfo cpci = { VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO };
     VkCommandPool cp;
@@ -222,7 +253,25 @@ int main(int argc, char **argv)
     barrier(cb, in, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
     VkBufferImageCopy up_copy = { 0, 0, 0, { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 }, { 0 }, { IW, IH, 1 } };
     vkCmdCopyBufferToImage(cb, up, in, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &up_copy);
-    barrier(cb, in, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+    if (bilinear) {
+        barrier(cb, in, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
+        VkRenderingAttachmentInfo scene = { VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO, 0, in_view,
+                                            VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL };
+        scene.loadOp = VK_ATTACHMENT_LOAD_OP_LOAD;
+        scene.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+        VkRenderingInfo sri = { VK_STRUCTURE_TYPE_RENDERING_INFO, 0, 0, { { 0, 0 }, { IW, IH } }, 1, 0, 1, &scene };
+        vkCmdBeginRendering(cb, &sri);
+        VkViewport svp = { 0, 0, PW, PH, 0, 1 };
+        VkRect2D ssc = { { 0, 0 }, { PW, PH } };
+        vkCmdSetViewport(cb, 0, 1, &svp);
+        vkCmdSetScissor(cb, 0, 1, &ssc);
+        vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, pattern);
+        vkCmdDraw(cb, 3, 1, 0, 0);
+        vkCmdEndRendering(cb);
+        barrier(cb, in, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+    } else {
+        barrier(cb, in, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+    }
     barrier(cb, out, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
     VkRenderingAttachmentInfo ca = { VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO, 0, out_view,
                                      VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL };
@@ -234,6 +283,7 @@ int main(int argc, char **argv)
     vkCmdBeginRendering(cb, &ri);
     VkViewport vp = { 0, 0, OW, OH, 0, 1 };
     VkRect2D sc = { { 0, 0 }, { OW, OH } };
+    if (clipped) sc.extent.height = OH / 2;
     vkCmdSetViewport(cb, 0, 1, &vp);
     vkCmdSetScissor(cb, 0, 1, &sc);
     vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, pipe);
@@ -259,8 +309,9 @@ int main(int argc, char **argv)
     int scaled = l[2] > 200 && l[0] < 60 && l[1] < 60 && r[0] > 200 && r[2] < 60 && r[1] < 60 &&
                  bl[2] > 200 && bl[1] < 60 && br[0] > 200 && br[1] < 60;
     int magenta = l[0] > 200 && l[2] > 200 && r[0] > 200 && r[2] > 200 && l[1] < 60 && r[1] < 60;
-    printf("result: %s\n", scaled ? "metalfx (the input enlarged)" : magenta ? "shader (magenta)" : "neither");
-    int ok = want_metalfx ? scaled : magenta;
+    printf("result: %s\n", scaled ? "scaled picture" : magenta ? "shader (magenta)" : "unscaled or clipped picture");
+    int original_bilinear = full || native ? scaled : br[1] > 200 && br[0] < 60 && br[2] < 60;
+    int ok = want_metalfx ? scaled : bilinear ? original_bilinear : magenta;
     printf("== vk_fsr: %s\n", ok ? "ok" : "FAIL");
     return !ok;
 }

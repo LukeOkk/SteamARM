@@ -250,6 +250,32 @@ else
         run_fsr "kosmickrisp steamarm off" shader STEAMARM_VK_ICD=kosmickrisp STEAMARM_KK_DIR="$OWN" KK_FSR_METALFX=0
         run_fsr "kosmickrisp steamarm dynamic" "metalfx dynamic" STEAMARM_VK_ICD=kosmickrisp STEAMARM_KK_DIR="$OWN"
     fi
+    # Ultra Quality is a bilinear pass, not EASU. For a whole low-resolution
+    # input both scalers give the right colors: check the actual encode log
+    # as well. Blend/scissor safeguards must still use the game's shader.
+    run_bilinear() { # label, expected pixels, expected encode 0|1, variant, environment
+        local label=$1 want=$2 encode=$3 variant=$4; shift 4
+        local log="$ROOT/tmp/vktest/vk_fsr_bilinear_${label// /_}.log" actual=0
+        env OBJC_DISABLE_INITIALIZE_FORK_SAFETY=YES LXRT_ROOT="$ROOT" "$@" \
+            perl -e 'alarm 60; exec @ARGV' ./build/lxrun /tmp/vktest/vk_fsr "$want" bilinear "$variant" > "$log" 2>&1
+        grep -q '^kk: bilinear upsample by MetalFX:' "$log" && actual=1
+        if [ "$(grep -E '^== vk_fsr' "$log" | tail -1)" = "== vk_fsr: ok" ] && [ "$actual" = "$encode" ]; then
+            printf '  ok    vk_fsr bilinear %s (encode=%s)\n' "$label" "$actual"; pass=$((pass + 1))
+        else
+            printf '  FAIL  vk_fsr bilinear %s (encode=%s, wanted %s; log %s)\n' "$label" "$actual" "$encode" "$log"
+            fail=$((fail + 1))
+        fi
+    }
+    run_bilinear moltenvk shader 0 "" STEAMARM_VK_ICD=moltenvk
+    run_bilinear "moltenvk full" shader 0 full STEAMARM_VK_ICD=moltenvk
+    if [ -f "$OWN/libvulkan_kosmickrisp.dylib" ]; then
+        run_bilinear "kosmickrisp partial" metalfx 1 "" STEAMARM_VK_ICD=kosmickrisp STEAMARM_KK_DIR="$OWN" KK_FSR_METALFX=1
+        run_bilinear "kosmickrisp full" metalfx 1 full STEAMARM_VK_ICD=kosmickrisp STEAMARM_KK_DIR="$OWN" KK_FSR_METALFX=1
+        run_bilinear "kosmickrisp off" shader 0 "" STEAMARM_VK_ICD=kosmickrisp STEAMARM_KK_DIR="$OWN" KK_FSR_METALFX=0
+        run_bilinear "kosmickrisp blend" shader 0 blend STEAMARM_VK_ICD=kosmickrisp STEAMARM_KK_DIR="$OWN" KK_FSR_METALFX=1
+        run_bilinear "kosmickrisp scissor" shader 0 scissor STEAMARM_VK_ICD=kosmickrisp STEAMARM_KK_DIR="$OWN" KK_FSR_METALFX=1
+        run_bilinear "kosmickrisp native" shader 0 native STEAMARM_VK_ICD=kosmickrisp STEAMARM_KK_DIR="$OWN" KK_FSR_METALFX=1
+    fi
 fi
 # vk_x11_present: a swapchain on an X window of SteamARM's X server. With
 # IMMEDIATE the shim's mailbox (shim/mailbox.c) must not wait for the display

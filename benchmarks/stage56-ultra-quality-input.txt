@@ -1,0 +1,39 @@
+Stage 56 -- Whole low-resolution input in the bilinear MetalFX spatial path
+2026-10-05, Apple M4, macOS 27. Zero VM.
+
+Reproduction, tests/elf/vk_fsr.c:
+  bilinear scene 49x49 (77% of 64x64 output), set 1 texture binding 30,
+  sampler binding 14, one sample; record a real render into the input.
+  In a 64x64 allocation the installed driver encodes MetalFX.
+  In a whole 49x49 allocation it produces correct colors with the ordinary
+  shader, but never encodes MetalFX. Readback alone missed the regression.
+
+Patch 21 removes the full-input exclusion. The independent output/input
+ratio limits still exclude native-resolution copies and downscales. All
+patch 17 protections remain. The bilinear log follows successful encoding.
+
+Isolated driver (Mesa 26.2.4 with the repository's patch stack), readback:
+  EASU, dynamic EASU: correct.
+  bilinear partial and full input: correct, actual-encode log present.
+  blend, scissor, disabled MetalFX: original draw, encode log absent.
+  MoltenVK partial and full: original draw, encode log absent.
+  native resolution: original draw, encode log absent.
+Existing probes on installed MoltenVK and isolated patched KosmicKrisp:
+  pipeline, passes, vertex reads, alpha/MSAA (also pipeline cache),
+  resubmission, vertex-only pipeline (also cache), spatial MetalFX: passed.
+
+Performance experiment, 800x600 clear/present, IMMEDIATE, 900 frames,
+first 30 discarded, installed MoltenVK:
+  baseline: median 6.040 ms, mean 5.691 ms
+  asynchronous queue submits: median 5.998 ms, mean 6.062 ms
+  synchronous queue submits repeated: median 6.018 ms, mean 5.902 ms
+No useful improvement established; no default changed. Remaining semaphore
+and prefill experiments could not run after the X service closed and are
+not valid performance results. Patched KosmicKrisp clear/present median
+0.190 ms, mean 0.271 ms, is a mailbox microbenchmark (frames can be dropped),
+not CS2 FPS, and has no matched baseline establishing a new gain.
+
+Limits: no full CS2 match or Windows game through Proton/FEX rerun in this
+session. No measured +150% FPS gain. This probe proves the whole-input
+fallback defect and its correction, not the cause of every reported CS2
+Ultra Quality fallback. The spatial cache's existing creation limit remains.
