@@ -1,0 +1,200 @@
+SteamARM: a relative pointer for mouse-look (patches/xquartz-pointer-confine.patch
+holds the pointer; this gives games its motion on relative X/Y axes).
+
+While a game holds the pointer (a grab with confine_to and the cursor hidden),
+X11Application.m keeps the macOS cursor at the window's centre, dissociated
+from the mouse, and the mouse's motion reached X clients only as the Rel X /
+Rel Y valuators (2, 3) of the "xquartz virtual pointer", whose axes 0 and 1
+are absolute. SDL 3 reads Rel X / Rel Y, but Wine reads only axes 0 and 1
+(winex11.drv mouse.c update_relative_valuators), for raw input (WM_INPUT) and
+for the cursor while it is clipped: they stood still at the centre, so
+Windows games under Proton (Schedule I, Unity) could not turn the camera.
+
+A second slave pointer, "xquartz relative pointer", with relative X/Y axes
+(0, 1, labelled Rel X / Rel Y) and its own scroll axes (2, 3), carries the
+motion, buttons and scroll while the pointer is held; the slave switch tells
+clients (XI_DeviceChanged, XISlaveSwitch) that the axes changed, which Wine
+and SDL 3 both follow. Free pointer: the virtual pointer, as before.
+--- a/hw/xquartz/darwin.h
++++ b/hw/xquartz/darwin.h
+@@ -60,6 +60,7 @@
+ extern DeviceIntPtr darwinPointer;
+ extern DeviceIntPtr darwinTabletCursor;
+ extern DeviceIntPtr darwinTabletStylus;
++extern DeviceIntPtr darwinRelPointer;
+ extern DeviceIntPtr darwinTabletEraser;
+ extern DeviceIntPtr darwinKeyboard;
+ 
+--- a/hw/xquartz/darwin.c
++++ b/hw/xquartz/darwin.c
+@@ -148,6 +148,7 @@
+ DeviceIntPtr darwinKeyboard = NULL;
+ DeviceIntPtr darwinPointer = NULL;
+ DeviceIntPtr darwinTabletStylus = NULL;
++DeviceIntPtr darwinRelPointer = NULL;
+ DeviceIntPtr darwinTabletCursor = NULL;
+ DeviceIntPtr darwinTabletEraser = NULL;
+ 
+@@ -362,7 +363,69 @@
+ #undef NAXES
+ }
+ 
++/*
++ * SteamARM: DarwinRelMouseProc, the relative pointer. While a game holds
++ * the pointer (confined, cursor hidden: X11Application.m keeps the macOS
++ * cursor at the window's centre), darwinEvents.c sends the mouse's motion,
++ * buttons and scroll through this device, whose X and Y axes (0 and 1) are
++ * relative. Wine reads only axes 0 and 1 of the pointer, for raw input
++ * (WM_INPUT) and for the cursor while it is clipped; on darwinPointer those
++ * are absolute and stood still at the centre, so mouse-look did nothing in
++ * Windows games. SDL 3 finds Rel X / Rel Y on either device.
++ */
+ static int
++DarwinRelMouseProc(DeviceIntPtr pPointer, int what)
++{
++#define NBUTTONS 3
++#define NAXES    4
++    CARD8 map[NBUTTONS + 1] = { 0, 1, 2, 3 };
++    Atom btn_labels[NBUTTONS] = { 0 };
++    Atom axes_labels[NAXES] = { 0 };
++    int i;
++
++    switch (what) {
++    case DEVICE_INIT:
++        pPointer->public.on = FALSE;
++
++        btn_labels[0] = XIGetKnownProperty(BTN_LABEL_PROP_BTN_LEFT);
++        btn_labels[1] = XIGetKnownProperty(BTN_LABEL_PROP_BTN_MIDDLE);
++        btn_labels[2] = XIGetKnownProperty(BTN_LABEL_PROP_BTN_RIGHT);
++
++        axes_labels[0] = XIGetKnownProperty(AXIS_LABEL_PROP_REL_X);
++        axes_labels[1] = XIGetKnownProperty(AXIS_LABEL_PROP_REL_Y);
++        axes_labels[2] = XIGetKnownProperty(AXIS_LABEL_PROP_REL_WHEEL);
++        axes_labels[3] = XIGetKnownProperty(AXIS_LABEL_PROP_REL_HWHEEL);
++
++        InitPointerDeviceStruct((DevicePtr)pPointer, map, NBUTTONS,
++                                btn_labels,
++                                (PtrCtrlProcPtr)NoopDDA,
++                                GetMotionHistorySize(), NAXES,
++                                axes_labels);
++        for (i = 0; i < NAXES; i++)
++            InitValuatorAxisStruct(pPointer, i, axes_labels[i],
++                                   NO_AXIS_LIMITS, NO_AXIS_LIMITS,
++                                   1, 0, 1, Relative);
++
++        SetScrollValuator(pPointer, 2, SCROLL_TYPE_VERTICAL, -1.0, SCROLL_FLAG_PREFERRED);
++        SetScrollValuator(pPointer, 3, SCROLL_TYPE_HORIZONTAL, -1.0, SCROLL_FLAG_NONE);
++        break;
++
++    case DEVICE_ON:
++        pPointer->public.on = TRUE;
++        return Success;
++
++    case DEVICE_CLOSE:
++    case DEVICE_OFF:
++        pPointer->public.on = FALSE;
++        return Success;
++    }
++
++    return Success;
++#undef NBUTTONS
++#undef NAXES
++}
++
++static int
+ DarwinTabletProc(DeviceIntPtr pPointer, int what)
+ {
+ #define NBUTTONS 3
+@@ -548,6 +611,10 @@
+     assert(darwinTabletEraser);
+     darwinTabletEraser->name = strdup("eraser");
+ 
++    darwinRelPointer = AddInputDevice(serverClient, DarwinRelMouseProc, TRUE);
++    assert(darwinRelPointer);
++    darwinRelPointer->name = strdup("xquartz relative pointer");
++
+     DarwinEQInit();
+ 
+     QuartzInitInput(argc, argv);
+--- a/hw/xquartz/darwinEvents.c
++++ b/hw/xquartz/darwinEvents.c
+@@ -484,6 +484,17 @@
+     } input_unlock();
+ }
+ 
++/* SteamARM: whether the pointer is held by a game (X11Application.m; the
++ * main thread, like the callers here): its events then come from
++ * darwinRelPointer (darwin.c DarwinRelMouseProc says why). */
++extern int XQPointerLocked(void);
++
++static Bool
++DarwinPointerRelative(void)
++{
++    return darwinRelPointer && darwinRelPointer->enabled && XQPointerLocked();
++}
++
+ void
+ DarwinSendPointerEvents(DeviceIntPtr pDev, int ev_type, int ev_button,
+                         double pointer_x, double pointer_y,
+@@ -538,6 +549,23 @@
+         }
+ 
+         darwinFakeMouseButtonDown = 0;
++    }
++
++    if (pDev == darwinPointer && DarwinPointerRelative()) {
++        valuator_mask_zero(&valuators);
++        if (ev_type == MotionNotify) {
++            if (pointer_dx == 0.0 && pointer_dy == 0.0)
++                return;
++            valuator_mask_set_double(&valuators, 0, pointer_dx);
++            valuator_mask_set_double(&valuators, 1, pointer_dy);
++        }
++        input_lock();
++        {
++            QueuePointerEvents(darwinRelPointer, ev_type, ev_button,
++                               POINTER_RELATIVE, &valuators);
++            DarwinPokeEQ();
++        } input_unlock();
++        return;
+     }
+ 
+     /* Fix offset between darwin and X screens */
+@@ -586,13 +614,17 @@
+         return;
+     }
+ 
++    /* SteamARM: the relative pointer's scroll axes are 2 and 3. */
++    DeviceIntPtr dev = DarwinPointerRelative() ? darwinRelPointer : darwinPointer;
++    int axis = dev == darwinRelPointer ? 2 : 4;
++
+     valuator_mask_zero(&valuators);
+-    valuator_mask_set_double(&valuators, 4, scroll_y);
+-    valuator_mask_set_double(&valuators, 5, scroll_x);
++    valuator_mask_set_double(&valuators, axis, scroll_y);
++    valuator_mask_set_double(&valuators, axis + 1, scroll_x);
+ 
+     input_lock();
+     {
+-        QueuePointerEvents(darwinPointer, MotionNotify, 0,
++        QueuePointerEvents(dev, MotionNotify, 0,
+                            POINTER_RELATIVE, &valuators);
+         DarwinPokeEQ();
+     } input_unlock();
+--- a/hw/xquartz/X11Application.m
++++ b/hw/xquartz/X11Application.m
+@@ -1470,6 +1470,14 @@
+             ErrorF("pointer: released (confined %d, hidden %d, active %d)\n",
+                    xq_ptr_confined, xq_ptr_hidden, (int)NSApp.active);
+     }
++}
++
++/* Main thread: whether the pointer is held, for darwinEvents.c, which then
++ * sends its motion, buttons and scroll through the relative pointer. */
++int
++XQPointerLocked(void)
++{
++    return xq_ptr_locked;
+ }
+ 
+ /* X server thread. */
