@@ -30,9 +30,8 @@ cp -R build/SteamARM.app "$APP"
 # unpacked source.
 /usr/libexec/PlistBuddy -c "Set :SteamARMProjectDir ''" "$APP/Contents/Info.plist"
 
-# The source: what git tracks plus new files it does not ignore.
-git ls-files -co --exclude-standard -z | xargs -0 tar -czf "$APP/Contents/Resources/SteamARM-src.tar.gz" \
-    --no-mac-metadata --uid 0 --gid 0 --uname "" --gname ""
+# The source is exactly the committed tree. Never package local, untracked files.
+git archive --format=tar HEAD | gzip -n > "$APP/Contents/Resources/SteamARM-src.tar.gz"
 # Nothing personal may ship: fail on a home path or a user name in the tree.
 if tar -xzOf "$APP/Contents/Resources/SteamARM-src.tar.gz" 2>/dev/null | grep -aq "/Users/$(id -un)"; then
     echo "make-release: the source contains /Users/$(id -un); refusing" >&2
