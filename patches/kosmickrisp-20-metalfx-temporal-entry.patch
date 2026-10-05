@@ -1,0 +1,1533 @@
+SteamARM: MetalFX's temporal scaler for an upscale the shim hands over
+
+kk_steamarm_upscale_temporal(VkCommandBuffer, const struct sa_mfxt_cmd *)
+is exported (C ABI, default visibility) for SteamARM's Vulkan shim. A
+Windows FFX DLL of SteamARM's records a game's FSR 3.1 / DLSS style upscale
+as an ordinary vkCmdUpdateBuffer whose 320 bytes are a struct sa_mfxt_cmd
+(vulkan/kk_mfx_temporal.h: the text of SteamARM's shim/mfx_temporal.h, with
+every offset asserted); the shim calls this instead of the update and gives
+its status back to the DLL in the same call, which runs the game's own
+upscaler on anything but OK.
+
+PROBE answers OK and writes caps_out (temporal; motion vectors at the
+output's size, jittered motion vectors and content offsets on macOS 27;
+reactive mask; private copy), driver_out (28) and max_scale_out (3.0 on an
+M4) into the command it is given, or answers UNSUPPORTED. DESTROY drops the
+context's scalers. ENCODE takes each image's Metal texture (a view where a
+mutable image is asked for in another format of the same size; depth always
+in its own) and refuses with nothing encoded: BAD_ARGS inside a render
+pass, for an image missing, not an image of the device, or smaller than the
+sizes; UNSUPPORTED for a secondary command buffer, conditional rendering, a
+scale outside 1x..3x, a format or texture usage MetalFX does not take (the
+formats it took under Metal's debug layer, MEASURED), macOS 27 features on
+an older system; NO_SCALER when MetalFX makes none, or for a ninth made
+within 10 s. Otherwise patch 14's sequence: the encoders end,
+MTL4FXTemporalScaler is encoded into the render passes' Metal command
+buffer with the game's jitter, motion vector scale, pre-exposure, reset and
+depth direction unchanged (depthReversed and the scale always set:
+MetalFX's defaults are YES and minus the input size), auto exposure for
+AUTO_EXP or for HDR without an exposure texture, and after_metalfx makes
+the next encoder wait for it; a command buffer that ends right after
+MetalFX gets a small encoder at its end that waits for it and that later
+work waits for. One scaler per context, formats, sizes and flags (its
+history), at most 8, one unused for 2 s dropped when another is asked for;
+what an encode uses (the scaler, views, the private texture) is kept by its
+Metal command buffer until KosmicKrisp releases that, when the GPU has
+finished it. A command buffer that may be submitted again keeps the
+command in its queue and encodes it again when it is recorded again.
+
+KosmicKrisp's textures are shared, and MetalFX writes those correctly (the
+same RMSE as private ones), but Metal's debug layer stops the process at
+"outputTexture must have private storage mode". KK_MFXT_SCRATCH=1 (on by
+itself with MTL_DEBUG_LAYER=1) has MetalFX write a private texture of its
+own, copied into the output, as an output without shader-write usage always
+does: 1.04 ms per upscale written directly against 1.36 ms with the copy,
+960x540 -> 1920x1080 RGBA16F, three frames in flight (MEASURED, M4,
+2026-10-04). KK_MFXT=0: UNSUPPORTED always.
+
+Tests (MEASURED 2026-10-04), SteamARM's tests/kk/run.sh: the bridge with
+textures made as KosmicKrisp makes them, the game's jitter RMSE 0.0241
+against 0.1378 for the opposite sign and 0.0904 for none, its motion
+vectors 0.0753 against 0.1268 (+v) and 0.1340 (none), the same through the
+private copy; the entry in the built driver called as the shim calls it,
+15 checks (probe, encode, a read in the next command buffer, a command
+buffer submitted twice, the refusals, destroy), also under Metal's debug
+layer. Vulkan tests 40/40.
+
+Not done: sharpening (MetalFX has none: SHARPEN and sharpness are
+ignored), sa_mfxt_tex.flags and the reserved words are ignored, a
+secondary command buffer is refused rather than replayed, and nothing
+calls the entry until the shim and the DLL do.
+diff -ruN a/src/kosmickrisp/bridge/mtl_metalfx.h b/src/kosmickrisp/bridge/mtl_metalfx.h
+--- a/src/kosmickrisp/bridge/mtl_metalfx.h	2026-10-04 21:13:34
++++ b/src/kosmickrisp/bridge/mtl_metalfx.h	2026-10-04 21:13:34
+@@ -26,4 +26,75 @@
+                                 mtl_command_buffer *cmd_buf, mtl_texture *in,
+                                 mtl_texture *out, uint32_t in_w, uint32_t in_h);
+ 
++/* SteamARM: MetalFX's temporal scaler (MTL4FXTemporalScaler), for a game's
++ * FSR 3.1 / DLSS style upscale handed over by SteamARM's Vulkan shim
++ * (vulkan/kk_mfx_temporal.c). One scaler, with its history, per context
++ * the game made, kept while it is used. */
++struct mtl_metalfx_temporal_tex {
++   mtl_texture *texture; /* NULL: absent */
++   uint32_t format;      /* MTLPixelFormat to use it as (a view); 0: its own */
++   uint32_t x, y;        /* where its content starts (macOS 27) */
++};
++
++struct mtl_metalfx_temporal_args {
++   uint64_t context;
++   struct mtl_metalfx_temporal_tex color, depth, motion, exposure, reactive,
++      output;
++   /* The picture in color and depth (and in motion, unless mv_display: then
++    * motion is out_w x out_h), and what MetalFX writes into output. */
++   uint32_t render_w, render_h, out_w, out_h;
++   /* As the game gives them to FSR or DLSS: MetalFX takes the same signs and
++    * units (MEASURED, see kk_mfx_temporal.c). */
++   float jitter_x, jitter_y, mv_scale_x, mv_scale_y, pre_exposure;
++   bool reset, depth_reversed, auto_exposure, mv_display, mv_jittered;
++};
++
++enum mtl_metalfx_temporal_status {
++   MTL_MFXT_OK = 0,
++   MTL_MFXT_BAD_ARGS,    /* textures missing, sizes outside the textures */
++   MTL_MFXT_UNSUPPORTED, /* formats, usage, scale, macOS, no Metal 4 MetalFX */
++   MTL_MFXT_NO_SCALER,   /* MetalFX made no scaler for it, or too many made */
++};
++
++struct mtl_metalfx_temporal_caps {
++   bool supported, mv_display, mv_jittered, offsets, reactive;
++   float min_scale, max_scale;
++};
++
++void mtl_metalfx_temporal_get_caps(mtl_device *device,
++                                   struct mtl_metalfx_temporal_caps *caps);
++
++/* KK_MFXT_SCRATCH=1: MetalFX writes a private texture of its own, copied
++ * into the output (Metal's debug layer refuses an output that is not
++ * private; KosmicKrisp's are shared, which MetalFX writes correctly). On by
++ * itself with MTL_DEBUG_LAYER=1 unless KK_MFXT_SCRATCH=0; an output without
++ * shader-write usage always goes this way. */
++bool mtl_metalfx_temporal_scratch(void);
++
++/* Whether mtl_metalfx_temporal_encode would take this (it makes and keeps
++ * the scaler): asked before the caller ends its encoders. *why: the reason
++ * of a refusal, for the log. */
++enum mtl_metalfx_temporal_status
++mtl_metalfx_temporal_prepare(mtl_device *device, mtl_compiler *compiler,
++                             const struct mtl_metalfx_temporal_args *args,
++                             const char **why);
++
++/* Encodes the upscale into `cmd_buf` (a Metal 4 command buffer with no
++ * encoder open). What the GPU uses (the scaler, views, the private texture)
++ * is kept alive by the command buffer until Metal lets it go. */
++enum mtl_metalfx_temporal_status
++mtl_metalfx_temporal_encode(mtl_device *device, mtl_compiler *compiler,
++                            mtl_command_buffer *cmd_buf,
++                            const struct mtl_metalfx_temporal_args *args,
++                            const char **why);
++
++/* The context is gone: its scalers are dropped (work already encoded keeps
++ * them until it has run). */
++void mtl_metalfx_temporal_destroy(uint64_t context);
++
++/* A small encoder that waits for all work before it and that later work
++ * waits for: put after MetalFX when nothing of the driver follows it in its
++ * command buffer, so later command buffers see MetalFX's writes. */
++void mtl_metalfx_temporal_tail(mtl_device *device, mtl_command_buffer *cmd_buf);
++
+ #endif /* MTL_METALFX_H */
+diff -ruN a/src/kosmickrisp/bridge/mtl_metalfx.m b/src/kosmickrisp/bridge/mtl_metalfx.m
+--- a/src/kosmickrisp/bridge/mtl_metalfx.m	2026-10-04 21:13:34
++++ b/src/kosmickrisp/bridge/mtl_metalfx.m	2026-10-04 21:13:34
+@@ -166,3 +166,744 @@
+    }
+    return ok;
+ }
++
++/* SteamARM: MetalFX's temporal scaler, for a game's FSR 3.1 / DLSS style
++ * upscale (vulkan/kk_mfx_temporal.c). What follows was measured on an M4
++ * with macOS 27 (MetalFX's own temporal scaler, Metal 4):
++ *  - scale 1x to exactly 3x a side; more, or a downscale, gets no scaler;
++ *  - inputs need only shader-read usage, the output shader-write (its
++ *    reported usage, 0x7, is more than it needs);
++ *  - outputs of shared storage, KosmicKrisp's, are written correctly (the
++ *    same picture as private ones), though Metal's debug layer refuses them
++ *    ("outputTexture must have private storage mode"): KK_MFXT_SCRATCH=1
++ *    gives MetalFX a private texture of its own and copies it;
++ *  - depthReversed defaults to YES and the motion vector scale to
++ *    (-inputWidth, -inputHeight): both always set here;
++ *  - making a scaler takes 60-490 ms (a new size or format the longest). */
++
++#include <objc/runtime.h>
++#include <string.h>
++#include <time.h>
++
++/* A context keeps its history in its scaler; a game has one or two (one
++ * per view, made again when the resolution changes). A few kept: the least
++ * recently used goes, and one unused for 2 s goes when another is asked
++ * for (a game that stops upscaling for a while finds its own again). */
++#define MFXT_ENTRIES 8
++#define MFXT_IDLE_S 2.0
++/* Past 8 made in 10 s a new one is refused: the game's own upscaler until
++ * then (patch 17: scalers made again and again stalled the game and took
++ * 7 GB). */
++#define MFXT_MAKE_BURST 8
++#define MFXT_MAKE_WINDOW_S 10.0
++
++struct mfxt_entry {
++   bool used;
++   id<MTLDevice> dev;
++   uint64_t context;
++   MTLPixelFormat cf, df, mf, of, rf; /* rf 0: no reactive mask */
++   NSUInteger in_w, in_h, out_w, out_h;
++   bool auto_exposure, mv_display, mv_jittered, scratch;
++   id<MTL4FXTemporalScaler> scaler; /* nil: refused, for `why` */
++   enum mtl_metalfx_temporal_status status;
++   const char *why;
++   id<MTLTexture> scratch_tex;
++   id<MTLResidencySet> scratch_set;
++   double last_used;
++   bool fresh; /* nothing encoded yet: no history */
++};
++
++static struct mfxt_entry mfxt_entries[MFXT_ENTRIES];
++static double mfxt_made_at[MFXT_MAKE_BURST];
++static unsigned mfxt_made;
++static pthread_mutex_t mfxt_lock = PTHREAD_MUTEX_INITIALIZER;
++
++static double
++mfxt_now(void)
++{
++   struct timespec ts;
++   clock_gettime(CLOCK_MONOTONIC, &ts);
++   return ts.tv_sec + ts.tv_nsec * 1e-9;
++}
++
++static void
++mfxt_drop(struct mfxt_entry *e)
++{
++   [e->scaler release];
++   [e->scratch_tex release];
++   [e->scratch_set release];
++   memset(e, 0, sizeof(*e));
++}
++
++/* The formats MetalFX took, with correct values read back, under Metal's
++ * debug layer (MEASURED, M4, macOS 27). Others are not offered to it. */
++static const MTLPixelFormat mfxt_color_formats[] = {
++   MTLPixelFormatRGBA16Float, MTLPixelFormatRGBA8Unorm,
++   MTLPixelFormatRGBA8Unorm_sRGB, MTLPixelFormatRGBA8Snorm,
++   MTLPixelFormatBGRA8Unorm, MTLPixelFormatBGRA8Unorm_sRGB,
++   MTLPixelFormatRGB10A2Unorm, MTLPixelFormatBGR10A2Unorm,
++   MTLPixelFormatRG11B10Float, MTLPixelFormatRGB9E5Float,
++   MTLPixelFormatRGBA32Float, MTLPixelFormatRGBA16Unorm,
++   MTLPixelFormatRGBA16Snorm, MTLPixelFormatR16Unorm, MTLPixelFormatR32Float,
++};
++static const MTLPixelFormat mfxt_depth_formats[] = {
++   MTLPixelFormatDepth32Float, MTLPixelFormatDepth16Unorm,
++   MTLPixelFormatDepth32Float_Stencil8, MTLPixelFormatR32Float,
++   MTLPixelFormatR16Float,
++};
++static const MTLPixelFormat mfxt_motion_formats[] = {
++   MTLPixelFormatRG16Float, MTLPixelFormatRG32Float, MTLPixelFormatRG16Snorm,
++   MTLPixelFormatRG16Unorm, MTLPixelFormatRGBA16Float, MTLPixelFormatRG8Unorm,
++};
++static const MTLPixelFormat mfxt_output_formats[] = {
++   MTLPixelFormatRGBA16Float, MTLPixelFormatBGRA8Unorm,
++   MTLPixelFormatBGRA8Unorm_sRGB, MTLPixelFormatRGBA8Unorm,
++   MTLPixelFormatRGBA8Unorm_sRGB, MTLPixelFormatRGB10A2Unorm,
++   MTLPixelFormatBGR10A2Unorm, MTLPixelFormatRG11B10Float,
++   MTLPixelFormatRGBA32Float, MTLPixelFormatRGBA16Unorm,
++};
++static const MTLPixelFormat mfxt_reactive_formats[] = {
++   MTLPixelFormatR8Unorm, MTLPixelFormatR16Float, MTLPixelFormatR16Unorm,
++   MTLPixelFormatR32Float, MTLPixelFormatRG8Unorm, MTLPixelFormatRGBA8Unorm,
++};
++static const MTLPixelFormat mfxt_exposure_formats[] = {
++   MTLPixelFormatR16Float, MTLPixelFormatR32Float, MTLPixelFormatRG32Float,
++   MTLPixelFormatRGBA16Float, MTLPixelFormatRGBA32Float,
++};
++
++static bool
++mfxt_format_in(MTLPixelFormat f, const MTLPixelFormat *list, unsigned n)
++{
++   for (unsigned i = 0; i < n; i++)
++      if (list[i] == f)
++         return true;
++   return false;
++}
++
++static void
++mfxt_caps_locked(id<MTLDevice> dev, struct mtl_metalfx_temporal_caps *caps)
++{
++   static id<MTLDevice> cached_dev;
++   static struct mtl_metalfx_temporal_caps cached;
++   if (cached_dev != dev) {
++      memset(&cached, 0, sizeof(cached));
++      cached.supported = [MTLFXTemporalScalerDescriptor supportsDevice:dev] &&
++                         [MTLFXTemporalScalerDescriptor supportsMetal4FX:dev];
++      if (cached.supported) {
++         cached.min_scale =
++            [MTLFXTemporalScalerDescriptor supportedInputContentMinScaleForDevice:dev];
++         cached.max_scale =
++            [MTLFXTemporalScalerDescriptor supportedInputContentMaxScaleForDevice:dev];
++         if (cached.min_scale < 1.0f)
++            cached.min_scale = 1.0f;
++         cached.reactive = true;
++         if (@available(macOS 27.0, *))
++            cached.mv_display = cached.mv_jittered = cached.offsets = true;
++      }
++      cached_dev = dev;
++   }
++   *caps = cached;
++}
++
++void
++mtl_metalfx_temporal_get_caps(mtl_device *device,
++                              struct mtl_metalfx_temporal_caps *caps)
++{
++   @autoreleasepool {
++      pthread_mutex_lock(&mfxt_lock);
++      mfxt_caps_locked((id<MTLDevice>)device, caps);
++      pthread_mutex_unlock(&mfxt_lock);
++   }
++}
++
++bool
++mtl_metalfx_temporal_scratch(void)
++{
++   /* On by itself under Metal's debug layer (MTL_DEBUG_LAYER=1), which
++    * otherwise stops the process at the first encode; KK_MFXT_SCRATCH=0
++    * turns it off even then. */
++   static int on = -1;
++   if (on < 0) {
++      const char *e = getenv("KK_MFXT_SCRATCH");
++      const char *d = getenv("MTL_DEBUG_LAYER");
++      on = e ? e[0] == '1' : (d && d[0] == '1');
++   }
++   return on;
++}
++
++struct mfxt_tex {
++   id<MTLTexture> t; /* nil: absent */
++   MTLPixelFormat f; /* what MetalFX is told */
++   NSUInteger x, y;
++};
++
++/* One texture: a plain 2D one (or the first layer of a 2D array), a format
++ * MetalFX takes (a view in another format only where the texture allows
++ * one), its content within it, readable by shaders unless it is the
++ * output. */
++static enum mtl_metalfx_temporal_status
++mfxt_tex_check(const struct mtl_metalfx_temporal_tex *in,
++               const MTLPixelFormat *list, unsigned n, NSUInteger need_w,
++               NSUInteger need_h, bool output, struct mfxt_tex *out,
++               const char **why)
++{
++   id<MTLTexture> t = (id<MTLTexture>)in->texture;
++   out->t = t;
++   out->f = in->format ? (MTLPixelFormat)in->format : t.pixelFormat;
++   out->x = in->x;
++   out->y = in->y;
++   if (t.textureType != MTLTextureType2D &&
++       t.textureType != MTLTextureType2DArray) {
++      *why = "a texture that is not plain 2D";
++      return MTL_MFXT_UNSUPPORTED;
++   }
++   if (out->f != t.pixelFormat && !(t.usage & MTLTextureUsagePixelFormatView)) {
++      *why = "a view in another format of a texture that allows none";
++      return MTL_MFXT_UNSUPPORTED;
++   }
++   if (!mfxt_format_in(out->f, list, n)) {
++      *why = "a format MetalFX does not take";
++      return MTL_MFXT_UNSUPPORTED;
++   }
++   if (out->x + need_w > t.width || out->y + need_h > t.height) {
++      *why = "sizes outside the textures";
++      return MTL_MFXT_BAD_ARGS;
++   }
++   if (!output && !(t.usage & MTLTextureUsageShaderRead)) {
++      *why = "an input shaders cannot read";
++      return MTL_MFXT_UNSUPPORTED;
++   }
++   return MTL_MFXT_OK;
++}
++
++#define MFXT_N(list) (unsigned)(sizeof(list) / sizeof(list[0]))
++
++/* Checks everything and finds (or makes) the scaler. Caller holds the
++ * lock. tx: color, depth, motion, exposure, reactive, output. */
++static enum mtl_metalfx_temporal_status
++mfxt_prepare_locked(id<MTLDevice> dev, id<MTL4Compiler> compiler,
++                    const struct mtl_metalfx_temporal_args *a,
++                    struct mfxt_tex tx[6], struct mfxt_entry **entry,
++                    const char **why)
++{
++   enum mtl_metalfx_temporal_status st;
++   struct mtl_metalfx_temporal_caps caps;
++   mfxt_caps_locked(dev, &caps);
++   memset(tx, 0, 6 * sizeof(tx[0]));
++   *entry = NULL;
++
++   if (!caps.supported) {
++      *why = "no Metal 4 MetalFX temporal scaler on this GPU";
++      return MTL_MFXT_UNSUPPORTED;
++   }
++   if (!a->color.texture || !a->depth.texture || !a->motion.texture ||
++       !a->output.texture) {
++      *why = "colour, depth, motion vectors or output missing";
++      return MTL_MFXT_BAD_ARGS;
++   }
++   if (!a->render_w || !a->render_h || !a->out_w || !a->out_h) {
++      *why = "a size of 0";
++      return MTL_MFXT_BAD_ARGS;
++   }
++   if (a->out_w < a->render_w || a->out_h < a->render_h) {
++      *why = "a downscale";
++      return MTL_MFXT_UNSUPPORTED;
++   }
++   /* A near-native request (FSR Native AA) on a GPU whose smallest scale is
++    * above 1: MetalFX would reject the content scale at encode. */
++   if ((double)a->out_w < (double)a->render_w * caps.min_scale - 1e-3 ||
++       (double)a->out_h < (double)a->render_h * caps.min_scale - 1e-3) {
++      *why = "less than MetalFX's smallest scale";
++      return MTL_MFXT_UNSUPPORTED;
++   }
++   if ((double)a->out_w > (double)a->render_w * caps.max_scale + 1e-3 ||
++       (double)a->out_h > (double)a->render_h * caps.max_scale + 1e-3) {
++      *why = "more than MetalFX's largest scale";
++      return MTL_MFXT_UNSUPPORTED;
++   }
++   if ((a->mv_display && !caps.mv_display) ||
++       (a->mv_jittered && !caps.mv_jittered)) {
++      *why = "motion vectors at the output's size or jittered (macOS 27)";
++      return MTL_MFXT_UNSUPPORTED;
++   }
++   const struct mtl_metalfx_temporal_tex *in[6] = {
++      &a->color, &a->depth, &a->motion, &a->exposure, &a->reactive, &a->output,
++   };
++   for (unsigned i = 0; i < 6; i++) {
++      /* MetalFX reads the exposure from its texture's first texel. */
++      if (in[i]->texture && (in[i]->x || in[i]->y) &&
++          (!caps.offsets || i == 3)) {
++         *why = "content away from the textures' origin (macOS 27)";
++         return MTL_MFXT_UNSUPPORTED;
++      }
++   }
++   NSUInteger mv_w = a->mv_display ? a->out_w : a->render_w;
++   NSUInteger mv_h = a->mv_display ? a->out_h : a->render_h;
++   if ((st = mfxt_tex_check(&a->color, mfxt_color_formats,
++                            MFXT_N(mfxt_color_formats), a->render_w,
++                            a->render_h, false, &tx[0], why)) ||
++       (st = mfxt_tex_check(&a->depth, mfxt_depth_formats,
++                            MFXT_N(mfxt_depth_formats), a->render_w,
++                            a->render_h, false, &tx[1], why)) ||
++       (st = mfxt_tex_check(&a->motion, mfxt_motion_formats,
++                            MFXT_N(mfxt_motion_formats), mv_w, mv_h, false,
++                            &tx[2], why)) ||
++       (a->exposure.texture &&
++        (st = mfxt_tex_check(&a->exposure, mfxt_exposure_formats,
++                             MFXT_N(mfxt_exposure_formats), 1, 1, false,
++                             &tx[3], why))) ||
++       (a->reactive.texture &&
++        (st = mfxt_tex_check(&a->reactive, mfxt_reactive_formats,
++                             MFXT_N(mfxt_reactive_formats), a->render_w,
++                             a->render_h, false, &tx[4], why))) ||
++       (st = mfxt_tex_check(&a->output, mfxt_output_formats,
++                            MFXT_N(mfxt_output_formats), a->out_w, a->out_h,
++                            true, &tx[5], why)))
++      return st;
++   if (tx[1].f != tx[1].t.pixelFormat) {
++      *why = "depth in a format of its own";
++      return MTL_MFXT_BAD_ARGS;
++   }
++
++   /* The input size: the colour texture's (its content may be smaller,
++    * inputContentWidth/Height each frame: a dynamic resolution keeps the
++    * scaler), no larger than the output. */
++   NSUInteger in_w = MIN(tx[0].t.width - tx[0].x, (NSUInteger)a->out_w);
++   NSUInteger in_h = MIN(tx[0].t.height - tx[0].y, (NSUInteger)a->out_h);
++   bool scratch = mtl_metalfx_temporal_scratch() ||
++                  !(tx[5].t.usage & MTLTextureUsageShaderWrite);
++   MTLPixelFormat rf = tx[4].t ? tx[4].f : MTLPixelFormatInvalid;
++   double now = mfxt_now();
++
++   struct mfxt_entry *e = NULL, *free_e = NULL, *lru = NULL;
++   for (unsigned i = 0; i < MFXT_ENTRIES; i++) {
++      struct mfxt_entry *c = &mfxt_entries[i];
++      if (c->used && c->dev == dev && c->context == a->context &&
++          c->cf == tx[0].f && c->df == tx[1].f && c->mf == tx[2].f &&
++          c->of == tx[5].f && c->rf == rf && c->in_w == in_w &&
++          c->in_h == in_h && c->out_w == a->out_w && c->out_h == a->out_h &&
++          c->auto_exposure == a->auto_exposure &&
++          c->mv_display == a->mv_display && c->mv_jittered == a->mv_jittered &&
++          c->scratch == scratch) {
++         e = c;
++         break;
++      }
++   }
++   if (!e) {
++      for (unsigned i = 0; i < MFXT_ENTRIES; i++) {
++         struct mfxt_entry *c = &mfxt_entries[i];
++         if (c->used && now - c->last_used > MFXT_IDLE_S)
++            mfxt_drop(c);
++         if (!c->used) {
++            if (!free_e)
++               free_e = c;
++         } else if (!lru || c->last_used < lru->last_used) {
++            lru = c;
++         }
++      }
++
++      unsigned oldest = mfxt_made % MFXT_MAKE_BURST;
++      if (mfxt_made >= MFXT_MAKE_BURST &&
++          now - mfxt_made_at[oldest] < MFXT_MAKE_WINDOW_S) {
++         static double told;
++         if (now - told > MFXT_MAKE_WINDOW_S) {
++            fprintf(stderr, "kk: MetalFX temporal: %u scalers made in %.0f s, "
++                            "no more for now: the game's own upscaler\n",
++                    MFXT_MAKE_BURST, MFXT_MAKE_WINDOW_S);
++            told = now;
++         }
++         *why = "too many scalers made";
++         return MTL_MFXT_NO_SCALER;
++      }
++      mfxt_made_at[oldest] = now;
++      mfxt_made++;
++
++      e = free_e ? free_e : lru;
++      if (e->used)
++         mfxt_drop(e);
++
++      MTLFXTemporalScalerDescriptor *desc = [MTLFXTemporalScalerDescriptor new];
++      desc.colorTextureFormat = tx[0].f;
++      desc.depthTextureFormat = tx[1].f;
++      desc.motionTextureFormat = tx[2].f;
++      desc.outputTextureFormat = tx[5].f;
++      desc.inputWidth = in_w;
++      desc.inputHeight = in_h;
++      desc.outputWidth = a->out_w;
++      desc.outputHeight = a->out_h;
++      /* The picture smaller than the input textures each frame; also 12-15 %
++       * faster (MEASURED). */
++      desc.inputContentPropertiesEnabled = YES;
++      desc.inputContentMinScale = caps.min_scale;
++      desc.inputContentMaxScale = caps.max_scale;
++      desc.autoExposureEnabled = a->auto_exposure;
++      desc.requiresSynchronousInitialization = YES;
++      if (rf != MTLPixelFormatInvalid) {
++         desc.reactiveMaskTextureEnabled = YES;
++         desc.reactiveMaskTextureFormat = rf;
++      }
++      if (@available(macOS 27.0, *)) {
++         desc.outputResolutionMotionVectorsEnabled = a->mv_display;
++         desc.jitteredMotionVectorsEnabled = a->mv_jittered;
++      }
++      id<MTL4FXTemporalScaler> s =
++         [desc newTemporalScalerWithDevice:dev compiler:compiler];
++      [desc release];
++      double ms = (mfxt_now() - now) * 1000.0;
++
++      const char *refused = NULL;
++      enum mtl_metalfx_temporal_status rst = MTL_MFXT_OK;
++      if (!s) {
++         refused = "MetalFX has no scaler for it";
++         rst = MTL_MFXT_NO_SCALER;
++      } else {
++         MTLTextureUsage ru = 0;
++         if (tx[4].t) {
++            if (@available(macOS 27.0, *)) {
++               ru = s.reactiveMaskTextureUsage;
++            } else {
++#pragma clang diagnostic push
++#pragma clang diagnostic ignored "-Wdeprecated-declarations"
++               ru = s.reactiveTextureUsage; /* its name before macOS 27 */
++#pragma clang diagnostic pop
++            }
++         }
++         if ((tx[0].t.usage & s.colorTextureUsage) != s.colorTextureUsage ||
++             (tx[1].t.usage & s.depthTextureUsage) != s.depthTextureUsage ||
++             (tx[2].t.usage & s.motionTextureUsage) != s.motionTextureUsage ||
++             (tx[4].t && (tx[4].t.usage & ru) != ru)) {
++            refused = "texture usage MetalFX needs missing";
++            rst = MTL_MFXT_UNSUPPORTED;
++            [s release];
++            s = nil;
++         }
++      }
++
++      id<MTLTexture> stex = nil;
++      id<MTLResidencySet> sset = nil;
++      if (s && scratch) {
++         /* Its own residency set, never changed: one the queue's work still
++          * uses is never made non-resident under it. */
++         MTLTextureDescriptor *td = [MTLTextureDescriptor
++            texture2DDescriptorWithPixelFormat:tx[5].f
++                                         width:a->out_w
++                                        height:a->out_h
++                                     mipmapped:NO];
++         td.usage = s.outputTextureUsage | MTLTextureUsageShaderRead |
++                    MTLTextureUsageShaderWrite;
++         td.storageMode = MTLStorageModePrivate;
++         stex = [dev newTextureWithDescriptor:td];
++         MTLResidencySetDescriptor *rd = [MTLResidencySetDescriptor new];
++         rd.initialCapacity = 1;
++         NSError *err = nil;
++         sset = stex ? [dev newResidencySetWithDescriptor:rd error:&err] : nil;
++         [rd release];
++         if (sset) {
++            [sset addAllocation:stex];
++            [sset commit];
++            [sset requestResidency];
++         } else {
++            [stex release];
++            stex = nil;
++            [s release];
++            s = nil;
++            refused = "no private texture for the output";
++            rst = MTL_MFXT_NO_SCALER;
++         }
++      }
++
++      fprintf(stderr,
++              "kk: MetalFX temporal: context %llu: %lux%lu -> %lux%lu (colour "
++              "%lu, depth %lu, motion %lu%s, output %lu%s%s%s%s) in %.0f ms%s%s\n",
++              (unsigned long long)a->context, (unsigned long)in_w,
++              (unsigned long)in_h, (unsigned long)a->out_w,
++              (unsigned long)a->out_h, (unsigned long)tx[0].f,
++              (unsigned long)tx[1].f, (unsigned long)tx[2].f,
++              a->mv_display ? " at the output's size" : "",
++              (unsigned long)tx[5].f, scratch ? " through a private copy" : "",
++              rf != MTLPixelFormatInvalid ? ", reactive mask" : "",
++              a->auto_exposure ? ", auto exposure" : "",
++              a->mv_jittered ? ", jittered motion" : "", ms,
++              refused ? ": " : "", refused ? refused : "");
++
++      *e = (struct mfxt_entry){
++         .used = true,
++         .dev = dev,
++         .context = a->context,
++         .cf = tx[0].f,
++         .df = tx[1].f,
++         .mf = tx[2].f,
++         .of = tx[5].f,
++         .rf = rf,
++         .in_w = in_w,
++         .in_h = in_h,
++         .out_w = a->out_w,
++         .out_h = a->out_h,
++         .auto_exposure = a->auto_exposure,
++         .mv_display = a->mv_display,
++         .mv_jittered = a->mv_jittered,
++         .scratch = scratch,
++         .scaler = s,
++         .status = rst,
++         .why = refused,
++         .scratch_tex = stex,
++         .scratch_set = sset,
++         .fresh = true,
++      };
++   }
++   e->last_used = now;
++   if (!e->scaler) {
++      *why = e->why;
++      return e->status;
++   }
++   *entry = e;
++   return MTL_MFXT_OK;
++}
++
++enum mtl_metalfx_temporal_status
++mtl_metalfx_temporal_prepare(mtl_device *device, mtl_compiler *compiler,
++                             const struct mtl_metalfx_temporal_args *args,
++                             const char **why)
++{
++   enum mtl_metalfx_temporal_status st;
++   const char *dummy;
++   if (!why)
++      why = &dummy;
++   *why = NULL;
++   @autoreleasepool {
++      struct mfxt_tex tx[6];
++      struct mfxt_entry *e;
++      pthread_mutex_lock(&mfxt_lock);
++      st = mfxt_prepare_locked((id<MTLDevice>)device,
++                               (id<MTL4Compiler>)compiler, args, tx, &e, why);
++      pthread_mutex_unlock(&mfxt_lock);
++   }
++   return st;
++}
++
++/* Kept by the command buffer, released with it (KosmicKrisp releases its
++ * Metal command buffers when the GPU has finished them, or unsubmitted at a
++ * reset): Metal 4 command buffers do not retain what they use. */
++static char mfxt_keep_key;
++
++static void
++mfxt_keep(id<MTL4CommandBuffer> cb, id obj)
++{
++   if (!obj)
++      return;
++   NSMutableArray *keep = objc_getAssociatedObject(cb, &mfxt_keep_key);
++   if (!keep) {
++      keep = [NSMutableArray new];
++      objc_setAssociatedObject(cb, &mfxt_keep_key, keep,
++                               OBJC_ASSOCIATION_RETAIN_NONATOMIC);
++      [keep release];
++   }
++   [keep addObject:obj];
++}
++
++static bool
++mfxt_kept(id<MTL4CommandBuffer> cb, id obj)
++{
++   NSMutableArray *keep = objc_getAssociatedObject(cb, &mfxt_keep_key);
++   return keep && [keep indexOfObjectIdenticalTo:obj] != NSNotFound;
++}
++
++/* The texture as MetalFX is to see it: itself, or (another format, a layer
++ * of an array, mipmaps) a 2D view of its first level and layer. +1. */
++static id<MTLTexture>
++mfxt_view(const struct mfxt_tex *t)
++{
++   if (!t->t)
++      return nil;
++   if (t->f == t->t.pixelFormat && t->t.textureType == MTLTextureType2D &&
++       t->t.mipmapLevelCount == 1)
++      return [t->t retain];
++   return [t->t newTextureViewWithPixelFormat:t->f
++                                  textureType:MTLTextureType2D
++                                       levels:NSMakeRange(0, 1)
++                                       slices:NSMakeRange(0, 1)];
++}
++
++enum mtl_metalfx_temporal_status
++mtl_metalfx_temporal_encode(mtl_device *device, mtl_compiler *compiler,
++                            mtl_command_buffer *cmd_buf,
++                            const struct mtl_metalfx_temporal_args *a,
++                            const char **why)
++{
++   enum mtl_metalfx_temporal_status st;
++   const char *dummy;
++   if (!why)
++      why = &dummy;
++   *why = NULL;
++
++   @autoreleasepool {
++      id<MTL4CommandBuffer> cb = (id<MTL4CommandBuffer>)cmd_buf;
++      struct mfxt_tex tx[6];
++      struct mfxt_entry *e;
++      id<MTLTexture> v[6] = {nil};
++
++      pthread_mutex_lock(&mfxt_lock);
++      st = mfxt_prepare_locked((id<MTLDevice>)device,
++                               (id<MTL4Compiler>)compiler, a, tx, &e, why);
++      if (st == MTL_MFXT_OK) {
++         for (unsigned i = 0; i < 6; i++) {
++            v[i] = mfxt_view(&tx[i]);
++            if (tx[i].t && !v[i]) {
++               *why = "no view of a texture in the format asked";
++               st = MTL_MFXT_UNSUPPORTED;
++            }
++         }
++      }
++      if (st == MTL_MFXT_OK) {
++         id<MTL4FXTemporalScaler> s = e->scaler;
++         s.colorTexture = v[0];
++         s.depthTexture = v[1];
++         s.motionTexture = v[2];
++         s.outputTexture = e->scratch ? e->scratch_tex : v[5];
++         /* Auto exposure ignores the texture; none means 1. */
++         s.exposureTexture = a->auto_exposure ? nil : v[3];
++         s.reactiveMaskTexture = e->rf != MTLPixelFormatInvalid ? v[4] : nil;
++         s.inputContentWidth = a->render_w;
++         s.inputContentHeight = a->render_h;
++         if (@available(macOS 27.0, *)) {
++            s.colorContentOffsetX = tx[0].x;
++            s.colorContentOffsetY = tx[0].y;
++            s.depthContentOffsetX = tx[1].x;
++            s.depthContentOffsetY = tx[1].y;
++            s.motionContentOffsetX = tx[2].x;
++            s.motionContentOffsetY = tx[2].y;
++            s.reactiveMaskContentOffsetX = tx[4].x;
++            s.reactiveMaskContentOffsetY = tx[4].y;
++            s.outputOffsetX = e->scratch ? 0 : tx[5].x;
++            s.outputOffsetY = e->scratch ? 0 : tx[5].y;
++         }
++         /* The game's values unchanged: MetalFX's jitter is the negated
++          * sample offset and its motion vectors point from the current
++          * position to the previous one, as FSR's and DLSS's (MEASURED with
++          * a supersampled reference: the other signs were worse than no
++          * jitter or no motion vectors at all). */
++         s.jitterOffsetX = a->jitter_x;
++         s.jitterOffsetY = a->jitter_y;
++         s.motionVectorScaleX = a->mv_scale_x;
++         s.motionVectorScaleY = a->mv_scale_y;
++         s.preExposure = a->pre_exposure > 0.0f ? a->pre_exposure : 1.0f;
++         s.depthReversed = a->depth_reversed;
++         s.reset = a->reset || e->fresh;
++         [s encodeToCommandBuffer:cb];
++         /* Encoded: the scaler need not keep the game's textures alive. */
++         s.colorTexture = nil;
++         s.depthTexture = nil;
++         s.motionTexture = nil;
++         s.outputTexture = nil;
++         s.exposureTexture = nil;
++         s.reactiveMaskTexture = nil;
++         e->fresh = false;
++
++         mfxt_keep(cb, s);
++         for (unsigned i = 0; i < 6; i++)
++            if (v[i] && v[i] != tx[i].t)
++               mfxt_keep(cb, v[i]);
++
++         if (e->scratch) {
++            if (!mfxt_kept(cb, e->scratch_set)) {
++               [cb useResidencySet:e->scratch_set];
++               mfxt_keep(cb, e->scratch_set);
++               mfxt_keep(cb, e->scratch_tex);
++            }
++            /* MetalFX's writes, then the copy into the game's output; what
++             * comes after waits for the copy. */
++            id<MTL4ComputeCommandEncoder> ce = [cb computeCommandEncoder];
++            [ce barrierAfterQueueStages:MTLStageAll
++                           beforeStages:MTLStageBlit
++                      visibilityOptions:MTL4VisibilityOptionDevice];
++            [ce copyFromTexture:e->scratch_tex
++                     sourceSlice:0
++                     sourceLevel:0
++                    sourceOrigin:MTLOriginMake(0, 0, 0)
++                      sourceSize:MTLSizeMake(a->out_w, a->out_h, 1)
++                       toTexture:v[5]
++                destinationSlice:0
++                destinationLevel:0
++               destinationOrigin:MTLOriginMake(tx[5].x, tx[5].y, 0)];
++            [ce barrierAfterStages:MTLStageBlit
++                 beforeQueueStages:MTLStageAll
++                 visibilityOptions:MTL4VisibilityOptionDevice];
++            [ce endEncoding];
++         }
++      }
++      pthread_mutex_unlock(&mfxt_lock);
++      for (unsigned i = 0; i < 6; i++)
++         [v[i] release];
++   }
++   return st;
++}
++
++void
++mtl_metalfx_temporal_destroy(uint64_t context)
++{
++   @autoreleasepool {
++      pthread_mutex_lock(&mfxt_lock);
++      for (unsigned i = 0; i < MFXT_ENTRIES; i++)
++         if (mfxt_entries[i].used && mfxt_entries[i].context == context)
++            mfxt_drop(&mfxt_entries[i]);
++      pthread_mutex_unlock(&mfxt_lock);
++   }
++}
++
++void
++mtl_metalfx_temporal_tail(mtl_device *device, mtl_command_buffer *cmd_buf)
++{
++   @autoreleasepool {
++      id<MTLDevice> dev = (id<MTLDevice>)device;
++      id<MTL4CommandBuffer> cb = (id<MTL4CommandBuffer>)cmd_buf;
++      /* A few bytes the encoder writes (a command, so that it waits and is
++       * waited for), in a residency set of their own; one per device. */
++      static struct {
++         id<MTLDevice> dev;
++         id<MTLBuffer> buf;
++         id<MTLResidencySet> set;
++      } tails[4];
++      id<MTLBuffer> buf = nil;
++      id<MTLResidencySet> set = nil;
++      pthread_mutex_lock(&mfxt_lock);
++      for (unsigned i = 0; i < 4 && !buf; i++) {
++         if (!tails[i].dev) {
++            MTLResidencySetDescriptor *rd = [MTLResidencySetDescriptor new];
++            NSError *err = nil;
++            id<MTLResidencySet> s =
++               [dev newResidencySetWithDescriptor:rd error:&err];
++            [rd release];
++            id<MTLBuffer> b =
++               [dev newBufferWithLength:16
++                                options:MTLResourceStorageModePrivate];
++            if (!s || !b) {
++               [s release];
++               [b release];
++               break;
++            }
++            [s addAllocation:b];
++            [s commit];
++            tails[i].dev = [dev retain];
++            tails[i].buf = b;
++            tails[i].set = s;
++         }
++         if (tails[i].dev == dev) {
++            buf = tails[i].buf;
++            set = tails[i].set;
++         }
++      }
++      pthread_mutex_unlock(&mfxt_lock);
++      if (!buf)
++         return;
++      [cb useResidencySet:set];
++      id<MTL4ComputeCommandEncoder> ce = [cb computeCommandEncoder];
++      [ce barrierAfterQueueStages:MTLStageAll
++                     beforeStages:MTLStageBlit
++                visibilityOptions:MTL4VisibilityOptionDevice];
++      [ce fillBuffer:buf range:NSMakeRange(0, 4) value:0];
++      [ce barrierAfterStages:MTLStageBlit
++           beforeQueueStages:MTLStageAll
++           visibilityOptions:MTL4VisibilityOptionDevice];
++      [ce endEncoding];
++   }
++}
+diff -ruN a/src/kosmickrisp/bridge/stubs/mtl_metalfx.c b/src/kosmickrisp/bridge/stubs/mtl_metalfx.c
+--- a/src/kosmickrisp/bridge/stubs/mtl_metalfx.c	2026-10-04 21:13:34
++++ b/src/kosmickrisp/bridge/stubs/mtl_metalfx.c	2026-10-04 21:13:34
+@@ -20,3 +20,43 @@
+ {
+    return false;
+ }
++
++void
++mtl_metalfx_temporal_get_caps(mtl_device *device,
++                              struct mtl_metalfx_temporal_caps *caps)
++{
++   *caps = (struct mtl_metalfx_temporal_caps){0};
++}
++
++bool
++mtl_metalfx_temporal_scratch(void)
++{
++   return false;
++}
++
++enum mtl_metalfx_temporal_status
++mtl_metalfx_temporal_prepare(mtl_device *device, mtl_compiler *compiler,
++                             const struct mtl_metalfx_temporal_args *args,
++                             const char **why)
++{
++   return MTL_MFXT_UNSUPPORTED;
++}
++
++enum mtl_metalfx_temporal_status
++mtl_metalfx_temporal_encode(mtl_device *device, mtl_compiler *compiler,
++                            mtl_command_buffer *cmd_buf,
++                            const struct mtl_metalfx_temporal_args *args,
++                            const char **why)
++{
++   return MTL_MFXT_UNSUPPORTED;
++}
++
++void
++mtl_metalfx_temporal_destroy(uint64_t context)
++{
++}
++
++void
++mtl_metalfx_temporal_tail(mtl_device *device, mtl_command_buffer *cmd_buf)
++{
++}
+diff -ruN a/src/kosmickrisp/vulkan/kk_cmd_buffer.c b/src/kosmickrisp/vulkan/kk_cmd_buffer.c
+--- a/src/kosmickrisp/vulkan/kk_cmd_buffer.c	2026-10-04 21:13:34
++++ b/src/kosmickrisp/vulkan/kk_cmd_buffer.c	2026-10-04 21:13:34
+@@ -11,6 +11,7 @@
+ #include "kk_cmd_pool.h"
+ #include "kk_descriptor_set_layout.h"
+ #include "kk_entrypoints.h"
++#include "kk_mfx_temporal.h"
+ 
+ #include "kosmickrisp/bridge/mtl_bridge.h"
+ #include "kosmickrisp/bridge/mtl_command_buffer.h"
+@@ -371,6 +372,7 @@
+    cs_end(cmd);
+    kk_cmd_buffer_close_mtl(cmd);
+    cmd->close_gfx_cmd_buf = false;
++   cmd->after_metalfx = false;
+    kk_cmd_release_resources(dev, cmd);
+    if (cmd->drawable) {
+       mtl_release(cmd->drawable);
+@@ -425,6 +427,7 @@
+    /* Call twice since post_gfx will be moved to pre_gfx but not ended. */
+    cs_end(cmd);
+    cs_end(cmd);
++   kk_mfxt_end(cmd);
+    kk_cmd_buffer_close_mtl(cmd);
+ 
+    return vk_command_buffer_end(&cmd->vk);
+diff -ruN a/src/kosmickrisp/vulkan/kk_cmd_buffer.h b/src/kosmickrisp/vulkan/kk_cmd_buffer.h
+--- a/src/kosmickrisp/vulkan/kk_cmd_buffer.h	2026-10-04 21:13:34
++++ b/src/kosmickrisp/vulkan/kk_cmd_buffer.h	2026-10-04 21:13:34
+@@ -264,8 +264,9 @@
+    /* A dependency of that kind was recorded inside the current render
+     * pass: the encoder's command buffer is closed when it ends. */
+    bool close_gfx_cmd_buf;
+-   /* MetalFX encoded work into the command buffer (kk_fsr_metalfx_draw):
+-    * the next encoder waits for all that came before it. */
++   /* MetalFX encoded work into the command buffer (kk_fsr_metalfx_draw,
++    * kk_mfx_temporal.c): the next encoder waits for all that came before
++    * it. Still set when the command buffer ends: kk_mfxt_end. */
+    bool after_metalfx;
+ 
+    void *drawable;
+diff -ruN a/src/kosmickrisp/vulkan/kk_cmd_meta.c b/src/kosmickrisp/vulkan/kk_cmd_meta.c
+--- a/src/kosmickrisp/vulkan/kk_cmd_meta.c	2026-10-04 21:13:34
++++ b/src/kosmickrisp/vulkan/kk_cmd_meta.c	2026-10-04 21:13:34
+@@ -11,6 +11,7 @@
+ 
+ #include "kk_buffer.h"
+ #include "kk_cmd_buffer.h"
++#include "kk_mfx_temporal.h"
+ 
+ #include "kosmickrisp/bridge/mtl_bridge.h"
+ 
+@@ -209,6 +210,13 @@
+ {
+    VK_FROM_HANDLE(kk_cmd_buffer, cmd, commandBuffer);
+    struct kk_device *dev = kk_cmd_buffer_device(cmd);
++
++   /* SteamARM: a MetalFX temporal upscale kept in the command queue of a
++    * command buffer recorded again (kk_mfx_temporal.c): no buffer. */
++   if (dstBuffer == KK_MFXT_REPLAY_BUFFER) {
++      kk_mfxt_replay(cmd, pData, dstRange);
++      return;
++   }
+ 
+    struct kk_meta_save save;
+    kk_meta_begin(cmd, &save, VK_PIPELINE_BIND_POINT_COMPUTE);
+diff -ruN a/src/kosmickrisp/vulkan/kk_mfx_temporal.c b/src/kosmickrisp/vulkan/kk_mfx_temporal.c
+--- a/src/kosmickrisp/vulkan/kk_mfx_temporal.c	1969-12-31 21:00:00
++++ b/src/kosmickrisp/vulkan/kk_mfx_temporal.c	2026-10-04 21:13:34
+@@ -0,0 +1,362 @@
++/*
++ * Copyright 2026 SteamARM contributors
++ * SPDX-License-Identifier: MIT
++ */
++
++/* SteamARM: a game's temporal upscale (FSR 3.1, DLSS) done by MetalFX's
++ * temporal scaler, at its place in the command buffer.
++ *
++ * A Windows FFX DLL of SteamARM's records the upscale as an ordinary
++ * vkCmdUpdateBuffer whose data is a struct sa_mfxt_cmd (kk_mfx_temporal.h);
++ * the call crosses winevulkan and FEX unchanged, and SteamARM's Vulkan shim
++ * catches it and calls kk_steamarm_upscale_temporal here instead of the
++ * update. Its status goes back to the DLL in the same call: anything but
++ * SA_ST_OK and the DLL runs the game's own upscaler in the same frame.
++ *
++ * ENCODE: each VkImage is its kk_image's Metal texture (a view where another
++ * format is asked for and the image is mutable; depth always in its own
++ * format). Refused, with nothing encoded: inside a render pass, a secondary
++ * command buffer, conditional rendering on, an image or size missing or
++ * outside its image, a scale MetalFX does not take (1x to 3x a side on an
++ * M4), formats or texture usage it does not take. Then patch 14's sequence:
++ * the open encoders end, MetalFX is encoded into the render passes' Metal
++ * command buffer, and the next encoder waits for it (after_metalfx); when
++ * none follows in this command buffer, a small one is added at its end
++ * (kk_mfxt_end). A command buffer that may be submitted again keeps the
++ * command in its queue (a vkCmdUpdateBuffer on KK_MFXT_REPLAY_BUFFER) and
++ * encodes it again when it is recorded again.
++ *
++ * PROBE: whether this GPU has MetalFX's temporal scaler (OK or
++ * UNSUPPORTED), with caps_out, driver_out and max_scale_out written into
++ * the command given. DESTROY: the context's scalers are dropped (work
++ * already encoded keeps them until it has run).
++ *
++ * Flags: RESET, DEPTH_INV (depthReversed, always set: MetalFX's default is
++ * YES), AUTO_EXP or HDR without an exposure texture (auto exposure),
++ * MV_DISPLAY and MV_JITTERED (macOS 27). Sharpening is not done: MetalFX has
++ * none (SHARPEN and sharpness are ignored).
++ *
++ * KK_MFXT=0: every ENCODE and PROBE answers UNSUPPORTED (the game's own
++ * upscaler). KK_MFXT_SCRATCH=1: the output through a private texture and a
++ * copy (bridge/mtl_metalfx.m). */
++
++#include "kk_mfx_temporal.h"
++
++#include "kk_cmd_buffer.h"
++#include "kk_device.h"
++#include "kk_format.h"
++#include "kk_image.h"
++
++#include "kosmickrisp/bridge/mtl_metalfx.h"
++
++#include "util/format/u_format.h"
++#include "util/simple_mtx.h"
++#include "vk_cmd_enqueue_entrypoints.h"
++#include "vk_format.h"
++
++#include <stdio.h>
++#include <stdlib.h>
++#include <string.h>
++
++static bool
++kk_mfxt_enabled(void)
++{
++   static int on = -1;
++   if (on < 0) {
++      const char *e = getenv("KK_MFXT");
++      on = !(e && e[0] == '0');
++   }
++   return on;
++}
++
++/* One line per reason a context's upscale is refused, the first time. */
++static void
++kk_mfxt_refused(const struct sa_mfxt_cmd *c, uint32_t status, const char *why)
++{
++   static const char *told[32];
++   static simple_mtx_t lock = SIMPLE_MTX_INITIALIZER;
++   if (!why)
++      why = "refused";
++   simple_mtx_lock(&lock);
++   unsigned i;
++   for (i = 0; i < ARRAY_SIZE(told) && told[i]; i++)
++      if (told[i] == why)
++         break;
++   bool tell = i < ARRAY_SIZE(told) && !told[i];
++   if (tell)
++      told[i] = why;
++   simple_mtx_unlock(&lock);
++   if (tell)
++      fprintf(stderr,
++              "kk: MetalFX temporal: context %llu %ux%u -> %ux%u: %s (status "
++              "%u): the game's own upscaler\n",
++              (unsigned long long)c->context, c->render_w, c->render_h,
++              c->upscale_w, c->upscale_h, why, status);
++}
++
++static uint32_t
++kk_mfxt_status(enum mtl_metalfx_temporal_status st)
++{
++   switch (st) {
++   case MTL_MFXT_OK:
++      return SA_ST_OK;
++   case MTL_MFXT_BAD_ARGS:
++      return SA_ST_BAD_ARGS;
++   case MTL_MFXT_NO_SCALER:
++      return SA_ST_NO_SCALER;
++   default:
++      return SA_ST_UNSUPPORTED;
++   }
++}
++
++static bool
++kk_mfxt_identity(const struct kk_va_format *va)
++{
++   return va && va->unswizzle.red == PIPE_SWIZZLE_X &&
++          va->unswizzle.green == PIPE_SWIZZLE_Y &&
++          va->unswizzle.blue == PIPE_SWIZZLE_Z &&
++          va->unswizzle.alpha == PIPE_SWIZZLE_W;
++}
++
++/* An image of the command as the bridge takes it. */
++static uint32_t
++kk_mfxt_tex(struct kk_device *dev, const struct sa_mfxt_tex *t, bool depth,
++            struct mtl_metalfx_temporal_tex *out, const char **why)
++{
++   memset(out, 0, sizeof(*out));
++   if (!t->image)
++      return SA_ST_OK;
++
++   struct kk_image *img = kk_image_from_handle((VkImage)(uintptr_t)t->image);
++   if (img->vk.base.type != VK_OBJECT_TYPE_IMAGE ||
++       img->vk.base.device != &dev->vk) {
++      *why = "a handle that is not an image of this device";
++      return SA_ST_BAD_ARGS;
++   }
++   if (img->vk.image_type != VK_IMAGE_TYPE_2D || img->vk.samples != 1 ||
++       img->plane_count != 1) {
++      *why = "an image that is not plain 2D, or multisampled";
++      return SA_ST_UNSUPPORTED;
++   }
++   if (!img->planes[0].mtl_handle) {
++      *why = "an image without memory";
++      return SA_ST_BAD_ARGS;
++   }
++   /* w, h: the image's size as the sender knows it (0: not given). */
++   if (t->w > img->vk.extent.width || t->h > img->vk.extent.height) {
++      *why = "an image smaller than the sender says";
++      return SA_ST_BAD_ARGS;
++   }
++
++   enum pipe_format have = vk_format_to_pipe_format(img->vk.format);
++   if (!kk_mfxt_identity(kk_get_va_format(have))) {
++      *why = "an image format the driver stores swizzled";
++      return SA_ST_UNSUPPORTED;
++   }
++   if (!depth && t->vk_format && t->vk_format != (uint32_t)img->vk.format) {
++      enum pipe_format want = vk_format_to_pipe_format((VkFormat)t->vk_format);
++      const struct kk_va_format *va = kk_get_va_format(want);
++      if (!kk_mfxt_identity(va)) {
++         *why = "a view format the driver stores swizzled";
++         return SA_ST_UNSUPPORTED;
++      }
++      if (!(img->vk.create_flags & VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT) ||
++          util_format_get_blocksize(want) != util_format_get_blocksize(have)) {
++         *why = "a view format the image cannot have";
++         return SA_ST_UNSUPPORTED;
++      }
++      out->format = va->mtl_pixel_format;
++   }
++   out->texture = img->planes[0].mtl_handle;
++   out->x = t->x;
++   out->y = t->y;
++   return SA_ST_OK;
++}
++
++static uint32_t
++kk_mfxt_args(struct kk_device *dev, const struct sa_mfxt_cmd *c,
++             struct mtl_metalfx_temporal_args *a, const char **why)
++{
++   const struct sa_mfxt_tex *in[6] = {
++      &c->color, &c->depth, &c->motion, &c->exposure, &c->reactive, &c->output,
++   };
++   struct mtl_metalfx_temporal_tex *out[6] = {
++      &a->color, &a->depth, &a->motion, &a->exposure, &a->reactive, &a->output,
++   };
++   memset(a, 0, sizeof(*a));
++   for (unsigned i = 0; i < 6; i++) {
++      uint32_t st = kk_mfxt_tex(dev, in[i], i == 1, out[i], why);
++      if (st != SA_ST_OK)
++         return st;
++   }
++   if (!a->color.texture || !a->depth.texture || !a->motion.texture ||
++       !a->output.texture) {
++      *why = "colour, depth, motion vectors or output missing";
++      return SA_ST_BAD_ARGS;
++   }
++   a->context = c->context;
++   a->render_w = c->render_w;
++   a->render_h = c->render_h;
++   a->out_w = c->upscale_w;
++   a->out_h = c->upscale_h;
++   a->jitter_x = c->jitter_x;
++   a->jitter_y = c->jitter_y;
++   a->mv_scale_x = c->mv_scale_x;
++   a->mv_scale_y = c->mv_scale_y;
++   a->pre_exposure = c->pre_exposure;
++   a->reset = c->flags & SA_MFXT_RESET;
++   a->depth_reversed = c->flags & SA_MFXT_DEPTH_INV;
++   a->auto_exposure = (c->flags & SA_MFXT_AUTO_EXP) ||
++                      ((c->flags & SA_MFXT_HDR) && !a->exposure.texture);
++   a->mv_display = c->flags & SA_MFXT_MV_DISPLAY;
++   a->mv_jittered = c->flags & SA_MFXT_MV_JITTERED;
++   /* MetalFX ignores the exposure texture with auto exposure: drop it, so
++    * its format cannot refuse the upscale. */
++   if (a->auto_exposure)
++      memset(&a->exposure, 0, sizeof(a->exposure));
++   return SA_ST_OK;
++}
++
++/* The encode itself (also when a command buffer is recorded again). */
++static uint32_t
++kk_mfxt_encode(struct kk_cmd_buffer *cmd, const struct sa_mfxt_cmd *c)
++{
++   struct kk_device *dev = kk_cmd_buffer_device(cmd);
++   struct kk_graphics_state *gfx = &cmd->state.gfx;
++   const char *why = NULL;
++   uint32_t st;
++
++   if (!kk_mfxt_enabled()) {
++      why = "KK_MFXT=0";
++      st = SA_ST_UNSUPPORTED;
++      goto refused;
++   }
++   if (cmd->vk.level != VK_COMMAND_BUFFER_LEVEL_PRIMARY) {
++      why = "a secondary command buffer";
++      st = SA_ST_UNSUPPORTED;
++      goto refused;
++   }
++   /* The application's render pass still going on (a pass it ended whose
++    * encoder is left open, pending_end, is over). */
++   if (gfx->render_pass_descriptor && !gfx->pending_end) {
++      why = "inside a render pass";
++      st = SA_ST_BAD_ARGS;
++      goto refused;
++   }
++   if (cmd->state.cond_render.enabled) {
++      why = "conditional rendering on";
++      st = SA_ST_UNSUPPORTED;
++      goto refused;
++   }
++
++   struct mtl_metalfx_temporal_args args;
++   st = kk_mfxt_args(dev, c, &args, &why);
++   if (st != SA_ST_OK)
++      goto refused;
++   /* Asked before the encoders end: a refusal leaves the command buffer as
++    * it was. */
++   st = kk_mfxt_status(mtl_metalfx_temporal_prepare(
++      dev->mtl_handle, dev->mtl_compiler_handle, &args, &why));
++   if (st != SA_ST_OK)
++      goto refused;
++
++   /* Twice: compute work open beside a pass is closed as well. */
++   cs_end(cmd);
++   cs_end(cmd);
++   mtl_command_buffer *cmd_buf = kk_cmd_buffer_take_gfx_mtl(cmd);
++   st = kk_mfxt_status(mtl_metalfx_temporal_encode(
++      dev->mtl_handle, dev->mtl_compiler_handle, cmd_buf, &args, &why));
++   kk_cmd_buffer_return_gfx_mtl(cmd, cmd_buf);
++   if (st != SA_ST_OK)
++      goto refused;
++   /* The next encoder waits for all that came before it (a queue barrier)
++    * and ends with the producer barrier every encoder ends with. */
++   cmd->after_metalfx = true;
++   return SA_ST_OK;
++
++refused:
++   kk_mfxt_refused(c, st, why);
++   return st;
++}
++
++static uint32_t
++kk_mfxt_probe(struct kk_device *dev, struct sa_mfxt_cmd *c)
++{
++   struct mtl_metalfx_temporal_caps caps;
++   mtl_metalfx_temporal_get_caps(dev->mtl_handle, &caps);
++   c->driver_out = VK_DRIVER_ID_MESA_KOSMICKRISP;
++   if (!kk_mfxt_enabled() || !caps.supported) {
++      c->caps_out = 0;
++      c->max_scale_out = 0.0f;
++      return SA_ST_UNSUPPORTED;
++   }
++   c->caps_out = SA_MFXT_CAP_TEMPORAL |
++                 (caps.mv_display ? SA_MFXT_CAP_MV_DISPLAY : 0) |
++                 (caps.mv_jittered ? SA_MFXT_CAP_MV_JITTERED : 0) |
++                 (caps.offsets ? SA_MFXT_CAP_OFFSETS : 0) |
++                 (caps.reactive ? SA_MFXT_CAP_REACTIVE : 0) |
++                 (mtl_metalfx_temporal_scratch() ? SA_MFXT_CAP_SCRATCH : 0);
++   c->max_scale_out = caps.max_scale;
++   return SA_ST_OK;
++}
++
++PUBLIC uint32_t
++kk_steamarm_upscale_temporal(VkCommandBuffer commandBuffer,
++                             const struct sa_mfxt_cmd *c)
++{
++   if (!commandBuffer || !c || c->magic != SA_MFXT_MAGIC ||
++       c->version != SA_MFXT_VERSION || c->size != sizeof(*c))
++      return SA_ST_BAD_ARGS;
++   VK_FROM_HANDLE(kk_cmd_buffer, cmd, commandBuffer);
++   struct kk_device *dev = kk_cmd_buffer_device(cmd);
++
++   switch (c->op) {
++   case SA_OP_PROBE:
++      /* The out fields of the caller's own copy (the shim's): the entry's
++       * one write into the command. */
++      return kk_mfxt_probe(dev, (struct sa_mfxt_cmd *)c);
++   case SA_OP_DESTROY:
++      mtl_metalfx_temporal_destroy(c->context);
++      return SA_ST_OK;
++   case SA_OP_ENCODE:
++      break;
++   default:
++      return SA_ST_BAD_ARGS;
++   }
++
++   uint32_t st = kk_mfxt_encode(cmd, c);
++   /* Recorded again at a second submission (rerecord_cmd_buffer): replayed
++    * from the command queue, through kk_CmdUpdateBuffer. */
++   if (st == SA_ST_OK && !cmd->one_time_submit)
++      vk_cmd_enqueue_CmdUpdateBuffer(commandBuffer, KK_MFXT_REPLAY_BUFFER, 0,
++                                     sizeof(*c), c);
++   return st;
++}
++
++void
++kk_mfxt_replay(struct kk_cmd_buffer *cmd, const void *data, VkDeviceSize size)
++{
++   struct sa_mfxt_cmd c;
++   if (size != sizeof(c))
++      return;
++   memcpy(&c, data, sizeof(c));
++   /* The game saw OK when it recorded this, so it recorded no fallback: a
++    * refusal now leaves the output unwritten for this frame. */
++   if (c.magic == SA_MFXT_MAGIC && c.op == SA_OP_ENCODE) {
++      uint32_t st = kk_mfxt_encode(cmd, &c);
++      if (st != SA_ST_OK)
++         kk_mfxt_refused(&c, st, "re-recorded upscale refused, output left unwritten this frame");
++   }
++}
++
++void
++kk_mfxt_end(struct kk_cmd_buffer *cmd)
++{
++   if (!cmd->after_metalfx)
++      return;
++   struct kk_device *dev = kk_cmd_buffer_device(cmd);
++   mtl_command_buffer *cmd_buf = kk_cmd_buffer_take_gfx_mtl(cmd);
++   mtl_metalfx_temporal_tail(dev->mtl_handle, cmd_buf);
++   kk_cmd_buffer_return_gfx_mtl(cmd, cmd_buf);
++   cmd->after_metalfx = false;
++}
+diff -ruN a/src/kosmickrisp/vulkan/kk_mfx_temporal.h b/src/kosmickrisp/vulkan/kk_mfx_temporal.h
+--- a/src/kosmickrisp/vulkan/kk_mfx_temporal.h	1969-12-31 21:00:00
++++ b/src/kosmickrisp/vulkan/kk_mfx_temporal.h	2026-10-04 21:13:34
+@@ -0,0 +1,131 @@
++/*
++ * Copyright 2026 SteamARM contributors
++ * SPDX-License-Identifier: MIT
++ */
++
++/* SteamARM: a temporal upscale (FSR 3.1 / DLSS style) handed to Apple's
++ * MetalFX by the Vulkan shim (SteamARM's shim/mfx_temporal.c), which calls
++ * kk_steamarm_upscale_temporal (kk_mfx_temporal.c) with the command a
++ * Windows FFX DLL recorded as a vkCmdUpdateBuffer.
++ *
++ * The block between the SA_MFX_TEMPORAL_H guards is SteamARM's
++ * shim/mfx_temporal.h protocol, byte for byte the same layout (the same
++ * text): the DLL, the shim and this driver share it. What follows it is
++ * this driver's side. */
++
++#ifndef KK_MFX_TEMPORAL_H
++#define KK_MFX_TEMPORAL_H 1
++
++#ifndef SA_MFX_TEMPORAL_H
++#define SA_MFX_TEMPORAL_H
++
++#include <stdint.h>
++
++#define SA_MFXT_MAGIC 0x5458464D41455453ull   /* "STEAMFXT" */
++#define SA_MFXT_VERSION 1u
++
++enum { SA_OP_PROBE=1, SA_OP_ENCODE=2, SA_OP_DESTROY=3 };
++enum { SA_ST_UNSEEN=0, SA_ST_OK=1, SA_ST_NO_DRIVER, SA_ST_BAD_ARGS, SA_ST_UNSUPPORTED, SA_ST_NO_SCALER };
++
++/* sa_mfxt_cmd.flags */
++#define SA_MFXT_RESET        1u
++#define SA_MFXT_DEPTH_INV    2u
++#define SA_MFXT_AUTO_EXP     4u
++#define SA_MFXT_MV_DISPLAY   8u
++#define SA_MFXT_MV_JITTERED 16u
++#define SA_MFXT_HDR         32u
++#define SA_MFXT_SHARPEN     64u
++
++struct sa_mfxt_tex { uint64_t image; uint32_t vk_format, w, h, x, y, flags; };      /* 32 B */
++struct sa_mfxt_cmd {
++  uint64_t magic; uint32_t version, size, op, status /* written back */; uint64_t context;
++  struct sa_mfxt_tex color, depth, motion, exposure, reactive, output;             /* image 0 = absent */
++  uint32_t render_w, render_h, upscale_w, upscale_h;
++  float jitter_x, jitter_y, mv_scale_x, mv_scale_y, pre_exposure, sharpness;
++  uint32_t flags;   /* RESET 1, DEPTH_INV 2, AUTO_EXP 4, MV_DISPLAY 8, MV_JITTERED 16, HDR 32, SHARPEN 64 */
++  uint32_t caps_out, driver_out; float max_scale_out; uint32_t reserved[10];       /* pad to 320 */
++};
++
++#define SA_MFXT_STATUS_OFFSET 20u   /* offsetof(struct sa_mfxt_cmd, status) */
++
++_Static_assert(sizeof(struct sa_mfxt_tex) == 32, "sa_mfxt_tex is 32 bytes");
++_Static_assert(sizeof(struct sa_mfxt_cmd) == 320, "sa_mfxt_cmd is 320 bytes");
++_Static_assert(__builtin_offsetof(struct sa_mfxt_cmd, status) == SA_MFXT_STATUS_OFFSET, "status at 20");
++_Static_assert(__builtin_offsetof(struct sa_mfxt_cmd, color) == 32, "textures at 32");
++_Static_assert(__builtin_offsetof(struct sa_mfxt_cmd, render_w) == 224, "sizes at 224");
++
++/* The KosmicKrisp entry (default visibility in the driver), found by the
++   shim with lxrt_host_dlsym on the driver's handle; returns an SA_ST_*. */
++#define SA_MFXT_KK_ENTRY "kk_steamarm_upscale_temporal"
++
++#endif
++
++#include <stddef.h>
++
++/* Every field where the DLL and the shim put it (the layout above is the
++ * contract: a field moved is a different protocol). */
++_Static_assert(offsetof(struct sa_mfxt_tex, image) == 0, "tex.image");
++_Static_assert(offsetof(struct sa_mfxt_tex, vk_format) == 8, "tex.vk_format");
++_Static_assert(offsetof(struct sa_mfxt_tex, w) == 12, "tex.w");
++_Static_assert(offsetof(struct sa_mfxt_tex, h) == 16, "tex.h");
++_Static_assert(offsetof(struct sa_mfxt_tex, x) == 20, "tex.x");
++_Static_assert(offsetof(struct sa_mfxt_tex, y) == 24, "tex.y");
++_Static_assert(offsetof(struct sa_mfxt_tex, flags) == 28, "tex.flags");
++_Static_assert(offsetof(struct sa_mfxt_cmd, magic) == 0, "magic");
++_Static_assert(offsetof(struct sa_mfxt_cmd, version) == 8, "version");
++_Static_assert(offsetof(struct sa_mfxt_cmd, size) == 12, "size");
++_Static_assert(offsetof(struct sa_mfxt_cmd, op) == 16, "op");
++_Static_assert(offsetof(struct sa_mfxt_cmd, context) == 24, "context");
++_Static_assert(offsetof(struct sa_mfxt_cmd, depth) == 64, "depth");
++_Static_assert(offsetof(struct sa_mfxt_cmd, motion) == 96, "motion");
++_Static_assert(offsetof(struct sa_mfxt_cmd, exposure) == 128, "exposure");
++_Static_assert(offsetof(struct sa_mfxt_cmd, reactive) == 160, "reactive");
++_Static_assert(offsetof(struct sa_mfxt_cmd, output) == 192, "output");
++_Static_assert(offsetof(struct sa_mfxt_cmd, render_h) == 228, "render_h");
++_Static_assert(offsetof(struct sa_mfxt_cmd, upscale_w) == 232, "upscale_w");
++_Static_assert(offsetof(struct sa_mfxt_cmd, upscale_h) == 236, "upscale_h");
++_Static_assert(offsetof(struct sa_mfxt_cmd, jitter_x) == 240, "jitter_x");
++_Static_assert(offsetof(struct sa_mfxt_cmd, jitter_y) == 244, "jitter_y");
++_Static_assert(offsetof(struct sa_mfxt_cmd, mv_scale_x) == 248, "mv_scale_x");
++_Static_assert(offsetof(struct sa_mfxt_cmd, mv_scale_y) == 252, "mv_scale_y");
++_Static_assert(offsetof(struct sa_mfxt_cmd, pre_exposure) == 256, "pre_exposure");
++_Static_assert(offsetof(struct sa_mfxt_cmd, sharpness) == 260, "sharpness");
++_Static_assert(offsetof(struct sa_mfxt_cmd, flags) == 264, "flags");
++_Static_assert(offsetof(struct sa_mfxt_cmd, caps_out) == 268, "caps_out");
++_Static_assert(offsetof(struct sa_mfxt_cmd, driver_out) == 272, "driver_out");
++_Static_assert(offsetof(struct sa_mfxt_cmd, max_scale_out) == 276, "max_scale_out");
++_Static_assert(offsetof(struct sa_mfxt_cmd, reserved) == 280, "reserved");
++
++/* What PROBE writes into the command it is given (caps_out, driver_out,
++ * max_scale_out; the shim passes its own copy, which it may copy back to
++ * the sender's data with the status). caps_out bits: */
++#define SA_MFXT_CAP_TEMPORAL    1u  /* MetalFX's temporal scaler (Metal 4) on this GPU */
++#define SA_MFXT_CAP_MV_DISPLAY  2u  /* motion vectors at the output's size (macOS 27) */
++#define SA_MFXT_CAP_MV_JITTERED 4u  /* motion vectors with the jitter in them (macOS 27) */
++#define SA_MFXT_CAP_OFFSETS     8u  /* sa_mfxt_tex.x/y: content not at the origin (macOS 27) */
++#define SA_MFXT_CAP_REACTIVE   16u  /* a reactive mask */
++#define SA_MFXT_CAP_SCRATCH    32u  /* the output goes through a private texture and a copy */
++/* driver_out: VK_DRIVER_ID_MESA_KOSMICKRISP (28); max_scale_out: the
++ * largest output / render size MetalFX takes on each side (3.0 on an M4). */
++
++#include <vulkan/vulkan_core.h>
++
++/* Returns an SA_ST_*. Never called by the application: see above. */
++uint32_t kk_steamarm_upscale_temporal(VkCommandBuffer commandBuffer,
++                                      const struct sa_mfxt_cmd *cmd);
++
++struct kk_cmd_buffer;
++
++/* The destination buffer of the vkCmdUpdateBuffer an encode leaves in the
++ * command queue of a command buffer that may be submitted again: replayed
++ * (rerecord_cmd_buffer), kk_CmdUpdateBuffer hands it back here. Not an
++ * address any buffer can have. */
++#define KK_MFXT_REPLAY_BUFFER ((VkBuffer)(uintptr_t)0xFFFF534D46580001ull)
++void kk_mfxt_replay(struct kk_cmd_buffer *cmd, const void *data,
++                    VkDeviceSize size);
++
++/* The command buffer ends with MetalFX's work the last in it
++ * (after_metalfx still set): work in later command buffers waits for it. */
++void kk_mfxt_end(struct kk_cmd_buffer *cmd);
++
++#endif /* KK_MFX_TEMPORAL_H */
+diff -ruN a/src/kosmickrisp/vulkan/kk_queue.c b/src/kosmickrisp/vulkan/kk_queue.c
+--- a/src/kosmickrisp/vulkan/kk_queue.c	2026-10-04 21:13:34
++++ b/src/kosmickrisp/vulkan/kk_queue.c	2026-10-04 21:13:34
+@@ -9,6 +9,7 @@
+ #include "kk_buffer.h"
+ #include "kk_cmd_buffer.h"
+ #include "kk_device.h"
++#include "kk_mfx_temporal.h"
+ #include "kk_physical_device.h"
+ #include "kk_sync.h"
+ 
+@@ -28,6 +29,7 @@
+ 
+    cs_end(cmd);
+    cs_end(cmd);
++   kk_mfxt_end(cmd);
+    kk_cmd_buffer_close_mtl(cmd);
+ 
+    /* Need to ensure the new buffers allocated at record are resident. */
+diff -ruN a/src/kosmickrisp/vulkan/meson.build b/src/kosmickrisp/vulkan/meson.build
+--- a/src/kosmickrisp/vulkan/meson.build	2026-10-04 21:13:34
++++ b/src/kosmickrisp/vulkan/meson.build	2026-10-04 21:13:34
+@@ -89,6 +89,8 @@
+   'kk_instance.h',
+   'kk_instance.c',
+   'kk_fsr_metalfx.c',
++  'kk_mfx_temporal.h',
++  'kk_mfx_temporal.c',
+   'kk_metal_objects.c',
+   'kk_nir_lower_descriptors.c',
+   'kk_nir_lower_multiview.c',

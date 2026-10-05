@@ -363,6 +363,16 @@ struct ApplicationCoreTests {
         check(SettingsMigration.graphicsBackend(stored: "vulkan") == "vulkanMoltenVK", "legacy vulkan -> MoltenVK")
         check(SettingsMigration.graphicsBackend(stored: nil) == "auto" && SettingsMigration.graphicsBackend(stored: "bogus") == "auto", "graphics default AUTO")
         check(SettingsMigration.fallbackPolicy(stored: "ask") == "ask" && SettingsMigration.fallbackPolicy(stored: nil) == "auto", "fallback policy")
+        // "Escalado del juego": MetalFX (AUTO) unless "fsr" is stored (settings-env.py game_upscaler).
+        check(SettingsMigration.gameUpscaler(stored: nil) == "auto", "old settings.json -> AUTO")
+        check(SettingsMigration.gameUpscaler(stored: "fsr") == "fsr", "stored fsr wins")
+        check(SettingsMigration.gameUpscaler(stored: "bogus") == "auto" && SettingsMigration.gameUpscaler(stored: "") == "auto", "not a choice -> AUTO")
+        check(GameUpscalerChoice.label("bogus") == "Automático (recomendado)" && GameUpscalerChoice.options.map(\.0) == ["auto", "fsr"],
+              "game upscaler choices")
+        check(GameUpscalerChoice.note("auto", backend: .vulkanMoltenVK).contains("Con MoltenVK no hay todavía ningún paso de FSR a MetalFX")
+              && !GameUpscalerChoice.note("auto", backend: .vulkanKosmicKrisp).contains("MoltenVK")
+              && GameUpscalerChoice.note("auto", backend: .vulkanKosmicKrisp).contains("FSR 1 pasa a MetalFX espacial")
+              && GameUpscalerChoice.note("fsr", backend: .vulkanKosmicKrisp).contains("sin MetalFX"), "game upscaler notes")
 
         // Library: search, filters, favourites first, recent by date, logs by exact id.
         let items = [LibraryItem(id: "steam", name: "Steam", architecture: "x86_64", isWindows: false),

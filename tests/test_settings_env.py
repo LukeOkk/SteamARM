@@ -153,10 +153,7 @@ class SettingsEnvironmentTests(unittest.TestCase):
         self.assertNotIn("STEAMARM_RENDER_SCALE", env)
         env = self.settings.env_from_settings({"scalingFilter": "metalfx", "renderScale": "1.0"})
         self.assertNotIn("STEAMARM_MFX_NATIVE", env)
-        # A game's own FSR: MetalFX draws it unless another filter was chosen.
-        self.assertEqual(self.settings.env_from_settings({})["KK_FSR_METALFX"], "1")
-        self.assertEqual(self.settings.env_from_settings({"scalingFilter": "metalfx-temporal"})["KK_FSR_METALFX"], "1")
-        self.assertEqual(self.settings.env_from_settings({"scalingFilter": "fsr"})["KK_FSR_METALFX"], "0")
+        # A game's own FSR is "Escalado del juego"'s: test_game_upscaler.
         env = self.settings.env_from_settings({"scalingFilter": "fsr", "fsrSharpness": 40})
         self.assertEqual((env["LXRT_VK_SCALER"], env["LXRT_VK_FSR_SHARPNESS"]), ("fsr", "40"))
         env = self.settings.env_from_settings({"scalingFilter": "fsr", "fsrSharpness": 500})
@@ -167,6 +164,64 @@ class SettingsEnvironmentTests(unittest.TestCase):
         self.assertNotIn("LXRT_VK_SCALER", self.settings.env_from_settings({"scalingFilter": "bogus"}))
         merged = self.settings.with_overrides({"scalingFilter": "linear"}, {"scalingFilter": "nearest"})
         self.assertEqual(self.settings.env_from_settings(merged)["LXRT_VK_SCALER"], "nearest")
+
+    def test_game_upscaler(self):
+        kk = {"graphicsBackend": "vulkanKosmicKrisp"}
+        with patch.object(self.settings, "shim_selects_icd", return_value=True), \
+                patch.object(self.settings, "kosmickrisp_build_dir", return_value=""):
+            # AUTO (the default) on KosmicKrisp: the game's FSR 1 to MetalFX
+            # spatial, and FSR 3.1 / FSR 4 of Windows games to MetalFX temporal.
+            env = self.env(kk)
+            self.assertEqual((env["KK_FSR_METALFX"], env["STEAMARM_WIN_UPSCALER"]), ("1", "metalfx"))
+            env = self.env(dict(kk, gameUpscaler="auto"))
+            self.assertEqual((env["KK_FSR_METALFX"], env["STEAMARM_WIN_UPSCALER"]), ("1", "metalfx"))
+            # The game's own FSR: KosmicKrisp leaves its pass, no DLL override.
+            env = self.env(dict(kk, gameUpscaler="fsr"))
+            self.assertEqual(env["KK_FSR_METALFX"], "0")
+            self.assertNotIn("STEAMARM_WIN_UPSCALER", env)
+            # Apart from "Filtro de escalado": SteamARM's own filter is unchanged
+            # and does not decide the game's once the setting exists.
+            env = self.env(dict(kk, gameUpscaler="auto", scalingFilter="fsr"))
+            self.assertEqual((env["KK_FSR_METALFX"], env["STEAMARM_WIN_UPSCALER"]), ("1", "metalfx"))
+            self.assertEqual(env["LXRT_VK_SCALER"], "fsr")
+            env = self.env(dict(kk, gameUpscaler="fsr", scalingFilter="metalfx"))
+            self.assertEqual((env["KK_FSR_METALFX"], env["LXRT_VK_SCALER"]), ("0", "metalfx"))
+            self.assertNotIn("STEAMARM_WIN_UPSCALER", env)
+            # Not a choice: AUTO.
+            for bogus in ("bogus", "", "metalfx"):
+                self.assertEqual(self.env(dict(kk, gameUpscaler=bogus))["STEAMARM_WIN_UPSCALER"], "metalfx")
+            # The user's own variables still have the last word.
+            env = self.env(dict(kk, gameUpscaler="fsr", extraEnv={"STEAMARM_WIN_UPSCALER": "metalfx"}))
+            self.assertEqual(env["STEAMARM_WIN_UPSCALER"], "metalfx")
+        # MoltenVK (AUTO graphics) and WineD3D have no FSR-to-MetalFX path:
+        # nothing for the FidelityFX DLLs, the game's DLL loads untouched.
+        # KK_FSR_METALFX is exported anyway (only KosmicKrisp reads it).
+        for gfx in ({}, {"graphicsBackend": "vulkanMoltenVK"}, {"graphicsBackend": "openGLWineD3D"}):
+            env = self.env(gfx)
+            self.assertEqual(env["KK_FSR_METALFX"], "1")
+            self.assertNotIn("STEAMARM_WIN_UPSCALER", env)
+            self.assertEqual(self.env(dict(gfx, gameUpscaler="fsr"))["KK_FSR_METALFX"], "0")
+        # KosmicKrisp asked for, but a shim that cannot load it: MoltenVK.
+        with patch.object(self.settings, "shim_selects_icd", return_value=False):
+            self.assertNotIn("STEAMARM_WIN_UPSCALER", self.env(kk))
+
+    def test_game_upscaler_migration(self):
+        # settings.json from before "Escalado del juego": AUTO (MetalFX by
+        # default, the user's rule) whatever the old filter; only a stored
+        # "fsr" keeps the game's FSR. Same rule as
+        # SettingsMigration.gameUpscaler (launcher/ApplicationCore.swift).
+        upscaler = self.settings.game_upscaler
+        for flt in (None, "", "auto", "metalfx", "metalfx-temporal", "fsr", "linear", "nearest"):
+            old = {} if flt is None else {"scalingFilter": flt}
+            self.assertEqual(upscaler(old), "auto", flt)
+            self.assertEqual(self.env(old)["KK_FSR_METALFX"], "1", flt)
+        self.assertEqual(upscaler({"scalingFilter": "metalfx", "gameUpscaler": "fsr"}), "fsr")
+        for bad in (None, "", "bogus"):
+            self.assertEqual(upscaler({"scalingFilter": "fsr", "gameUpscaler": bad}), "auto", bad)
+        with patch.object(self.settings, "shim_selects_icd", return_value=True), \
+                patch.object(self.settings, "kosmickrisp_build_dir", return_value=""):
+            env = self.env({"scalingFilter": "fsr", "graphicsBackend": "vulkanKosmicKrisp"})
+            self.assertEqual((env["KK_FSR_METALFX"], env["STEAMARM_WIN_UPSCALER"]), ("1", "metalfx"))
 
     def test_sound(self):
         env = self.settings.env_from_settings({})

@@ -191,6 +191,7 @@ struct LauncherSettings: Codable, Equatable {
     var resolutionScaling: Bool = false // Wine's display-mode emulation in the game prefixes
     var scalingFilter: String = "auto"   // a picture smaller than its window: auto, linear, nearest, fsr, metalfx, metalfx-temporal (shim/scaler.c)
     var fsrSharpness: Int = 90         // FSR's RCAS strength, percent
+    var gameUpscaler: String = "auto"  // a game's own FSR (GameUpscalerChoice): auto (MetalFX where it can take it), fsr (the game's, untouched)
     var metalfxNativeAA: Bool = false  // MetalFX temporal at 100 %: a temporal pass at the native size (softens; opt-in)
     var renderScale: String = "1.0"    // games covering the screen render at this scale, the shim enlarges: 1.0 (native, the default), 0.77, 0.67, 0.59, 0.5, 0.33; an old "auto" is native
     var steamUIAcceleration: Bool = true // ARM64 Steam's webhelper on ANGLE/Vulkan (LXRT_EXEC_ARGS)
@@ -255,6 +256,8 @@ struct LauncherSettings: Codable, Equatable {
         resolutionScaling = try c.decodeIfPresent(Bool.self, forKey: .resolutionScaling) ?? false
         scalingFilter = try c.decodeIfPresent(String.self, forKey: .scalingFilter) ?? "auto"
         fsrSharpness = try c.decodeIfPresent(Int.self, forKey: .fsrSharpness) ?? 90
+        gameUpscaler = SettingsMigration.gameUpscaler(
+            stored: try c.decodeIfPresent(String.self, forKey: .gameUpscaler))
         renderScale = try c.decodeIfPresent(String.self, forKey: .renderScale) ?? "1.0"
         if renderScale == "auto" { renderScale = "1.0" }   // was 59 % on an M4: the whole picture blurred
         steamUIAcceleration = try c.decodeIfPresent(Bool.self, forKey: .steamUIAcceleration) ?? true

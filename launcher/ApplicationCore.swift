@@ -919,6 +919,14 @@ enum SettingsMigration {
     static func fallbackPolicy(stored: String?) -> String {
         stored.flatMap { FallbackPolicy(rawValue: $0) }?.rawValue ?? FallbackPolicy.auto.rawValue
     }
+
+    /// "Escalado del juego" (gameUpscaler): a stored choice, else
+    /// Automático -- nothing stored (a settings.json from before the setting)
+    /// included, since the user's rule is MetalFX by default.
+    /// settings-env.py game_upscaler() is the same rule.
+    static func gameUpscaler(stored: String?) -> String {
+        stored.flatMap { value in GameUpscalerChoice.options.contains { $0.0 == value } ? value : nil } ?? "auto"
+    }
 }
 
 // MARK: - Library
@@ -1584,11 +1592,11 @@ enum RenderScaleChoice {
 }
 
 /// Settings "Filtro de escalado": how a game's picture smaller than its window
-/// ("Escala de resolución") is enlarged. scripts/settings-env.py passes it to
-/// the Vulkan shim as LXRT_VK_SCALER (shim/scaler.c). "auto", the default:
-/// MetalFX where the driver exports its Metal objects, FSR 1.0 where not,
-/// and the render scale recommended for this Mac's chip
-/// (settings-env.py upscaling_policy, STEAMARM_RENDER_SIZE).
+/// ("Escala de resolución", "Escala de render") is enlarged by SteamARM.
+/// scripts/settings-env.py passes it to the Vulkan shim as LXRT_VK_SCALER
+/// (shim/scaler.c). "auto", the default: FSR 1.0, the fastest measured
+/// (settings-env.py upscaling_policy). A game's own FSR is not this
+/// setting's: GameUpscalerChoice.
 enum ScalingFilterChoice {
     static let options: [(String, String)] = [
         ("auto", "Automático (recomendado)"),
@@ -1604,7 +1612,7 @@ enum ScalingFilterChoice {
     }
 
     static func note(_ value: String) -> String {
-        let scope = " Actúa cuando un juego Vulkan o Direct3D (DXVK, VKD3D) dibuja más pequeño que su ventana; no en OpenGL (WineD3D)."
+        let scope = " Actúa cuando un juego Vulkan o Direct3D (DXVK, VKD3D) dibuja más pequeño que su ventana; no en OpenGL (WineD3D). El FSR propio del juego no depende de este filtro, sino de Escalado del juego."
         switch value {
         case "auto":
             return "FSR 1.0 de AMD con la nitidez de abajo: el filtro más rápido en las pruebas (Counter-Strike 2, M4: 7-9 fps más que MetalFX espacial, que en SteamARM espera a la cola del juego). Actúa con la Escala de render de arriba o cuando el juego dibuja más pequeño que su ventana." + scope
@@ -1618,6 +1626,43 @@ enum ScalingFilterChoice {
             return "Cada píxel del juego se repite tal cual: aspecto pixelado, sin suavizado." + scope
         default:
             return "El estirado de MoltenVK: suave y el más barato." + scope
+        }
+    }
+}
+
+/// Settings "Escalado del juego" (gameUpscaler): what happens to a game's own
+/// upscaler, apart from the "Filtro de escalado" of SteamARM's own picture.
+/// scripts/settings-env.py: "auto" (the default) sets KK_FSR_METALFX=1 -- a
+/// game's FSR 1 drawn by MetalFX's spatial scaler in SteamARM's KosmicKrisp
+/// (patches/kosmickrisp-14, -16, -17) -- and, on KosmicKrisp only,
+/// STEAMARM_WIN_UPSCALER=metalfx, which the FidelityFX DLLs for Windows games
+/// read (FSR 3.1 and FSR 4 to MetalFX's temporal scaler; harmless before they
+/// are installed). Each falls back to the game's own FSR where MetalFX cannot
+/// take its pass. "fsr": KK_FSR_METALFX=0 and no DLL override.
+enum GameUpscalerChoice {
+    static let options: [(String, String)] = [
+        ("auto", "Automático (recomendado)"),
+        ("fsr", "AMD FSR del juego"),
+    ]
+
+    static func label(_ value: String) -> String {
+        options.first { $0.0 == value }?.1 ?? "Automático (recomendado)"
+    }
+
+    /// `backend`: the graphics backend the games get (the "Motor" chosen and
+    /// usable); only KosmicKrisp has the MetalFX paths.
+    static func note(_ value: String, backend: GraphicsBackend) -> String {
+        if value == "fsr" {
+            return "El FSR que elijas en el juego queda tal cual, sin MetalFX. El FSR 4 propio de AMD solo funciona en GPU AMD: en el Mac los juegos ofrecen FSR 3.1 o anterior. Se aplica al reiniciar Steam."
+        }
+        let rules = "Usa MetalFX siempre que sea compatible con el FSR elegido en el juego: el FSR 1 pasa a MetalFX espacial; el FSR 3.1 y el FSR 4 de los juegos Windows, a MetalFX temporal (en preparación). Si MetalFX no puede con un juego o con un pase, se queda el FSR del propio juego. En juegos con anticheat (EasyAntiCheat, BattlEye) no se cambia nada."
+        switch backend {
+        case .vulkanKosmicKrisp:
+            return rules + " Se aplica al reiniciar Steam."
+        case .openGLWineD3D:
+            return rules + " Con OpenGL (WineD3D) no hay MetalFX para el FSR del juego: queda el suyo. Hace falta Vulkan (KosmicKrisp) en Motor."
+        default:
+            return rules + " Con MoltenVK no hay todavía ningún paso de FSR a MetalFX: los juegos usan su propio FSR. Hace falta Vulkan (KosmicKrisp) en Motor."
         }
     }
 }

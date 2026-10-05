@@ -27,6 +27,13 @@ struct SettingsTests {
         let noEsync = try decoder.decode(LauncherSettings.self, from: Data(#"{"esync":false,"fsync":true}"#.utf8))
         precondition(noEsync.synchronization == "wineserver")
         precondition(defaults.synchronization == "auto" && defaults.graphicsBackend == "auto")
+        // "Escalado del juego": AUTO unless "fsr" is stored, whatever an old settings.json's filter was.
+        precondition(defaults.gameUpscaler == "auto")
+        let oldFSR = try decoder.decode(LauncherSettings.self, from: Data(#"{"scalingFilter":"fsr"}"#.utf8))
+        precondition(oldFSR.gameUpscaler == "auto" && oldFSR.scalingFilter == "fsr")
+        let chosen = try decoder.decode(LauncherSettings.self, from: Data(#"{"scalingFilter":"metalfx","gameUpscaler":"fsr"}"#.utf8))
+        precondition(chosen.gameUpscaler == "fsr")
+        precondition(String(decoding: try JSONEncoder().encode(chosen), as: UTF8.self).contains("\"gameUpscaler\":\"fsr\""))
         let saved = String(decoding: try JSONEncoder().encode(old), as: UTF8.self)
         precondition(!saved.contains("\"esync\":") && !saved.contains("\"fsync\":") && saved.contains("\"synchronization\":\"esync\""))
         // apps.json from before builtIn/readiness/overrides still decodes; builtin-apps.json decodes.

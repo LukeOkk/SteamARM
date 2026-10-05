@@ -59,3 +59,5 @@ vkQueueSubmit2KHR
 vkCmdBindDescriptorSets
 vkCmdBindDescriptorSets2
 vkCmdBindDescriptorSets2KHR
+# mfx_temporal.c
+vkCmdUpdateBuffer

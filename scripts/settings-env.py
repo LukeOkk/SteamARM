@@ -24,6 +24,7 @@ SHIM = os.path.join(STATE, "steamroot", "usr", "lib", "lxrt-emu", "libvulkan.so.
 ICD_MARKER = b"STEAMARM_VK_ICD"
 OVERRIDABLE = ("display", "vsync", "synchronization", "graphicsBackend", "scalingFilter")
 SCALING_FILTERS = ("auto", "linear", "nearest", "fsr", "metalfx", "metalfx-temporal")
+GAME_UPSCALERS = ("auto", "fsr")
 STEAM_UI_GPU_SWITCHES = ("--use-gl=angle", "--use-angle=vulkan",
                          "--enable-features=Vulkan,VulkanFromANGLE,DefaultANGLEVulkan",
                          "--ignore-gpu-blocklist")
@@ -235,6 +236,16 @@ def upscaling_policy(chip, display=None):
             "reason": "FSR 1.0: el filtro más rápido medido (MetalFX espacial, 7-9 fps menos)"}
 
 
+def game_upscaler(s):
+    """"Escalado del juego": "auto" (MetalFX wherever it can take the
+    game's FSR) or "fsr" (the game's own FSR, untouched). Anything else,
+    nothing stored included (a settings.json from before the setting), is
+    "auto": the user's rule is MetalFX by default. Mirrors
+    SettingsMigration.gameUpscaler (launcher/ApplicationCore.swift)."""
+    value = s.get("gameUpscaler")
+    return value if value in GAME_UPSCALERS else "auto"
+
+
 def host_timezone():
     # /etc/localtime -> /var/db/timezone/zoneinfo/<Area>/<City>
     try:
@@ -375,10 +386,27 @@ def env_from_settings(s, total=None, chip=None, display=None):
     if flt in SCALING_FILTERS and flt != "linear":
         # AUTO is FSR 1.0 (see upscaling_policy), with its sharpness.
         env["LXRT_VK_SCALER"] = "fsr" if flt == "auto" else flt
-    # A game's own FSR 1 upscale (its EASU pass) is drawn by MetalFX in
-    # SteamARM's KosmicKrisp (patches/kosmickrisp-14) unless another filter
-    # than MetalFX was chosen: "FSR" keeps the game's FSR as it is.
-    env["KK_FSR_METALFX"] = "1" if flt in ("auto", "metalfx", "metalfx-temporal") else "0"
+    # "Escalado del juego" (game_upscaler), apart from the filter above: a
+    # game's own upscaler. AUTO (the default) gives it to MetalFX wherever
+    # MetalFX can take it, and the game keeps its own FSR wherever not:
+    # - FSR 1 (its EASU pass, or the bilinear upsample of a Source 2 game)
+    #   is drawn by MetalFX's spatial scaler in SteamARM's KosmicKrisp
+    #   (patches/kosmickrisp-14, -16, -17), which leaves the game's pass
+    #   for formats or sizes MetalFX does not take. Exported whatever the
+    #   backend: only KosmicKrisp reads it.
+    # - FSR 3.1 and FSR 4 of Windows games: SteamARM's FidelityFX API DLLs
+    #   (Wine builtins over amd_fidelityfx_*) send the upscale to MetalFX's
+    #   temporal scaler, and to the game's own DLL when it fails, when
+    #   STEAMARM_WIN_UPSCALER=metalfx (harmless before they are installed).
+    #   KosmicKrisp only: MoltenVK has no FSR-to-MetalFX path. Requirement
+    #   on the game tool (steamarm-fex-proton): without this variable, and
+    #   for games with an anti-cheat, it adds no DLL override, so the
+    #   game's own DLL loads untouched.
+    # "fsr" leaves the game's FSR as it is.
+    upscaler = game_upscaler(s)
+    env["KK_FSR_METALFX"] = "1" if upscaler == "auto" else "0"
+    if upscaler == "auto" and env.get("STEAMARM_VK_ICD") == "kosmickrisp":
+        env["STEAMARM_WIN_UPSCALER"] = "metalfx"
     # "Escala de render": games whose window covers the screen render at this
     # fraction of it (the game tool passes STEAMARM_RENDER_SCALE to the game
     # only as LXRT_VK_RENDER_SCALE; shim/wsi.c render_scale) and the shim

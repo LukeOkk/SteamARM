@@ -415,6 +415,9 @@ struct SettingsView: View {
                     Text("Pasa cada fotograma por MetalFX temporal sin escalarlo. Sin los vectores de movimiento del juego suaviza la imagen (el texto se ve más borroso) y cuesta fotogramas; desactivado, la imagen queda tal cual.")
                         .font(.caption).foregroundStyle(.secondary)
                 }
+                choice("Escalado del juego", $draft.gameUpscaler, GameUpscalerChoice.options)
+                Text(GameUpscalerChoice.note(draft.gameUpscaler, backend: gameGraphics))
+                    .font(.caption).foregroundStyle(.secondary)
                 Toggle("Interfaz de Steam ARM64 acelerada por GPU", isOn: $draft.steamUIAcceleration)
                 Text("La interfaz de Steam ARM64 y Steam Frame (Chromium) dibuja con Vulkan sobre Metal (el driver elegido arriba: MoltenVK o KosmicKrisp) en lugar de con la CPU. Sin ella, su proceso GPU no arranca en macOS y Steam pinta por software. Se aplica al abrir Steam; si su ventana se viera mal, desactívala.")
                     .font(.caption).foregroundStyle(.secondary)
@@ -424,6 +427,13 @@ struct SettingsView: View {
 
     private var graphicsOrder: [GraphicsBackend] {
         [.auto, .vulkanMoltenVK, .vulkanKosmicKrisp, .openGLWineD3D]
+    }
+
+    /// The backend games get with the "Motor" chosen, as scripts/settings-env.py
+    /// decides it: AUTO is MoltenVK there, and a backend that cannot run falls
+    /// back (only KosmicKrisp has the MetalFX paths of "Escalado del juego").
+    private var gameGraphics: GraphicsBackend {
+        draft.graphics == .auto ? .vulkanMoltenVK : model.capabilities.effectiveGraphics(draft.graphics)
     }
 
     private var runtimeSection: some View {

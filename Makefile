@@ -145,8 +145,8 @@ shim/vulkan_shim.S shim/vulkan_shim.c: shim/gen.py shim/entrypoints.txt build/sh
 
 SHIM_SRCS := shim/vulkan_shim.S shim/vulkan_shim.c shim/wsi.c shim/features.c shim/fallback.c shim/map32.c \
              shim/memcap.c shim/present.c shim/scaler.c shim/mailbox.c shim/spirv_names.c shim/spirv_dref.c shim/spirv_invariant.c \
-             shim/mvkfix.c shim/a2c.c build/vk_rebase.c
-build/libvulkan.so.1: $(SHIM_SRCS) shim/scaler_spv.h runtime/include/lxrt_host.h
+             shim/mvkfix.c shim/a2c.c shim/mfx_temporal.c build/vk_rebase.c
+build/libvulkan.so.1: $(SHIM_SRCS) shim/scaler_spv.h shim/mfx_temporal.h runtime/include/lxrt_host.h
 	@mkdir -p build
 	$(CC) -target $(LXRT_TARGET) -shared -fPIC -nostdlib -O2 \
 	      -fuse-ld=$(CROSS_LD) -Iruntime/include -I$(VK_HEADERS)/include \

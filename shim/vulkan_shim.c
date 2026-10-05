@@ -529,6 +529,9 @@ static const char *driver_for_program(char *(*henv)(const char *), const char *r
 typedef void *(*lxrt_gipa_fn)(void *instance, const char *name);
 __attribute__((visibility("hidden"))) int lxrt_vk_icd;
 __attribute__((visibility("hidden"))) const char *lxrt_vk_driver = "none";
+// The driver's host handle, for entry points of its own beyond Vulkan's
+// (shim/mfx_temporal.c: KosmicKrisp's kk_steamarm_upscale_temporal).
+__attribute__((visibility("hidden"))) void *lxrt_vk_driver_handle;
 static lxrt_gipa_fn g_gipa;
 static volatile int g_fill_lock;
 
@@ -633,6 +636,7 @@ static void lxrt_vk_init(void)
             bind(h);
         }
     }
+    lxrt_vk_driver_handle = h;
     const char *calls = henv ? henv("LXRT_VK_CALLS") : 0;
     if (calls && *calls == '1') {
         lxrt_vk_calls_on = 1;
