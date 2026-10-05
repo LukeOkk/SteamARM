@@ -16,6 +16,10 @@ on:
         description: "Publish a release with this tag (e.g. v0.3.4), created on the dispatched commit of main"
         required: false
         default: ""
+      prerelease:
+        description: "Mark it as a pre-release (\"false\" publishes a full release, the one the app's updater and GitHub's latest show)"
+        required: false
+        default: "true"
 
 permissions:
   contents: read
@@ -86,7 +90,9 @@ jobs:
           notes=docs/releases/$TAG.md
           [ -f "$notes" ] || { echo "missing $notes"; exit 1; }
           # --target only matters when the tag does not exist yet (a run by hand).
-          gh release create "$TAG" --target "$GITHUB_SHA" --title "SteamARM $v" --notes-file "$notes" --prerelease \
+          pre=--prerelease
+          [ "${{ github.event.inputs.prerelease }}" = false ] && pre=--latest
+          gh release create "$TAG" --target "$GITHUB_SHA" --title "SteamARM $v" --notes-file "$notes" $pre \
               build/release/SteamARM-$v-macOS-arm64.dmg \
               build/release/SteamARM-$v-macOS-arm64.zip \
               build/release/SHA256SUMS.txt
