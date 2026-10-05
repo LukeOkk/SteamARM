@@ -1,0 +1,126 @@
+KosmicKrisp: experimental bounded dynamic depth/stencil cache.
+
+Enable with KK_DS_CACHE=1. Default is the original allocation path until
+matched game FPS and visual checks are available. Immutable Metal states
+retain every depth/stencil descriptor value. The cache holds at most 64
+states per device, locks concurrent recording and retains caller ownership;
+full capacity uses the original path. No shader, resolution or synchronization
+change. tests/elf/vk_dynamic_depth.c verifies pixels and cache saturation.
+
+KK_DS_CACHE_LOG=1 reports cache hits, misses and full-capacity fallbacks
+at device teardown; it writes no application paths or shader contents.
+
+--- a/src/kosmickrisp/vulkan/kk_device.h
++++ b/src/kosmickrisp/vulkan/kk_device.h
+@@ -33,6 +33,7 @@
+ /* Upload BOs (KK_CMD_BO_SIZE, 128 KB) kept by the device once the GPU has
+  * finished the commit that used them: 32 MB. */
+ #define KK_UPLOAD_BO_POOL_SIZE 256
++#define KK_DS_CACHE_SIZE 64
+ 
+ struct kk_bo;
+ struct kk_physical_device;
+@@ -94,6 +95,16 @@
+    /* Dispatch table exposed to the user. Required since we need to record all
+     * commands due to Metal limitations */
+    struct vk_device_dispatch_table exposed_dispatch_table;
++
++   /* Immutable Metal depth/stencil states, bounded per device. */
++   struct {
++      simple_mtx_t lock;
++      bool enabled, log;
++      uint64_t hits, misses, full;
++      uint32_t count;
++      uint32_t keys[KK_DS_CACHE_SIZE][15];
++      mtl_depth_stencil_state *states[KK_DS_CACHE_SIZE];
++   } ds_cache;
+ 
+    struct kk_sampler_heap samplers;
+    struct kk_query_table occlusion_queries;
+--- a/src/kosmickrisp/vulkan/kk_device.c
++++ b/src/kosmickrisp/vulkan/kk_device.c
+@@ -395,6 +395,13 @@
+ void
+ kk_device_init_cmd_mem(struct kk_device *dev)
+ {
++   simple_mtx_init(&dev->ds_cache.lock, mtx_plain);
++   const char *ds_cache = getenv("KK_DS_CACHE");
++   dev->ds_cache.enabled = ds_cache && ds_cache[0] == '1';
++   dev->ds_cache.count = 0;
++   const char *ds_log = getenv("KK_DS_CACHE_LOG");
++   dev->ds_cache.log = ds_log && ds_log[0] == '1';
++   dev->ds_cache.hits = dev->ds_cache.misses = dev->ds_cache.full = 0;
+    simple_mtx_init(&dev->cmd_mem.lock, mtx_plain);
+    dev->cmd_mem.idle_count = 0;
+    dev->cmd_mem.idle_bytes = 0;
+@@ -613,6 +620,15 @@
+    }
+ 
+    simple_mtx_destroy(&dev->cmd_mem.lock);
++   if (dev->ds_cache.enabled && dev->ds_cache.log)
++      fprintf(stderr, "[kosmickrisp] depth state cache: entries=%u hits=%llu misses=%llu full=%llu\n",
++              dev->ds_cache.count, (unsigned long long)dev->ds_cache.hits,
++              (unsigned long long)dev->ds_cache.misses,
++              (unsigned long long)dev->ds_cache.full);
++   for (uint32_t i = 0; i < dev->ds_cache.count; i++)
++      mtl_release(dev->ds_cache.states[i]);
++   dev->ds_cache.count = 0;
++   simple_mtx_destroy(&dev->ds_cache.lock);
+ }
+ 
+ VKAPI_ATTR void VKAPI_CALL
+--- a/src/kosmickrisp/vulkan/kk_shader.c
++++ b/src/kosmickrisp/vulkan/kk_shader.c
+@@ -1423,7 +1423,51 @@
+ {
+    struct kk_shader_info info = {};
+    kk_gather_ds_info(ds, has_depth, has_stencil, &info);
+-   return kk_compile_ds_state(device, &info);
++   if (!device->ds_cache.enabled)
++      return kk_compile_ds_state(device, &info);
++
++   /* Key only the values given to Metal, never padding, attachment handles,
++    * or dynamic reference values (which are encoded separately). The caller
++    * still owns a reference, just as with an uncached newDepthStencilState.
++    * Recording threads share this device, so lookup and creation are locked.
++    * A full cache falls back to the original path without growing memory. */
++   const uint32_t key[15] = {
++      info.vs.has_depth_write, info.vs.depth_compare_op,
++      info.vs.has_stencil_test,
++      info.vs.stencil_front.depth_fail, info.vs.stencil_front.fail,
++      info.vs.stencil_front.pass, info.vs.stencil_front.compare,
++      info.vs.stencil_front.compare_mask, info.vs.stencil_front.write_mask,
++      info.vs.stencil_back.depth_fail, info.vs.stencil_back.fail,
++      info.vs.stencil_back.pass, info.vs.stencil_back.compare,
++      info.vs.stencil_back.compare_mask, info.vs.stencil_back.write_mask,
++   };
++   simple_mtx_lock(&device->ds_cache.lock);
++   for (uint32_t i = 0; i < device->ds_cache.count; i++) {
++      if (memcmp(device->ds_cache.keys[i], key, sizeof(key)) == 0) {
++         if (device->ds_cache.log)
++            device->ds_cache.hits++;
++         mtl_depth_stencil_state *state =
++            mtl_retain(device->ds_cache.states[i]);
++         simple_mtx_unlock(&device->ds_cache.lock);
++         return state;
++      }
++   }
++   if (device->ds_cache.count == KK_DS_CACHE_SIZE) {
++      if (device->ds_cache.log)
++         device->ds_cache.full++;
++      simple_mtx_unlock(&device->ds_cache.lock);
++      return kk_compile_ds_state(device, &info);
++   }
++   if (device->ds_cache.log)
++      device->ds_cache.misses++;
++   mtl_depth_stencil_state *state = kk_compile_ds_state(device, &info);
++   if (state) {
++      uint32_t i = device->ds_cache.count++;
++      memcpy(device->ds_cache.keys[i], key, sizeof(key));
++      device->ds_cache.states[i] = mtl_retain(state);
++   }
++   simple_mtx_unlock(&device->ds_cache.lock);
++   return state;
+ }
+ 
+ /* Copies all msl shader data to the vertex and gathers information for pipeline

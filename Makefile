@@ -161,7 +161,7 @@ shim/vulkan_shim.S shim/vulkan_shim.c: shim/gen.py shim/entrypoints.txt build/sh
 SHIM_SRCS := shim/vulkan_shim.S shim/vulkan_shim.c shim/wsi.c shim/features.c shim/fallback.c shim/map32.c \
              shim/memcap.c shim/present.c shim/scaler.c shim/mailbox.c shim/spirv_names.c shim/spirv_dref.c shim/spirv_invariant.c \
              shim/mvkfix.c shim/a2c.c shim/mfx_temporal.c build/vk_rebase.c
-build/libvulkan.so.1: $(SHIM_SRCS) shim/scaler_spv.h shim/mfx_temporal.h runtime/include/lxrt_host.h
+build/libvulkan.so.1: $(SHIM_SRCS) shim/scaler_spv.h shim/mfx_temporal.h shim/adaptive_sync.h runtime/include/lxrt_host.h
 	@mkdir -p build
 	$(CC) -target $(LXRT_TARGET) -shared -fPIC -nostdlib -O2 \
 	      -fuse-ld=$(CROSS_LD) -Iruntime/include -I$(VK_HEADERS)/include \
@@ -218,8 +218,15 @@ $(LAUNCHER_BIN): $(LAUNCHER_SRCS) launcher/SDLShim.h
 # (scripts/apk-inspect.py, scripts/android-pm.py). All of them also run on Linux
 # (guest_env.sh skips its scripts/mkframeroot.sh part there; mkarmroot.sh and
 # run_steam_arm64.sh skip: APFS clones, launchd reparenting).
-.PHONY: test-launcher-core
-test-launcher-core:
+.PHONY: test-launcher-core test-adaptive-sync
+test-adaptive-sync:
+	@mkdir -p build
+	$(CC) -O2 -I$(VK_HEADERS)/include tests/elf/adaptive_sync.c -o build/adaptive-sync-tests
+	build/adaptive-sync-tests
+	$(CC) -O2 -I$(VK_HEADERS)/include tests/elf/adaptive_present.c -o build/adaptive-present-tests
+	build/adaptive-present-tests
+
+test-launcher-core: test-adaptive-sync
 	@mkdir -p build
 	swiftc -parse-as-library -swift-version 5 launcher/ApplicationCore.swift \
 	    launcher/tests/ApplicationCoreTests.swift -o build/application-core-tests

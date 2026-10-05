@@ -129,6 +129,7 @@ static int surface_offers(VkPhysicalDevice pd, VkSurfaceKHR surface, VkPresentMo
 
 VkResult lxrt_inner_vkGetPhysicalDeviceSurfaceCapabilitiesKHR(VkPhysicalDevice, VkSurfaceKHR, void *);   // wsi.c
 int lxrt_wsi_layer_extent(VkSurfaceKHR, uint32_t *, uint32_t *);                                           // wsi.c
+int lxrt_wsi_adaptive_sync(VkSurfaceKHR);   // wsi.c: native fullscreen + actual display range
 
 // 1 when the swapchain must be enlarged over its surface (above); *window
 // is then the surface's size. MoltenVK stretches it itself; any other
@@ -190,6 +191,17 @@ VkResult lxrt_inner_vkCreateSwapchainKHR(VkDevice dev, const VkSwapchainCreateIn
     int ov = wanted_mode(&raw, &want);
     VkExtent2D window = { 0, 0 };
     int stretch = ci && needs_stretch(dev, ci, &window);
+    const char *adaptive = getenv("LXRT_VK_ADAPTIVE_SYNC");
+    int requested = adaptive && adaptive[0] == '1';
+    // Metal owns VRR timing. Keep display sync through direct FIFO only on an
+    // eligible native fullscreen surface. Explicit mode overrides win.
+    // Never make an unsupported monitor or a borderless X window "active".
+    int vrr = requested && !ov && ci && !stretch && lxrt_wsi_adaptive_sync(ci->surface) &&
+              device_pd(dev) && surface_offers(device_pd(dev), ci->surface, VK_PRESENT_MODE_FIFO_KHR);
+    if (vrr) { want = VK_PRESENT_MODE_FIFO_KHR; ov = 1; raw = "FIFO (Adaptive Sync request)"; }
+    if (dbg && requested)
+        dprintf(2, "[shim] Adaptive Sync request: %s; physical VRR activation unverified\n",
+                vrr ? "eligible native fullscreen, direct FIFO" : "original presentation retained");
     if (dbg && ci)
         dprintf(2, "[shim] vkCreateSwapchainKHR extent %ux%u usage 0x%x flags 0x%x images %u, surface %ux%u, format %d colorspace %d\n",
                 ci->imageExtent.width, ci->imageExtent.height, (unsigned)ci->imageUsage, (unsigned)ci->flags,
@@ -205,7 +217,7 @@ VkResult lxrt_inner_vkCreateSwapchainKHR(VkDevice dev, const VkSwapchainCreateIn
         VkSwapchainCreateInfoKHR m = *ci;
         if (ov > 0 && device_pd(dev) && surface_offers(device_pd(dev), ci->surface, want))
             m.presentMode = want;
-        if (lxrt_mailbox_wanted(&m)) {
+        if (!vrr && lxrt_mailbox_wanted(&m)) {
             VkResult mr = lxrt_mailbox_create(dev, device_pd(dev), &m, alloc, out);
             if (dbg)
                 dprintf(2, "[shim] vkCreateSwapchainKHR driver=%s requested=%s: mailbox -> %d\n", lxrt_vk_driver,

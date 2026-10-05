@@ -172,6 +172,10 @@ struct LauncherSettings: Codable, Equatable {
     var guestLanguage: String = "auto"
     var timezone: String = "auto"
     var vsync: String = "game"
+    /// Requests macOS Adaptive Sync on a compatible screen and fullscreen
+    /// surface. The WSI checks the actual surface before using it; an old
+    /// settings file keeps the game's presentation behavior.
+    var adaptiveSync: Bool = false
     var dramGB: Int = 0
     var vramGB: Int = 0
     /// SynchronizationBackend raw value; replaces the esync/fsync booleans
@@ -242,6 +246,7 @@ struct LauncherSettings: Codable, Equatable {
         guestLanguage = try c.decodeIfPresent(String.self, forKey: .guestLanguage) ?? "auto"
         timezone = try c.decodeIfPresent(String.self, forKey: .timezone) ?? "auto"
         vsync = try c.decodeIfPresent(String.self, forKey: .vsync) ?? "game"
+        adaptiveSync = try c.decodeIfPresent(Bool.self, forKey: .adaptiveSync) ?? false
         dramGB = try c.decodeIfPresent(Int.self, forKey: .dramGB) ?? 0
         vramGB = try c.decodeIfPresent(Int.self, forKey: .vramGB) ?? 0
         fexDiskCache = try c.decodeIfPresent(Bool.self, forKey: .fexDiskCache) ?? false

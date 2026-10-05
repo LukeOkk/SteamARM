@@ -1,0 +1,191 @@
+--- a/hw/xquartz/remoteLayerCocoa.m
++++ b/hw/xquartz/remoteLayerCocoa.m
+@@ -16,6 +16,8 @@
+ #import <Cocoa/Cocoa.h>
+ #import <QuartzCore/QuartzCore.h>
+ #include "xpr/xprRemoteLayer.h"
++#include <pthread.h>
++#include <math.h>
+ 
+ extern void ErrorF(const char *f, ...) __attribute__((format(printf, 1, 2)));
+ static int rl_debug = -1;
+@@ -28,6 +30,7 @@
+ 
+ @interface XQRemoteLayerWindow : NSWindow
+ @property (nonatomic) uint32_t nativeBelow;
++@property (nonatomic) XQRemoteLayerState refreshState;
+ @property (nonatomic) NSInteger baseLevel;
+ @property (nonatomic) BOOL top;
+ @property (nonatomic) BOOL coversScreen;
+@@ -49,6 +52,67 @@
+ 
+ static NSMutableDictionary<NSNumber *, XQRemoteLayerWindow *> *overlays;
+ static id observerActive, observerUnhide;
++
++/* Main-thread display/window snapshots only. The DIX thread copies plain
++ * integers under a separate lock; it never calls AppKit or waits on main.
++ * _STEAMARM_VRR: version, CAContext, min/max interval (us), native fullscreen.
++ * A capability/request is not proof of the physical monitor's scanout mode. */
++static pthread_mutex_t refresh_lock = PTHREAD_MUTEX_INITIALIZER;
++static struct { uint32_t xid, v[5]; XQRemoteLayerState applied; } refresh_slots[64];
++
++int
++XQRemoteLayerRefreshInfo(const XQRemoteLayerState *state, uint32_t out[5])
++{
++    int found = 0;
++    pthread_mutex_lock(&refresh_lock);
++    for (unsigned i = 0; i < 64; i++)
++        if (refresh_slots[i].xid == state->xid && !memcmp(&refresh_slots[i].applied, state, sizeof(*state))) {
++            memcpy(out, refresh_slots[i].v, sizeof(refresh_slots[i].v));
++            found = 1;
++            break;
++        }
++    pthread_mutex_unlock(&refresh_lock);
++    return found;
++}
++
++static void
++rl_refresh_store(uint32_t xid, XQRemoteLayerWindow *w)
++{
++    uint32_t v[5] = {1, w ? w.host.contextId : 0, 0, 0, 0};
++    NSScreen *sc = w.screen;
++    if (w && w.isVisible && w.wanted && !w.mcHidden && !w.covered && sc) {
++        double lo = sc.minimumRefreshInterval, hi = sc.maximumRefreshInterval;
++        if (isfinite(lo) && isfinite(hi) && lo > 0 && hi >= lo && hi <= 1.0) {
++            v[2] = (uint32_t)llround(lo * 1000000.0);
++            v[3] = (uint32_t)llround(hi * 1000000.0);
++            /* Do not infer native fullscreen from a borderless rectangle.
++             * The current rootless overlay has a one-column outset to avoid
++             * WindowServer suppressing its remote layer. Keep that path. */
++            v[4] = (w.styleMask & NSWindowStyleMaskFullScreen) != 0;
++        }
++    }
++    pthread_mutex_lock(&refresh_lock);
++    unsigned slot = 64, empty = 64;
++    for (unsigned i = 0; i < 64; i++) {
++        if (refresh_slots[i].xid == xid) { slot = i; break; }
++        if (!refresh_slots[i].xid && empty == 64) empty = i;
++    }
++    if (slot == 64 && w) slot = empty;
++    if (slot < 64) {
++        refresh_slots[slot].xid = w ? xid : 0;
++        memcpy(refresh_slots[slot].v, v, sizeof(v));
++        if (w) refresh_slots[slot].applied = w.refreshState;
++        refresh_slots[slot].applied.reorder = 0;
++    }
++    pthread_mutex_unlock(&refresh_lock);
++}
++
++static void
++rl_refresh_all(void)
++{
++    for (NSNumber *key in overlays)
++        rl_refresh_store(key.unsignedIntValue, overlays[key]);
++}
+ 
+ /* Mission Control lays the overlays out as windows of their own, with the
+  * game's picture, but leaves the Xplugin frames where they are: the window
+@@ -569,7 +633,7 @@
+         dispatch_source_t timer = dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER, 0, 0, dispatch_get_main_queue());
+         dispatch_source_set_timer(timer, dispatch_time(DISPATCH_TIME_NOW, 100 * NSEC_PER_MSEC),
+                                   100 * NSEC_PER_MSEC, 10 * NSEC_PER_MSEC);
+-        dispatch_source_set_event_handler(timer, ^{ @autoreleasepool { rl_watch(); rl_mc_check(); } });
++        dispatch_source_set_event_handler(timer, ^{ @autoreleasepool { rl_watch(); rl_mc_check(); rl_refresh_all(); } });
+         dispatch_resume(timer);     /* for the life of the server */
+     }
+     return w;
+@@ -679,6 +743,8 @@
+         rl_mc_release_unused();
+         rl_mc_hide(w);
+         rl_presentation();
++        w.refreshState = *st;
++        rl_refresh_store(st->xid, w);
+     }
+ }
+ 
+@@ -693,6 +759,7 @@
+         [w orderOut:nil];
+         [w close];
+         [overlays removeObjectForKey:key];
++        rl_refresh_store(xid, nil);
+         rl_mc_release_unused();
+         ErrorF("remote layer: overlay for 0x%x removed (%lu live)\n", xid, (unsigned long)overlays.count);
+         rl_presentation();
+--- a/hw/xquartz/xpr/xprRemoteLayer.h
++++ b/hw/xquartz/xpr/xprRemoteLayer.h
+@@ -32,6 +32,9 @@
+ void XQRemoteLayerRemove(uint32_t xid);
+ void XQRemoteLayerRemoveAll(void);
+ 
++/* Thread-safe integer snapshot; no AppKit calls on the X thread. */
++int XQRemoteLayerRefreshInfo(const XQRemoteLayerState *state, uint32_t out[5]);
++
+ /* X side (only for files built with the X server headers). */
+ #ifdef XQUARTZ_REMOTE_LAYER_DIX
+ #include "scrnintstr.h"
+--- a/hw/xquartz/xpr/xprRemoteLayer.c
++++ b/hw/xquartz/xpr/xprRemoteLayer.c
+@@ -26,6 +26,7 @@
+ #include <Xplugin.h>
+ #include "quartz.h"
+ #include "propertyst.h"
++#include "property.h"
+ #include "windowstr.h"
+ #include "scrnintstr.h"
+ #include "dixstruct.h"
+@@ -48,11 +49,13 @@
+     xp_native_window_id native;   /* ... and its CGWindowID */
+     XQRemoteLayerState sent;      /* last state handed to AppKit */
+     int have_sent;
++    uint32_t refresh[5];
+ } RLEntry;
+ 
+ static RLEntry rl_entries[RL_MAX];
+ static int rl_count;
+ static Atom rl_atom = None;
++static Atom refresh_atom = None;
+ static OsTimerPtr rl_timer;
+ static int rl_callback_added;
+ 
+@@ -194,6 +197,12 @@
+     XQRemoteLayerState st;
+ 
+     rl_compute(e, &st);
++    if (!e->have_sent || memcmp(&e->sent, &st, sizeof(st))) {
++        uint32_t invalid[5] = {1, e->ctx, 0, 0, 0};
++        memcpy(e->refresh, invalid, sizeof(invalid));
++        dixChangeWindowProperty(serverClient, e->win, refresh_atom,
++                                XA_CARDINAL, 32, PropModeReplace, 5, invalid, FALSE);
++    }
+     if (e->have_sent) {
+         XQRemoteLayerState old = e->sent;
+         old.reorder = 0;
+@@ -237,6 +246,20 @@
+     if (!rl_count)
+         return 0;
+     rl_update_all(FALSE);
++    for (int i = 0; i < rl_count; i++) {
++        RLEntry *e = &rl_entries[i];
++        uint32_t v[5] = {1, e->ctx, 0, 0, 0};
++        XQRemoteLayerRefreshInfo(&e->sent, v);
++        /* Mapping/geometry changes invalidate the asynchronously copied
++         * eligibility until AppKit has applied precisely that snapshot. */
++        if (!e->win->realized || !e->sent.visible || !e->sent.top)
++            v[4] = 0;
++        if (memcmp(e->refresh, v, sizeof(v))) {
++            memcpy(e->refresh, v, sizeof(v));
++            dixChangeWindowProperty(serverClient, e->win, refresh_atom,
++                                    XA_CARDINAL, 32, PropModeReplace, 5, v, FALSE);
++        }
++    }
+     return RL_POLL_MS;
+ }
+ 
+@@ -403,6 +426,7 @@
+         return TRUE;
+ 
+     rl_atom = MakeAtom(RL_ATOM_NAME, strlen(RL_ATOM_NAME), TRUE);
++    refresh_atom = MakeAtom("_STEAMARM_VRR", 13, TRUE);
+     if (!rl_callback_added) {
+         if (!AddCallback(&PropertyStateCallback, rl_property_cb, NULL))
+             return FALSE;

@@ -74,6 +74,8 @@ extern int pthread_mutex_lock(lx_mutex *) __attribute__((weak));
 extern int pthread_mutex_unlock(lx_mutex *) __attribute__((weak));
 extern int pthread_cond_wait(lx_cond *, lx_mutex *) __attribute__((weak));
 extern int pthread_cond_signal(lx_cond *) __attribute__((weak));
+extern int pthread_cond_clockwait(lx_cond *, lx_mutex *, int, const struct lx_timespec *) __attribute__((weak));
+extern int pthread_cond_destroy(lx_cond *) __attribute__((weak));
 
 VkResult lxrt_mvk_vkCreateSwapchainKHR(VkDevice, const VkSwapchainCreateInfoKHR *, const VkAllocationCallbacks *,
                                        VkSwapchainKHR *);
@@ -142,7 +144,7 @@ typedef struct mailbox {
     // The thread that acquires the driver's images.
     lx_thread thread;
     lx_mutex lock;
-    lx_cond wake;
+    lx_cond wake, ready_wake;   // separate waiters: acquire's "go", present's drawable
     int go, ready, quit, started;
     uint32_t real_index;
     VkResult acquire_result, sticky;   // sticky: what the game is told at its next acquire
@@ -420,6 +422,7 @@ static void *acquirer(void *arg)
         if (r != VK_SUCCESS)
             m->sticky = r;      // out of date, surface lost, suboptimal: the game hears of it
         int stop = r != VK_SUCCESS && r != VK_SUBOPTIMAL_KHR;
+        pthread_cond_signal(&m->ready_wake);
         pthread_mutex_unlock(&m->lock);
         if (stop)
             return 0;           // no image will come from this swapchain any more
@@ -433,6 +436,7 @@ static void stop_thread(mailbox *m)
     pthread_mutex_lock(&m->lock);
     m->quit = 1;
     pthread_cond_signal(&m->wake);
+    pthread_cond_signal(&m->ready_wake);
     pthread_mutex_unlock(&m->lock);
     pthread_join(m->thread, 0);
     m->started = 0;
@@ -459,6 +463,10 @@ static void destroy(mailbox *m)
     }
     if (debug())
         dprintf(2, "[shim] mailbox: %u frames shown, %u dropped\n", m->shown, m->dropped);
+    if (pthread_cond_destroy) {
+        pthread_cond_destroy(&m->ready_wake);
+        pthread_cond_destroy(&m->wake);
+    }
     free(m);
 }
 
@@ -690,6 +698,34 @@ static void image_barrier(VkCommandBuffer cb, VkImage img, VkImageLayout from, V
                                   0, 1, &b);
 }
 
+// Called with m->lock held; returns with it held. A drawable or terminal
+// acquire result wakes present immediately instead of polling every 250 us.
+// The separate condition cannot consume the acquire thread's "go" signal.
+// Older guest libcs retain the previous polling path. The absolute deadline
+// uses CLOCK_MONOTONIC, so changes to the wall clock cannot extend the wait.
+// LXRT_VK_MAILBOX_POLL=1 also keeps that path for comparison/recovery.
+static void wait_ready_locked(mailbox *m, uint64_t deadline)
+{
+    const char *poll = getenv("LXRT_VK_MAILBOX_POLL");
+    int event_wait = pthread_cond_clockwait && !(poll && *poll == '1');
+    const struct lx_timespec until = { (long)(deadline / 1000000000ull), (long)(deadline % 1000000000ull) };
+    const struct lx_timespec nap = { 0, 250000 };
+    while (!m->ready && !m->quit &&
+           (m->sticky == VK_SUCCESS || m->sticky == VK_SUBOPTIMAL_KHR) && now_ns() < deadline) {
+        if (event_wait) {
+            int r = pthread_cond_clockwait(&m->ready_wake, &m->lock, 1 /* CLOCK_MONOTONIC */, &until);
+            if (!r)
+                continue;   // predicate handles spurious notifications
+            if (r == 110 /* ETIMEDOUT */)
+                break;
+            event_wait = 0;  // unsupported clock/libc: preserve the bounded fallback
+        }
+        pthread_mutex_unlock(&m->lock);
+        nanosleep(&nap, 0);
+        pthread_mutex_lock(&m->lock);
+    }
+}
+
 // The game's present of its image i, waiting for `waits`. *shown: 1 if a
 // driver image took it.
 VkResult lxrt_mailbox_present(VkQueue q, VkSwapchainKHR sc, uint32_t i, const VkSemaphore *waits, uint32_t nwaits,
@@ -738,19 +774,16 @@ VkResult lxrt_mailbox_present(VkQueue q, VkSwapchainKHR sc, uint32_t i, const Vk
     // an error, which the game hears of at its next acquire.)
     if (!ready && (m->fifo || now_ns() - m->last_shown_ns > 13000000ull)) {
         const uint64_t deadline = now_ns() + (m->fifo ? 1000000000ull : 30000000ull);
-        const struct lx_timespec nap = { 0, 250000 };
-        while (!ready && now_ns() < deadline) {
-            nanosleep(&nap, 0);
-            pthread_mutex_lock(&m->lock);
-            ready = m->ready;
-            if (ready) {
-                m->ready = 0;
-                real = m->real_index;
-                slot = m->slot;
-                acquired = m->acquire_result;
-            }
-            pthread_mutex_unlock(&m->lock);
+        pthread_mutex_lock(&m->lock);
+        wait_ready_locked(m, deadline);
+        ready = m->ready;
+        if (ready) {
+            m->ready = 0;
+            real = m->real_index;
+            slot = m->slot;
+            acquired = m->acquire_result;
         }
+        pthread_mutex_unlock(&m->lock);
     }
 
     if (!ready) {

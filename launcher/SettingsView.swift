@@ -36,6 +36,13 @@ struct SettingsView: View {
     @State private var saveError: String?
     @State private var compatibility: CompatibilityStatus?
     @State private var compatibilityLoaded = false
+    @State private var displayRefresh: [ScreenRefresh] = []
+
+    private struct ScreenRefresh: Identifiable {
+        let id: Int
+        let name: String
+        let range: DisplayRefreshRange?
+    }
 
     var body: some View {
         VStack(spacing: 0) {
@@ -81,6 +88,7 @@ struct SettingsView: View {
         .frame(width: 1160, height: 790)
         .preferredColorScheme(.dark)
         .task {
+            refreshDisplays()
             model.refreshCapabilities()
             compatibility = await CompatibilityStatus.load(project: model.projectDir)
             compatibilityLoaded = true
@@ -102,6 +110,18 @@ struct SettingsView: View {
         } message: { Text(saveError ?? "") }
         .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
             trusted = AXIsProcessTrusted()
+            refreshDisplays()
+        }
+        .onReceive(NotificationCenter.default.publisher(for: NSApplication.didChangeScreenParametersNotification)) { _ in
+            refreshDisplays()
+        }
+    }
+
+    private func refreshDisplays() {
+        displayRefresh = NSScreen.screens.enumerated().map { index, screen in
+            ScreenRefresh(id: index, name: screen.localizedName,
+                range: DisplayRefreshRange(minimumInterval: screen.minimumRefreshInterval,
+                                           maximumInterval: screen.maximumRefreshInterval))
         }
     }
 
@@ -391,8 +411,10 @@ struct SettingsView: View {
                 integerChoice("Filtrado anisotrópico", $draft.anisotropy, [0, 2, 4, 8, 16], zero: "Automático")
                 Text("Un mínimo para los juegos (Direct3D por DXVK y Vulkan nativo como Counter-Strike 2): si el juego pide más, se queda con lo suyo. Automático: lo que elija el juego. Se aplica al reiniciar Steam.")
                     .font(.caption).foregroundStyle(.secondary)
-                integerChoice("Límite de FPS", $draft.frameRateLimit, [0, 30, 60, 90, 120, 144], zero: "Sin límite")
+                integerChoice("Límite de FPS", $draft.frameRateLimit, [0, 30, 60, 90, 100, 120, 144, 165], zero: "Sin límite")
                 Text("Para los juegos (Direct3D por DXVK/VKD3D y Vulkan nativo), no para la interfaz de Steam. Se aplica al reiniciar Steam.")
+                    .font(.caption).foregroundStyle(.secondary)
+                Text("100 FPS equivalen a 10 ms por fotograma; menos de 10 ms requiere más de 100 FPS. El límite no aumenta el rendimiento del juego.")
                     .font(.caption).foregroundStyle(.secondary)
                 choice("HUD de DXVK", $draft.dxvkHud, [("off", "Desactivado"), ("fps", "FPS"), ("full", "Completo")])
                 Text("Solo juegos Direct3D 8 a 11 (DXVK).")
@@ -430,6 +452,33 @@ struct SettingsView: View {
                 Toggle("Interfaz de Steam ARM64 acelerada por GPU", isOn: $draft.steamUIAcceleration)
                 Text("La interfaz de Steam ARM64 y Steam Frame (Chromium) dibuja con Vulkan sobre Metal (el driver elegido arriba: MoltenVK o KosmicKrisp) en lugar de con la CPU. Sin ella, su proceso GPU no arranca en macOS y Steam pinta por software. Se aplica al abrir Steam; si su ventana se viera mal, desactívala.")
                     .font(.caption).foregroundStyle(.secondary)
+            }
+            Section("Pantalla y Adaptive Sync") {
+                Toggle("Solicitar Adaptive Sync (FreeSync / G-SYNC compatibles)", isOn: $draft.adaptiveSync)
+                ForEach(displayRefresh) { screen in
+                    LabeledContent(screen.name) {
+                        if let range = screen.range {
+                            if range.variable {
+                                Text("Rango variable informado: \(range.minimumFPS, specifier: "%.0f")–\(range.maximumFPS, specifier: "%.0f") Hz")
+                            } else {
+                                Text("Refresco fijo: \(range.maximumFPS, specifier: "%.0f") Hz")
+                            }
+                        } else {
+                            Text("Rango de refresco no disponible")
+                        }
+                    }
+                }
+                if displayRefresh.isEmpty {
+                    Text("No se pudo consultar ninguna pantalla.").font(.caption).foregroundStyle(.secondary)
+                } else if !displayRefresh.contains(where: { $0.range?.variable == true }) {
+                    Text("macOS no informa un rango variable en esta conexión. SteamARM conserva la presentación del juego hasta detectar una pantalla compatible.")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
+                Text("Requiere una pantalla que macOS ofrezca como Variable o Adaptive, Adaptive Sync activado en el monitor y pantalla completa nativa de macOS. Una ventana que cubre la pantalla puede conservar la presentación normal. FreeSync y G-SYNC compatibles usan ese soporte de macOS. La opción solicita su uso; no confirma que el monitor esté sincronizando cada fotograma ni aumenta los FPS. Se aplica al reiniciar Steam.")
+                    .font(.caption).foregroundStyle(.secondary)
+                Text("Apple recomienda conectar por USB-C o Thunderbolt con DisplayPort. Si Variable o Adaptive no aparece en Ajustes del Sistema → Pantallas, revisa el monitor y la conexión.")
+                    .font(.caption).foregroundStyle(.secondary)
+                Link("Guía de Adaptive Sync de Apple", destination: URL(string: "https://support.apple.com/102144")!)
             }
         }
     }

@@ -21,6 +21,7 @@
 #include "lxrt_host.h"
 #include <stdint.h>
 #include <stddef.h>
+#include "adaptive_sync.h"
 
 typedef int32_t VkResult;
 typedef uint32_t VkBool32;
@@ -111,6 +112,10 @@ typedef struct {
     uint8_t response_type, pad0; uint16_t sequence; uint32_t length; uint32_t atom;
 } xcb_intern_atom_reply_t;
 typedef struct {
+    uint8_t response_type, format; uint16_t sequence; uint32_t length;
+    uint32_t type, bytes_after, value_len; uint8_t pad[12];
+} xcb_get_property_reply_t;
+typedef struct {
     uint8_t response_type, pad0; uint16_t sequence; uint32_t length;
     uint32_t root, parent; uint16_t children_len; uint8_t pad1[14];
 } xcb_query_tree_reply_t;
@@ -127,6 +132,9 @@ static struct {
     xcb_cookie_t (*query_tree)(void *c, uint32_t w);
     xcb_query_tree_reply_t *(*query_tree_reply)(void *c, xcb_cookie_t, void **e);
     int (*flush)(void *c);
+    xcb_cookie_t (*get_property)(void *, uint8_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t);
+    xcb_get_property_reply_t *(*get_property_reply)(void *, xcb_cookie_t, void **);
+    void *(*get_property_value)(const xcb_get_property_reply_t *);
     int loaded;
 } X;
 
@@ -146,6 +154,9 @@ static int load_xcb(void)
         X.query_tree = dlsym(xcb, "xcb_query_tree");
         X.query_tree_reply = dlsym(xcb, "xcb_query_tree_reply");
         X.flush = dlsym(xcb, "xcb_flush");
+        X.get_property = dlsym(xcb, "xcb_get_property");
+        X.get_property_reply = dlsym(xcb, "xcb_get_property_reply");
+        X.get_property_value = dlsym(xcb, "xcb_get_property_value");
     }
     if (xx)
         X.get_xcb = dlsym(xx, "XGetXCBConnection");
@@ -236,6 +247,44 @@ static wsi_surface *find(VkSurfaceKHR s)
         if (p->surface == s)
             return p;
     return 0;
+}
+
+// Query the window actually hosting this layer, not the launcher's screen.
+// Older X servers, VNC, fixed refresh and borderless overlays safely decline.
+static void follow_window(VkSurfaceKHR surface);
+int lxrt_wsi_adaptive_sync(VkSurfaceKHR surface)
+{
+    wsi_surface *s = find(surface);
+    if (!s || !X.get_property || !X.get_property_reply || !X.get_property_value)
+        return 0;
+    follow_window(surface);
+    // A layer can be removed without destroying its X window. Its old VRR
+    // property must not make a retired context eligible; never rewrite the
+    // X server's property list from a property-destruction callback.
+    if (!s->atom) return 0;
+    xcb_get_property_reply_t *layer = X.get_property_reply(s->conn,
+        X.get_property(s->conn, 0, s->shown, s->atom, 6, 0, 1), 0);
+    if (!layer) return 0;
+    int live = layer->type == 6 && layer->format == 32 && layer->value_len == 1 &&
+               !layer->bytes_after && layer->length == 1 &&
+               *(const uint32_t *)X.get_property_value(layer) == s->ctx;
+    free(layer);
+    if (!live) return 0;
+    static const char name[] = "_STEAMARM_VRR";
+    xcb_intern_atom_reply_t *a = X.intern_atom_reply(s->conn,
+        X.intern_atom(s->conn, 1, sizeof name - 1, name), 0);
+    if (!a) return 0;
+    uint32_t atom = a->atom;
+    free(a);
+    if (!atom) return 0;
+    xcb_get_property_reply_t *r = X.get_property_reply(s->conn,
+        X.get_property(s->conn, 0, s->shown, atom, 6 /* CARDINAL */, 0, 5), 0);
+    if (!r) return 0;
+    int eligible = r->type == 6 && r->format == 32 && r->value_len == 5 &&
+                   !r->bytes_after && r->length == 5 &&
+                   lxrt_adaptive_sync_eligible(X.get_property_value(r), s->ctx);
+    free(r);
+    return eligible;
 }
 
 static VkResult create_x11_surface(VkInstance inst, void *conn, uint32_t window,

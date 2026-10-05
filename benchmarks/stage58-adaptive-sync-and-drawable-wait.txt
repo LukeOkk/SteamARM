@@ -1,0 +1,87 @@
+Stage 58 -- Adaptive Sync eligibility and drawable notification
+2026-10-05. Apple M4, macOS 27, 1920x1080 fixed 165 Hz. Zero VM.
+
+Target: less than 10 ms per displayed game frame, with unchanged quality.
+NOT ACHIEVED: no new CS2 benchmark establishes 100 FPS, +150%, zero stutter
+or physical Adaptive Sync activation. See stage 57 for the native game
+trace: GPU walltime averaged 14.18 ms and presentation hitches remained.
+
+1. Drawable wait
+
+The mailbox has separate conditions for the acquirer's go signal and the
+presenter's drawable-ready signal. pthread_cond_clockwait uses a monotonic
+absolute deadline; unsupported libcs/clocks retain 250-us polling. Existing
+FIFO/IMMEDIATE deadlines, frame-copy and dropping semantics remain.
+Stop and terminal acquisition errors also wake the waiter. All conditions
+are destroyed after the acquire thread has joined.
+
+tests/elf/run_mailbox_wait.sh with RUN_FEX=1 passed ARM64 and x86/FEX
+event, forced-poll and unsupported-clock cases. Tests cover a drawable,
+terminal error, timeout, spurious wake and stop. Synthetic tests establish
+correct signaling, not a measured game FPS increase.
+
+Eight paired native FIFO runs (600 frames each), both installed drivers:
+warm-frame medians 6.02--6.14 ms. One event-wait MoltenVK run had a
+15.454-ms maximum versus 10.507 ms in polling samples. KosmicKrisp event
+maxima reached 7.938 ms versus 12.683 ms for polling. Small samples and
+uncontrolled load do not establish lower stuttering or a stable <10 ms.
+
+2. Adaptive Sync
+
+Settings reads each NSScreen's actual minimum/maximum interval, validates
+finite positive ranges, and displays fixed/variable capability separately
+from a user's request. Old settings decode adaptiveSync=false.
+
+XQuartz publishes a versioned, bounded integer snapshot for the actual
+hosting window: context id, interval range and native fullscreen flag.
+AppKit runs only on its main thread; the DIX thread copies snapshots under
+a mutex. Full applied window state must match, and geometry/context/removal
+invalidate eligibility. A removed layer is rejected by its live context
+property; window destruction removes properties through XQuartz itself.
+No account, display serial or personal path is sent.
+
+The WSI follows the current host window and validates property type, length,
+version, context, interval and native fullscreen. Eligible, unscaled
+surfaces request direct FIFO/Metal display sync when offered. Explicit
+present-mode overrides win. All other paths keep the original behavior.
+The current rootless overlay deliberately uses a one-column outset to
+avoid WindowServer suppressing its remote layer; it is not native macOS
+fullscreen and does NOT claim eligibility. No fullscreen rewrite was made.
+
+Policy probes cover fixed/invalid/stale context, missing fullscreen,
+explicit override, absent driver mode, scaler fallback and caller immutability.
+These use synthetic states, not fictitious hardware activation.
+
+An isolated initial teardown test caught a server crash from modifying the
+property list inside its deletion callback. That mutation was removed;
+the WSI checks the live layer property instead. The installed server was
+not touched during the failed experiment.
+
+Actual monitor: minimum/maximum 6.061 ms, both equal, no Variable/Adaptive
+option exposed by macOS. Fixed-monitor native probes with the request off/on
+passed on MoltenVK and KosmicKrisp and logged original presentation retained.
+Physical FreeSync/G-SYNC-compatible Adaptive Sync remains unverified.
+
+Final isolated server survived five consecutive window teardowns: FIFO and
+IMMEDIATE on MoltenVK and the freshly built KosmicKrisp patches 1--22,
+plus FIFO with the optional depth cache enabled. FIFO warm medians were
+6.028--6.038 ms and maxima 7.728--7.881 ms. These are 800x600 clears,
+not CS2. IMMEDIATE can drop mailbox frames; submission FPS is not scanout.
+
+The final shim and fresh driver passed 24 offscreen native regressions:
+passes, alpha/MSAA, resubmission, vertex reads, vertex-only pipelines,
+MetalFX, FSR EASU/dynamic/bilinear-full and negative blend/scissor/native
+cases, on both drivers. The fresh depth cache passed off/on readback and
+reported 64 entries, 59,998 hits, 64 misses and 322 capacity fallbacks.
+
+3. Distribution
+
+Version 0.3.52 inherits About/version from CFBundleShortVersionString.
+Packaging refuses existing output and mixed source revisions, retains its
+staging directory, and consumes full privacy-check streams with pipefail.
+The released source excludes private logs, proprietary shader captures,
+Steam accounts and settings. Experimental render-area and MoltenVK vertex
+subgroup rewrites are excluded. Dynamic depth cache remains opt-in.
+
+https://support.apple.com/102144
+https://github.com/apple/game-porting-toolkit/blob/main/game-porting-skills/skills/presenting-metal-drawables/references/frame-pacing.md

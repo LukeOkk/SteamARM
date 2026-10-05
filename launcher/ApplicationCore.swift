@@ -1666,3 +1666,22 @@ enum GameUpscalerChoice {
         }
     }
 }
+
+/// The refresh range reported by macOS, not a game's measured frame time.
+/// A fixed or invalid range must never be advertised as Adaptive Sync.
+struct DisplayRefreshRange: Equatable {
+    let minimumInterval: TimeInterval
+    let maximumInterval: TimeInterval
+
+    init?(minimumInterval: TimeInterval, maximumInterval: TimeInterval) {
+        guard minimumInterval.isFinite, maximumInterval.isFinite,
+              minimumInterval > 0, maximumInterval >= minimumInterval else { return nil }
+        self.minimumInterval = minimumInterval
+        self.maximumInterval = maximumInterval
+    }
+
+    var minimumFPS: Double { 1 / maximumInterval }
+    var maximumFPS: Double { 1 / minimumInterval }
+    /// Avoid treating insignificant floating-point differences as VRR.
+    var variable: Bool { maximumInterval - minimumInterval > minimumInterval * 0.001 }
+}

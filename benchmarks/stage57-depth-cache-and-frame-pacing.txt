@@ -1,0 +1,128 @@
+Stage 57 -- Bounded dynamic depth/stencil cache and CS2 frame pacing
+2026-10-05. Apple M4, 16 GB, macOS 27, 1920x1080 at 165 Hz. Zero VM.
+
+Scope: preserve resolution and quality. The current CS2 video profile has
+low settings, anisotropic filtering 16x, MSAA 4x, V-Sync off and FSR off.
+The requested targets (+150% FPS, at least 100 FPS, no stuttering) have NOT
+been established. The installed application and installed drivers were not
+replaced. Raw game logs, account data, captures and proprietary shaders are
+not part of this record or the source changes.
+
+1. KOSMICKRISP DYNAMIC DEPTH/STENCIL STATE CACHE (patch 22)
+
+Metal depth/stencil states are immutable. Cache up to 64 states per device,
+using all 15 descriptor fields, retaining caller ownership and serializing
+concurrent lookup/creation. Dynamic stencil reference values remain encoded
+separately. At capacity, use the original allocation path; no eviction.
+KK_DS_CACHE=1 enables the experiment. DEFAULT OFF: game FPS benefit has not
+been established. KK_DS_CACHE_LOG=1 reports hits and capacity fallback at
+device teardown, without application paths or shader contents.
+
+tests/elf/vk_dynamic_depth.c alternates ALWAYS/NEVER depth comparison over
+60,000 draws, checks pixels, then draws 256 cells using different stencil
+masks, operations, references, depth writes and both faces. The probe also
+exercises device teardown. The final driver reports 64 entries, 59,998
+hits, 64 misses and 322 capacity fallbacks. MoltenVK, cache off/on and x86
+through FEX passed. tests/elf/run_vk_dynamic_depth.sh checks both pixels and
+the cache counters: an older driver cannot silently pass the enabled case.
+
+Final paired native ARM runs: 12 pairs, alternate the order, discard the
+first two pairs. Same binary and driver, render-area experiment disabled,
+game stopped. Ten retained pairs, milliseconds:
+
+                       record median [min,max]       total median [min,max]
+  KK_DS_CACHE=0          31.939 [30.760,39.257]         45.729 [41.610,51.493]
+  KK_DS_CACHE=1          19.359 [17.985,25.331]         31.989 [29.594,41.218]
+
+39.4% less recording time, 30.0% less total completion time in this
+microbenchmark. These numbers are NOT game FPS or a stutter reduction.
+An earlier ten-pair run measured 34.562/20.684 ms recording and
+47.492/34.497 ms total, consistent with the recording benefit.
+
+Final cache-enabled regressions passed: render passes, alpha/MSAA, pipeline
+cache keys, vertex reads, vertex-only pipelines, resubmission and MetalFX.
+FSR tests passed with the required expected-result arguments: EASU, dynamic
+EASU, bilinear partial/full input, and blend/scissor/native negative cases.
+The first invocation omitted that argument and expected the original shader
+while MetalFX was active; that FAIL was a test invocation error.
+
+Windows D3D11/D3D12 probes passed through the ARM64 client's reaper,
+SteamARM's Proton x86 compatibility tool, FEX and the isolated driver.
+Their clear/present throughput is a mailbox microbenchmark, with possible
+dropped frames; it is NOT a measured Windows game performance gain.
+
+2. CS2 EXPERIMENTS -- NO MATCHED FPS COMPARISON
+
+Native Linux CS2 through the ARM64 client's Linux x86/FEX tool, de_dust2,
+nine bots, current quality settings. Bots, camera, round and warmup differed;
+durations also differed. Consequently none of these establishes +150%,
+an improvement over CrossOver, or a stable game FPS gain.
+
+KosmicKrisp baseline: last 30 two-second windows median 42.5 FPS.
+Depth cache plus a separate render-area experiment: last 60 windows median
+43.25 FPS. No stable improvement established; render-area changes remain
+outside the repository and disabled.
+
+Isolated MoltenVK 1.4.2 experiment lowered only vertex subgroup bitwise-OR
+reductions with subgroup scope and no subgroup builtins to single invocation
+identity, as KosmicKrisp does. Own pixel probe and SPIR-V validation passed.
+Custom-driver paths bypass named MoltenVK compatibility branches, so the
+experiment also preserved null descriptor-set splitting and shadow-compare
+splitting, and enabled invariant Position. Earlier incomplete experiments
+crashed on a null descriptor set or showed visual defects. The complete
+experiment entered real gameplay and was inspected visually, but is NOT
+integrated or enabled in the application. Complete visual equivalence and
+general shader compatibility remain unverified.
+
+Driver-present submission intervals, last 30 windows (two seconds each):
+  complete MoltenVK experiment: FPS median 68.58; window-P99 median 17.32 ms;
+                              18 intervals above 50 ms.
+  real IMMEDIATE swapchain:    FPS median 66.66; window-P99 median 19.75 ms;
+                              17 intervals above 50 ms.
+  prefill mode 2:              FPS median 57.05; window-P99 median 22.11 ms;
+                              16 intervals above 50 ms.
+These are submission timings, not scanout timings or global P99/1% lows.
+Menu/team selection (~80 FPS) was observed separately from gameplay.
+No present-mode or prefill default changed. FEX disk-cache experimentation
+was too short and interrupted by the test client's timer; no benefit is
+established and the existing setting is unchanged.
+
+Metal's native metalperftrace independently captured one 152.5-second CS2
+session at 1920x1080: 8,991 presented frames, reported 60.05 FPS, average
+on-GPU walltime 14.18 ms, average drawable wait 0.55 ms, maximum on-glass
+interval 824.23 ms. The native trace confirms remaining hitches; submission
+FPS alone is insufficient. A 100 FPS frame budget is 10 ms. The measured
+GPU work and hitches still exceed that budget; VRR cannot remove that work.
+This is a session aggregate, not a fixed-scene comparison or a global P99.
+
+3. VRR / G-SYNC / FREESYNC
+
+NSScreen currently reports maximum 165 FPS and identical minimum/maximum
+refresh intervals of 6.061 ms. System Settings was inspected: only fixed
+50, 60, 100, 120, 144 and 165 Hz options; no Variable/Adaptive option.
+No refresh setting was changed. This establishes that the current link
+does not expose Adaptive Sync; it does not establish that the panel could
+never support it through a different input or OSD setting.
+
+Apple's supported path is macOS Adaptive Sync on a compatible display,
+preferably DisplayPort over USB-C/Thunderbolt, with Variable/Adaptive selected
+in Displays. G-SYNC/FreeSync branding alone does not establish compatibility.
+VRR can address presentation cadence/tearing within its supported range,
+but does not eliminate shader compilation, CPU translation or GPU stalls.
+Do not force unsupported refresh modes or claim VRR is enabled here.
+
+https://support.apple.com/102144
+https://developer.apple.com/documentation/xcode/understanding-metal-performance-hud-metrics
+https://github.com/apple/game-porting-toolkit/blob/main/game-porting-skills/skills/presenting-metal-drawables/references/frame-pacing.md
+
+4. GPTK 4.0 BETA 2
+
+Both provided DMGs were inspected read-only and preserved. Evaluation
+Wine/D3DMetal binaries are macOS Mach-O x86_64; the Proton/FEX chain loads
+Linux ELF libraries. They cannot be substituted into that chain directly.
+No unsupported GPTK mixing or replacement of the working runtime was made.
+
+Reproduce the cache probe, with a separately built patch-22 driver:
+  STEAMARM_KK_OWN=<isolated-driver-directory> \
+    bash tests/elf/run_vk_dynamic_depth.sh <arm64-root>
+The runner retains its binary and logs and never installs a driver.

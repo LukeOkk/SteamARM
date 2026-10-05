@@ -363,6 +363,20 @@ struct ApplicationCoreTests {
         check(SettingsMigration.graphicsBackend(stored: "vulkan") == "vulkanMoltenVK", "legacy vulkan -> MoltenVK")
         check(SettingsMigration.graphicsBackend(stored: nil) == "auto" && SettingsMigration.graphicsBackend(stored: "bogus") == "auto", "graphics default AUTO")
         check(SettingsMigration.fallbackPolicy(stored: "ask") == "ask" && SettingsMigration.fallbackPolicy(stored: nil) == "auto", "fallback policy")
+        // Screen ranges describe macOS capability, never measured game FPS.
+        let fixedRefresh = DisplayRefreshRange(minimumInterval: 1.0 / 165, maximumInterval: 1.0 / 165)
+        check(fixedRefresh?.variable == false && abs((fixedRefresh?.maximumFPS ?? 0) - 165) < 0.001,
+              "165 Hz fixed screen is not Adaptive Sync")
+        let variableRefresh = DisplayRefreshRange(minimumInterval: 1.0 / 165, maximumInterval: 1.0 / 48)
+        check(variableRefresh?.variable == true && abs((variableRefresh?.minimumFPS ?? 0) - 48) < 0.001,
+              "48–165 Hz variable screen")
+        check(DisplayRefreshRange(minimumInterval: 0, maximumInterval: 0) == nil
+              && DisplayRefreshRange(minimumInterval: .nan, maximumInterval: 1) == nil
+              && DisplayRefreshRange(minimumInterval: 1, maximumInterval: .infinity) == nil
+              && DisplayRefreshRange(minimumInterval: 1, maximumInterval: 0.5) == nil,
+              "invalid display ranges never become VRR")
+        check(DisplayRefreshRange(minimumInterval: 0.01, maximumInterval: 0.010000001)?.variable == false,
+              "floating-point noise is not VRR")
         // "Escalado del juego": MetalFX (AUTO) unless "fsr" is stored (settings-env.py game_upscaler).
         check(SettingsMigration.gameUpscaler(stored: nil) == "auto", "old settings.json -> AUTO")
         check(SettingsMigration.gameUpscaler(stored: "fsr") == "fsr", "stored fsr wins")

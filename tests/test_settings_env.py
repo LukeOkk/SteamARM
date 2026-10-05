@@ -49,6 +49,12 @@ class SettingsEnvironmentTests(unittest.TestCase):
         for settings in ({"vsync": "game"}, {}):
             self.assertNotIn("VKD3D_SWAPCHAIN_PRESENT_MODE", self.env(settings))
 
+    def test_adaptive_sync_request(self):
+        self.assertEqual(self.env({"adaptiveSync": True})["LXRT_VK_ADAPTIVE_SYNC"], "1")
+        for value in (False, "true", 1, None):
+            self.assertNotIn("LXRT_VK_ADAPTIVE_SYNC", self.env({"adaptiveSync": value}))
+        self.assertNotIn("LXRT_VK_ADAPTIVE_SYNC", self.env({}))
+
     def test_synchronization(self):
         for choice in ("auto", "wineserver", "msync", "bogus"):
             with self.subTest(choice=choice):

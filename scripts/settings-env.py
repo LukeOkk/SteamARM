@@ -271,6 +271,10 @@ def env_from_settings(s, total=None, chip=None, display=None):
     if tz:
         env["TZ"] = tz
     vsync = s.get("vsync") or "game"
+    # A request, not a claim that VRR is active: the shim checks the real
+    # hosting window's display range and native fullscreen eligibility.
+    if s.get("adaptiveSync") is True:
+        env["LXRT_VK_ADAPTIVE_SYNC"] = "1"
     if vsync in ("on", "off"):
         n = "1" if vsync == "on" else "0"
         dxvk += ["dxgi.syncInterval = %s" % n, "d3d9.presentInterval = %s" % n]

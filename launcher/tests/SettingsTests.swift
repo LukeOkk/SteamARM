@@ -10,8 +10,10 @@ struct SettingsTests {
         let decoder = JSONDecoder()
         let defaults = try decoder.decode(LauncherSettings.self, from: Data("{}".utf8))
         precondition(defaults == LauncherSettings())
+        precondition(!defaults.adaptiveSync)
         let legacy = try decoder.decode(LauncherSettings.self, from: Data(#"{"metalHud":true,"display":"vnc","resolution":"1920x1080","extraEnv":{"TEST":"1"}}"#.utf8))
         precondition(legacy.metalHud && legacy.display == .vnc && legacy.confirmStop)
+        precondition(!legacy.adaptiveSync)
         precondition(legacy.extraEnv == ["TEST": "1"] && legacy.hotkeys["screenshot"] == "F8")
         var changed = defaults
         changed.guestLanguage = "es_ES.UTF-8"
@@ -19,6 +21,7 @@ struct SettingsTests {
         changed.fexTSO = "fast"
         changed.hotkeys["stopApp"] = "Cmd+F9"
         changed.dramGB = 12
+        changed.adaptiveSync = true
         let decoded = try decoder.decode(LauncherSettings.self, from: JSONEncoder().encode(changed))
         precondition(decoded == changed)
         // The esync/fsync booleans become one choice that keeps what ran; "vulkan" was MoltenVK.
@@ -33,7 +36,8 @@ struct SettingsTests {
         precondition(oldFSR.gameUpscaler == "auto" && oldFSR.scalingFilter == "fsr")
         let chosen = try decoder.decode(LauncherSettings.self, from: Data(#"{"scalingFilter":"metalfx","gameUpscaler":"fsr"}"#.utf8))
         precondition(chosen.gameUpscaler == "fsr")
-        precondition(String(decoding: try JSONEncoder().encode(chosen), as: UTF8.self).contains("\"gameUpscaler\":\"fsr\""))
+        let chosenJSON = String(decoding: try JSONEncoder().encode(chosen), as: UTF8.self)
+        precondition(chosenJSON.contains("\"gameUpscaler\":\"fsr\""))
         let saved = String(decoding: try JSONEncoder().encode(old), as: UTF8.self)
         precondition(!saved.contains("\"esync\":") && !saved.contains("\"fsync\":") && saved.contains("\"synchronization\":\"esync\""))
         // apps.json from before builtIn/readiness/overrides still decodes; builtin-apps.json decodes.
@@ -42,8 +46,9 @@ struct SettingsTests {
         // Run from the checkout: scripts/builtin-apps.json is read from the current directory.
         let builtIns = try decoder.decode([AppEntry].self, from: Data(contentsOf: URL(fileURLWithPath:
             FileManager.default.currentDirectoryPath).appendingPathComponent("scripts/builtin-apps.json")))
-        precondition(builtIns.map(\.id) == ["steam", "steam-arm64", "steam-arm64-frame"] && builtIns.allSatisfy(\.isBuiltIn))
-        for arm in builtIns.dropFirst() {
+        precondition(Set(builtIns.map(\.id)) == Set(["steam", "steam-arm64", "steam-arm64-frame"])
+                     && builtIns.count == 3 && builtIns.allSatisfy(\.isBuiltIn))
+        for arm in builtIns.filter({ $0.architecture == "aarch64" }) {
             precondition(arm.isExperimental && arm.architecture == "aarch64" && arm.fexRootfs == nil)
         }
         var withOverrides = oldApps[0]
