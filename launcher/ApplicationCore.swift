@@ -544,25 +544,16 @@ extension ExecutionBackend {
     }
 }
 
-/// Which Steam the launcher means by "Steam" (Ajustes → Interfaz → Steam
-/// principal, and "Iniciar Steam al abrir el launcher"): the chosen one, or
-/// the next usable one in SteamARM's order -- the native client on the Steam
-/// Frame root, the native client on the Fedora root, then the x86 client
-/// under FEX.
+/// The Steam Frame client is the only Steam offered by the launcher.
+/// Stored choices for older clients resolve to it without rewriting settings.
 enum PrimarySteam {
-    static let order = ["steam-arm64-frame", "steam-arm64", "steam"]
+    static let order = ["steam-arm64-frame"]
 
-    static func label(_ id: String) -> String {
-        switch id {
-        case "steam-arm64-frame": return "Steam ARM64 · Steam Frame"
-        case "steam-arm64": return "Steam ARM64 (Fedora)"
-        default: return "Steam x86_64 (FEX)"
-        }
-    }
+    static func label(_ id: String) -> String { "SteamARM" }
 
     /// `usable(id)` says whether that entry can start on this Mac.
     static func pick(_ chosen: String, usable: (String) -> Bool) -> String? {
-        let tries = [chosen] + order.filter { $0 != chosen }
+        let tries = (order.contains(chosen) ? [chosen] : []) + order.filter { $0 != chosen }
         return tries.first(where: usable)
     }
 }

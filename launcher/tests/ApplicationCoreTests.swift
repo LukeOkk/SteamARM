@@ -242,11 +242,11 @@ struct ApplicationCoreTests {
         check(caps.graphicsFallback(after: .vulkanMoltenVK) == nil, "no WineD3D fallback yet")
         for (k, v) in caps.graphics { check(!v.reason.isEmpty, "\(k) has a reason") }
         check(caps.graphics[.openGLWineD3D]?.state == .unavailable, "WineD3D: needs detection")
-        // The primary Steam and its fallbacks.
+        // Only Steam Frame is offered, including legacy stored choices.
         check(PrimarySteam.pick("steam-arm64-frame", usable: { _ in true }) == "steam-arm64-frame", "primary: Steam Frame when it can start")
-        check(PrimarySteam.pick("steam-arm64-frame", usable: { $0 != "steam-arm64-frame" }) == "steam-arm64", "Frame missing: ARM64 (Fedora)")
-        check(PrimarySteam.pick("steam-arm64-frame", usable: { $0 == "steam" }) == "steam", "only x86: x86")
-        check(PrimarySteam.pick("steam", usable: { _ in true }) == "steam", "x86 chosen: x86")
+        check(PrimarySteam.pick("steam-arm64-frame", usable: { $0 != "steam-arm64-frame" }) == nil, "Frame missing: no other client offered")
+        check(PrimarySteam.pick("steam-arm64-frame", usable: { $0 == "steam" }) == nil, "only x86: no launcher entry")
+        check(PrimarySteam.pick("steam", usable: { _ in true }) == "steam-arm64-frame", "old x86 choice: Steam Frame")
         check(PrimarySteam.pick("steam", usable: { $0 != "steam" }) == "steam-arm64-frame", "x86 chosen but missing: Frame next")
         check(PrimarySteam.pick("steam-arm64", usable: { _ in false }) == nil, "none can start: nil")
         // Clients started outside the launcher.

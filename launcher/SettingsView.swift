@@ -200,21 +200,10 @@ struct SettingsView: View {
     private var interfaceSection: some View {
         Group {
             Section("Inicio") {
-                Picker("Steam principal", selection: $draft.primarySteam) {
-                    ForEach(PrimarySteam.order, id: \.self) { id in
-                        let app = model.allApps.first { $0.id == id }
-                        let reason = app.flatMap { model.unavailableReason($0) } ?? (app == nil ? "no está en la biblioteca" : nil)
-                        Text(PrimarySteam.label(id) + (reason == nil ? "" : " · no disponible"))
-                            .tag(id).help(reason ?? "")
-                    }
-                }
-                if let now = model.primarySteamApp(choice: draft.primarySteam) {
-                    Text(now.id == draft.primarySteam
-                         ? "Se abre al pulsar «Iniciar Steam al abrir el launcher». Si un día no puede arrancar, se usa el siguiente: Steam Frame, después ARM64 (Fedora), después x86_64."
-                         : "\(PrimarySteam.label(draft.primarySteam)) no puede arrancar en este Mac: se usará \(PrimarySteam.label(now.id)).")
-                        .font(.caption).foregroundStyle(.secondary)
-                }
-                Toggle("Iniciar Steam al abrir el launcher", isOn: $draft.launchSteamOnStart)
+                LabeledContent("Steam principal", value: "SteamARM · Steam Frame")
+                Text("Cliente ARM64 de Steam Frame.")
+                    .font(.caption).foregroundStyle(.secondary)
+                Toggle("Iniciar SteamARM al abrir el launcher", isOn: $draft.launchSteamOnStart)
                 Toggle("Confirmar antes de detener una app", isOn: $draft.confirmStop)
             }
             Section("Pantalla") {

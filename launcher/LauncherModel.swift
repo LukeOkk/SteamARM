@@ -16,7 +16,7 @@ final class LauncherModel: ObservableObject {
     @Published var settings = LauncherSettings() {
         didSet { if settings != oldValue { Store.save(settings, to: Paths.settingsFile) } }
     }
-    /// scripts/builtin-apps.json: Steam (x86, under FEX) and Steam ARM64 (experimental).
+    /// scripts/builtin-apps.json: the Steam Frame client shown as SteamARM.
     @Published private(set) var builtIns: [AppEntry] = [AppEntry.steam]
     /// library.json: launches, time, last result and favourites per app id.
     @Published var stats: [String: AppStats] = [:] {
@@ -66,7 +66,8 @@ final class LauncherModel: ObservableObject {
             if let o = settings.builtinOverrides[b.id], !o.isEmpty { e.overrides = o }
             return e
         }
-        return builtIn + apps.filter { !ids.contains($0.id) }
+        return builtIn.filter { !$0.isOtherSteam }
+            + apps.filter { !ids.contains($0.id) && !$0.isOtherSteam }
     }
 
     init() {
@@ -80,11 +81,18 @@ final class LauncherModel: ObservableObject {
         refreshCapabilities()
     }
 
-    /// The same definitions run-app.sh reads; Steam (x86) is always there.
+    /// Older source manifests cannot reintroduce retired Steam menu entries.
     private func loadBuiltIns() {
         var list = Store.load([AppEntry].self, from: projectDir.appendingPathComponent("scripts/builtin-apps.json")) ?? []
+        var seen = Set<String>()
+        list = list.filter { !$0.isOtherSteam && seen.insert($0.id).inserted }
         if !list.contains(where: { $0.id == AppEntry.steam.id }) { list.insert(AppEntry.steam, at: 0) }
-        builtIns = list.map { var e = $0; e.builtIn = true; return e }
+        builtIns = list.map {
+            var e = $0
+            e.builtIn = true
+            if e.id == AppEntry.steam.id { e.name = AppEntry.steam.name }
+            return e
+        }
     }
 
     /// Re-reads what is installed (scripts/compat-status.py, in a subprocess).

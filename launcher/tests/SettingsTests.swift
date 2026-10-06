@@ -46,8 +46,8 @@ struct SettingsTests {
         // Run from the checkout: scripts/builtin-apps.json is read from the current directory.
         let builtIns = try decoder.decode([AppEntry].self, from: Data(contentsOf: URL(fileURLWithPath:
             FileManager.default.currentDirectoryPath).appendingPathComponent("scripts/builtin-apps.json")))
-        precondition(Set(builtIns.map(\.id)) == Set(["steam", "steam-arm64", "steam-arm64-frame"])
-                     && builtIns.count == 3 && builtIns.allSatisfy(\.isBuiltIn))
+        precondition(builtIns.map(\.id) == ["steam-arm64-frame"]
+                     && builtIns.count == 1 && builtIns.allSatisfy(\.isBuiltIn))
         for arm in builtIns.filter({ $0.architecture == "aarch64" }) {
             precondition(arm.isExperimental && arm.architecture == "aarch64" && arm.fexRootfs == nil)
         }
