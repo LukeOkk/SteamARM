@@ -1,0 +1,70 @@
+Stage 57 -- Wine ARM64 (Valve's Proton ARM64) natively under the runtime
+2026-10-05/06, Apple M4, macOS 27. Zero VM, Rosetta 0.
+
+Goal: a Windows game's x86-64 code is the only thing FEX translates; Wine,
+wineserver, DXVK and vkd3d-proton run as native ARM64 / ARM64EC code
+(docs: the user's architecture directive of 2026-10-05). Valve already ships
+exactly that stack for the Steam Frame: Proton Experimental (ARM64), build
+experimental-11.0-20261001-arm64 (scripts/arch-audit.py, MEASURED):
+  files/bin-arm64/wine, wineserver               ELF aarch64
+  lib/wine/aarch64-unix/ntdll.so                 ELF aarch64
+  lib/wine/aarch64-windows/ntdll, kernel32,
+    win32u, dxvk/d3d11, dxgi, vkd3d-proton/d3d12 PE ARM64X (ARM64EC + x64 thunks)
+  lib/wine/aarch64-windows/libarm64ecfex.dll     PE ARM64EC (FEX, x64 code in-process)
+  lib/wine/aarch64-windows/libwow64fex.dll       PE ARM64 (FEX, 32-bit code)
+  lib/wine/x86_64-windows/ntdll.dll ...          PE x64 (the x64 side of each DLL)
+Unity's Schedule I.exe, UnityPlayer.dll, GameAssembly.dll: PE x64 without
+volatile metadata (FEX's ARM64EC TSO relaxation cannot apply to them).
+
+Stage 18 stopped at the first failure ("wine exits in 2 s"). This stage walks
+the failures one by one with a prototype: an APFS clone of that Proton tree
+(/tmp/armhome/proton-arm64-steamarm in the Steam Frame root), run as
+  LXRT_LOWPAGES=1 WINEPREFIX=/tmp/armhome/.wine-probe
+  scripts/run-native.sh .../files/bin-arm64/wine cmd /c ver
+
+1. virtual_alloc_first_teb: "failed to map the shared user data" (c0000017)
+   Wine allocates KUSER_SHARED_DATA fixed at 0x7ffe0000; macOS has nothing
+   below 4 GiB (__PAGEZERO). FIXED: runtime/lowpage.c (LXRT_LOWPAGES=1): a
+   fixed mapping in [0x7ffe0000, 0x7fff0000) becomes a virtual page whose
+   memory lives elsewhere; each faulting load/store is carried out by the
+   fault handler (28 addressing forms and protections: tests/elf/lowpage.c).
+   Elsewhere below 4 GiB a MAP_FIXED_NOREPLACE probe answers EEXIST, so
+   Wine's try_map_free_area (step doubling) walks up past 4 GiB in ~16 tries.
+
+2. "map_view Allocation failed, clearing native views" then
+   "allocate_virtual_memory out of memory, base (nil) size 00200000"
+   The 2 MiB TEB block is allocated with zero_bits 0x7fffffff (below 2 GiB:
+   ntdll/unix/virtual.c virtual_alloc_first_teb, for WoW64 TEBs). TEBs are
+   read on every TLS access, so they cannot be virtual pages. PROTOTYPE: the
+   instruction `mov w0, #0x7fffffff` before get_zero_bits_limit in the
+   clone's ntdll.so (vaddr 0x62bf0) patched to `mov w0, #0`. A SteamARM Wine
+   build has to make this `is_wow64() ? 0x7fffffff : 0` (32-bit programs
+   stay on the x86 Proton path).
+
+3. exit 127 after "created the configuration directory"
+   The server is exec'd as lib/wine/../../bin/wineserver; Proton ARM64 ships
+   bin-arm64/ and its python script points Wine at it. PROTOTYPE: a symlink
+   files/bin -> bin-arm64. (The runtime now logs the missing exec path under
+   --trace.)
+
+4. REACHED: wineserver (aarch64, native) starts -- "wineserver: using
+   server-side synchronization"; ntdll.dll/kernel32.dll (ARM64X) load; cmd
+   is started ("could not find DOS drive for current working directory").
+   Then: guest signal 11 at address 0x17ee and 0x60 -- loads from
+   [x18 + 0x17e8] / [x18 + 0x60] (TEB fields: Peb) with x18 = 0. Darwin
+   clears x18; the runtime virtualises it only inside ELF functions known
+   from .eh_frame (rewrite.c x18_site: in_code && lxrt_elf_in_function). PE
+   code mapped by Wine's loader gets the svc pass but not the x18 pass.
+   NEXT: an x18 pass for PE text -- code ranges from the ARM64X CHPE code
+   map (ARM64EC ranges only: the x64 thunks must not be decoded as
+   aarch64), function bounds from .pdata/.xdata, trampoline pools near the
+   image. After it: the FEX ARM64EC JIT (libarm64ecfex.dll) reads x18 in
+   code it generates at run time, which no load-time pass sees -- the JIT
+   output hook (jit.c) would need the x18 pass too, or a SteamARM build of
+   that DLL from the patched FEX tree (llvm-mingw, not installed here).
+   Also seen: "virtual_setup_exception stack overflow 336 bytes" when the
+   fault lands with sp inside Wine's guard range (its 4 KiB pages on 16 KiB
+   host pages; to be looked at once x18 is right).
+
+Not measured: performance. Nothing of this reaches a game yet; the x86
+Proton path is unchanged (LXRT_LOWPAGES is off by default).

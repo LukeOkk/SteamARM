@@ -53,7 +53,7 @@ clean:
 # every size below the 4 GiB default makes the kernel SIGKILL the binary at
 # exec (measured, see benchmarks/stage2-pagezero.txt). The consequence is that
 # non-PIE Linux images, which link at 0x200000, cannot be loaded in-process.
-LXRT_SRCS := runtime/ids.c runtime/procpid.c runtime/main.c runtime/android_ids.c runtime/binder.c runtime/binder_hub.c runtime/props.c runtime/propsvc.c runtime/elf.c runtime/elfsect.c runtime/errno_map.c runtime/fsflags.c runtime/pathfd.c runtime/evdev.c runtime/rewrite.c \
+LXRT_SRCS := runtime/ids.c runtime/procpid.c runtime/main.c runtime/lowpage.c runtime/android_ids.c runtime/binder.c runtime/binder_hub.c runtime/props.c runtime/propsvc.c runtime/elf.c runtime/elfsect.c runtime/errno_map.c runtime/fsflags.c runtime/pathfd.c runtime/evdev.c runtime/rewrite.c \
              runtime/dirents.c runtime/jit.c runtime/wxsplit.c runtime/dispatch.c runtime/x18.c runtime/gbase.c runtime/arena.c runtime/guestprof.c runtime/arena_seg.s \
              runtime/epoll_eventfd.c runtime/fex_support.c runtime/fileops2.c runtime/offmap.c \
              runtime/futex_ops.c runtime/futex_waitv.c runtime/inotify.c runtime/ioctl_tty.c runtime/mounts.c runtime/memlog.c runtime/mremap.c runtime/timerfd_signalfd.c runtime/posixtimer.c runtime/proc_ext.c runtime/privmap.c runtime/shmirror.c runtime/sysv_ipc.c runtime/process.c runtime/procfs.c runtime/signal.c runtime/socket.c runtime/stack.c runtime/storemu.c runtime/subpage.c runtime/sysfs.c runtime/sysreg.c runtime/window.m runtime/remote_layer.m runtime/metalfx.m runtime/ntsync.c runtime/thread.c runtime/tls.c runtime/trampoline.S runtime/vdso_map.c runtime/vdso_blob.S

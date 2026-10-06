@@ -556,6 +556,11 @@ static int x18_stats_on(void)
 // (stage 23 review; tests/elf/wx_owner.c, "misaligned").
 bool lxrt_absorb_runtime_fault(int dsig, siginfo_t *dinfo, void *uap)
 {
+    // A load or store on a virtual page below 4 GiB (lowpage.c): carried out
+    // here, the instruction skipped, nothing for the guest to see. Both
+    // fault paths come through here (host_handler, main.c's fault_report).
+    if ((dsig == SIGSEGV || dsig == SIGBUS) && dinfo && uap && lxrt_lowpage_fault(dinfo, uap))
+        return true;
     if ((dsig == SIGSEGV || dsig == SIGBUS) && uap &&
         ((ucontext_t *)uap)->uc_mcontext->__ss.__x[18] == 0) {
         _STRUCT_ARM_THREAD_STATE64 *ts = &((ucontext_t *)uap)->uc_mcontext->__ss;
