@@ -1,0 +1,182 @@
+KosmicKrisp: argument tables borrowed per recording, not one per VkCommandBuffer
+
+Every VkCommandBuffer owned an MTL4ArgumentTable from creation to
+destruction; Metal keeps 96 KB of host memory behind each, whatever its
+three buffer bindings. A game allocates command buffers by the thousand and
+keeps them: Counter-Strike 2 had 3,530 alive after four minutes (330 MB of
+the game's 925 MB of untyped malloc blocks; heap of the process, stage 61).
+Metal snapshots a table's contents when a draw, dispatch or execute command
+is encoded (MTL4RenderCommandEncoder.h, setArgumentTable:stages:), so a
+table is only needed while its command buffer records: a command buffer now
+borrows one of the device's idle tables at vkBeginCommandBuffer and returns
+it at vkEndCommandBuffer, at a reset while recording, or when destroyed.
+The pool holds as many tables as command buffers ever recorded at once.
+
+--- a/src/kosmickrisp/vulkan/kk_cmd_buffer.c
++++ b/src/kosmickrisp/vulkan/kk_cmd_buffer.c
+@@ -79,6 +79,58 @@
+    assert(es->cmd_buf == NULL);
+ 
+    util_dynarray_fini(&es->ts_resolves);
++}
++
++/* An argument table for this command buffer's recording: one of the
++ * device's idle tables, or a new one (root at 0, samplers at 1, per-draw
++ * data at 2). */
++static void
++kk_cmd_buffer_borrow_argument_table(struct kk_cmd_buffer *cmd)
++{
++   struct kk_device *dev = kk_cmd_buffer_device(cmd);
++   if (cmd->argument_table)
++      return;
++   simple_mtx_lock(&dev->arg_tables.lock);
++   if (dev->arg_tables.count) {
++      cmd->argument_table = dev->arg_tables.tables[--dev->arg_tables.count];
++      simple_mtx_unlock(&dev->arg_tables.lock);
++      return;
++   }
++   dev->arg_tables.made++;
++   simple_mtx_unlock(&dev->arg_tables.lock);
++
++   mtl_argument_table_descriptor *desc = mtl_new_argument_table_descriptor();
++   mtl_set_max_buffer_binding_count(desc, 3u);
++   cmd->argument_table = mtl_new_argument_table(dev->mtl_handle, desc);
++   mtl_set_address(cmd->argument_table, dev->samplers.table.bo->gpu, 1u);
++   mtl_release(desc);
++}
++
++/* Done recording (or reset, or destroyed while recording): the table goes
++ * back to the device. The commands encoded with it keep their snapshots. */
++static void
++kk_cmd_buffer_return_argument_table(struct kk_cmd_buffer *cmd)
++{
++   struct kk_device *dev = kk_cmd_buffer_device(cmd);
++   mtl_argument_table *table = cmd->argument_table;
++   if (!table)
++      return;
++   cmd->argument_table = NULL;
++   simple_mtx_lock(&dev->arg_tables.lock);
++   if (dev->arg_tables.count == dev->arg_tables.cap) {
++      uint32_t cap = dev->arg_tables.cap ? dev->arg_tables.cap * 2 : 16;
++      mtl_argument_table **t =
++         realloc(dev->arg_tables.tables, cap * sizeof(*t));
++      if (!t) {
++         simple_mtx_unlock(&dev->arg_tables.lock);
++         mtl_release(table);
++         return;
++      }
++      dev->arg_tables.tables = t;
++      dev->arg_tables.cap = cap;
++   }
++   dev->arg_tables.tables[dev->arg_tables.count++] = table;
++   simple_mtx_unlock(&dev->arg_tables.lock);
+ }
+ 
+ static void
+@@ -88,7 +140,7 @@
+       container_of(vk_cmd_buffer, struct kk_cmd_buffer, vk);
+    struct kk_cmd_pool *pool = kk_cmd_buffer_pool(cmd);
+ 
+-   mtl_release(cmd->argument_table);
++   kk_cmd_buffer_return_argument_table(cmd);
+    kk_destroy_encoder_state(&cmd->cmp[0]);
+    kk_destroy_encoder_state(&cmd->cmp[1]);
+    kk_destroy_encoder_state(&cmd->gfx);
+@@ -155,14 +207,7 @@
+    if (!kk_init_encoder_state(cmd->post_gfx, dev->mtl_handle))
+       goto post_gfx_allocator_fail;
+ 
+-   {
+-      mtl_argument_table_descriptor *desc = mtl_new_argument_table_descriptor();
+-      /* Root at 0, samplers at 1 and per draw data at 2 */
+-      mtl_set_max_buffer_binding_count(desc, 3u);
+-      cmd->argument_table = mtl_new_argument_table(dev->mtl_handle, desc);
+-      mtl_set_address(cmd->argument_table, dev->samplers.table.bo->gpu, 1u);
+-      mtl_release(desc);
+-   }
++   cmd->argument_table = NULL;   /* borrowed at vkBeginCommandBuffer */
+ 
+    cmd->submit_cmd_bufs = UTIL_DYNARRAY_INIT;
+    cmd->allocators = UTIL_DYNARRAY_INIT;
+@@ -371,6 +416,7 @@
+    cs_end(cmd);
+    cs_end(cmd);
+    kk_cmd_buffer_close_mtl(cmd);
++   kk_cmd_buffer_return_argument_table(cmd);   /* after the encoders */
+    cmd->close_gfx_cmd_buf = false;
+    cmd->after_metalfx = false;
+    kk_cmd_release_resources(dev, cmd);
+@@ -412,6 +458,7 @@
+    VK_FROM_HANDLE(kk_cmd_buffer, cmd, commandBuffer);
+ 
+    kk_reset_cmd_buffer(&cmd->vk, 0u);
++   kk_cmd_buffer_borrow_argument_table(cmd);
+    vk_command_buffer_begin(&cmd->vk, pBeginInfo);
+    cmd->one_time_submit =
+       pBeginInfo->flags & VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+@@ -429,6 +476,7 @@
+    cs_end(cmd);
+    kk_mfxt_end(cmd);
+    kk_cmd_buffer_close_mtl(cmd);
++   kk_cmd_buffer_return_argument_table(cmd);
+ 
+    return vk_command_buffer_end(&cmd->vk);
+ }
+--- a/src/kosmickrisp/vulkan/kk_device.h
++++ b/src/kosmickrisp/vulkan/kk_device.h
+@@ -107,6 +107,19 @@
+    } ds_cache;
+ 
+    struct kk_sampler_heap samplers;
++
++   /* Argument tables for command buffers (stage 61): Metal snapshots a
++    * table's contents when a draw or dispatch is encoded, so a table is only
++    * needed while a command buffer records. One table per VkCommandBuffer
++    * cost 96 KB each of host memory for the thousands a game keeps
++    * allocated and idle (3,530 in Counter-Strike 2: 330 MB); recording
++    * command buffers borrow one here and return it at vkEndCommandBuffer. */
++   struct {
++      simple_mtx_t lock;
++      mtl_argument_table **tables;
++      uint32_t count, cap;
++      uint32_t made;
++   } arg_tables;
+    struct kk_query_table occlusion_queries;
+    /* The slot of every occlusion query that has none of its own yet
+     * (kk_query_pool.c). */
+--- a/src/kosmickrisp/vulkan/kk_device.c
++++ b/src/kosmickrisp/vulkan/kk_device.c
+@@ -314,6 +314,7 @@
+ 
+    /* We need to initialize the device residency set before any bo is created. */
+    simple_mtx_init(&dev->residency_set.mutex, mtx_plain);
++   simple_mtx_init(&dev->arg_tables.lock, mtx_plain);
+    kk_device_init_cmd_mem(dev);
+    dev->residency_set.handle = mtl_new_residency_set(dev->mtl_handle);
+    if (dev->residency_set.handle == NULL)
+@@ -382,6 +383,12 @@
+ fail_vab_memory:
+    mtl_release(dev->residency_set.handle);
+ fail_compiler:
++   for (uint32_t i = 0; i < dev->arg_tables.count; i++)
++      mtl_release(dev->arg_tables.tables[i]);
++   free(dev->arg_tables.tables);
++   dev->arg_tables.tables = NULL;
++   dev->arg_tables.count = dev->arg_tables.cap = 0;
++   simple_mtx_destroy(&dev->arg_tables.lock);
+    kk_device_finish_cmd_mem(dev);
+    simple_mtx_destroy(&dev->residency_set.mutex);
+    kk_release_compiler(dev);
+@@ -661,6 +668,12 @@
+ 
+    /* Before the queue goes: the commits still in flight hand their
+     * allocators back from Metal's feedback thread. */
++   for (uint32_t i = 0; i < dev->arg_tables.count; i++)
++      mtl_release(dev->arg_tables.tables[i]);
++   free(dev->arg_tables.tables);
++   dev->arg_tables.tables = NULL;
++   dev->arg_tables.count = dev->arg_tables.cap = 0;
++   simple_mtx_destroy(&dev->arg_tables.lock);
+    kk_device_finish_cmd_mem(dev);
+ 
+    if (dev->has_queue) {
