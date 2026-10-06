@@ -1,0 +1,6 @@
+"manifest"
+{
+  "version" "2"
+  "commandline" "/steamarm-native-proton %verb%"
+  "compatmanager_layer_name" "proton"
+}

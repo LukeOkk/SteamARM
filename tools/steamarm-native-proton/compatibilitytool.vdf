@@ -1,0 +1,13 @@
+"compatibilitytools"
+{
+  "compat_tools"
+  {
+    "steamarm-native-proton"
+    {
+      "install_path" "."
+      "display_name" "SteamARM: Proton ARM64 nativo (experimental)"
+      "from_oslist" "windows"
+      "to_oslist" "linux"
+    }
+  }
+}

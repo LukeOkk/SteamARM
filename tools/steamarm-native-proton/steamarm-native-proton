@@ -1,0 +1,51 @@
+#!/bin/bash
+# SteamARM: Proton ARM64 nativo (experimental).
+#
+# A Steam compatibility tool for SteamARM's client (Valve's native arm64
+# Steam client in the Steam Frame root, under lxrun): the game's x86-64 code
+# is the only thing translated -- by FEX's ARM64EC JIT inside Wine
+# (libarm64ecfex.dll) -- and Wine, wineserver, DXVK and vkd3d-proton run as
+# native ARM64 / ARM64EC code (benchmarks/stage57-wine-arm64-native.txt).
+# It is Valve's own Proton ARM64 (the one the Steam Frame runs), copied by
+# scripts/install-native-proton.sh into dist/ next to this script with two
+# changes macOS needs (the TEB block above 2 GiB, files/bin), run with the
+# runtime features the same stage brought: the KUSER_SHARED_DATA page at
+# 0x7ffe0000 as a virtual page (LXRT_LOWPAGES=1) and the x18 pass on PE
+# images and JIT output (LXRT_X18_JIT=1).
+#
+#   steamarm-native-proton <verb> <game.exe> [args...]
+#
+# execs, in place of itself, Valve's script in dist/:
+#
+#   python3 dist/proton <verb> <game.exe> [args...]
+#
+# No container: the toolmanifest names no Steam Linux Runtime, so the client
+# runs this directly in its own root. 32-bit (i386) games are not for this
+# tool: Wine's WoW64 needs the low 4 GiB, which macOS does not give; use
+# "SteamARM: Proton x86 via FEX" for them.
+#
+# Exit codes: Valve's script's, or 6 when the copy is missing.
+set -u
+me=${0##*/}
+say() { echo "$me: $*" >&2; }
+die() { local rc=$1; shift; say "$*"; exit "$rc"; }
+here=${BASH_SOURCE[0]%/*}
+[ "$here" = "$0" ] && here=.
+case "$here" in /*) ;; *) here="$PWD/$here" ;; esac
+
+dist="$here/dist"
+[ -f "$dist/proton" ] && [ -x "$dist/files/bin-arm64/wine" ] ||
+    die 6 "no Proton ARM64 copy in $dist (scripts/install-native-proton.sh)"
+[ -e "$dist/files/bin" ] || die 6 "$dist/files/bin is missing (scripts/install-native-proton.sh)"
+
+verb=${1:-}
+[ -n "$verb" ] || die 2 "usage: $me <verb> <game.exe> [args...]"
+
+# The runtime features this path needs (off by default for everything else).
+export LXRT_LOWPAGES=1
+export LXRT_X18_JIT=1
+# Valve's script wants to know it is not inside its container.
+unset PRESSURE_VESSEL_RUNTIME PRESSURE_VESSEL_RUNTIME_BASE 2>/dev/null || true
+
+say "$verb ${2:-} via Proton ARM64 (native Wine, FEX ARM64EC in-process) from $dist"
+exec python3 "$dist/proton" "$@"
