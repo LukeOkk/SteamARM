@@ -86,3 +86,17 @@ Proton path is unchanged (LXRT_LOWPAGES is off by default).
    this Wine -- its generated code reads x18 (the TEB) and nothing rewrites
    JIT output for x18; and the 'virtual_setup_exception stack overflow'
    seen with x18 broken, if it returns.
+
+6. REACHED (2026-10-06 05:17): an x64 Windows program (tests/win/tick.c,
+   mingw x86_64) runs under that Wine: "== tick probe: ok", exit 0 -- the
+   x64 code translated by FEX's ARM64EC JIT (libarm64ecfex.dll, Valve's
+   build) inside a native ARM64 Wine, QPC / system time / GetTickCount
+   right. What made it: LXRT_X18_JIT=1 (rewrite.c): a page of code with no
+   file behind it and no PE image around it -- the JIT's output, which keeps
+   the TEB in x18 -- is taken as one window for the x18 pass at the W^X
+   flip that makes it executable; pages inside a PE image's non-aarch64
+   part (the x64 side of an ARM64X DLL, a pure x64 image: pefile.c
+   lxrt_pe_in_image_not_code) are never decoded as aarch64. Off by default:
+   a game's own x86 JIT output outside any image would be corrupted by it.
+   Seen on the way: Wine's x64 side gets ENOMEM for top-down tries at
+   0x7ffeff0b0000-0x7fffff0b0000 (the runtime's top gap) and goes on.

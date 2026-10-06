@@ -516,6 +516,7 @@ int lxrt_pe_exec_sections(int fd, uint64_t file_off, uint64_t len, uint64_t addr
                           struct lxrt_range *code, int max);
 int lxrt_pe_code_windows(uint64_t start, uint64_t end, struct lxrt_range *out, int max);
 bool lxrt_pe_intersects(uint64_t start, uint64_t end);
+bool lxrt_pe_in_image_not_code(uint64_t start, uint64_t end);
 void lxrt_pe_forget(uint64_t addr, uint64_t len);
 void lxrt_fn_register(uint64_t lo, uint64_t hi, struct lxrt_range *r, int n);
 

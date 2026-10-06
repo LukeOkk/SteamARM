@@ -333,6 +333,8 @@ static enum site_kind classify(uint32_t insn, unsigned *rt)
 // loop the compiler vectorises: subpage.c runs it over the executable 4 KiB
 // pages of a host page at every write->execute flip, where a full scan of
 // unchanged code cost 5.4 us a flip (MEASURED, benchmarks/stage23).
+static bool synth_window(uint64_t start, uint64_t end);
+
 bool lxrt_rewrite_has_candidates(uint64_t start, uint64_t end)
 {
     const uint32_t *w = (const uint32_t *)start;
@@ -340,9 +342,17 @@ bool lxrt_rewrite_has_candidates(uint64_t start, uint64_t end)
     unsigned hit = 0;
     for (size_t i = 0; i < words; i++)
         hit |= (w[i] == INSN_SVC0) | ((w[i] & 0xFFD00000u) == 0xD5100000u);
+    if (hit)
+        return true;
     // The code of a PE image the guest mapped (pefile.c) may hold x18 sites
     // and none of the above: looked at either way.
-    return hit != 0 || lxrt_pe_intersects(start, end);
+    if (lxrt_pe_intersects(start, end))
+        return true;
+    if (synth_window(start, end))
+        for (size_t i = 0; i < words; i++)
+            if (lxrt_x18_touches(w[i]))
+                return true;
+    return false;
 }
 
 // Returns the total trampoline bytes the range needs.
@@ -356,13 +366,33 @@ static bool in_code(uint64_t addr, const struct lxrt_range *code, int ncode)
     return false;
 }
 
+// LXRT_X18_JIT=1: code with no file behind it and no PE image around it --
+// the output of a JIT that keeps the TEB in x18, FEX's ARM64EC backend
+// inside Wine ARM64 -- is taken as one function for the x18 pass. Off by
+// default: a page of x86 code a guest makes executable outside any image
+// (a game's own JIT) would be decoded as aarch64 and corrupted.
+static bool x18_jit_on(void)
+{
+    static int on = -1;
+    if (on < 0) { const char *e = getenv("LXRT_X18_JIT"); on = e && e[0] == '1'; }
+    return on;
+}
+static _Thread_local bool g_x18_synth;     // the window in hand is synthetic
+
 static bool x18_site(uint64_t addr, uint32_t insn, const struct lxrt_range *code, int ncode)
 {
     static int off = -1;                       // LXRT_NO_X18=1: diagnostic, no x18 pass
     if (off < 0) off = getenv("LXRT_NO_X18") != NULL;
     extern bool lxrt_elf_in_function(uint64_t addr);
     return !off && ncode > 0 && lxrt_x18_enabled() && in_code(addr, code, ncode) &&
-           lxrt_x18_touches(insn) && lxrt_elf_in_function(addr);
+           lxrt_x18_touches(insn) && (g_x18_synth || lxrt_elf_in_function(addr));
+}
+
+// A synthetic window for [start, end): JIT output under LXRT_X18_JIT=1,
+// never inside a PE image's non-aarch64 part.
+static bool synth_window(uint64_t start, uint64_t end)
+{
+    return x18_jit_on() && !lxrt_pe_in_image_not_code(start, end);
 }
 
 static size_t count_sites(uint64_t start, uint64_t end,
@@ -493,12 +523,17 @@ size_t lxrt_rewrite_count(uint64_t start, uint64_t end)
     // after one rewrite (a rewritten site is a branch, a refused one brk).
     struct lxrt_range pe[32];
     int npe = lxrt_pe_intersects(start, end) ? lxrt_pe_code_windows(start, end, pe, 32) : 0;
+    if (!npe && synth_window(start, end)) {
+        pe[0].start = start; pe[0].end = end; npe = 1;
+        g_x18_synth = true;
+    }
     for (int k = 0; k < npe; k++) {
         uint64_t lo = LXRT_ALIGN_UP(pe[k].start, 4), hi = pe[k].end & ~3ull;
         for (uint64_t a = lo; a + 4 <= hi; a += 4)
             if (x18_site(a, *(const uint32_t *)(uintptr_t)a, pe, npe))
                 n++;
     }
+    g_x18_synth = false;
     return n;
 }
 
@@ -526,6 +561,11 @@ static int rewrite_chunk_code(uint64_t start, uint64_t end,
             code = pe_code;
             ncode = npe;
         }
+    }
+    if (ncode <= 0 && synth_window(start, end)) {
+        pe_code[0].start = start; pe_code[0].end = end;
+        code = pe_code; ncode = 1;
+        g_x18_synth = true;
     }
 
     size_t need = count_sites(start, end, rep, code, ncode);
@@ -711,7 +751,9 @@ int lxrt_rewrite_range_code(uint64_t start, uint64_t end,
     for (uint64_t pos = start; pos < end;) {
         uint64_t next = end - pos > chunk_size ? pos + chunk_size : end;
         struct lxrt_rewrite_report one;
-        if (rewrite_chunk_code(pos, next, code, ncode, &one, err) != 0)
+        int rc = rewrite_chunk_code(pos, next, code, ncode, &one, err);
+        g_x18_synth = false;                    // a synthetic window ends with its chunk
+        if (rc != 0)
             return -1;
         report_add(rep, &one);
         pos = next;

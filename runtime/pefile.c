@@ -217,6 +217,12 @@ bool lxrt_pe_is(int fd)
 #define PE_WINDOWS 512
 static struct lxrt_range g_win[PE_WINDOWS];
 static int g_nwin;
+// Images found in memory: their whole extent (code or not), so the JIT-output
+// x18 pass never takes the x64 side of an ARM64X DLL, or a pure x64 image,
+// for aarch64 code.
+#define PE_IMAGES 256
+static struct { uint64_t base, end; } g_img[PE_IMAGES];
+static int g_nimg;
 
 static void remember(uint64_t lo, uint64_t hi)
 {
@@ -235,6 +241,12 @@ void lxrt_pe_forget(uint64_t addr, uint64_t len)
 {
     if (!len) return;
     pthread_mutex_lock(&g_lock);
+    for (int i = 0; i < g_nimg; ) {
+        if (g_img[i].base < addr + len && g_img[i].end > addr)
+            g_img[i] = g_img[--g_nimg];
+        else
+            i++;
+    }
     for (int i = 0; i < g_nwin; ) {
         if (g_win[i].start < addr + len && g_win[i].end > addr)
             g_win[i] = g_win[--g_nwin];
@@ -258,6 +270,22 @@ static bool mem_read(uint64_t addr, void *buf, size_t n)
     mach_vm_size_t got = 0;
     return addr >= 0x10000 && mach_vm_read_overwrite(mach_task_self(), (mach_vm_address_t)addr, n,
                                                      (mach_vm_address_t)(uintptr_t)buf, &got) == KERN_SUCCESS && got == n;
+}
+
+// Images found in memory: their whole extent, aarch64 code or not. The
+// JIT-output x18 pass (rewrite.c, LXRT_X18_JIT=1) must never touch the x64
+// side of an ARM64X DLL or a pure x64 image decoded as aarch64 by chance.
+
+bool lxrt_pe_in_image_not_code(uint64_t start, uint64_t end)
+{
+    bool inside = false;
+    pthread_mutex_lock(&g_lock);
+    for (int i = 0; i < g_nimg; i++)
+        if (g_img[i].base < end && g_img[i].end > start) { inside = true; break; }
+    pthread_mutex_unlock(&g_lock);
+    if (!inside) return false;
+    struct lxrt_range r;
+    return lxrt_pe_code_windows(start, end, &r, 1) == 0;
 }
 
 // Negative cache: 64 KiB-aligned starts that were looked at and hold no image.
@@ -333,6 +361,18 @@ static bool parse_in_memory(uint64_t base)
     if (lxrt_trace_on())
         fprintf(lxrt_trace_stream(), "[lxrt] PE image in memory at 0x%llx: machine 0x%x%s, size 0x%x, %d aarch64 code range(s)\n",
                 (unsigned long long)base, machine, chpe ? " (CHPE code map)" : "", size_of_image, ncode);
+    pthread_mutex_lock(&g_lock);
+    {
+        bool known = false;
+        for (int i = 0; i < g_nimg; i++)
+            if (g_img[i].base == base) { known = true; break; }
+        if (!known && g_nimg < PE_IMAGES) {
+            g_img[g_nimg].base = base;
+            g_img[g_nimg].end = base + size_of_image;
+            g_nimg++;
+        }
+    }
+    pthread_mutex_unlock(&g_lock);
     for (int i = 0; i < ncode; i++) {
         uint64_t lo = (code[i].start + 3) & ~3ull, hi = code[i].end & ~3ull;
         if (lo >= hi || hi > base + size_of_image) continue;
