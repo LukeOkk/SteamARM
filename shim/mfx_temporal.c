@@ -79,10 +79,11 @@ static const char *status_name(uint32_t st)
     }
 }
 
-// One log line per context id, the first time it is seen (LXRT_VK_DEBUG=1).
-// A context seen when the table is full is logged every time: rare, and
-// better than silence.
-enum { N_SEEN = 64 };
+// One log line per (context id, op, status), the first time the combination
+// is seen (LXRT_VK_DEBUG=1): a context's PROBE, its first ENCODE and the
+// first refusal each get a line. A combination seen when the table is full
+// is logged every time: rare, and better than silence.
+enum { N_SEEN = 256 };
 static uint64_t g_seen[N_SEEN];
 static int g_seen_used[N_SEEN];   // 0 free, 1 being written, 2 holds g_seen[i]
 
@@ -141,7 +142,7 @@ void lxrt_inner_vkCmdUpdateBuffer(VkCommandBuffer commandBuffer, VkBuffer dstBuf
     // PROBE's answer (caps, driver, largest scale) goes back with the status.
     if (cmd.op == SA_OP_PROBE && f)
         __builtin_memcpy((char *)pData + SA_MFXT_CAPS_OFFSET, (const char *)&cmd + SA_MFXT_CAPS_OFFSET, 12);
-    if (debug_on() && first_sight(cmd.context))
+    if (debug_on() && first_sight((cmd.context << 8) ^ ((uint64_t)cmd.op << 4) ^ (st & 15)))
         dprintf(2, "[shim] mfx-temporal ctx %llu op %s %ux%u->%ux%u fmt %u driver %s entry %s st=%s\n",
                 (unsigned long long)cmd.context, op_name(cmd.op), cmd.render_w, cmd.render_h,
                 cmd.upscale_w, cmd.upscale_h, cmd.color.vk_format, lxrt_vk_driver,
