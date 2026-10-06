@@ -14,6 +14,20 @@
 // sees status SA_ST_UNSEEN: it then falls back to the game's own upscaler in
 // the same frame.
 //
+// Versions. 1: PROBE, ENCODE and DESTROY, answered by the driver's entry
+// (KosmicKrisp's kk_mfx_temporal.h carries this header's v1 text). 2 adds
+// op SPATIAL, answered by the shim itself: the FSR 1 EASU (+ RCAS) pass of
+// shim/scaler.c recorded from the colour image onto the output
+// (shim/spatial.c; on KosmicKrisp the driver's FSR-1 hook, patches
+// kosmickrisp-14/16/17, draws that EASU pass with MetalFX's spatial
+// scaler), for DLSS 1 (tools/dlss-metalfx). It also names the textures'
+// sizes (the v1 reserved words). A v2 receiver takes v1 and v2 commands; a
+// v1 sender keeps working; the driver is only ever given v1 (the shim
+// rewrites the version of what it forwards). PROBE's caps_out has
+// SA_MFXT_CAP_SPATIAL when the shim answers SPATIAL, whatever the driver
+// said (and whatever the status: a v2 shim writes PROBE's answer back
+// even when no driver entry answered).
+//
 // Fixed layout, the same for every compiler that builds it (mingw x86_64,
 // clang aarch64 Linux, clang macOS): only fixed-width fields, no pointers.
 // Image handles are the driver's own VkImage values (winevulkan does not
@@ -24,9 +38,11 @@
 #include <stdint.h>
 
 #define SA_MFXT_MAGIC 0x5458464D41455453ull   /* "STEAMFXT" */
-#define SA_MFXT_VERSION 1u
+#define SA_MFXT_VERSION 2u          /* what a v2 sender puts in `version` (1 for the v1 ops is fine) */
+#define SA_MFXT_VERSION_MIN 1u      /* a receiver takes 1..SA_MFXT_VERSION */
+#define SA_MFXT_DRIVER_VERSION 1u   /* what kk_steamarm_upscale_temporal checks */
 
-enum { SA_OP_PROBE=1, SA_OP_ENCODE=2, SA_OP_DESTROY=3 };
+enum { SA_OP_PROBE=1, SA_OP_ENCODE=2, SA_OP_DESTROY=3, SA_OP_SPATIAL=4 /* v2, the shim's */ };
 enum { SA_ST_UNSEEN=0, SA_ST_OK=1, SA_ST_NO_DRIVER, SA_ST_BAD_ARGS, SA_ST_UNSUPPORTED, SA_ST_NO_SCALER };
 
 /* sa_mfxt_cmd.flags */
@@ -45,19 +61,26 @@ struct sa_mfxt_cmd {
   uint32_t render_w, render_h, upscale_w, upscale_h;
   float jitter_x, jitter_y, mv_scale_x, mv_scale_y, pre_exposure, sharpness;
   uint32_t flags;   /* RESET 1, DEPTH_INV 2, AUTO_EXP 4, MV_DISPLAY 8, MV_JITTERED 16, HDR 32, SHARPEN 64 */
-  uint32_t caps_out, driver_out; float max_scale_out; uint32_t reserved[10];       /* pad to 320 */
+  uint32_t caps_out, driver_out; float max_scale_out;
+  /* v2 (SPATIAL): the colour and output images' own sizes, which EASU's
+     constants need (0: the content's, color.w/h and output.w/h). v1 senders
+     leave these 0 (the reserved words). */
+  uint32_t color_tex_w, color_tex_h, output_tex_w, output_tex_h;
+  uint32_t reserved[6];                                                              /* pad to 320 */
 };
 
 #define SA_MFXT_STATUS_OFFSET 20u   /* offsetof(struct sa_mfxt_cmd, status) */
 #define SA_MFXT_CAPS_OFFSET 268u    /* caps_out, driver_out, max_scale_out: 12 bytes PROBE fills */
 
-/* PROBE's caps_out bits, as KosmicKrisp writes them (kk_mfx_temporal.h). */
+/* PROBE's caps_out bits, as KosmicKrisp writes them (kk_mfx_temporal.h),
+   plus the shim's own. */
 #define SA_MFXT_CAP_TEMPORAL    1u  /* MetalFX's temporal scaler (Metal 4) on this GPU */
 #define SA_MFXT_CAP_MV_DISPLAY  2u  /* motion vectors at the output's size (macOS 27) */
 #define SA_MFXT_CAP_MV_JITTERED 4u  /* motion vectors with the jitter in them (macOS 27) */
 #define SA_MFXT_CAP_OFFSETS     8u  /* sa_mfxt_tex.x/y: content not at the origin (macOS 27) */
 #define SA_MFXT_CAP_REACTIVE   16u  /* a reactive mask */
 #define SA_MFXT_CAP_SCRATCH    32u  /* the output goes through a private texture and a copy */
+#define SA_MFXT_CAP_SPATIAL    64u  /* v2: op SPATIAL is answered (by the shim, on any driver) */
 
 _Static_assert(sizeof(struct sa_mfxt_tex) == 32, "sa_mfxt_tex is 32 bytes");
 _Static_assert(sizeof(struct sa_mfxt_cmd) == 320, "sa_mfxt_cmd is 320 bytes");
@@ -65,6 +88,7 @@ _Static_assert(__builtin_offsetof(struct sa_mfxt_cmd, status) == SA_MFXT_STATUS_
 _Static_assert(__builtin_offsetof(struct sa_mfxt_cmd, color) == 32, "textures at 32");
 _Static_assert(__builtin_offsetof(struct sa_mfxt_cmd, render_w) == 224, "sizes at 224");
 _Static_assert(__builtin_offsetof(struct sa_mfxt_cmd, caps_out) == SA_MFXT_CAPS_OFFSET, "caps at 268");
+_Static_assert(__builtin_offsetof(struct sa_mfxt_cmd, color_tex_w) == 280, "v2 texture sizes at 280");
 
 /* The KosmicKrisp entry (default visibility in the driver), found by the
    shim with lxrt_host_dlsym on the driver's handle; returns an SA_ST_*. */

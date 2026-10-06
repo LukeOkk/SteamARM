@@ -2,14 +2,17 @@
 // MetalFX (shim/mfx_temporal.h has the command and why it travels this way).
 //
 // An update of exactly sizeof(struct sa_mfxt_cmd) bytes whose data starts
-// with SA_MFXT_MAGIC and SA_MFXT_VERSION is a command for this shim, not a
-// buffer update: it goes to the driver's kk_steamarm_upscale_temporal when
-// the driver has one, its status (and, for PROBE, the caps the driver
-// reports) is written back into the sender's data
-// before this returns, and it is NOT forwarded (the carrier buffer stays as
-// it was). Without that entry the status is SA_ST_NO_DRIVER, and the sender
-// falls back to the game's own upscaler. Every other update goes to the
-// driver unchanged.
+// with SA_MFXT_MAGIC and a version this shim knows (1 or 2) is a command
+// for this shim, not a buffer update: PROBE, ENCODE and DESTROY go to the
+// driver's kk_steamarm_upscale_temporal when the driver has one (as v1,
+// the version that entry checks), SPATIAL (v2) is answered here
+// (shim/spatial.c: the FSR 1 pass, MetalFX spatial on KosmicKrisp). The
+// status (and, for PROBE, the caps: the driver's, plus SA_MFXT_CAP_SPATIAL
+// for this shim's SPATIAL) is written back into the sender's data before
+// this returns, and the command is NOT forwarded (the carrier buffer stays
+// as it was). Without the driver's entry the v1 ops' status is
+// SA_ST_NO_DRIVER, and the sender falls back to the game's own upscaler.
+// Every other update goes to the driver unchanged.
 //
 // pData has already been moved out of a guest's low window by the generated
 // wrapper (build/vk_rebase.c): an address change on the same memory, so the
@@ -28,6 +31,9 @@ extern void *lxrt_vk_driver_handle;  // vulkan_shim.c (generated): its host hand
 void lxrt_mvk_vkCmdUpdateBuffer(VkCommandBuffer, VkBuffer, VkDeviceSize, VkDeviceSize, const void *);
 
 typedef uint32_t (*kk_upscale_fn)(VkCommandBuffer, const struct sa_mfxt_cmd *);
+
+uint32_t lxrt_spatial_record(VkCommandBuffer cb, const struct sa_mfxt_cmd *c, const char **path);   // spatial.c
+void lxrt_spatial_destroy(uint64_t context);                                                         // spatial.c
 
 static int debug_on(void)
 {
@@ -62,6 +68,7 @@ static const char *op_name(uint32_t op)
     case SA_OP_PROBE: return "probe";
     case SA_OP_ENCODE: return "encode";
     case SA_OP_DESTROY: return "destroy";
+    case SA_OP_SPATIAL: return "spatial";
     default: return "unknown";
     }
 }
@@ -115,7 +122,7 @@ static int is_command(VkDeviceSize size, const void *data)
     uint32_t version;
     __builtin_memcpy(&magic, data, sizeof magic);
     __builtin_memcpy(&version, (const char *)data + 8, sizeof version);
-    return magic == SA_MFXT_MAGIC && version == SA_MFXT_VERSION;
+    return magic == SA_MFXT_MAGIC && version >= SA_MFXT_VERSION_MIN && version <= SA_MFXT_VERSION;
 }
 
 __attribute__((visibility("hidden")))
@@ -130,20 +137,39 @@ void lxrt_inner_vkCmdUpdateBuffer(VkCommandBuffer commandBuffer, VkBuffer dstBuf
     struct sa_mfxt_cmd cmd;
     __builtin_memcpy(&cmd, pData, sizeof cmd);
     uint32_t st;
+    const char *path = "";
     kk_upscale_fn f = driver_entry();
-    if (cmd.size != sizeof cmd || cmd.op < SA_OP_PROBE || cmd.op > SA_OP_DESTROY)
+    if (cmd.size != sizeof cmd || cmd.op < SA_OP_PROBE || cmd.op > SA_OP_SPATIAL)
         st = SA_ST_BAD_ARGS;
-    else if (!f)
-        st = SA_ST_NO_DRIVER;
-    else
-        st = f(commandBuffer, &cmd);
+    else if (cmd.op == SA_OP_SPATIAL)
+        st = lxrt_spatial_record(commandBuffer, &cmd, &path);
+    else {
+        if (cmd.op == SA_OP_DESTROY)
+            lxrt_spatial_destroy(cmd.context);
+        if (!f)
+            st = SA_ST_NO_DRIVER;
+        else {
+            // The driver's entry takes the v1 layout, which v2 only extends.
+            cmd.version = SA_MFXT_DRIVER_VERSION;
+            st = f(commandBuffer, &cmd);
+        }
+    }
     __builtin_memcpy((char *)pData + SA_MFXT_STATUS_OFFSET, &st, sizeof st);
-    // PROBE's answer (caps, driver, largest scale) goes back with the status.
-    if (cmd.op == SA_OP_PROBE && f)
+    // PROBE's answer (caps, driver, largest scale) goes back with the
+    // status: the driver's when it answered, and this shim's own SPATIAL
+    // whatever the driver said.
+    if (cmd.op == SA_OP_PROBE) {
+        if (!f) {
+            cmd.caps_out = 0;
+            cmd.driver_out = 0;
+            cmd.max_scale_out = 0.0f;
+        }
+        cmd.caps_out |= SA_MFXT_CAP_SPATIAL;
         __builtin_memcpy((char *)pData + SA_MFXT_CAPS_OFFSET, (const char *)&cmd + SA_MFXT_CAPS_OFFSET, 12);
-    if (debug_on() && first_sight(cmd.context))
-        dprintf(2, "[shim] mfx-temporal ctx %llu op %s %ux%u->%ux%u fmt %u driver %s entry %s st=%s\n",
+    }
+    if (debug_on() && (first_sight(cmd.context) || (cmd.op == SA_OP_SPATIAL && st != SA_ST_OK)))
+        dprintf(2, "[shim] mfx-temporal ctx %llu op %s %ux%u->%ux%u fmt %u driver %s entry %s st=%s%s%s%s\n",
                 (unsigned long long)cmd.context, op_name(cmd.op), cmd.render_w, cmd.render_h,
                 cmd.upscale_w, cmd.upscale_h, cmd.color.vk_format, lxrt_vk_driver,
-                f ? "found" : "missing", status_name(st));
+                f ? "found" : "missing", status_name(st), *path ? " (" : "", path, *path ? ")" : "");
 }

@@ -7,7 +7,7 @@ CC        := clang
 
 .PHONY: all clean
 
-all: lxrt shim launcher inputd wlmac ffx-metalfx
+all: lxrt shim launcher inputd wlmac ffx-metalfx dlss-metalfx
 
 # steamarm-inputd: the Mac's controllers as /dev/input for guests (tools/inputd).
 .PHONY: inputd
@@ -37,6 +37,20 @@ FFX_SRCS := $(wildcard tools/ffx-metalfx/*.c tools/ffx-metalfx/*.h tools/ffx-met
 ffx-metalfx: $(FFX_DLLS)
 $(FFX_DIR)/%.dll: $(FFX_SRCS)
 	FFX_OUT=$@ tools/ffx-metalfx/build.sh
+
+# SteamARM's NGX DLLs (tools/dlss-metalfx): x86_64 Wine builtins standing in
+# for NVIDIA's NGX core (nvngx.dll, _nvngx.dll), for a Windows game's DLSS to
+# go to MetalFX's temporal scaler over the same channel. Built, installed and
+# switched on with the FidelityFX DLLs (scripts/install-ffx-metalfx.sh, the
+# game tool's STEAMARM_WIN_DLSS=metalfx).
+NGX_DIR  := build/dlss-metalfx/x86_64-windows
+NGX_DLLS := $(addprefix $(NGX_DIR)/,nvngx.dll _nvngx.dll)
+NGX_SRCS := $(wildcard tools/dlss-metalfx/*.c tools/dlss-metalfx/*.h tools/dlss-metalfx/*.def) \
+            tools/dlss-metalfx/build.sh tools/ffx-metalfx/wine-builtin-mark.py shim/mfx_temporal.h
+.PHONY: dlss-metalfx
+dlss-metalfx: $(NGX_DLLS)
+$(NGX_DIR)/%.dll: $(NGX_SRCS)
+	NGX_OUT=$@ tools/dlss-metalfx/build.sh
 
 resources/AppIcon.icns: scripts/make-icon.py scripts/make-icns.sh
 	@python3 scripts/make-icon.py resources/icon.png
@@ -160,7 +174,7 @@ shim/vulkan_shim.S shim/vulkan_shim.c: shim/gen.py shim/entrypoints.txt build/sh
 
 SHIM_SRCS := shim/vulkan_shim.S shim/vulkan_shim.c shim/wsi.c shim/features.c shim/fallback.c shim/map32.c \
              shim/memcap.c shim/present.c shim/scaler.c shim/mailbox.c shim/spirv_names.c shim/spirv_dref.c shim/spirv_invariant.c \
-             shim/mvkfix.c shim/a2c.c shim/mfx_temporal.c build/vk_rebase.c
+             shim/mvkfix.c shim/a2c.c shim/mfx_temporal.c shim/spatial.c build/vk_rebase.c
 build/libvulkan.so.1: $(SHIM_SRCS) shim/scaler_spv.h shim/mfx_temporal.h shim/adaptive_sync.h runtime/include/lxrt_host.h
 	@mkdir -p build
 	$(CC) -target $(LXRT_TARGET) -shared -fPIC -nostdlib -O2 \

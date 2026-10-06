@@ -425,9 +425,11 @@ VkQueue lxrt_scaler_a_queue(VkDevice dev)
 
 void lxrt_mvk_vkDestroyDevice(VkDevice, const VkAllocationCallbacks *);
 void lxrt_aniso_forget(VkDevice dev);   // features.c: a later device may get this handle
+void lxrt_spatial_device_gone(VkDevice dev);   // spatial.c: its DLSS-1 pass objects
 void lxrt_inner_vkDestroyDevice(VkDevice dev, const VkAllocationCallbacks *alloc)
 {
     lxrt_aniso_forget(dev);
+    lxrt_spatial_device_gone(dev);
     lock();
     for (int i = 0; i < 32; i++)
         if (g_q[i].dev == dev)
