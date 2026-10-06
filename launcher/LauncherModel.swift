@@ -16,7 +16,7 @@ final class LauncherModel: ObservableObject {
     @Published var settings = LauncherSettings() {
         didSet { if settings != oldValue { Store.save(settings, to: Paths.settingsFile) } }
     }
-    /// scripts/builtin-apps.json: Steam (x86, under FEX) and Steam ARM64 (experimental).
+    /// scripts/builtin-apps.json: SteamARM (the Steam Frame's ARM64 client).
     @Published private(set) var builtIns: [AppEntry] = [AppEntry.steam]
     /// library.json: launches, time, last result and favourites per app id.
     @Published var stats: [String: AppStats] = [:] {
@@ -714,7 +714,7 @@ final class LauncherModel: ObservableObject {
         let wrapped = FileManager.default.fileExists(atPath: Paths.pgidFile.path)
         if let pid = Shell.readPID(Paths.pidFile), Shell.isAlive(pid),
            SessionLiveness.isLeader(command: Shell.command(of: pid), wrapped: wrapped) {
-            id = ((try? String(contentsOf: Paths.idFile, encoding: .utf8)) ?? "steam")
+            id = ((try? String(contentsOf: Paths.idFile, encoding: .utf8)) ?? AppEntry.steam.id)
                 .trimmingCharacters(in: .whitespacesAndNewlines)
             // run-app.sh wrote running.pid when it started the session.
             start = (try? FileManager.default.attributesOfItem(atPath: Paths.pidFile.path))?[.modificationDate] as? Date

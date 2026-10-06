@@ -126,16 +126,20 @@ struct AppEntry: Codable, Identifiable, Hashable {
     /// Android runtime yet, and the launcher never starts one.
     var android: AndroidAppInfo? = nil
 
-    /// The x86 client under FEX: TRANSITIONAL_COMPATIBILITY until the ARM64
-    /// client runs (docs/APPLICATION_MANAGER.md). Only a fallback: the
-    /// definition run-app.sh uses is scripts/builtin-apps.json.
+    /// SteamARM: Valve's native ARM64 Steam client in the Steam Frame root,
+    /// the only Steam the launcher offers (the x86 client and the Fedora ARM64
+    /// root were retired 2026-10-05; the x86 root stays, games run there under
+    /// FEX). Only a fallback: the definition run-app.sh uses is
+    /// scripts/builtin-apps.json.
     static let steam = AppEntry(
-        id: "steam", name: "Steam", icon: nil,
-        command: ["/bin/bash", "/tmp/fexhome/.local/share/Steam/steam.sh", "-noverifyfiles"],
-        root: Paths.guestRoot, fexRootfs: "/", env: [:], kind: "steam",
-        architecture: GuestArchitecture.x86_64.rawValue, builtIn: true)
+        id: "steam-arm64-frame", name: "SteamARM", icon: nil,
+        command: ["/tmp/armhome/.local/share/Steam/steamrtarm64/steam"],
+        root: "/tmp/lxrt-arm64root", fexRootfs: nil,
+        env: ["HOME_IN_GUEST": "/tmp/armhome", "LXRT_GUEST_PAGE": "4096",
+              "LXRT_X18_ALL_TEXT": "libcef.so", "STEAM_IGNORE_INDIRECT_RENDERING": "1"],
+        kind: "steam", architecture: GuestArchitecture.aarch64.rawValue, builtIn: true)
 
-    var isBuiltIn: Bool { builtIn == true || id == "steam" }
+    var isBuiltIn: Bool { builtIn == true || id == AppEntry.steam.id }
     var isExperimental: Bool { readiness == CapabilityStatus.State.experimental.rawValue }
     var isWindows: Bool { kind == "windows" }
     var isAndroid: Bool { kind == "android" }

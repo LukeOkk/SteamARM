@@ -550,35 +550,28 @@ extension ExecutionBackend {
 /// Frame root, the native client on the Fedora root, then the x86 client
 /// under FEX.
 enum PrimarySteam {
-    static let order = ["steam-arm64-frame", "steam-arm64", "steam"]
+    /// Only SteamARM (the Steam Frame client) since 2026-10-05: a stored
+    /// "steam" or "steam-arm64" falls through to it.
+    static let order = ["steam-arm64-frame"]
 
-    static func label(_ id: String) -> String {
-        switch id {
-        case "steam-arm64-frame": return "Steam ARM64 · Steam Frame"
-        case "steam-arm64": return "Steam ARM64 (Fedora)"
-        default: return "Steam x86_64 (FEX)"
-        }
-    }
+    static func label(_ id: String) -> String { "SteamARM" }
 
     /// `usable(id)` says whether that entry can start on this Mac.
     static func pick(_ chosen: String, usable: (String) -> Bool) -> String? {
-        let tries = [chosen] + order.filter { $0 != chosen }
+        let tries = (order.contains(chosen) ? [chosen] : []) + order.filter { $0 != chosen }
         return tries.first(where: usable)
     }
 }
 
-/// A Steam client started outside the launcher (scripts/run-steam.sh, or
-/// scripts/run-steam-arm64.sh for the native one), which the launcher adopts.
-/// The native client's entry comes from its root: /tmp/lxrt-arm64root is the
-/// Steam Frame root, anything else the Fedora one (scripts/builtin-apps.json).
+/// SteamARM's client started outside the launcher (scripts/run-steam-arm64.sh
+/// with the Steam Frame root), which the launcher adopts. Other clients (the
+/// x86 one, an ARM64 client in another root) are not launcher apps any more.
 enum OutsideClient {
     static func find(_ processes: [(pid: Int32, command: String)],
                      root: (Int32) -> String?) -> (id: String, arch: String?)? {
-        if processes.contains(where: { $0.command.contains("ubuntu12_32/steam ") }) {
-            return ("steam", nil)
-        }
-        if let p = processes.first(where: { $0.command.contains("steamrtarm64/steam ") }) {
-            return (root(p.pid) == "/tmp/lxrt-arm64root" ? "steam-arm64-frame" : "steam-arm64", "aarch64 none")
+        if let p = processes.first(where: { $0.command.contains("steamrtarm64/steam ") }),
+           root(p.pid) == "/tmp/lxrt-arm64root" {
+            return ("steam-arm64-frame", "aarch64 none")
         }
         return nil
     }

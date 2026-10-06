@@ -243,18 +243,17 @@ struct ApplicationCoreTests {
         for (k, v) in caps.graphics { check(!v.reason.isEmpty, "\(k) has a reason") }
         check(caps.graphics[.openGLWineD3D]?.state == .unavailable, "WineD3D: needs detection")
         // The primary Steam and its fallbacks.
-        check(PrimarySteam.pick("steam-arm64-frame", usable: { _ in true }) == "steam-arm64-frame", "primary: Steam Frame when it can start")
-        check(PrimarySteam.pick("steam-arm64-frame", usable: { $0 != "steam-arm64-frame" }) == "steam-arm64", "Frame missing: ARM64 (Fedora)")
-        check(PrimarySteam.pick("steam-arm64-frame", usable: { $0 == "steam" }) == "steam", "only x86: x86")
-        check(PrimarySteam.pick("steam", usable: { _ in true }) == "steam", "x86 chosen: x86")
-        check(PrimarySteam.pick("steam", usable: { $0 != "steam" }) == "steam-arm64-frame", "x86 chosen but missing: Frame next")
-        check(PrimarySteam.pick("steam-arm64", usable: { _ in false }) == nil, "none can start: nil")
-        // Clients started outside the launcher.
+        // Only SteamARM (the Steam Frame client) since 2026-10-05.
+        check(PrimarySteam.pick("steam-arm64-frame", usable: { _ in true }) == "steam-arm64-frame", "primary: SteamARM")
+        check(PrimarySteam.pick("steam", usable: { _ in true }) == "steam-arm64-frame"
+              && PrimarySteam.pick("steam-arm64", usable: { _ in true }) == "steam-arm64-frame", "old x86 / Fedora choice: SteamARM")
+        check(PrimarySteam.pick("steam-arm64-frame", usable: { _ in false }) == nil, "SteamARM cannot start: nil")
+        check(PrimarySteam.label("steam-arm64-frame") == "SteamARM", "SteamARM's name")
+        // Clients started outside the launcher: only SteamARM's is adopted.
         let x86 = [(pid: Int32(10), command: "build/lxrun /tmp/lxrt-root/usr/bin/FEX-gb /tmp/fexhome/.local/share/Steam/ubuntu12_32/steam -noverifyfiles")]
-        check(OutsideClient.find(x86, root: { _ in nil })?.id == "steam" && OutsideClient.find(x86, root: { _ in nil })?.arch == nil,
-              "outside x86 client: steam, architecture unknown")
+        check(OutsideClient.find(x86, root: { _ in nil }) == nil, "outside x86 client: not a launcher app")
         let arm = [(pid: Int32(11), command: "build/lxrun /tmp/armhome/.local/share/Steam/steamrtarm64/steam -srt-logger-opened")]
-        check(OutsideClient.find(arm, root: { _ in "/tmp/lxrt-armroot" })?.id == "steam-arm64", "outside native client, Fedora root")
+        check(OutsideClient.find(arm, root: { _ in "/tmp/lxrt-armroot" }) == nil, "outside native client, another root: not adopted")
         check(OutsideClient.find(arm, root: { _ in "/tmp/lxrt-arm64root" })?.id == "steam-arm64-frame"
               && OutsideClient.find(arm, root: { _ in "/tmp/lxrt-arm64root" })?.arch == "aarch64 none",
               "outside native client, Steam Frame root, aarch64")

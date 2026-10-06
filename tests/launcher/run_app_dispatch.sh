@@ -58,12 +58,6 @@ expect x86   'FEX_TSOENABLED=1'
 expect i386  'translator: FEX'
 expect steam 'command:  scripts/run-fex.sh /bin/bash /tmp/fexhome/.local/share/Steam/steam.sh'
 expect steam 'LXRT_ROOT=/tmp/lxrt-steamroot FEX_ROOTFS=/ DISPLAY=:2'
-expect steam-arm64 'command:  scripts/run-native.sh /tmp/armhome/.local/share/Steam/steamrtarm64/steam' ' FEX_'
-expect steam-arm64 'LXRT_ROOT=/tmp/lxrt-armroot DISPLAY=:2'
-expect steam-arm64 'LXRT_GUEST_PAGE=4096'
-expect steam-arm64 'HOME_IN_GUEST=/tmp/armhome'
-expect steam-arm64 'LXRT_X18_ALL_TEXT=libcef.so'
-expect steam-arm64 'translator: none, session: ZERO-VM'
 expect steam-arm64-frame 'command:  scripts/run-native.sh /tmp/armhome/.local/share/Steam/steamrtarm64/steam' ' FEX_'
 # The games an ARM64 client starts through FEX get the Processor settings
 # (tools/steamarm-fex-proton).
@@ -79,8 +73,8 @@ expect heroic 'LXRT_X18_ALL_TEXT=/opt/apps/heroic/'
 expect heroic 'translator: none, session: ZERO-VM'
 expect ovr 'display:  vnc (DISPLAY=:1)'
 expect ovr 'VKD3D_SWAPCHAIN_PRESENT_MODE=FIFO'
-expect_in "$W2" steam-arm64 'display:  native (DISPLAY=:2)'
-expect_in "$W2" steam-arm64 'VNC cannot serve it'
+expect_in "$W2" steam-arm64-frame 'display:  native (DISPLAY=:2)'
+expect_in "$W2" steam-arm64-frame 'VNC cannot serve it'
 expect_in "$W2" steam 'display:  vnc (DISPLAY=:1)'
 expect bad   "architecture 'armv7'"
 # Android apps (docs/APK_SUPPORT.md, benchmarks/stage28-android-apk.txt): the
@@ -152,7 +146,7 @@ echo '[]' > "$W3/launcher/apps.json"
 echo '{"antialiasing":4,"builtinOverrides":{"steam-arm64-frame":{"vsync":"on","bogus":"x"}}}' > "$W3/launcher/settings.json"
 expect_in "$W3" steam-arm64-frame 'VKD3D_SWAPCHAIN_PRESENT_MODE=FIFO'
 expect_in "$W3" steam-arm64-frame 'd3d9.forceSwapchainMSAA = 4'
-expect_in "$W3" steam-arm64 'd3d9.forceSwapchainMSAA = 4' 'VKD3D_SWAPCHAIN_PRESENT_MODE=FIFO'
+expect_in "$W3" steam 'd3d9.forceSwapchainMSAA = 4' 'VKD3D_SWAPCHAIN_PRESENT_MODE=FIFO'
 rm -rf "$W3"
 echo "$pass passed, $fail failed"
 [ "$fail" -eq 0 ]
