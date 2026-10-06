@@ -6,19 +6,16 @@
 #include "lxrt_host.h"
 
 __attribute__((visibility("hidden")))
-void *lxrt_vk_table[431];
+void *lxrt_vk_table[433];
 
 // LXRT_VK_CALLS=1 (vulkan_shim.S): the driver's entry points while the table
 // holds the counting thunks, and how often each was called.
-__attribute__((visibility("hidden"))) void *lxrt_vk_real[431];
-__attribute__((visibility("hidden"))) unsigned long long lxrt_vk_counts[431];
+__attribute__((visibility("hidden"))) void *lxrt_vk_real[433];
+__attribute__((visibility("hidden"))) unsigned long long lxrt_vk_counts[433];
 __attribute__((visibility("hidden"))) int lxrt_vk_calls_on;
-extern void *const lxrt_vk_cnt_thunks[431] __attribute__((visibility("hidden")));
+extern void *const lxrt_vk_cnt_thunks[433] __attribute__((visibility("hidden")));
 
 static const char *const k_names[] = {
-    "vk_icdGetInstanceProcAddr",
-    "vk_icdGetPhysicalDeviceProcAddr",
-    "vk_icdNegotiateLoaderICDInterfaceVersion",
     "vkAcquireNextImage2KHR",
     "vkAcquireNextImageKHR",
     "vkAllocateCommandBuffers",
@@ -33,11 +30,11 @@ static const char *const k_names[] = {
     "vkBindImageMemory2KHR",
     "vkCmdBeginDebugUtilsLabelEXT",
     "vkCmdBeginQuery",
-    "vkCmdBeginRendering",
-    "vkCmdBeginRenderingKHR",
     "vkCmdBeginRenderPass",
     "vkCmdBeginRenderPass2",
     "vkCmdBeginRenderPass2KHR",
+    "vkCmdBeginRendering",
+    "vkCmdBeginRenderingKHR",
     "vkCmdBindDescriptorSets",
     "vkCmdBindDescriptorSets2",
     "vkCmdBindDescriptorSets2KHR",
@@ -84,13 +81,15 @@ static const char *const k_names[] = {
     "vkCmdDrawIndirectCount",
     "vkCmdDrawIndirectCountAMD",
     "vkCmdDrawIndirectCountKHR",
+    "vkCmdDrawMultiEXT",
+    "vkCmdDrawMultiIndexedEXT",
     "vkCmdEndDebugUtilsLabelEXT",
     "vkCmdEndQuery",
-    "vkCmdEndRendering",
-    "vkCmdEndRenderingKHR",
     "vkCmdEndRenderPass",
     "vkCmdEndRenderPass2",
     "vkCmdEndRenderPass2KHR",
+    "vkCmdEndRendering",
+    "vkCmdEndRenderingKHR",
     "vkCmdExecuteCommands",
     "vkCmdFillBuffer",
     "vkCmdInsertDebugUtilsLabelEXT",
@@ -153,12 +152,12 @@ static const char *const k_names[] = {
     "vkCmdSetFrontFaceEXT",
     "vkCmdSetLineRasterizationModeEXT",
     "vkCmdSetLineStipple",
-    "vkCmdSetLineStippleEnableEXT",
     "vkCmdSetLineStippleEXT",
+    "vkCmdSetLineStippleEnableEXT",
     "vkCmdSetLineStippleKHR",
     "vkCmdSetLineWidth",
-    "vkCmdSetLogicOpEnableEXT",
     "vkCmdSetLogicOpEXT",
+    "vkCmdSetLogicOpEnableEXT",
     "vkCmdSetPatchControlPointsEXT",
     "vkCmdSetPolygonModeEXT",
     "vkCmdSetPrimitiveRestartEnable",
@@ -323,6 +322,7 @@ static const char *const k_names[] = {
     "vkGetDeviceQueue2",
     "vkGetEventStatus",
     "vkGetFenceStatus",
+    "vkGetIOSurfaceMVK",
     "vkGetImageMemoryRequirements",
     "vkGetImageMemoryRequirements2",
     "vkGetImageMemoryRequirements2KHR",
@@ -334,15 +334,14 @@ static const char *const k_names[] = {
     "vkGetImageSubresourceLayout2EXT",
     "vkGetImageSubresourceLayout2KHR",
     "vkGetInstanceProcAddr",
-    "vkGetIOSurfaceMVK",
-    "vkGetMemoryHostPointerPropertiesEXT",
-    "vkGetMemoryMetalHandleEXT",
-    "vkGetMemoryMetalHandlePropertiesEXT",
-    "vkGetMoltenVKConfigurationMVK",
     "vkGetMTLBufferMVK",
     "vkGetMTLCommandQueueMVK",
     "vkGetMTLDeviceMVK",
     "vkGetMTLTextureMVK",
+    "vkGetMemoryHostPointerPropertiesEXT",
+    "vkGetMemoryMetalHandleEXT",
+    "vkGetMemoryMetalHandlePropertiesEXT",
+    "vkGetMoltenVKConfigurationMVK",
     "vkGetPastPresentationTimingGOOGLE",
     "vkGetPerformanceStatisticsMVK",
     "vkGetPhysicalDeviceCalibrateableTimeDomainsEXT",
@@ -423,8 +422,8 @@ static const char *const k_names[] = {
     "vkSetDebugUtilsObjectTagEXT",
     "vkSetEvent",
     "vkSetHdrMetadataEXT",
-    "vkSetMoltenVKConfigurationMVK",
     "vkSetMTLTextureMVK",
+    "vkSetMoltenVKConfigurationMVK",
     "vkSetPrivateData",
     "vkSetPrivateDataEXT",
     "vkSetWorkgroupSizeMVK",
@@ -438,21 +437,24 @@ static const char *const k_names[] = {
     "vkUnmapMemory",
     "vkUnmapMemory2",
     "vkUnmapMemory2KHR",
-    "vkUpdateDescriptorSets",
     "vkUpdateDescriptorSetWithTemplate",
     "vkUpdateDescriptorSetWithTemplateKHR",
+    "vkUpdateDescriptorSets",
     "vkUseIOSurfaceMVK",
     "vkWaitForFences",
     "vkWaitForPresent2KHR",
     "vkWaitForPresentKHR",
     "vkWaitSemaphores",
     "vkWaitSemaphoresKHR",
+    "vk_icdGetInstanceProcAddr",
+    "vk_icdGetPhysicalDeviceProcAddr",
+    "vk_icdNegotiateLoaderICDInterfaceVersion",
 };
 #define N_NAMES (sizeof(k_names) / sizeof(k_names[0]))
-#define I_vkCreateInstance 206
-#define I_vk_icdGetInstanceProcAddr 0
-#define I_vkEnumerateInstanceLayerProperties 263
-#define I_vkEnumerateDeviceLayerProperties 261
+#define I_vkCreateInstance 205
+#define I_vk_icdGetInstanceProcAddr 430
+#define I_vkEnumerateInstanceLayerProperties 262
+#define I_vkEnumerateDeviceLayerProperties 260
 
 // Homebrew first, then the Vulkan SDK. Whichever is present wins; a build that
 // finds neither leaves the table null and every entry point traps at brk #2

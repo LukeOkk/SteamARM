@@ -81,11 +81,26 @@ def vulkan_api(el):
     return api is None or "vulkan" in api.split(",")
 
 
+def member_text(m):
+    """The member's declaration without its <comment>: the registry's comments
+    hold brackets ("{UNIFORM,STORAGE}_BUFFER[_DYNAMIC]" on
+    VkWriteDescriptorSet::pBufferInfo), which read as a fixed array and left
+    the member unrebased -- KosmicKrisp then read DXVK's buffer infos at their
+    raw guest addresses, 430k faults a second fixed up one by one
+    (MEASURED, Schedule I, 2026-10-06)."""
+    parts = [m.text or ""]
+    for c in m:
+        if c.tag != "comment":
+            parts.append("".join(c.itertext()))
+        parts.append(c.tail or "")
+    return "".join(parts)
+
+
 def member_info(m):
     """(type, name, pointer depth, fixed array?, len attr, text)"""
     t = m.find("type").text
     n = m.find("name").text
-    text = "".join(m.itertext())
+    text = member_text(m)
     depth = text.split(n)[0].count("*")
     fixed = "[" in text.split(n, 1)[1] if n in text else False
     return t, n, depth, fixed, m.get("len"), text
