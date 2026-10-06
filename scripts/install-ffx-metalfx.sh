@@ -1,8 +1,10 @@
 #!/bin/bash
 # Install SteamARM's FidelityFX API DLLs (tools/ffx-metalfx, built by
-# make ffx-metalfx) into the x86 Steam root, where the game tools point Wine
-# at them for a game's FSR 3.1 / FSR 4 -> MetalFX (STEAMARM_WIN_UPSCALER=metalfx,
-# launcher "Escalado del juego"; games with an anti-cheat are left alone).
+# make ffx-metalfx) and its NGX DLLs (tools/dlss-metalfx, make dlss-metalfx)
+# into the x86 Steam root, where the game tools point Wine at them for a
+# game's FSR 3.1 / FSR 4 -> MetalFX (STEAMARM_WIN_UPSCALER=metalfx) and
+# DLSS -> MetalFX (STEAMARM_WIN_DLSS=metalfx; launcher "Escalado del juego";
+# games with an anti-cheat are left alone).
 #
 #   scripts/install-ffx-metalfx.sh [--root DIR] [--dry-run]
 #   scripts/install-ffx-metalfx.sh --uninstall [--root DIR]
@@ -10,6 +12,7 @@
 # What it writes, all under <root>/opt/steamarm/wine (and nothing else):
 #   x86_64-windows/amd_fidelityfx_dx12.dll, amd_fidelityfx_vk.dll,
 #   amd_fidelityfx_upscaler_dx12.dll   the builtins (WINEDLLPATH=/opt/steamarm/wine)
+#   x86_64-windows/nvngx.dll, _nvngx.dll   NVIDIA's NGX names, SteamARM's DLSS -> MetalFX
 #   anticheat-appids.txt               games never given the DLLs, by Steam app id
 #                                      (tools/ffx-metalfx/anticheat-appids.txt)
 #   steamarm-ffx                       the x86 client's launch-option wrapper:
@@ -25,10 +28,13 @@
 # --root     the x86 Steam root (default $LXRT_ROOT, else /tmp/lxrt-steamroot)
 # FFX_BUILD  the built DLLs' directory (default build/ffx-metalfx, made with
 #            make ffx-metalfx first; set, nothing is built: tests)
+# NGX_BUILD  the built NGX DLLs' directory (default build/dlss-metalfx, made
+#            with make dlss-metalfx; set, nothing is built: tests)
 set -euo pipefail
 cd "$(dirname "$0")/.." || exit 1
 ROOT="${LXRT_ROOT:-/tmp/lxrt-steamroot}" DRY=0 UNINSTALL=0
 NAMES="amd_fidelityfx_dx12 amd_fidelityfx_vk amd_fidelityfx_upscaler_dx12"
+NGX_NAMES="nvngx _nvngx"
 while [ $# -gt 0 ]; do
     case "$1" in
         --root) ROOT="${2:?--root needs a directory}"; shift 2 ;;
@@ -66,8 +72,21 @@ fi
 for n in $NAMES; do
     [ -f "$SRC/x86_64-windows/$n.dll" ] || die "missing $SRC/x86_64-windows/$n.dll (make ffx-metalfx)"
 done
+NGX_SRC="${NGX_BUILD:-}"
+if [ -z "$NGX_SRC" ]; then
+    NGX_SRC=build/dlss-metalfx
+    if ! make -s dlss-metalfx; then
+        for n in $NGX_NAMES; do
+            [ -f "$NGX_SRC/x86_64-windows/$n.dll" ] || die "could not build $NGX_SRC/x86_64-windows/$n.dll (make dlss-metalfx; needs mingw-w64 and vulkan-headers)"
+        done
+        log "warning: make dlss-metalfx failed; installing the DLLs already in $NGX_SRC"
+    fi
+fi
+for n in $NGX_NAMES; do
+    [ -f "$NGX_SRC/x86_64-windows/$n.dll" ] || die "missing $NGX_SRC/x86_64-windows/$n.dll (make dlss-metalfx)"
+done
 if [ "$DRY" = 1 ]; then
-    log "would install $NAMES (.dll), anticheat-appids.txt and steamarm-ffx into $DEST"
+    log "would install $NAMES $NGX_NAMES (.dll), anticheat-appids.txt and steamarm-ffx into $DEST"
     exit 0
 fi
 
@@ -78,6 +97,9 @@ mkdir -p "$DEST/x86_64-windows"
 for n in $NAMES; do
     put "$SRC/x86_64-windows/$n.dll" "$DEST/x86_64-windows/$n.dll" 0644
 done
+for n in $NGX_NAMES; do
+    put "$NGX_SRC/x86_64-windows/$n.dll" "$DEST/x86_64-windows/$n.dll" 0644
+done
 put tools/ffx-metalfx/anticheat-appids.txt "$DEST/anticheat-appids.txt" 0644
 put tools/steamarm-fex-proton/steamarm-fex-proton "$DEST/steamarm-ffx" 0755
-log "installed into $DEST: $NAMES (.dll), anticheat-appids.txt, steamarm-ffx"
+log "installed into $DEST: $NAMES $NGX_NAMES (.dll), anticheat-appids.txt, steamarm-ffx"

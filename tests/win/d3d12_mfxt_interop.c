@@ -650,6 +650,8 @@ int main(int argc, char **argv)
                                                            &IID_ID3D12GraphicsCommandList, (void **)&cl));
     HR("CreateCommandList", ID3D12Device_CreateCommandList(dev, 0, D3D12_COMMAND_LIST_TYPE_DIRECT, alloc2, NULL,
                                                            &IID_ID3D12GraphicsCommandList, (void **)&cl2));
+    /* Both lists start recording: closed, so the first Reset of their allocators is legal. */
+    ID3D12GraphicsCommandList_Close(cl);
     ID3D12GraphicsCommandList_Close(cl2);
     HR("CreateFence", ID3D12Device_CreateFence(dev, 0, D3D12_FENCE_FLAG_NONE, &IID_ID3D12Fence, (void **)&fence));
     fence_event = CreateEventA(NULL, FALSE, FALSE, NULL);

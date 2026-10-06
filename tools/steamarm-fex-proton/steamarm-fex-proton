@@ -46,7 +46,10 @@
 # "Escalado del juego", scripts/settings-env.py) and a Windows game without an
 # anti-cheat, Wine takes SteamARM's FidelityFX API DLLs from the x86 root's
 # /opt/steamarm/wine (scripts/install-ffx-metalfx.sh) over the game's own
-# (see "FSR 3.1 / FSR 4" below). Installed there under the name steamarm-ffx,
+# (see "FSR 3.1 / FSR 4" below). DLSS -> MetalFX likewise with
+# STEAMARM_WIN_DLSS=metalfx, for a game that ships DLSS (nvngx_dlss.dll): its
+# NGX calls go to SteamARM's nvngx.dll / _nvngx.dll (see "DLSS" below).
+# Installed there under the name steamarm-ffx,
 # the same script does only that, for SteamARM's x86 Steam client, whose game
 # environment is Steam's own (scripts/run-steam.sh) and has no per-game step
 # of SteamARM's: a game's launch options there read
@@ -184,9 +187,84 @@ ffx_say() {   # the one line, either way
 }
 show_ffx_env() {   # for the dry run
     local v
-    for v in WINEDLLPATH WINEDLLOVERRIDES PRESSURE_VESSEL_FILESYSTEMS_RO; do
+    for v in WINEDLLPATH WINEDLLOVERRIDES PRESSURE_VESSEL_FILESYSTEMS_RO NVIDIA_WINE_DLL_DIR STEAMARM_NGX_MODEL DXVK_CONFIG; do
         [ -z "${!v+x}" ] || echo "env: $v=${!v}"
     done
+}
+
+# ------------------------------------------------------ DLSS -> MetalFX
+# SteamARM's NGX DLLs (tools/dlss-metalfx: nvngx.dll and _nvngx.dll, Wine
+# builtins with the prefer-native flag, in FFX_DIR with the FidelityFX
+# DLLs) stand in for NVIDIA's NGX core and send a game's DLSS to MetalFX's
+# temporal scaler. Set up the same way, with STEAMARM_WIN_DLSS=metalfx, the
+# same anti-cheat rule, and only for a game that ships DLSS at all: its
+# nvngx_dlss.dll (the model DLL, searched under the game's install
+# directory, Unreal keeps it in a plugin folder) -- without it the game has
+# no DLSS option to answer. Besides the load order (MEASURED,
+# tests/win/run_d3d12_dlss.sh: "nvngx.dll" by name and _nvngx.dll by its
+# System32 path both load the builtin), two things the DLLs cannot do for
+# themselves:
+# - NVIDIA_WINE_DLL_DIR: Proton's win32u answers NVIDIA's static NGX SDK,
+#   which asks the display driver (D3DKMTQueryAdapterInfo, NGXCore\NGXPath)
+#   where the NGX core lives, with this directory when the registry has no
+#   answer; the SDK then loads <dir>\_nvngx.dll by path. Set to the DLLs'
+#   directory (a path in the x86 root, which FEX's rootfs shows the game).
+#   An SDK that takes the registry's NGXCore FullPath (C:\Windows\System32
+#   in Proton's prefixes) instead looks for a file there, which this tool
+#   does not put in a game's prefix: such a game shows DLSS unavailable.
+# - STEAMARM_NGX_MODEL: the model DLL found, for the DLL's DLSS 1 test (a
+#   1.x nvngx_dlss.dll is DLSS 1: MetalFX spatial through the shim's FSR 1
+#   pass instead of temporal). The game's directory is seen by the guest at
+#   the same path (the client's paths are bound as they are); where it is
+#   not, the DLL looks next to the game's program itself.
+# - the adapter: games offer DLSS only on an NVIDIA GPU (vendor 0x10de), so
+#   DXVK's dxgi.customVendorId = 10de is appended to DXVK_CONFIG (VKD3D-
+#   Proton takes the adapter from DXVK's dxgi, so Direct3D 12 games see it
+#   too; a Vulkan game asks the driver itself and is not fooled). A user's
+#   own customVendorId in DXVK_CONFIG is left as it is. Never set without
+#   the DLLs: an NVIDIA vendor also makes a game try NVAPI (Proton's nvapi64
+#   refuses on this GPU; games go on without it).
+DLSS_DLLS=nvngx,_nvngx
+dlss_why="" dlss_model=""
+dlss_find_model() {   # dlss_find_model DIR...: dlss_model = the game's nvngx_dlss.dll
+    local d
+    dlss_model=""
+    for d in "$@"; do
+        [ -d "$d" ] || continue
+        dlss_model=$(find "$d" -maxdepth 8 -iname nvngx_dlss.dll -print 2>/dev/null | head -1)
+        [ -z "$dlss_model" ] || return 0
+    done
+    return 1
+}
+dlss_decide() {   # dlss_decide EXE: dlss_why = why the game is left out, "" if it is not
+    dlss_why=""
+    ffx_decide "$1"
+    if [ -n "$ffx_why" ]; then dlss_why=$ffx_why; return; fi
+    dlss_find_model ${ffx_dirs[@]+"${ffx_dirs[@]}"} || dlss_why="no nvngx_dlss.dll in the game's files: it has no DLSS to stand in for"
+}
+dlss_apply() {   # dlss_apply DIR: Wine takes the NGX DLLs in DIR (a path in the x86 root)
+    case ":${WINEDLLPATH:-}:" in *":$1:"*) ;; *) export WINEDLLPATH="${WINEDLLPATH:+$WINEDLLPATH:}$1" ;; esac
+    case "${WINEDLLOVERRIDES:-}" in
+        *"$DLSS_DLLS=b,n"*) ;;
+        *) export WINEDLLOVERRIDES="$DLSS_DLLS=b,n${WINEDLLOVERRIDES:+;$WINEDLLOVERRIDES}" ;;
+    esac
+    case ":${PRESSURE_VESSEL_FILESYSTEMS_RO:-}:" in
+        *":$1:"*) ;;
+        *) export PRESSURE_VESSEL_FILESYSTEMS_RO="${PRESSURE_VESSEL_FILESYSTEMS_RO:+$PRESSURE_VESSEL_FILESYSTEMS_RO:}$1" ;;
+    esac
+    [ -n "${NVIDIA_WINE_DLL_DIR:-}" ] || export NVIDIA_WINE_DLL_DIR="$1/x86_64-windows"
+    [ -n "${STEAMARM_NGX_MODEL:-}" ] || [ -z "$dlss_model" ] || export STEAMARM_NGX_MODEL="$dlss_model"
+    case "${DXVK_CONFIG:-}" in
+        *customVendorId*) ;;
+        *) export DXVK_CONFIG="${DXVK_CONFIG:+$DXVK_CONFIG;}dxgi.customVendorId = 10de" ;;
+    esac
+}
+dlss_say() {   # the one line, either way
+    if [ -z "$dlss_why" ]; then
+        say "DLSS -> MetalFX: SteamARM's NGX DLLs from $1 ($DLSS_DLLS=b,n; ${dlss_model##*/} found), adapter shown as NVIDIA to DXVK"
+    else
+        say "DLSS -> MetalFX off for this game ($dlss_why)"
+    fi
 }
 
 # steamarm-ffx: the x86 client's launch-option wrapper, run in the x86 root
@@ -215,6 +293,25 @@ if [ "$ffx_only" = 1 ]; then
         fi
         [ -n "$ffx_why" ] || ffx_apply "$dir"
         ffx_say "$dir"
+    fi
+    if [ "${STEAMARM_WIN_DLSS:-}" = metalfx ]; then
+        exe="" p1="" p2=""
+        for a in "$@"; do
+            case "$p2" in */proton) exe=$a; break ;; esac
+            p2=$p1 p1=$a
+        done
+        if [ -z "$exe" ]; then
+            for a in "$@"; do case "$a" in *.[eE][xX][eE]) exe=$a; break ;; esac; done
+        fi
+        dir=$(cd "$here" && pwd -P) || die 3 "cannot resolve $here"
+        dlss_decide "$exe"
+        if [ -z "$dlss_why" ]; then
+            for n in ${DLSS_DLLS//,/ }; do
+                [ -f "$dir/x86_64-windows/$n.dll" ] || { dlss_why="no $dir/x86_64-windows/$n.dll (scripts/install-ffx-metalfx.sh)"; break; }
+            done
+        fi
+        [ -n "$dlss_why" ] || dlss_apply "$dir"
+        dlss_say "$dir"
     fi
     if [ "${STEAMARM_FEX_PROTON_DRYRUN:-}" = 1 ]; then
         show_ffx_env
@@ -332,20 +429,30 @@ for n in amd_fidelityfx_dx12 amd_fidelityfx_vk amd_fidelityfx_upscaler_dx12; do
 [ -f "$1$8/x86_64-windows/$n.dll" ] || { m="$m noffx"; break; }
 done
 fi
+if [ -n "$9" ]; then
+for n in nvngx _nvngx; do
+[ -f "$1$9/x86_64-windows/$n.dll" ] || { m="$m nodlss"; break; }
+done
+fi
 echo "missing:$m"'
 # FSR 3.1 / FSR 4 (above): decided for a Windows game; its DLLs are checked
 # with the rest of the x86 side.
-ffx_check=""
+ffx_check="" dlss_check=""
 if [ "$linux" = 0 ] && [ "${STEAMARM_WIN_UPSCALER:-}" = metalfx ]; then
     ffx_decide "${1:-}"
     [ -n "$ffx_why" ] || ffx_check=$FFX_DIR
 fi
+# DLSS (above): the same, for a game that ships DLSS.
+if [ "$linux" = 0 ] && [ "${STEAMARM_WIN_DLSS:-}" = metalfx ]; then
+    dlss_decide "${1:-}"
+    [ -n "$dlss_why" ] || dlss_check=$FFX_DIR
+fi
 if [ "${STEAMARM_FEX_PROTON_DRYRUN:-}" = 1 ]; then
-    echo "check: LXRT_MOUNTS=$(show_table "$check_mounts") [x86 root $X86_ROOT: $proton_dir/proton, $slr_dir/_v2-entry-point; $FEXDIR/$FEXBIN; FEXServer socket /tmp/lxrt-abstract-$uid/$uid.FEXServer.Socket${ffx_check:+; FidelityFX DLLs $ffx_check/x86_64-windows}]"
+    echo "check: LXRT_MOUNTS=$(show_table "$check_mounts") [x86 root $X86_ROOT: $proton_dir/proton, $slr_dir/_v2-entry-point; $FEXDIR/$FEXBIN; FEXServer socket /tmp/lxrt-abstract-$uid/$uid.FEXServer.Socket${ffx_check:+; FidelityFX DLLs $ffx_check/x86_64-windows}${dlss_check:+; NGX DLLs $dlss_check/x86_64-windows}]"
     missing=""
 else
     out=$(LXRT_MOUNTS="$check_mounts" /bin/bash -c "$check_script" check "$x86" "$fex" \
-          "$proton_dir" "$slr_dir" "$FEXBIN" "$sock/$uid.FEXServer.Socket" "$PROTON" "$ffx_check" 2>/dev/null)
+          "$proton_dir" "$slr_dir" "$FEXBIN" "$sock/$uid.FEXServer.Socket" "$PROTON" "$ffx_check" "$dlss_check" 2>/dev/null)
     case "$out" in missing:*) missing=${out#missing:} ;; *) die 4 "could not check the x86 side (output: '$out')" ;; esac
 fi
 for m in $missing; do
@@ -355,6 +462,7 @@ for m in $missing; do
         runtime:*) die 4 "$RUNTIME is not installed in the x86 Steam root ($X86_ROOT: ${m#*:}); ${PROTON:-a native Linux game} requires it" ;;
         fex:*) die 4 "no FEX at $FEXDIR/$FEXBIN (scripts/setup.sh builds it)" ;;
         noffx) ffx_why="SteamARM's FidelityFX DLLs are not in the x86 root ($X86_ROOT$FFX_DIR: scripts/install-ffx-metalfx.sh)" ;;
+        nodlss) dlss_why="SteamARM's NGX DLLs are not in the x86 root ($X86_ROOT$FFX_DIR: scripts/install-ffx-metalfx.sh)" ;;
         fexserver) die 5 "FEXServer is not running (no /tmp/lxrt-abstract-$uid/$uid.FEXServer.Socket): start SteamARM's x86 side first (scripts/run-fex.sh /bin/true, or the launcher's Steam entry). Not starting one from here: a FEXServer started with a game's environment serves the wrong x86 root to every later FEX program (scripts/run-fex.sh)" ;;
     esac
 done
@@ -445,6 +553,10 @@ fi
 if [ "$linux" = 0 ] && [ "${STEAMARM_WIN_UPSCALER:-}" = metalfx ]; then
     [ -n "$ffx_why" ] || ffx_apply "$FFX_DIR"
     ffx_say "$FFX_DIR in the x86 root"
+fi
+if [ "$linux" = 0 ] && [ "${STEAMARM_WIN_DLSS:-}" = metalfx ]; then
+    [ -n "$dlss_why" ] || dlss_apply "$FFX_DIR"
+    dlss_say "$FFX_DIR in the x86 root"
 fi
 
 first=${1:-}
