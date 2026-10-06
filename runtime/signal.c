@@ -411,7 +411,10 @@ static _Atomic uint64_t g_sigstats_last;
 static int sigstats_on(void)
 {
     static int on = -1;
-    if (on < 0) on = getenv("LXRT_SIGSTATS") ? 1 : 0;
+    if (on < 0) {
+        const char *e = getenv("LXRT_SIGSTATS");
+        on = !e ? 0 : atoi(e) >= 2 ? 2 : 1;
+    }
     return on;
 }
 static void sigstats_print(const char *when)
@@ -809,6 +812,30 @@ static void host_handler(int dsig, siginfo_t *dinfo, void *uap)
         return;
     }
     sigstats_note(dsig);
+    // LXRT_SIGSTATS=2: every 100000th fault, where it was (pc, address, esr)
+    // and what became of it -- which code takes a storm of faults.
+    static _Atomic unsigned long g_sigsample;
+    bool sample_this = false;
+    if (uap && (dsig == SIGSEGV || dsig == SIGBUS) && sigstats_on() >= 2 &&
+        atomic_fetch_add(&g_sigsample, 1) % 100000 == 0) {
+        sample_this = true;
+        char where[300] = "?";
+        uint64_t spc = ((ucontext_t *)uap)->uc_mcontext->__ss.__pc;
+        mach_vm_address_t ra = spc; mach_vm_size_t rs = 0;
+        vm_region_basic_info_data_64_t ri; mach_msg_type_number_t rc = VM_REGION_BASIC_INFO_COUNT_64;
+        mach_port_t obj = MACH_PORT_NULL; char fname[256] = "";
+        if (mach_vm_region(mach_task_self(), &ra, &rs, VM_REGION_BASIC_INFO_64, (vm_region_info_t)&ri, &rc, &obj) == KERN_SUCCESS &&
+            ra <= spc && proc_regionfilename(getpid(), ra, fname, sizeof fname) > 0) {
+            const char *b = strrchr(fname, '/');
+            snprintf(where, sizeof where, "%s+0x%llx", b ? b + 1 : fname, (unsigned long long)(spc - ra + ri.offset));
+        } else
+            snprintf(where, sizeof where, "anonymous region 0x%llx (%s)", (unsigned long long)ra,
+                     lxrt_jit_contains(spc) ? "JIT code" : "not JIT");
+        fprintf(lxrt_trace_stream(), "[lxrt] pid %d sigsample #%lu: sig %d code %d pc 0x%llx [%s] addr 0x%llx esr 0x%x x18 0x%llx\n",
+                (int)getpid(), atomic_load(&g_sigsample), dsig, dinfo ? dinfo->si_code : 0,
+                (unsigned long long)spc, where, (unsigned long long)(dinfo ? (uintptr_t)dinfo->si_addr : 0),
+                ((ucontext_t *)uap)->uc_mcontext->__es.__esr, (unsigned long long)((ucontext_t *)uap)->uc_mcontext->__ss.__x[18]);
+    }
     if (uap) {
         unsigned k = g_lastsig_n++ % 4;
         g_lastsig[k].sig = dsig;
@@ -878,8 +905,13 @@ static void host_handler(int dsig, siginfo_t *dinfo, void *uap)
     }
 
     // The runtime's own faults first (shared with main.c's fault_report).
-    if (lxrt_absorb_runtime_fault(dsig, dinfo, uap))
+    if (lxrt_absorb_runtime_fault(dsig, dinfo, uap)) {
+        if (sample_this)
+            fprintf(lxrt_trace_stream(), "[lxrt] pid %d sigsample: absorbed by the runtime\n", (int)getpid());
         return;
+    }
+    if (sample_this)
+        fprintf(lxrt_trace_stream(), "[lxrt] pid %d sigsample: delivered to the guest's handler\n", (int)getpid());
     // A SIGSEGV the guest's handler returns from without fixing comes back
     // at once, at the same pc and address: a thread that took 10000 of them
     // in a row, with no other fault between, makes no progress and never
