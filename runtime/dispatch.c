@@ -989,6 +989,11 @@ static long do_madvise(uint64_t addr, uint64_t len, int ladvice)
 static long do_munmap_inner(uint64_t addr, uint64_t len);
 static long do_munmap(uint64_t addr, uint64_t len)
 {
+    {
+        long lr;
+        if (lxrt_lowpage_munmap(addr, len, &lr))
+            return lr;
+    }
     long r = do_munmap_inner(addr, len);
     if (r == 0)
         lxrt_arena_unmapped(addr, len);    // holes in the guest's arena get its reservation back
@@ -1179,6 +1184,13 @@ static long do_mmap(uint64_t addr, uint64_t len, long prot, long lflags,
 static long do_mmap_inner(uint64_t addr, uint64_t len, long prot, long lflags,
                           long fd, long off)
 {
+    // A native guest's fixed request below 4 GiB: KUSER_SHARED_DATA as a
+    // virtual page, anything else refused (lowpage.c, LXRT_LOWPAGES=1).
+    {
+        long lr;
+        if (lxrt_lowpage_mmap(addr, len, prot, lflags, fd, off, &lr))
+            return lr;
+    }
     int flags = 0;
     if (lflags & LINUX_MAP_SHARED)  flags |= MAP_SHARED;
     if (lflags & LINUX_MAP_PRIVATE) flags |= MAP_PRIVATE;
@@ -1733,6 +1745,11 @@ static long wx_leave(uint64_t addr, uint64_t len, int prot)
 // unwritable on the host whatever the guest asks, until their first store.
 static long do_mprotect(uint64_t addr, uint64_t len, long prot)
 {
+    {
+        long lr;
+        if (lxrt_lowpage_mprotect(addr, len, prot, &lr))
+            return lr;
+    }
     // Linux rounds the length up to whole pages (PAGE_ALIGN) before it looks
     // at anything; the paths below took it to the byte, so subpage.c recorded
     // a partial 4 KiB page and the tail of that page kept its old
@@ -4545,6 +4562,9 @@ restart:
                 ssize_t got = hfd >= 0 ? read(hfd, magic, 4) : -1;
                 if (hfd >= 0) close(hfd);
                 if (got != 4 || memcmp(magic, "\x7f" "ELF", 4) != 0 || stat(gp, &est) != 0) {
+                    if (g_trace)
+                        fprintf(lxrt_trace_stream(), "[lxrt]    execve \"%s\" (host \"%s\"): %s\n",
+                                gp, hp, strerror(e));
                     ret = LERR(e);
                     break;
                 }

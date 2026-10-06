@@ -766,6 +766,30 @@ if [ -f "$STAGE/usr/lib64/libc.a" ] && [ -n "$GCCDIR" ]; then
     fi
 fi
 
+# 19e2. Virtual pages below 4 GiB for a native guest (runtime/lowpage.c,
+# LXRT_LOWPAGES=1): Wine ARM64 maps KUSER_SHARED_DATA fixed at 0x7ffe0000,
+# which macOS cannot map; the runtime keeps it elsewhere and carries out the
+# faulting loads and stores itself. Every addressing form, protection and
+# unmapping, and the answers Wine's allocator gets for its probes below 4 GiB.
+if [ -f "$STAGE/usr/lib64/libc.a" ] && [ -n "$GCCDIR" ]; then
+    if err=$(glibc_cc -static-pie -O1 -o build/lowpage tests/elf/lowpage.c 2>&1); then
+        out=$(LXRT_LOWPAGES=1 deadline 60 ./build/lxrun "$PWD/build/lowpage" 2>&1); rc=$?
+        if [ "$rc" -eq 0 ] && grep -q "^lowpage: [0-9]* ok, 0 failed" <<<"$out"; then
+            ok "virtual page at 0x7ffe0000: $(grep -o 'lowpage: [0-9]* ok' <<<"$out") -- loads, stores, pairs, SIMD, writeback, acquire/release, read-only, unmapped"
+        else
+            bad "virtual page at 0x7ffe0000" "rc=$rc: $(grep FAIL <<<"$out" | head -3 | tr '\n' ' ')"
+        fi
+        out=$(deadline 60 ./build/lxrun "$PWD/build/lowpage" 2>&1); rc=$?
+        if [ "$rc" -eq 0 ] && grep -q "^lowpage: 1 ok, 0 failed" <<<"$out"; then
+            ok "without LXRT_LOWPAGES a page below 4 GiB is still refused"
+        else
+            bad "page below 4 GiB refused without LXRT_LOWPAGES" "rc=$rc: $(tail -2 <<<"$out" | tr '\n' ' ')"
+        fi
+    else
+        bad "build lowpage" "$err"
+    fi
+fi
+
 # 19f. readv, preadv, pwritev, preadv2 and pwritev2 (all ENOSYS before), and
 # read() on a seqpacket pair whose peer died without writing: end of file,
 # not a read that never returns (Steam's web helper and its zygotes).

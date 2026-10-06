@@ -509,6 +509,16 @@ void *lxrt_build_stack(const struct lxrt_image *img, int argc, char **argv,
 
 // main.c
 // Transfers control. Does not return.
+// lowpage.c: virtual pages below 4 GiB for native guests (LXRT_LOWPAGES=1).
+bool lxrt_lowpage_on(void);
+bool lxrt_lowpage_mmap(uint64_t addr, uint64_t len, long prot, long lflags,
+                       long fd, long off, long *ret);
+bool lxrt_lowpage_munmap(uint64_t addr, uint64_t len, long *ret);
+bool lxrt_lowpage_mprotect(uint64_t addr, uint64_t len, long prot, long *ret);
+struct __siginfo;
+bool lxrt_lowpage_fault(const struct __siginfo *si, void *uap);
+unsigned long lxrt_lowpage_faults(void);
+
 void lxrt_enter(uint64_t entry, void *sp) __attribute__((noreturn));
 void lxrt_thread_enter(const struct lxrt_regs *saved, uint64_t sp)
     __attribute__((noreturn));
