@@ -19,7 +19,10 @@
 //
 // Arguments: frames=N (per case, default 24), out=PATH, orig=PATH,
 // dll=NAME (default amd_fidelityfx_dx12.dll), still=0|1 moving=0|1 (cases,
-// default both). Built and run by tests/win/run_d3d12_ffx.sh.
+// default both), maxerr=F (the RMSE both cases must stay under, default
+// 0.06 still and 0.15 moving: a plain bilinear blit of the input, the
+// DLL's answer with no upscaler at all, needs more). Built and run by
+// tests/win/run_d3d12_ffx.sh.
 // Prints "== d3d12 ffx: ok" or "== d3d12 ffx: FAIL (why)".
 #define COBJMACROS
 #define WIDL_C_INLINE_WRAPPERS
@@ -491,9 +494,11 @@ static void run_case(struct run *r, const char *out_path)
 int main(int argc, char **argv)
 {
     int frames = 24, do_still = 1, do_moving = 1;
+    double still_max = 0.06, moving_max = 0.15;
     const char *out_path = NULL, *orig_path = NULL, *dll = "amd_fidelityfx_dx12.dll";
     for (int i = 1; i < argc; i++) {
         if (!strncmp(argv[i], "frames=", 7)) frames = atoi(argv[i] + 7);
+        else if (!strncmp(argv[i], "maxerr=", 7)) still_max = moving_max = atof(argv[i] + 7);
         else if (!strncmp(argv[i], "out=", 4)) out_path = argv[i] + 4;
         else if (!strncmp(argv[i], "orig=", 5)) orig_path = argv[i] + 5;
         else if (!strncmp(argv[i], "dll=", 4)) dll = argv[i] + 4;
@@ -620,14 +625,14 @@ int main(int argc, char **argv)
     if (do_still) {
         run_case(&still, do_moving ? NULL : out_path);
         if (still.rc_bad) BAD("still: %u dispatches returned an error", still.rc_bad);
-        else if (still.err > 0.06 || fabs(still.mean - 0.5) > 0.05) BAD("still: RMSE %.4f, mean %.3f: the picture is wrong", still.err, still.mean);
-        else OK("still: dispatch OK every frame, RMSE %.4f", still.err);
+        else if (still.err > still_max || fabs(still.mean - 0.5) > 0.05) BAD("still: RMSE %.4f (limit %.3f), mean %.3f: the picture is wrong", still.err, still_max, still.mean);
+        else OK("still: dispatch OK every frame, RMSE %.4f (limit %.3f)", still.err, still_max);
     }
     if (do_moving) {
         run_case(&moving, out_path);
         if (moving.rc_bad) BAD("moving: %u dispatches returned an error", moving.rc_bad);
-        else if (moving.err > 0.15 || fabs(moving.mean - 0.5) > 0.05) BAD("moving: RMSE %.4f, mean %.3f: the picture is wrong", moving.err, moving.mean);
-        else OK("moving: dispatch OK every frame, RMSE %.4f", moving.err);
+        else if (moving.err > moving_max || fabs(moving.mean - 0.5) > 0.05) BAD("moving: RMSE %.4f (limit %.3f), mean %.3f: the picture is wrong", moving.err, moving_max, moving.mean);
+        else OK("moving: dispatch OK every frame, RMSE %.4f (limit %.3f)", moving.err, moving_max);
     }
     rc = ffx.destroy(&ctx, NULL);
     printf("ffxDestroyContext: rc %u\n", rc);

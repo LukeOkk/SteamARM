@@ -12,9 +12,10 @@
  *
  * What it does, in one paragraph. With STEAMARM_WIN_UPSCALER=metalfx an
  * upscale context (FFX_API_CREATE_CONTEXT_DESC_TYPE_UPSCALE, 0x10000) whose
- * descriptor chain this DLL understands (the DX12 backend, 0x2, or the
- * Vulkan one, 0x3; a version override naming this DLL's version or none;
- * SDK 2.x's version header) is PROBEd through SteamARM's command channel
+ * descriptor chain this DLL understands (a backend descriptor, decoded per
+ * SDK generation, see T_BACKEND_*; SDK 2.x's allocation callbacks, passed
+ * through; a version override naming this DLL's version or none; SDK 2.x's
+ * version header) is PROBEd through SteamARM's command channel
  * (shim/mfx_temporal.h: a vkCmdUpdateBuffer of 320 bytes in a command
  * buffer of a pool of its own, never submitted; vkd3d-proton's
  * ID3D12DXVKInteropDevice1 gives the VkDevice behind an ID3D12Device). PROBE
@@ -23,21 +24,32 @@
  * the game's command list (BeginVkCommandBufferInterop for D3D12, the
  * VkCommandBuffer itself for Vulkan), its status read back in the same
  * call. Anything else -- PROBE not OK, a descriptor it does not know, a
- * refused ENCODE, a dispatch it has no MetalFX equivalent for -- and the
- * game's own DLL takes over: its file (GetModuleFileNameW of this module:
- * Wine keeps the path of the file it replaced) is copied to
- * %LOCALAPPDATA%\SteamARM\ffx\<hash>.dll (a name the override does not
- * cover) and LoadLibrary'd; a refused ENCODE creates the original context
- * at once, from a copy of the creation descriptors, and that context is
- * used from then on, the refused frame included. Contexts of this DLL are
- * kept in a table: a pointer not in it is forwarded, never dereferenced;
- * frame generation and swapchain contexts are always forwarded. Without the
- * variable (FORWARD mode) every call goes to the original unchanged.
- * Queries 0x10002..0x10005 (ratio, render resolution, jitter phase count,
- * jitter offset) are answered with AMD's formulas (ffx_fsr3upscaler.cpp),
- * 0x1000a (resource requirements) and 6 (the provider's version) for this
- * DLL's contexts; GPU memory (0x10008/9) with the original's numbers; the
- * version list (4) is this DLL's version first, then the original's.
+ * refused ENCODE, a dispatch it has no MetalFX equivalent for (the reactive
+ * mask generator, a debug view, a non-linear colour space, see
+ * dispatch_upscale) -- and the game's own DLL takes over: its file
+ * (GetModuleFileNameW of this module: Wine keeps the path of the file it
+ * replaced) is copied to %LOCALAPPDATA%\SteamARM\ffx\<hash>.dll (a name the
+ * override does not cover) and LoadLibrary'd; a refused ENCODE creates the
+ * original context at once, from a copy of the creation descriptors, and
+ * that context is used from then on, the refused frame included. Every
+ * call into the game's DLL goes without an ffxOverrideVersion naming THIS
+ * DLL's version (unlinked for the call: AMD's GetffxProvider has no
+ * provider for a version it does not know and answers NO_PROVIDER; without
+ * the override AMD picks its own default). With no game DLL to fall back
+ * to (none loadable, or its context refused), a frame MetalFX does not
+ * take is answered with a plain blit of the colour input to the output
+ * (vkCmdBlitImage, linear filter, in the game's command buffer,
+ * frame_without_metalfx): no temporal upscale, but never an output left
+ * untouched. Contexts of
+ * this DLL are kept in a table: a pointer not in it is forwarded, never
+ * dereferenced; frame generation and swapchain contexts are always
+ * forwarded. Without the variable (FORWARD mode) every call goes to the
+ * original unchanged. Queries 0x10002..0x10005 (ratio, render resolution,
+ * jitter phase count, jitter offset) are answered with AMD's formulas
+ * (ffx_fsr3upscaler.cpp), 0x1000a (resource requirements) and 6 (the
+ * provider's version) for this DLL's contexts; GPU memory (0x10008/9) with
+ * the original's numbers; the version list (4) is this DLL's version first,
+ * then the original's.
  *
  * KERNEL32 is the only import (no C runtime; build.sh) and
  * wine-builtin-mark.py writes Wine's builtin marker with prefer-native, so
@@ -45,7 +57,10 @@
  * (tools/steamarm-fex-proton sets it). SA_FFX_QUERY_IDENT (0x53410001)
  * says who answered (tests/win/ffx_load.c). Lines go to OutputDebugStringA
  * and stderr: [ffx-metalfx <dll>] ...; SA_FFX_DEBUG=1 adds one per dispatch
- * for the first frames of each context.
+ * for the first frames of each context. SA_FFX_TEST_REFUSE=1 (tests only,
+ * tests/win/run_d3d12_ffx.sh's blit mode) sends every ENCODE malformed
+ * (size + 1), which the shim refuses with BAD_ARGS: the fallback paths
+ * without a driver that refuses.
  */
 #define COBJMACROS
 #define WIDL_C_INLINE_WRAPPERS
@@ -63,6 +78,13 @@
 #endif
 #ifndef FFX_DLL_NAME
 #define FFX_DLL_NAME "amd_fidelityfx"
+#endif
+/* The SDK generation this DLL stands in for: build.sh sets FFX_SDK2=1 for
+ * the SDK 2.x names (amd_fidelityfx_upscaler_dx12, loaded by the game's
+ * amd_fidelityfx_loader_dx12.dll), 0 for SDK 1.1.x's amd_fidelityfx_dx12
+ * and _vk. The two decode the backend descriptor type 3 differently. */
+#ifndef FFX_SDK2
+#define FFX_SDK2 0
 #endif
 
 /* ------------------------------------------------------------------ API */
@@ -102,13 +124,26 @@ typedef ffxReturnCode_t (*PfnDispatch)(ffxContext *, const ffxApiHeader *);
 #define T_Q_RESREQ                 0x0001000au
 #define T_CREATE_UPSCALE_VERSION   0x0001000bu
 #define T_CFG_GLOBALDEBUG1         1u
-#define T_BACKEND_DX12             2u
-#define T_BACKEND_VK               3u
 #define T_Q_GET_VERSIONS           4u
 #define T_OVERRIDE_VERSION         5u
 #define T_Q_PROVIDER_VERSION       6u
 #define T_CFG_GLOBALDEBUG          7u
-#define T_BACKEND_VK2              0x02000003u   /* FFX_API_BACKEND_ID_VK | 3, SDK 2.x */
+/* Backend descriptor types, per SDK generation. SDK 1.1.x
+ * (dx12/ffx_api_dx12.h, vk/ffx_api_vk.h): 2 = DX12 backend, 3 = Vulkan
+ * backend. SDK 2.x (ffx_api.h's FFX_API_MAKE_BACKEND_SUB_ID(backend id,
+ * sub id), DX12's id 0, VK's 0x02000000): 2 = DX12 backend, 3 = DX12
+ * ALLOCATION_CALLBACKS (ffxCreateBackendDX12AllocationCallbacksDesc), the
+ * Vulkan backend 0x02000003. An SDK 2.x DLL reading 3 as Vulkan would
+ * refuse a game's allocation callbacks as "two backends". */
+#define T_BACKEND_DX12             2u
+#define T_BACKEND_VK_SDK1          3u
+#define T_BACKEND_DX12_ALLOC_SDK2  3u
+#define T_BACKEND_VK_SDK2          0x02000003u
+
+/* ffxDispatchDescUpscale.flags */
+#define DF_DEBUG_VIEW     (1u << 0)
+#define DF_NON_LINEAR_SRGB (1u << 1)
+#define DF_NON_LINEAR_PQ  (1u << 2)
 
 /* ffxCreateContextDescUpscale flags */
 #define UP_HDR            (1u << 0)
@@ -150,6 +185,9 @@ struct ffxQueryGpuMem { ffxApiHeader header; struct FfxApiEffectMemoryUsage *usa
 struct ffxQueryResReq { ffxApiHeader header; uint64_t required_resources, optional_resources; };
 struct ffxCreateBackendDX12Desc { ffxApiHeader header; ID3D12Device *device; };
 struct ffxCreateBackendVKDesc { ffxApiHeader header; VkDevice vkDevice; VkPhysicalDevice vkPhysicalDevice; PFN_vkGetDeviceProcAddr vkDeviceProcAddr; };
+/* SDK 2.x: five callbacks (resource and heap allocation, their release, a
+ * constant buffer allocator), each may be null; passed through as they are. */
+struct ffxCreateBackendDX12AllocationCallbacksDesc { ffxApiHeader header; void *fn[5]; };
 struct ffxCreateContextDescUpscaleVersion { ffxApiHeader header; uint32_t version; };
 struct ffxConfigureDescGlobalDebug1 { ffxApiHeader header; ffxApiMessage fpMessage; uint32_t debugLevel; };
 
@@ -158,6 +196,7 @@ _Static_assert(sizeof(struct ffxDispatchDescUpscale) == 432, "ffxDispatchDescUps
 _Static_assert(sizeof(struct ffxCreateContextDescUpscale) == 48, "ffxCreateContextDescUpscale is 48 bytes");
 _Static_assert(__builtin_offsetof(struct ffxDispatchDescUpscale, flags) == 428, "flags at 428");
 _Static_assert(__builtin_offsetof(struct ffxDispatchDescUpscale, reset) == 408, "reset at 408");
+_Static_assert(sizeof(struct ffxCreateBackendDX12AllocationCallbacksDesc) == 56, "the allocation callbacks desc is 56 bytes");
 
 /* This DLL's version, as a provider id (AMD's form: a tag in the high
  * half, (major << 22 | minor << 12 | patch) in the low) and a name. */
@@ -437,10 +476,35 @@ static float ratio_of_mode(uint32_t mode)
 {
     switch (mode) { case 0: return 1.0f; case 1: return 1.5f; case 2: return 1.7f; case 3: return 2.0f; case 4: return 3.0f; default: return 0.0f; }
 }
+/* ffxFsr3UpscalerGetJitterPhaseCount: int32_t(8.0f * pow(float(displayWidth)
+ * / renderWidth, 2.0f)), truncated. The square must come out as AMD's DLL
+ * computes it, or the truncation can differ by one. AMD's SDK 1.1.4 DLL
+ * imports no powf (its api-ms-win-crt-math imports are log2f, sinf, exp2f,
+ * tanf, roundf, atanf: MSVC folded pow(x, 2.0f) into a multiplication),
+ * MEASURED identical to r * r for 1280->1920, 1707->2560, 1280->3840 and
+ * 960->1920 (tests/win/d3d12_ffx.c). AMD's SDK 2.3.0 upscaler DLL does
+ * import powf, so the SDK 2.x build calls the same powf it would call under
+ * Wine (ucrtbase's, the DLL behind api-ms-win-crt-math-l1-1-0), and the
+ * multiplication only if that is not loadable. */
+typedef float (*PfnPowf)(float, float);
+static PfnPowf g_powf;
+static int g_powf_tried;
+static float square_as_amd(float r)
+{
+    if (FFX_SDK2) {
+        if (!g_powf_tried) {
+            HMODULE m = LoadLibraryA("ucrtbase.dll");
+            g_powf = m ? (PfnPowf)(void *)GetProcAddress(m, "powf") : NULL;
+            g_powf_tried = 1;
+        }
+        if (g_powf) return g_powf(r, 2.0f);
+    }
+    return r * r;
+}
 static int32_t phase_count(uint32_t render_w, uint32_t display_w)
 {
     float r = (float)display_w / (float)render_w;
-    return (int32_t)(8.0f * (r * r));
+    return (int32_t)(8.0f * square_as_amd(r));
 }
 
 /* ----------------------------------------------------------- contexts */
@@ -455,6 +519,7 @@ struct vkfn {
     PFN_vkEndCommandBuffer EndCommandBuffer;
     PFN_vkCmdUpdateBuffer CmdUpdateBuffer;
     PFN_vkCmdPipelineBarrier CmdPipelineBarrier;
+    PFN_vkCmdBlitImage CmdBlitImage;
     PFN_vkCreateBuffer CreateBuffer;
     PFN_vkDestroyBuffer DestroyBuffer;
     PFN_vkGetBufferMemoryRequirements GetBufferMemoryRequirements;
@@ -497,9 +562,10 @@ struct desc_copy {
     struct ffxCreateContextDescUpscale up;
     struct ffxCreateBackendDX12Desc dx;
     struct ffxCreateBackendVKDesc vk;
+    struct ffxCreateBackendDX12AllocationCallbacksDesc ac;   /* SDK 2.x */
     struct ffxOverrideVersion ov;
     struct ffxCreateContextDescUpscaleVersion ver;
-    int has_dx, has_vk, has_ov, has_ver;
+    int has_dx, has_vk, has_ac, has_ov, has_ver;
     ffxAllocationCallbacks cb;
     int has_cb;
 };
@@ -528,7 +594,8 @@ struct sa_ctx {
     ffxContext orig_ctx;
     /* bookkeeping */
     uint32_t frames, logged, status_last;
-    int probe_tried;
+    uint32_t blits;            /* frames answered with the blit (no game DLL) */
+    int probe_tried, tc_said, nofall_said;
 };
 #define SA_CTX_MAGIC 0x464D4153u
 
@@ -584,7 +651,7 @@ static int vkfn_load(struct sa_ctx *c, PFN_vkGetDeviceProcAddr gdpa)
 {
 #define F(name) c->fn.name = (PFN_vk##name)gdpa(c->vdev, "vk" #name); if (!c->fn.name) { say("vkGetDeviceProcAddr: no vk" #name); return 0; }
     F(CreateCommandPool) F(DestroyCommandPool) F(AllocateCommandBuffers) F(BeginCommandBuffer) F(EndCommandBuffer)
-    F(CmdUpdateBuffer) F(CmdPipelineBarrier) F(CreateBuffer) F(DestroyBuffer) F(GetBufferMemoryRequirements)
+    F(CmdUpdateBuffer) F(CmdPipelineBarrier) F(CmdBlitImage) F(CreateBuffer) F(DestroyBuffer) F(GetBufferMemoryRequirements)
     F(AllocateMemory) F(FreeMemory) F(BindBufferMemory)
 #undef F
     return 1;
@@ -700,33 +767,66 @@ static uint64_t override_of(const ffxApiHeader *h)
     return o ? o->versionId : 0;
 }
 
-/* The chain of an upscale creation, copied; 0 with the type not taken. */
+/* The chain of an upscale creation, copied; 0 with the type not taken.
+ * Type 3 is the Vulkan backend in SDK 1.1.x and the DX12 allocation
+ * callbacks in SDK 2.x (T_BACKEND_*): the DLL's name says which. */
 static int copy_chain(const ffxApiHeader *h, struct desc_copy *d, uint64_t *bad)
 {
     memset(d, 0, sizeof *d);
     memcpy(&d->up, h, sizeof d->up);
     for (h = h->pNext; h; h = h->pNext) {
-        switch (h->type) {
-        case T_BACKEND_DX12: memcpy(&d->dx, h, sizeof d->dx); d->has_dx = 1; break;
-        case T_BACKEND_VK: case T_BACKEND_VK2: memcpy(&d->vk, h, sizeof d->vk); d->has_vk = 1; break;
-        case T_OVERRIDE_VERSION: memcpy(&d->ov, h, sizeof d->ov); d->has_ov = 1; break;
-        case T_CREATE_UPSCALE_VERSION: memcpy(&d->ver, h, sizeof d->ver); d->has_ver = 1; break;
-        default: *bad = h->type; return 0;
-        }
+        uint64_t t = h->type;
+        if (t == T_BACKEND_DX12) { memcpy(&d->dx, h, sizeof d->dx); d->has_dx = 1; }
+        else if (t == 3u && FFX_SDK2) { memcpy(&d->ac, h, sizeof d->ac); d->has_ac = 1; }
+        else if ((t == T_BACKEND_VK_SDK1 && !FFX_SDK2) || t == T_BACKEND_VK_SDK2) { memcpy(&d->vk, h, sizeof d->vk); d->has_vk = 1; }
+        else if (t == T_OVERRIDE_VERSION) { memcpy(&d->ov, h, sizeof d->ov); d->has_ov = 1; }
+        else if (t == T_CREATE_UPSCALE_VERSION) { memcpy(&d->ver, h, sizeof d->ver); d->has_ver = 1; }
+        else { *bad = t; return 0; }
     }
     return 1;
 }
 
-/* The copied chain linked again, for the original's ffxCreateContext. */
+/* The copied chain linked again, for the original's ffxCreateContext: the
+ * allocation callbacks pass through; an override naming this DLL's version
+ * is left out (AMD's DLL has no provider of that id). */
 static ffxApiHeader *link_chain(struct desc_copy *d)
 {
     ffxApiHeader *tail = &d->up.header;
     tail->pNext = NULL;
     if (d->has_dx) { tail->pNext = &d->dx.header; tail = tail->pNext; tail->pNext = NULL; }
+    if (d->has_ac) { tail->pNext = &d->ac.header; tail = tail->pNext; tail->pNext = NULL; }
     if (d->has_vk) { tail->pNext = &d->vk.header; tail = tail->pNext; tail->pNext = NULL; }
     if (d->has_ver) { tail->pNext = &d->ver.header; tail = tail->pNext; tail->pNext = NULL; }
     if (d->has_ov && d->ov.versionId != SA_FFX_VERSION_ID) { tail->pNext = &d->ov.header; tail = tail->pNext; tail->pNext = NULL; }
     return &d->up.header;
+}
+
+/* The game's own chain with an ffxOverrideVersion naming THIS DLL's version
+ * unlinked, for the duration of a call into the game's DLL: AMD's
+ * GetffxProvider (ffx_provider.cpp, SDK 1.1.x and 2.x alike) returns no
+ * provider for an override id it does not have, and ffxCreateContext /
+ * ffxQuery answer FFX_API_RETURN_NO_PROVIDER -- a game that chose this
+ * DLL's version (first in the version list) and hit any forward path would
+ * lose FSR altogether. Without the override AMD's DLL picks its own
+ * default. The override is never the chain's head (the head is the create
+ * or query descriptor). Returns the node unlinked (NULL: none) and its
+ * predecessor, for relink_override(). */
+static ffxApiHeader *unlink_our_override(ffxApiHeader *h, ffxApiHeader **pred)
+{
+    for (ffxApiHeader *p = h; p && p->pNext; p = p->pNext) {
+        ffxApiHeader *n = p->pNext;
+        if (n->type == T_OVERRIDE_VERSION && ((struct ffxOverrideVersion *)n)->versionId == SA_FFX_VERSION_ID) {
+            p->pNext = n->pNext;
+            *pred = p;
+            return n;
+        }
+    }
+    *pred = NULL;
+    return NULL;
+}
+static void relink_override(ffxApiHeader *pred, ffxApiHeader *ov)
+{
+    if (ov) pred->pNext = ov;
 }
 
 /* FFX surface format -> VkFormat (vk/ffx_api_vk.h's table, the other way);
@@ -780,8 +880,21 @@ static void ctx_free(struct sa_ctx *c)
 static ffxReturnCode_t forward_create(ffxContext *context, ffxApiHeader *desc, const ffxAllocationCallbacks *cb, const char *why)
 {
     if (!orig_ok()) { say("create 0x%llx: %s, and no original DLL: NO_PROVIDER", (unsigned long long)desc->type, why); return FFX_NO_PROVIDER; }
+    ffxApiHeader *pred, *ov = unlink_our_override(desc, &pred);
     ffxReturnCode_t rc = g_orig.create(context, desc, cb);
-    say("create 0x%llx: %s: the game's DLL (rc %u, ctx %p)", (unsigned long long)desc->type, why, rc, context ? *context : NULL);
+    relink_override(pred, ov);
+    say("create 0x%llx: %s: the game's DLL (rc %u, ctx %p%s)", (unsigned long long)desc->type, why, rc, context ? *context : NULL,
+        ov ? "; the override naming this DLL's version left out" : "");
+    return rc;
+}
+
+/* A query for the game's DLL (its override naming this DLL left out). */
+static ffxReturnCode_t forward_query(ffxContext *context, ffxApiHeader *desc)
+{
+    if (!orig_ok()) return FFX_NO_PROVIDER;
+    ffxApiHeader *pred, *ov = unlink_our_override(desc, &pred);
+    ffxReturnCode_t rc = g_orig.query(context, desc);
+    relink_override(pred, ov);
     return rc;
 }
 
@@ -798,8 +911,17 @@ static ffxReturnCode_t create_upscale(ffxContext *context, ffxApiHeader *desc, c
     }
     if (d.has_ov && d.ov.versionId && d.ov.versionId != SA_FFX_VERSION_ID) return forward_create(context, desc, cb, "a version override naming AMD's");
     if (d.has_dx == d.has_vk) return forward_create(context, desc, cb, d.has_dx ? "two backends" : "no backend descriptor");
-    if (!vk1_load()) return forward_create(context, desc, cb, "no vulkan-1.dll");
+    if (d.has_ac && !d.has_dx) return forward_create(context, desc, cb, "allocation callbacks without the DX12 backend");
     const struct ffxCreateContextDescUpscale *up = (const struct ffxCreateContextDescUpscale *)desc;
+    /* FFX_UPSCALE_ENABLE_NON_LINEAR_COLORSPACE: the colour input holds
+     * gamma-encoded (perceptual) values. The channel (shim/mfx_temporal.h)
+     * has no colour-space field and MetalFX's temporal scaler takes linear
+     * colour: feeding it encoded values as linear would upscale the wrong
+     * quantity (blending and exposure in the wrong space). The game's own
+     * upscaler takes such a context; the choice is made here, at creation,
+     * so the game never sees a context switch. */
+    if (up->flags & UP_NON_LINEAR) return forward_create(context, desc, cb, "a non-linear (gamma-encoded) colour space, which the channel cannot tell MetalFX");
+    if (!vk1_load()) return forward_create(context, desc, cb, "no vulkan-1.dll");
 
     struct sa_ctx *c = xalloc(sizeof *c);
     if (!c) return FFX_ERROR_MEMORY;
@@ -866,7 +988,10 @@ static ffxReturnCode_t create_upscale(ffxContext *context, ffxApiHeader *desc, c
 static int fall_back(struct sa_ctx *c, const char *why)
 {
     if (c->mode == MODE_FALLBACK) return 1;
-    if (!orig_ok()) { say("ctx %llu: %s, and no original DLL: the frame is lost", (unsigned long long)c->id, why); return 0; }
+    if (!orig_ok()) {
+        if (!c->nofall_said++) say("ctx %llu: %s, and no game DLL to fall back to", (unsigned long long)c->id, why);
+        return 0;
+    }
     ffxApiHeader *chain = link_chain(&c->desc);
     ffxReturnCode_t rc = g_orig.create(&c->orig_ctx, chain, c->desc.has_cb ? &c->desc.cb : NULL);
     if (rc != FFX_OK || !c->orig_ctx) {
@@ -898,6 +1023,129 @@ static void tex_of(struct sa_ctx *c, const struct FfxApiResource *r, struct sa_m
     t->h = r->description.height;
 }
 
+/* The D3D12 state behind an FfxApiResource.state (FFX_API_RESOURCE_STATE_*,
+ * as AMD's DX12 backend maps them). */
+static D3D12_RESOURCE_STATES d3d12_state_of(uint32_t s)
+{
+    D3D12_RESOURCE_STATES r = D3D12_RESOURCE_STATE_COMMON;
+    if (s & 2) r |= D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
+    if (s & 4) r |= D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
+    if (s & 8) r |= D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
+    if (s & 16) r |= D3D12_RESOURCE_STATE_COPY_SOURCE;
+    if (s & 32) r |= D3D12_RESOURCE_STATE_COPY_DEST;
+    if (s & 64) r |= D3D12_RESOURCE_STATE_INDIRECT_ARGUMENT;
+    if (s & 128) r |= D3D12_RESOURCE_STATE_PRESENT;
+    if (s & 256) r |= D3D12_RESOURCE_STATE_RENDER_TARGET;
+    return r;
+}
+
+/* The VkImageLayout an image is in at the dispatch: vkd3d-proton's for the
+ * resource's D3D12 state (GetVulkanImageLayout; GENERAL under KosmicKrisp,
+ * MEASURED tests/win/run_d3d12_mfxt_interop.sh), or, Vulkan backend, the
+ * layout AMD's VK backend uses for the FFX state (ffx_vk.cpp). */
+static VkImageLayout layout_of(struct sa_ctx *c, const struct FfxApiResource *r)
+{
+    VkImageLayout l = VK_IMAGE_LAYOUT_GENERAL;
+    if (c->backend == BK_DX12) {
+        c->ix->lpVtbl->GetVulkanImageLayout(c->ix, (ID3D12Resource *)r->resource, d3d12_state_of(r->state), &l);
+        if ((int)l < 0 || l == VK_IMAGE_LAYOUT_UNDEFINED) l = VK_IMAGE_LAYOUT_GENERAL;
+        return l;
+    }
+    if (r->state & (4 | 8)) return VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+    if (r->state & 16) return VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+    if (r->state & 32) return VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+    if (r->state & 128) return VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
+    if (r->state & 256) return VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+    return VK_IMAGE_LAYOUT_GENERAL;
+}
+
+/* A refused ENCODE with no game DLL to fall back to: the colour input
+ * blitted to the output (linear filter, the render size to the upscale
+ * size) in the game's command buffer, between barriers that take the two
+ * images from the layouts vkd3d (or the game) has them in to the transfer
+ * layouts and back, every access made visible on both sides. No temporal
+ * upscale, but an output the game can present. */
+static void blit_upscale(struct sa_ctx *c, VkCommandBuffer cb, const struct ffxDispatchDescUpscale *d, const struct sa_mfxt_cmd *m)
+{
+    VkImage src = (VkImage)(uintptr_t)m->color.image, dst = (VkImage)(uintptr_t)m->output.image;
+    VkImageLayout lsrc = layout_of(c, &d->color), ldst = layout_of(c, &d->output);
+    VkImageSubresourceRange rng = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 };
+    VkImageMemoryBarrier in[2] = {
+        { VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER, NULL, VK_ACCESS_MEMORY_WRITE_BIT | VK_ACCESS_MEMORY_READ_BIT, VK_ACCESS_TRANSFER_READ_BIT,
+          lsrc, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_QUEUE_FAMILY_IGNORED, VK_QUEUE_FAMILY_IGNORED, src, rng },
+        { VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER, NULL, VK_ACCESS_MEMORY_WRITE_BIT | VK_ACCESS_MEMORY_READ_BIT, VK_ACCESS_TRANSFER_WRITE_BIT,
+          ldst, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_QUEUE_FAMILY_IGNORED, VK_QUEUE_FAMILY_IGNORED, dst, rng },
+    };
+    c->fn.CmdPipelineBarrier(cb, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, NULL, 0, NULL, 2, in);
+    VkImageBlit region;
+    memset(&region, 0, sizeof region);
+    region.srcSubresource.aspectMask = region.dstSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+    region.srcSubresource.layerCount = region.dstSubresource.layerCount = 1;
+    region.srcOffsets[0].x = (int32_t)m->color.x; region.srcOffsets[0].y = (int32_t)m->color.y;
+    region.srcOffsets[1].x = (int32_t)(m->color.x + m->render_w); region.srcOffsets[1].y = (int32_t)(m->color.y + m->render_h); region.srcOffsets[1].z = 1;
+    region.dstOffsets[0].x = (int32_t)m->output.x; region.dstOffsets[0].y = (int32_t)m->output.y;
+    region.dstOffsets[1].x = (int32_t)(m->output.x + m->upscale_w); region.dstOffsets[1].y = (int32_t)(m->output.y + m->upscale_h); region.dstOffsets[1].z = 1;
+    c->fn.CmdBlitImage(cb, src, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, dst, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region, VK_FILTER_LINEAR);
+    VkImageMemoryBarrier out[2] = {
+        { VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER, NULL, VK_ACCESS_TRANSFER_READ_BIT, VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT,
+          VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, lsrc, VK_QUEUE_FAMILY_IGNORED, VK_QUEUE_FAMILY_IGNORED, src, rng },
+        { VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER, NULL, VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT,
+          VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, ldst, VK_QUEUE_FAMILY_IGNORED, VK_QUEUE_FAMILY_IGNORED, dst, rng },
+    };
+    c->fn.CmdPipelineBarrier(cb, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0, 0, NULL, 0, NULL, 2, out);
+}
+
+static int g_test_refuse = -1;
+static int test_refuse(void)
+{
+    if (g_test_refuse < 0) {
+        char v[8];
+        g_test_refuse = GetEnvironmentVariableA("SA_FFX_TEST_REFUSE", v, sizeof v) > 0 && v[0] == '1';
+        if (g_test_refuse) say("SA_FFX_TEST_REFUSE=1: every ENCODE is sent malformed, for the shim to refuse (tests only)");
+    }
+    return g_test_refuse;
+}
+
+/* The command buffer a frame is recorded in: vkd3d's behind the D3D12
+ * command list (BeginVkCommandBufferInterop; close_cb ends it), or the
+ * game's own VkCommandBuffer. 0: none (said). */
+static int open_cb(struct sa_ctx *c, const struct ffxDispatchDescUpscale *d, VkCommandBuffer *cb, ID3D12CommandList **cl)
+{
+    *cl = NULL;
+    if (c->backend != BK_DX12) { *cb = (VkCommandBuffer)d->commandList; return 1; }
+    *cb = VK_NULL_HANDLE;
+    HRESULT hr = c->ix->lpVtbl->BeginVkCommandBufferInterop(c->ix, (ID3D12CommandList *)d->commandList, cb);
+    if (FAILED(hr) || !*cb) { say("ctx %llu: BeginVkCommandBufferInterop 0x%x", (unsigned long long)c->id, (unsigned)hr); return 0; }
+    *cl = (ID3D12CommandList *)d->commandList;
+    return 1;
+}
+static void close_cb(struct sa_ctx *c, ID3D12CommandList *cl)
+{
+    if (cl) c->ix->lpVtbl->EndVkCommandBufferInterop(c->ix, cl);
+}
+
+/* A frame MetalFX does not take (why), the game's command buffer not open:
+ * the game's own upscaler if there is one and it takes the context (its
+ * from now on; its ffxDispatch records D3D12 commands of its own, so the
+ * interop must be closed before); else -- no game DLL, or its context
+ * refused (fall_back said which) -- the blit of the colour input to the
+ * output, when the frame has what it needs (blittable); else an error,
+ * the output untouched. */
+static ffxReturnCode_t frame_without_metalfx(struct sa_ctx *c, const char *why, const struct ffxDispatchDescUpscale *d,
+                                             const struct sa_mfxt_cmd *m, int blittable)
+{
+    if (fall_back(c, why)) return g_orig.dispatch(&c->orig_ctx, &d->header);
+    if (!blittable) return FFX_ERROR_PARAMETER;
+    VkCommandBuffer cb;
+    ID3D12CommandList *cl;
+    if (!open_cb(c, d, &cb, &cl)) return FFX_RUNTIME_ERROR;
+    blit_upscale(c, cb, d, m);
+    close_cb(c, cl);
+    if (!c->blits++)
+        say("ctx %llu: %s: the colour input is blitted to the output (no temporal upscale) on such frames", (unsigned long long)c->id, why);
+    return FFX_OK;
+}
+
 static ffxReturnCode_t dispatch_upscale(struct sa_ctx *c, const struct ffxDispatchDescUpscale *d)
 {
     const struct ffxCreateContextDescUpscale *up = &c->desc.up;
@@ -907,7 +1155,20 @@ static ffxReturnCode_t dispatch_upscale(struct sa_ctx *c, const struct ffxDispat
     tex_of(c, &d->depth, &m.depth, 1, &bad);
     tex_of(c, &d->motionVectors, &m.motion, 0, &bad);
     tex_of(c, &d->exposure, &m.exposure, 0, &bad);
-    tex_of(c, &d->reactive, &m.reactive, 0, &bad);
+    /* The channel carries one mask, MetalFX's reactive mask (where the
+     * history is not to be trusted). FSR's reactive mask is that; its
+     * transparencyAndComposition mask (alpha of objects without motion
+     * vectors: reflections, particles, UI composited in) tells FSR the same
+     * thing by other means, so it stands in for the reactive mask when the
+     * game gives only it. With both given the reactive mask goes and the
+     * other is dropped: combining them is a shader pass the channel does
+     * not have. */
+    tex_of(c, d->reactive.resource ? &d->reactive : &d->transparencyAndComposition, &m.reactive, 0, &bad);
+    if (d->transparencyAndComposition.resource && !c->tc_said) {
+        c->tc_said = 1;
+        say("ctx %llu: a transparency-and-composition mask: %s", (unsigned long long)c->id,
+            d->reactive.resource ? "dropped (the reactive mask goes; the channel carries one mask)" : "sent as the reactive mask");
+    }
     tex_of(c, &d->output, &m.output, 0, &bad);
     m.render_w = d->renderSize.width; m.render_h = d->renderSize.height;
     m.upscale_w = d->upscaleSize.width ? d->upscaleSize.width : up->maxUpscaleSize.width;
@@ -920,6 +1181,8 @@ static ffxReturnCode_t dispatch_upscale(struct sa_ctx *c, const struct ffxDispat
               ((up->flags & UP_AUTO_EXPOSURE) ? SA_MFXT_AUTO_EXP : 0) | ((up->flags & UP_MV_DISPLAY) ? SA_MFXT_MV_DISPLAY : 0) |
               ((up->flags & UP_MV_JITTERED) ? SA_MFXT_MV_JITTERED : 0) | ((up->flags & UP_HDR) ? SA_MFXT_HDR : 0) |
               (d->enableSharpening ? SA_MFXT_SHARPEN : 0);
+    /* What the blit needs, at least. */
+    int blittable = !bad && d->commandList && m.color.image && m.output.image && m.render_w && m.render_h && m.upscale_w && m.upscale_h;
     const char *why = NULL;
     if (bad) why = "a resource without a VkImage";
     else if (!d->commandList) why = "a null command list";
@@ -928,40 +1191,33 @@ static ffxReturnCode_t dispatch_upscale(struct sa_ctx *c, const struct ffxDispat
     else if (m.upscale_w < m.render_w || m.upscale_h < m.render_h) why = "an upscale size below the render size";
     else if (c->max_scale > 0 && ((float)m.upscale_w / (float)m.render_w > c->max_scale + 1e-4f ||
                                   (float)m.upscale_h / (float)m.render_h > c->max_scale + 1e-4f)) why = "a scale above MetalFX's largest";
-    if (why) { fall_back(c, why); return c->mode == MODE_FALLBACK ? g_orig.dispatch(&c->orig_ctx, &d->header) : FFX_ERROR_PARAMETER; }
-
-    uint32_t st;
-    if (c->backend == BK_DX12) {
-        VkCommandBuffer vcb = VK_NULL_HANDLE;
-        ID3D12CommandList *cl = (ID3D12CommandList *)d->commandList;
-        HRESULT hr = c->ix->lpVtbl->BeginVkCommandBufferInterop(c->ix, cl, &vcb);
-        if (FAILED(hr) || !vcb) {
-            say("ctx %llu: BeginVkCommandBufferInterop 0x%x", (unsigned long long)c->id, (unsigned)hr);
-            fall_back(c, "no VkCommandBuffer behind the command list");
-            return c->mode == MODE_FALLBACK ? g_orig.dispatch(&c->orig_ctx, &d->header) : FFX_RUNTIME_ERROR;
-        }
-        vk_barrier(c, vcb);
-        c->fn.CmdUpdateBuffer(vcb, c->carrier, c->carrier_off, sizeof m, &m);
-        st = m.status;
-        if (st == SA_ST_OK) vk_barrier(c, vcb);
-        c->ix->lpVtbl->EndVkCommandBufferInterop(c->ix, cl);
-    } else {
-        VkCommandBuffer vcb = (VkCommandBuffer)d->commandList;
-        vk_barrier(c, vcb);
-        c->fn.CmdUpdateBuffer(vcb, c->carrier, c->carrier_off, sizeof m, &m);
-        st = m.status;
-        if (st == SA_ST_OK) vk_barrier(c, vcb);
-    }
-    c->status_last = st;
+    /* Dispatch flags with no MetalFX equivalent. NON_LINEAR_COLOR_SRGB / PQ:
+     * the colour input is gamma- or PQ-encoded for this frame and the
+     * channel cannot say so (see create_upscale); DRAW_DEBUG_VIEW: FSR's
+     * debug overlay. The game's own upscaler from here on. */
+    else if (d->flags & (DF_NON_LINEAR_SRGB | DF_NON_LINEAR_PQ)) why = "a non-linear (sRGB or PQ) colour input this frame, which the channel cannot tell MetalFX";
+    else if (d->flags & DF_DEBUG_VIEW) why = "FSR's debug view was asked for";
     c->frames++;
+    if (why) return frame_without_metalfx(c, why, d, &m, blittable);
+    if (test_refuse()) m.size = sizeof m + 1;   /* the shim answers BAD_ARGS */
+
+    VkCommandBuffer vcb;
+    ID3D12CommandList *cl;
+    if (!open_cb(c, d, &vcb, &cl)) return frame_without_metalfx(c, "no VkCommandBuffer behind the command list", d, &m, 0);
+    vk_barrier(c, vcb);
+    c->fn.CmdUpdateBuffer(vcb, c->carrier, c->carrier_off, sizeof m, &m);
+    uint32_t st = m.status;
+    c->status_last = st;
     if (st != SA_ST_OK) {
         char buf[64];
         char *p = put_str(buf, buf + 62, "ENCODE ");
         p = put_str(p, buf + 62, status_name(st));
         *p = 0;
-        fall_back(c, buf);
-        return c->mode == MODE_FALLBACK ? g_orig.dispatch(&c->orig_ctx, &d->header) : FFX_RUNTIME_ERROR;
+        close_cb(c, cl);
+        return frame_without_metalfx(c, buf, d, &m, 1);
     }
+    vk_barrier(c, vcb);
+    close_cb(c, cl);
     if (debug_on() && c->logged < 3) {
         c->logged++;
         say("ctx %llu: ENCODE %ux%u -> %ux%u jitter (%f, %f) mv scale (%f, %f) flags 0x%x colour fmt %u depth fmt %u -> st=%s",
@@ -991,7 +1247,7 @@ ffxReturnCode_t ffxDestroyContext(ffxContext *context, const ffxAllocationCallba
     if (had_orig) rc = g_orig.destroy(&c->orig_ctx, memCb);
     struct sa_mfxt_cmd m = base_cmd(SA_OP_DESTROY, c->id);
     uint32_t st = own_command(c, &m);
-    say("destroy ctx %llu after %u frames (%s; DESTROY %s%s)", (unsigned long long)c->id, c->frames,
+    say("destroy ctx %llu after %u frames, %u of them blitted (%s; DESTROY %s%s)", (unsigned long long)c->id, c->frames, c->blits,
         c->mode == MODE_FALLBACK ? "the game's upscaler" : "MetalFX", status_name(st), had_orig ? ", the game's context destroyed" : "");
     ctx_unregister(c);
     ctx_free(c);
@@ -1079,11 +1335,11 @@ ffxReturnCode_t ffxQuery(ffxContext *context, ffxApiHeader *desc)
     }
     ffxReturnCode_t rc;
     if (!context || !*context) {
-        if (!metalfx_mode()) return orig_ok() ? g_orig.query(context, desc) : FFX_NO_PROVIDER;
+        if (!metalfx_mode()) return forward_query(context, desc);
         if (desc->type == T_Q_GET_VERSIONS) {
             struct ffxQueryDescGetVersions *q = (struct ffxQueryDescGetVersions *)desc;
             if ((q->createDescType & FFX_EFFECT_MASK) != FFX_EFFECT_UPSCALE || !q->outputCount)
-                return orig_ok() ? g_orig.query(context, desc) : FFX_NO_PROVIDER;
+                return forward_query(context, desc);
             /* Ours first, then the original's. */
             uint64_t cap = *q->outputCount;
             int count_only = cap == 0 || (!q->versionIds && !q->versionNames);
@@ -1102,15 +1358,16 @@ ffxReturnCode_t ffxQuery(ffxContext *context, ffxApiHeader *desc)
             *q->outputCount = 1 + theirs;
             return FFX_OK;
         }
-        if ((desc->type & FFX_EFFECT_MASK) != FFX_EFFECT_UPSCALE) return orig_ok() ? g_orig.query(context, desc) : FFX_NO_PROVIDER;
+        if ((desc->type & FFX_EFFECT_MASK) != FFX_EFFECT_UPSCALE) return forward_query(context, desc);
         uint64_t ov = override_of(desc);
-        if (ov && ov != SA_FFX_VERSION_ID) return orig_ok() ? g_orig.query(context, desc) : FFX_NO_PROVIDER;
+        if (ov && ov != SA_FFX_VERSION_ID) return forward_query(context, desc);
         if (answer_formula(desc, &rc)) return rc;
-        /* GPU memory (0x10008/9) and whatever else: the original's numbers. */
-        return orig_ok() ? g_orig.query(context, desc) : FFX_NO_PROVIDER;
+        /* GPU memory (0x10008/9) and whatever else: the original's numbers
+         * (an override naming this DLL left out of the chain for the call). */
+        return forward_query(context, desc);
     }
     struct sa_ctx *c = ctx_find(context);
-    if (!c) return orig_ok() ? g_orig.query(context, desc) : FFX_NO_PROVIDER;
+    if (!c) return forward_query(context, desc);
     if (c->mode == MODE_FALLBACK && desc->type != T_Q_PROVIDER_VERSION) return g_orig.query(&c->orig_ctx, desc);
     if (desc->type == T_Q_PROVIDER_VERSION) {
         struct ffxQueryGetProviderVersion *q = (struct ffxQueryGetProviderVersion *)desc;

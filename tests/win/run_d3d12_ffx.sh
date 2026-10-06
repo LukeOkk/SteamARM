@@ -4,7 +4,7 @@
 # with no VM, through vkd3d-proton's interop, the Vulkan shim and
 # KosmicKrisp's MetalFX temporal entry -- and AMD's real DLL for comparison.
 #
-#   tests/win/run_d3d12_ffx.sh                  metalfx forward amd
+#   tests/win/run_d3d12_ffx.sh                  metalfx forward amd blit
 #   tests/win/run_d3d12_ffx.sh metalfx          one or more of them
 #
 # metalfx  STEAMARM_WIN_UPSCALER=metalfx, our builtin over the game's copy
@@ -12,13 +12,25 @@
 #          MetalFX's (shim log: ENCODE st=OK), the queries identical to
 #          AMD's DLL's (loaded in the same process under another name).
 # forward  the variable unset: our builtin forwards everything to the game's
-#          copy; the output must be byte for byte AMD's (the amd run's).
+#          copy; the output must be byte for byte AMD's (the amd run's, of
+#          the same invocation: the two outputs are compared only when both
+#          modes ran in this run, from this run's output directory).
 # amd      no override: the game's copy (AMD's DLL) alone.
+# blit     metalfx with a game copy that cannot be loaded (a stub DLL whose
+#          DllMain says no, in a game directory of its own: our builtin is
+#          mapped in its place as usual, then finds nothing to fall back
+#          to) and SA_FFX_TEST_REFUSE=1, which makes the DLL send every
+#          ENCODE malformed so the shim refuses it (BAD_ARGS): the DLL must
+#          blit the colour input to the output instead (its log line), the
+#          program must still find a picture there (RMSE under
+#          FFX_BLIT_MAXERR: a bilinear upscale of the jittered input, see
+#          the default) and every dispatch must return OK.
 #
 # The "game copy" is AMD's amd_fidelityfx_dx12.dll 1.1.4 from the FidelityFX
 # SDK samples, expected in the x86 root at FFX_AMD_DLL (default
 # /tmp/ffxsdk/v114/bin/amd_fidelityfx_dx12.dll, a guest path; never part of
-# the repository). Without it only metalfx can run, with no comparison.
+# the repository). Without it only metalfx and blit can run, with no
+# comparison.
 #
 # The shim under test is build/libvulkan.so.1 (MFXT_SHIM overrides), bound
 # over the root's for this run's processes only (LXRT_MOUNTS); the DLLs are
@@ -32,6 +44,11 @@
 #               55 s); then only this run's processes are stopped (by their
 #               STEAMARM_RUN_ID)
 # FFX_FRAMES    frames per case (default 24)
+# FFX_BLIT_MAXERR  the blit mode's RMSE limit (default 0.15: a bilinear blit
+#               of an input jittered by up to half a pixel, against the
+#               supersampled reference, MEASURED 0.0967 still and moving on
+#               KosmicKrisp, benchmarks/stage59-ffx-metalfx-e2e.txt; MetalFX
+#               gives 0.036/0.063, AMD's FSR 3.1 0.056/0.061)
 #
 # Needs: the Steam root with Proton Experimental and the Vulkan thunks,
 # mingw-w64 and vulkan-headers (Homebrew).
@@ -45,6 +62,7 @@ PROTON="$ROOT$PROTON_GUEST"
 LOGS="${STEAMARM_STATE:-$HOME/SteamARM-roots}/logs"
 TIMEOUT="${FFX_TIMEOUT:-120}"
 FRAMES="${FFX_FRAMES:-24}"
+BLIT_MAXERR="${FFX_BLIT_MAXERR:-0.15}"
 SHIM="${MFXT_SHIM:-build/libvulkan.so.1}"
 KK_DIR="${STEAMARM_KK_OWN:-${STEAMARM_BUILD:-$HOME/SteamARM-build}/mesa-kk/out}"
 AMD_DLL="${FFX_AMD_DLL:-/tmp/ffxsdk/v114/bin/amd_fidelityfx_dx12.dll}"
@@ -102,7 +120,12 @@ cp -f "$PROTON"/lib/wine/vkd3d-proton/x86_64-windows/*.dll "$SYS32/" &&
 # The game's directory: the program, AMD's DLL as the game's copy, and the
 # same file under another name for the in-process comparison of queries.
 rm -rf "${ROOT:?}$T"
-mkdir -p "$ROOT$T/game" "$ROOT$T/ours"
+mkdir -p "$ROOT$T/game" "$ROOT$T/ours" "$ROOT$T/noamd"
+# This run's outputs (out-<mode>.bin): a directory of this run alone, so a
+# comparison never reads another invocation's file.
+OUT="$T/out.$RUN_ID"
+mkdir -p "$ROOT$OUT"
+WOUT="Z:${OUT//\//\\}"
 have_amd=0
 if [ -f "$ROOT$AMD_DLL" ]; then
     cp "$ROOT$AMD_DLL" "$ROOT$T/game/amd_fidelityfx_dx12.dll"
@@ -117,14 +140,24 @@ echo "== our DLL: $(shasum "$ROOT$T/ours/x86_64-windows/amd_fidelityfx_dx12.dll"
 exe="$ROOT$T/game/d3d12_ffx.exe"
 x86_64-w64-mingw32-gcc -O2 -mconsole -Wall -Wextra -Wno-missing-field-initializers -I"$VK_HEADERS/include" -o "$exe" tests/win/d3d12_ffx.c \
     -ld3d12 -ldxguid -luuid || { echo "  FAIL  build"; rm -rf "$PRIV"; exit 1; }
+# The blit mode's game directory: the program beside a "game copy" of
+# amd_fidelityfx_dx12.dll that cannot be loaded (its DllMain returns FALSE:
+# LoadLibrary fails with ERROR_DLL_INIT_FAILED). Wine's override still finds
+# the file and maps our builtin in its place; our DLL then copies the file,
+# fails to load it and has no fallback. (A directory with no file at all is
+# not the case: without a file of that name Wine finds no builtin either.)
+cp "$exe" "$ROOT$T/noamd/d3d12_ffx.exe"
+printf '#include <windows.h>\nBOOL WINAPI DllMain(HINSTANCE i, DWORD r, LPVOID p) { (void)i; (void)r; (void)p; return FALSE; }\n' > "$PRIV/stub.c"
+x86_64-w64-mingw32-gcc -shared -s -o "$ROOT$T/noamd/amd_fidelityfx_dx12.dll" "$PRIV/stub.c" || { echo "  FAIL  build stub"; rm -rf "$PRIV"; exit 1; }
 # A stale fallback copy from a previous build must not be reused: the name
 # is the hash of the game's file, so only AMD's file ever matches.
 rm -rf "$ROOT$PFX_GUEST/drive_c/users/steamuser/AppData/Local/SteamARM/ffx"
 
 PASS=0 FAIL=0
-declare -a hashes
-for mode in ${@:-metalfx forward amd}; do
-    args=("frames=$FRAMES" "out=Z:\\tmp\\ffx-t4\\out-$mode.bin")
+ran_forward=0 ran_amd=0
+for mode in ${@:-metalfx forward amd blit}; do
+    args=("frames=$FRAMES" "out=$WOUT\\out-$mode.bin")
+    wexe="Z:\\tmp\\ffx-t4\\game\\d3d12_ffx.exe"
     case $mode in
         metalfx) menv=(STEAMARM_WIN_UPSCALER=metalfx WINEDLLPATH=$T/ours "WINEDLLOVERRIDES=amd_fidelityfx_dx12=b,n;d3d12,d3d12core,dxgi=n")
                  [ $have_amd = 1 ] && args+=("orig=Z:\\tmp\\ffx-t4\\game\\ffx_amd_orig.dll") ;;
@@ -132,15 +165,18 @@ for mode in ${@:-metalfx forward amd}; do
                  menv=(WINEDLLPATH=$T/ours "WINEDLLOVERRIDES=amd_fidelityfx_dx12=b,n;d3d12,d3d12core,dxgi=n") ;;
         amd)     [ $have_amd = 1 ] || { echo "  skip  amd (no AMD DLL)"; continue; }
                  menv=("WINEDLLOVERRIDES=amd_fidelityfx_dx12=n;d3d12,d3d12core,dxgi=n") ;;
+        blit)    menv=(STEAMARM_WIN_UPSCALER=metalfx SA_FFX_TEST_REFUSE=1 WINEDLLPATH=$T/ours "WINEDLLOVERRIDES=amd_fidelityfx_dx12=b,n;d3d12,d3d12core,dxgi=n")
+                 wexe="Z:\\tmp\\ffx-t4\\noamd\\d3d12_ffx.exe"
+                 args+=("maxerr=$BLIT_MAXERR") ;;
         *) echo "  FAIL  unknown mode $mode"; FAIL=$((FAIL + 1)); continue ;;
     esac
     log="$LOGS/win-d3d12-ffx-$mode.log"
     start=$SECONDS
-    env -u STEAMARM_WIN_UPSCALER -u WINEDLLPATH -u WINEDLLOVERRIDES \
+    env -u STEAMARM_WIN_UPSCALER -u WINEDLLPATH -u WINEDLLOVERRIDES -u SA_FFX_TEST_REFUSE \
         STEAMARM_RUN_ID=$RUN_ID LXRT_MOUNTS="$MOUNTS" LXRT_VK_DEBUG=1 SA_FFX_DEBUG=1 "${menv[@]}" \
         STEAMARM_VK_ICD=kosmickrisp STEAMARM_KK_DIR="$PRIV/kk" VKD3D_DEBUG=warn VKD3D_FEATURE_LEVEL=12_0 \
         DISPLAY=:2 WINEPREFIX=$PFX_GUEST WINEDEBUG=-all LXRT_ROOT=$ROOT FEX_ROOTFS=/ \
-        scripts/run-fex.sh "$PROTON_GUEST/bin/wine" "Z:\\tmp\\ffx-t4\\game\\d3d12_ffx.exe" "${args[@]}" > "$log" 2>&1 &
+        scripts/run-fex.sh "$PROTON_GUEST/bin/wine" "$wexe" "${args[@]}" > "$log" 2>&1 &
     pid=$!
     for _ in $(seq 1 "$TIMEOUT"); do kill -0 $pid 2>/dev/null || break; sleep 1; done
     if kill -0 $pid 2>/dev/null; then
@@ -160,6 +196,16 @@ for mode in ${@:-metalfx forward amd}; do
             ;;
         forward)
             grep -q 'FORWARD mode' "$log" || { echo "        the DLL did not say FORWARD mode"; ok=0; }
+            [ $ok = 1 ] && ran_forward=1
+            ;;
+        amd)
+            [ $ok = 1 ] && ran_amd=1
+            ;;
+        blit)
+            grep -q 'ffx-metalfx.*ENCODE BAD_ARGS: the colour input is blitted to the output' "$log" || { echo "        the DLL did not blit"; ok=0; }
+            grep -q 'mfx-temporal ctx [0-9]* op encode .* st=BAD_ARGS' "$log" || { echo "        the shim did not refuse the ENCODE"; ok=0; }
+            grep -q 'original DLL: .*no fallback' "$log" || { echo "        the DLL found a game copy to fall back to"; ok=0; }
+            grep -q 'ffx-metalfx.*the game.s own upscaler from now on' "$log" && { echo "        fell back to a game upscaler"; ok=0; }
             ;;
     esac
     if [ $ok = 1 ]; then echo "  ok    $mode ($((SECONDS - start)) s)"; PASS=$((PASS + 1))
@@ -167,13 +213,17 @@ for mode in ${@:-metalfx forward amd}; do
     grep -a -E '^(env:|D3D12CreateDevice|dll |versions:|    version|ffxCreateContext|provider version|gpu memory|    render|    ratios|    phase|    jitter|    differ|    non-OK|  ok|  FAIL|    still|    moving|    output|    dispatch|ffxDestroy|== d3d12|\[shim\] (vk driver|mfx-temporal)|\[ffx-metalfx|kk: MetalFX)' "$log" |
         sed 's/^/        /'
 done
-if [ -f "$ROOT$T/out-forward.bin" ] && [ -f "$ROOT$T/out-amd.bin" ]; then
-    if cmp -s "$ROOT$T/out-forward.bin" "$ROOT$T/out-amd.bin"; then
-        echo "  ok    forward output == amd output (byte for byte)"; PASS=$((PASS + 1))
+# forward against amd: both from this invocation (ran and passed), from
+# this run's output directory; one alone is said, never compared.
+if [ $ran_forward = 1 ] && [ $ran_amd = 1 ]; then
+    if cmp -s "$ROOT$OUT/out-forward.bin" "$ROOT$OUT/out-amd.bin"; then
+        echo "  ok    forward output == amd output (byte for byte, $(stat -f %z "$ROOT$OUT/out-amd.bin") bytes, this run)"; PASS=$((PASS + 1))
     else
-        echo "  FAIL  forward output differs from amd output: $(cmp "$ROOT$T/out-forward.bin" "$ROOT$T/out-amd.bin" 2>&1 | head -1)"
+        echo "  FAIL  forward output differs from amd output: $(cmp "$ROOT$OUT/out-forward.bin" "$ROOT$OUT/out-amd.bin" 2>&1 | head -1)"
         FAIL=$((FAIL + 1))
     fi
+elif [ $ran_forward = 1 ] || [ $ran_amd = 1 ]; then
+    echo "  --    forward vs amd output not compared: both must run (and pass) in the same invocation"
 fi
 rm -rf "$PRIV"
 echo "== $PASS passed, $FAIL failed"

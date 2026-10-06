@@ -95,6 +95,7 @@ the Fedora VM that was deleted on 2026-09-27; they are history, and
 | 57 | `stage57-wine-arm64-native.txt` | 10-06 | Valve's Proton ARM64 natively under the runtime: KUSER_SHARED_DATA as a virtual page (runtime/lowpage.c), the TEB block limit and the bin dir fixed in a prototype; wineserver (aarch64) and the ARM64X ntdll/kernel32 load; stops at x18 reads in PE code. |
 | 57 | `stage57-depth-cache-and-frame-pacing.txt` | 10-05 | Optional bounded depth/stencil cache: 39.4% less recording time in a paired microbenchmark, pixels/FEX/Proton probes passed; default off. CS2 and native Metal traces still show hitches and no established stable 100 FPS. Current display link exposes fixed refresh rates only. |
 | 58 | `stage58-adaptive-sync-and-drawable-wait.txt` | 10-05 | bounded notification wait tested on ARM64/FEX; actual display/native fullscreen eligibility and fixed-refresh fallback; <10 ms CS2 and physical VRR remain unverified |
+| 59 | `stage59-ffx-metalfx-e2e.txt` | 10-06 | FidelityFX API DLL end to end: AMD's FSR 3.1 (SDK 1.1.4) and SDK 2.3.0 samples take our version on KosmicKrisp, every ENCODE OK, frame generation still 2.01 presents/frame, the sample's upscale timer 2.4-2.7 ms vs 3.5-3.9 ms with FSR; the override, SDK 2.x backend-type and no-fallback blit fixes; our frames softer than FSR's |
 
 ## After stage 21 (no stage file)
 

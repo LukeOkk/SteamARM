@@ -27,8 +27,12 @@
 # v230/Samples/Upscalers/FidelityFX_FSR/dx12/x64/Release (FidelityFX_FSR.exe,
 # amd_fidelityfx_loader_dx12.dll, amd_fidelityfx_upscaler_dx12.dll 2.3.0,
 # media at v230/media). Results go to $STEAMARM_STATE/logs (default
-# ~/SteamARM-roots/logs) as ffx-e2e-<sample>-<mode>.log and the JSON, frames
-# and frame times under the root's /tmp/ffx-e2e/<sample>-<mode>/.
+# ~/SteamARM-roots/logs) as ffx-e2e-<sample>-<mode>.log, the summary of each
+# variant as ffx-e2e-<sample>-<mode>.summary (that variant's, rewritten when
+# it runs again) and all of them appended, with a dated header per
+# invocation, to ffx-e2e-summary.txt (never truncated: a subset run keeps
+# the other variants' lines); the JSON, frames and frame times under the
+# root's /tmp/ffx-e2e/<sample>-<mode>/.
 #
 # FFX_PFX      guest prefix (default /tmp/fexhome/ffx-t4, tests/win/run_d3d12_ffx.sh's)
 # FFX_FRAMES   benchmark frames (default 240; the sample runs them twice)
@@ -102,8 +106,9 @@ for a in "$@"; do case $a in v114|v230) samples="$samples $a" ;; amd|ours) modes
 
 PASS=0 FAIL=0
 summary="$LOGS/ffx-e2e-summary.txt"
-: > "$summary"
-note() { echo "$*"; echo "$*" >> "$summary"; }
+vsummary=""
+echo "== $(date '+%Y-%m-%d %H:%M:%S') run $RUN_ID: samples$samples, modes$modes (shim $(shasum "$PRIV/libvulkan.so.1" | cut -c1-12), KK $(shasum "$PRIV/kk/libvulkan_kosmickrisp.dylib" | cut -c1-12))" >> "$summary"
+note() { echo "$*"; echo "$*" >> "$summary"; [ -n "$vsummary" ] && echo "$*" >> "$vsummary"; }
 for s in $samples; do
     case $s in
         v114) dir="$SAMPLES/v114/bin"; exe=FFX_API_FSR_DX12.exe; dlls="amd_fidelityfx_dx12" ;;
@@ -114,6 +119,8 @@ for s in $samples; do
         out="$E/$s-$mode"
         rm -rf "${ROOT:?}$out"
         mkdir -p "$ROOT$out/snap"
+        vsummary="$LOGS/ffx-e2e-$s-$mode.summary"
+        echo "== $(date '+%Y-%m-%d %H:%M:%S') run $RUN_ID" > "$vsummary"
         rm -f "$ROOT$dir/Cauldron.log"
         case $mode in
             amd)  menv=("WINEDLLOVERRIDES=d3d12,d3d12core,dxgi=n") ;;
@@ -201,15 +208,16 @@ PY
         else note "  FAIL  $s $mode ($((SECONDS - start)) s; log $log)"; FAIL=$((FAIL + 1)); fi
         note "        json: ${stats:-none}"
         note "        presents: ${presents:-none}; shim: $encodes ENCODE OK, $refused refused; fallbacks $fell"
-        grep -a -E '^\[ffx-metalfx|^\[shim\] mfx-temporal|^kk: MetalFX temporal|Upscaler Context versionid|Upscaler [0-9.]+:|required_resources' "$log" "$ROOT$out/Cauldron.log" 2>/dev/null | sed 's/^.*\.log://; s/^/        /' | sort -u | head -20 | tee -a "$summary"
+        grep -a -E '^\[ffx-metalfx|^\[shim\] mfx-temporal|^kk: MetalFX temporal|Upscaler Context versionid|Upscaler [0-9.]+:|required_resources' "$log" "$ROOT$out/Cauldron.log" 2>/dev/null | sed 's/^.*\.log://; s/^/        /' | sort -u | head -24 | tee -a "$summary" "$vsummary"
         if [ -f "$ROOT$out/snap/frame.ppm" ]; then
             note "        frame: $out/snap/frame.ppm ($(head -c 20 "$ROOT$out/snap/frame.ppm" | sed -n 2p)), $snap_note"
         else
             note "        frame: none captured ($snap_note)"
         fi
     done
+    vsummary=""
     if [ -f "$ROOT$E/$s-ours/snap/frame.ppm" ] && [ -f "$ROOT$E/$s-amd/snap/frame.ppm" ]; then
-        note "        $s frames ours vs amd: $(python3 tests/win/ppm_compare.py "$ROOT$E/$s-ours/snap/frame.ppm" "$ROOT$E/$s-amd/snap/frame.ppm" left=440)"
+        note "        $s frames ours vs amd: $(python3 tests/win/ppm_compare.py "$ROOT$E/$s-ours/snap/frame.ppm" "$ROOT$E/$s-amd/snap/frame.ppm" left=440) (ours $(stat -f %Sm -t %H:%M:%S "$ROOT$E/$s-ours/snap/frame.ppm"), amd $(stat -f %Sm -t %H:%M:%S "$ROOT$E/$s-amd/snap/frame.ppm"))"
     fi
 done
 rm -rf "$PRIV"

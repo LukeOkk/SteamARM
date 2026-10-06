@@ -1,0 +1,163 @@
+Stage 59 -- FidelityFX API DLL (tools/ffx-metalfx) end to end: FSR 3.1 /
+FSR 4 upscale contexts on MetalFX temporal, AMD's samples as the games
+2026-10-06. Apple M4 (16 GB), macOS 27. Zero VM: x86 Proton Experimental
+under FEX, vkd3d-proton (vkd3d-1.1-5626-g7f0c30ad) -> Vulkan thunks -> the
+shim (build/libvulkan.so.1, sha1 4f0a4bc5bb21) -> KosmicKrisp (SteamARM's
+Mesa build, ~/SteamARM-build/mesa-kk/out: sha1 faf4b84b4f4c for sections
+1-3, 14db8073ef71 for section 4, the dylib having been rebuilt by another
+session in between; the tests copy it privately per run). [F] = measured
+in this stage's runs, [I] = inference.
+
+What was fixed before measuring (review of commits 77d3a8b, 4e3f811):
+
+- Every call into the game's own DLL (forward_create, forward_query, the
+  fallback's link_chain) goes without an ffxOverrideVersion naming THIS
+  DLL's version id. [F] AMD's GetffxProvider (ffx_provider.cpp, SDK 1.1.4
+  and 2.3.0 sources) only returns a provider whose id equals the override
+  and otherwise none, so ffxCreateContext / ffxQuery answer NO_PROVIDER: a
+  game that chose our version (first in the version list) and hit any
+  forward path would have lost FSR altogether.
+- The backend descriptor type 3 is decoded per SDK generation (build.sh:
+  FFX_SDK2=1 for the amd_fidelityfx_upscaler_dx12 / _framegeneration_
+  names). [F] SDK 1.1.4 vk/ffx_api_vk.h: 3 = the Vulkan backend; SDK 2.3.0
+  dx12/ffx_api_dx12.h: 3 = FFX_API_CREATE_CONTEXT_DESC_TYPE_BACKEND_DX12_
+  ALLOCATION_CALLBACKS (five callbacks, 56 bytes), the Vulkan backend
+  0x02000003. Allocation-callback descriptors are copied and passed
+  through to the game's DLL on every forward and fallback path.
+- Jitter phase count: int32(8 * pow(r, 2.0f)). [F] AMD's 1.1.4 DLL imports
+  no powf/pow (objdump: MSVC folded it into r * r; identical to r * r in
+  the 4 sizes tests/win/d3d12_ffx.c asks); AMD's 2.3.0 upscaler DLL does
+  import powf, so the SDK 2.x build calls ucrtbase's powf (the one AMD's
+  DLL calls under Wine), r * r only if that cannot be loaded.
+- Colour space: FFX_UPSCALE_ENABLE_NON_LINEAR_COLORSPACE at creation and
+  FFX_UPSCALE_FLAG_NON_LINEAR_COLOR_SRGB / _PQ at dispatch send the context
+  to the game's own upscaler (the channel, shim/mfx_temporal.h v1, has no
+  colour-space field; MetalFX takes linear colour) -- at creation the game
+  never sees a switch; at dispatch the context is the game's from then on,
+  logged once. transparencyAndComposition stands in for the reactive mask
+  when the game gives only it; with both, the reactive mask goes and the
+  other is dropped (logged once). The reactive-mask generator (0x10006)
+  switches the context to the game's upscaler for good (logged).
+- No game DLL to fall back to (none loadable, or its context refused) and
+  a frame MetalFX does not take (ENCODE refused, or a dispatch known
+  beforehand not to fit): the colour input is blitted to the output
+  (vkCmdBlitImage, linear filter) in the game's command buffer, between
+  image barriers from the layouts vkd3d reports for the resources' D3D12
+  states (GetVulkanImageLayout) to TRANSFER_SRC/DST and back. The output
+  is never left untouched.
+- Harness: tests/win/run_d3d12_ffx.sh writes each invocation's outputs to
+  a directory of its own and compares forward against amd only when both
+  ran and passed in that invocation; run_ffx_samples.sh appends to
+  ffx-e2e-summary.txt with a dated header per invocation and writes each
+  variant's own .summary file.
+
+1. tests/win/run_d3d12_ffx.sh (the DLL used like a game, 1280x720 ->
+   1920x1080, 24 frames still + 24 moving), all modes, 15:23 [F]
+
+  ok    metalfx
+        [shim] mfx-temporal ctx 1 op probe 1280x720->1920x1080 fmt 0 driver kosmickrisp entry found st=OK
+        [ffx-metalfx amd_fidelityfx_dx12] create upscale: 1280x720 -> 1920x1080 flags 0x0, D3D12 backend: MetalFX temporal (ctx 1, caps 0x1f, max scale 3.0000)
+          ok    queries: ours vs AMD's DLL: identical (79 answers)
+        [shim] mfx-temporal ctx 1 op encode 1280x720->1920x1080 fmt 97 driver kosmickrisp entry found st=OK
+          ok    still: dispatch OK every frame, RMSE 0.0356 (limit 0.060)
+          ok    moving: dispatch OK every frame, RMSE 0.0632 (limit 0.150)
+        [ffx-metalfx amd_fidelityfx_dx12] destroy ctx 1 after 48 frames, 0 of them blitted (MetalFX; DESTROY OK)
+        == d3d12 ffx: ok
+  ok    forward
+        [ffx-metalfx amd_fidelityfx_dx12] FORWARD mode (STEAMARM_WIN_UPSCALER not metalfx): every call goes to the game's own DLL
+          ok    still: dispatch OK every frame, RMSE 0.0558 (limit 0.060)
+          ok    moving: dispatch OK every frame, RMSE 0.0612 (limit 0.150)
+        == d3d12 ffx: ok
+  ok    amd (14 s)
+          ok    still: dispatch OK every frame, RMSE 0.0558 (limit 0.060)
+          ok    moving: dispatch OK every frame, RMSE 0.0612 (limit 0.150)
+        == d3d12 ffx: ok
+  ok    blit (14 s)
+        [ffx-metalfx amd_fidelityfx_dx12] original DLL: LoadLibraryW(C:\users\steamuser\AppData\Local\SteamARM\ffx\b8a3af43c6f13a57.dll) failed (1114): no fallback
+        [shim] mfx-temporal ctx 1 op encode 1280x720->1920x1080 fmt 97 driver kosmickrisp entry found st=BAD_ARGS
+        [ffx-metalfx amd_fidelityfx_dx12] ctx 1: ENCODE BAD_ARGS: the colour input is blitted to the output (no temporal upscale) on such frames
+          ok    still: dispatch OK every frame, RMSE 0.0967 (limit 0.200)
+          ok    moving: dispatch OK every frame, RMSE 0.0967 (limit 0.200)
+        [ffx-metalfx amd_fidelityfx_dx12] destroy ctx 1 after 48 frames, 48 of them blitted (MetalFX; DESTROY OK)
+        == d3d12 ffx: ok
+  ok    forward output == amd output (byte for byte, 16588800 bytes, this run)
+== 5 passed, 0 failed
+
+The blit mode's game copy is a stub DLL whose DllMain returns FALSE
+(ERROR_DLL_INIT_FAILED 1114 on LoadLibrary); a game directory with no file
+at all is not the case, since without a file of that name Wine finds no
+builtin to map either [F: the earlier attempt ended in LoadLibraryA
+failed: 126]. The blit's RMSE 0.0967 (a bilinear upscale of an input
+jittered by up to half a pixel; MetalFX 0.036/0.063, FSR 3.1 0.056/0.061)
+sets FFX_BLIT_MAXERR's default at 0.15 [F: a rerun of the blit mode at
+15:38 on KosmicKrisp 14db8073ef71 passed with "RMSE 0.0967 (limit
+0.150)" for both cases]. The review's earlier failures of
+metalfx ("no ENCODE st=OK") and forward ("guest signal 4") did not
+reproduce with this DLL [F: the runs above]; their cause is not known [I:
+they predate the fixes above and used an unknown KosmicKrisp build].
+
+2. tests/win/run_d3d12_mfxt_interop.sh (the channel's own D3D12 test), on
+   the same KosmicKrisp, 15:24 [F]
+
+  ok    fl11 (16 s)   == d3d12 mfxt interop: ok   (14 st=OK lines in its log)
+  ok    fl12 (16 s)   == d3d12 mfxt interop: ok   (14 st=OK lines)
+  ok    ots           == d3d12 mfxt interop: ok   (14 st=OK lines)
+
+3. AMD's FSR 3.1 sample, SDK 1.1.4 (FFX_API_FSR_DX12.exe + AMD's
+   amd_fidelityfx_dx12.dll), -benchmark duration=240 json, KosmicKrisp
+   VKD3D_FEATURE_LEVEL=12_0, 1280x705 -> 1920x1058 with the sample's frame
+   generation on, 15:25 [F]
+
+  ok    v114 amd (36 s)
+        json: fps 25.5 over 9.5 s, render [1280, 705] display [1920, 1058]; upscale pass FFX API FSR Upscaler 3.920 ms
+        presents: 466 presents in the last 9.1 s = 51.3/s = 2.01 per benchmark frame (514 in the whole run); shim: 0 ENCODE OK, 0 refused; fallbacks 0
+  ok    v114 ours (37 s)
+        json: fps 26.0 over 9.3 s, render [1280, 705] display [1920, 1058]; upscale pass FFX API FSR Upscaler 2.726 ms
+        presents: 477 presents in the last 9.1 s = 52.4/s = 2.01 per benchmark frame (479 in the whole run); shim: 1 ENCODE OK, 0 refused; fallbacks 0
+        Upscaler Context versionid 0x53414d4600400000, MetalFX temporal 1.0.0 (SteamARM)
+        [ffx-metalfx amd_fidelityfx_dx12] ctx 3: a transparency-and-composition mask: dropped (the reactive mask goes; the channel carries one mask)
+        [ffx-metalfx amd_fidelityfx_dx12] ctx 3: ENCODE 1280x705 -> 1920x1058 jitter (-0.2500, 0.3889) mv scale (1280.0000, 705.0000) flags 0x66 colour fmt 122 depth fmt 0 -> st=OK
+        v114 frames ours vs amd: sharpness 226.5 sharpness 496.5 meandiff 7.72 differing 9.1% (left 440 px skipped)
+== 2 passed, 0 failed
+
+4. AMD's FSR sample, SDK 2.3.0 (FidelityFX_FSR.exe + amd_fidelityfx_loader
+   _dx12.dll, which LoadLibrary's amd_fidelityfx_upscaler_dx12.dll: AMD's
+   2.3.0, then ours), the same benchmark, 15:33 [F]
+
+  ok    v230 amd (40 s)
+        json: fps 25.3 over 9.5 s, render [1280, 705] display [1920, 1058]; upscale pass FFX API FSR Upscaler 3.505 ms; frame generation pass FFX API FSR Frame Generation Prepare 0.439 ms
+        presents: 462 presents in the last 9.1 s = 50.9/s = 2.01 per benchmark frame (538 in the whole run); shim: 0 ENCODE OK, 0 refused; fallbacks 0
+  ok    v230 ours (36 s)
+        json: fps 25.8 over 9.3 s, render [1280, 705] display [1920, 1058]; upscale pass FFX API FSR Upscaler 2.369 ms; frame generation pass FFX API FSR Frame Generation Prepare 0.444 ms
+        presents: 473 presents in the last 9.1 s = 52.0/s = 2.01 per benchmark frame (475 in the whole run); shim: 1 ENCODE OK, 0 refused; fallbacks 0
+        Upscaler Context versionid 0x53414d4600400000, MetalFX temporal 1.0.0 (SteamARM)
+        Upscaler MetalFX temporal 1.0.0 (SteamARM): required_resources: 7 optional_resources: 24
+        [ffx-metalfx amd_fidelityfx_upscaler_dx12] create upscale: 1280x705 -> 1920x1058 flags 0x239, D3D12 backend: MetalFX temporal (ctx 3, caps 0x1f, max scale 3.0000)
+        [ffx-metalfx amd_fidelityfx_upscaler_dx12] ctx 3: ENCODE 1280x705 -> 1920x1058 jitter (-0.2500, 0.3889) mv scale (1280.0000, 705.0000) flags 0x66 colour fmt 122 depth fmt 0 -> st=OK
+        v230 frames ours vs amd: sharpness 245.8 sharpness 493.8 meandiff 8.60 differing 11.3% (left 440 px skipped)
+== 2 passed, 0 failed
+
+Reading. [F] Both samples take our version id, every ENCODE is OK, nothing
+is refused and nothing falls back; the SDK 2.x sample's creation chain
+carries the allocation-callback descriptor and is taken (the earlier
+build would have refused it as "two backends"). [F] The sample's own GPU
+timer around its upscale dispatch reads 2.7 ms (1.1.4) and 2.4 ms (2.3.0)
+with ours against 3.9 and 3.5 ms with AMD's FSR 3.1; frame generation
+(AMD's, forwarded) still presents 2.01 frames per benchmark frame in
+every run; the frame rate is bound elsewhere (25-26 fps either way). [I]
+What that timer covers on our path is the ENCODE command as KosmicKrisp
+records it; whether it spans all of MetalFX's work is not established
+here. [F] Our frames are softer: the sharpness number is about half of
+FSR's (226 vs 497, 246 vs 494) and 9-11% of the pixels differ noticeably
+from FSR's; SA_MFXT_SHARPEN is sent (flags 0x66). [I] Whether the driver
+applies the sharpening is not shown by these runs.
+
+Runs as a sensor for other sessions: a first v230 ours run at 15:27 was
+killed (SIGKILL after 4 s) when the main session's CS2 benchmark started
+and stopped every guest; the rerun above came after its lock cleared.
+
+NOT done: no game was run with the DLL (AMD's samples only); the Vulkan
+backend build (amd_fidelityfx_vk.dll) compiles but has no test of its
+own; a colour-space field in the channel (so non-linear contexts need not
+go to the game's upscaler) and a combined reactive + transparency mask
+are not there; the sharpness gap is unexplained.

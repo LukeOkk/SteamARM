@@ -41,12 +41,17 @@ build_one() {   # build_one FILE: the DLL named after FILE
     def="$tmp/$name.def"
     sed "s/^LIBRARY .*/LIBRARY $name.dll/" "$here/ffx_exports.def" > "$def"
     mkdir -p "$(dirname "$dll")"
+    # The SDK generation the name belongs to: SDK 2.x names carry the
+    # effect (upscaler, framegeneration); the backend descriptor type 3
+    # means something else there (ffx_metalfx.c's T_BACKEND_*).
+    local sdk2=0
+    case $name in *_upscaler_*|*_framegeneration_*) sdk2=1 ;; esac
     # KERNEL32 only: no C runtime, so DllMain is the entry point.
     # -ffp-contract=off: the jitter sequence must come out bit for bit as
     # AMD's DLL computes it (no fused multiply-add in halton()).
     "$CC" -std=gnu11 -O2 -ffp-contract=off -shared -s -nostdlib -ffreestanding -fno-stack-protector -fno-asynchronous-unwind-tables \
         -Wall -Wextra -Wno-unused-parameter -I"$VK_HEADERS/include" \
-        -DFFX_IDENT="\"${FFX_IDENT:-steamarm-builtin}\"" -DFFX_DLL_NAME="\"$name\"" \
+        -DFFX_IDENT="\"${FFX_IDENT:-steamarm-builtin}\"" -DFFX_DLL_NAME="\"$name\"" -DFFX_SDK2=$sdk2 \
         -Wl,-e,DllMain -o "$dll" "$here/ffx_metalfx.c" "$def" -lkernel32
     if [ "${FFX_MARK:-1}" = 1 ]; then
         local flags=()
