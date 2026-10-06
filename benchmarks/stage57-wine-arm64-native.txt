@@ -100,3 +100,18 @@ Proton path is unchanged (LXRT_LOWPAGES is off by default).
    a game's own x86 JIT output outside any image would be corrupted by it.
    Seen on the way: Wine's x64 side gets ENOMEM for top-down tries at
    0x7ffeff0b0000-0x7fffff0b0000 (the runtime's top gap) and goes on.
+
+7. REACHED (2026-10-06 05:30): an x64 Direct3D 11 program (tests/win/
+   d3d11_clear.c, mingw x86_64) renders under that Wine with Valve's ARM64X
+   DXVK: "== d3d11 probe: ok", 600 frames at 161.8 fps, 792x566, MoltenVK
+   through the Frame root's Vulkan shim, exit 0. The chain the user asked
+   for, end to end: x64 game code -> FEX ARM64EC (in-process) -> Wine ARM64
+   native -> DXVK ARM64X native -> Vulkan shim (aarch64) -> MoltenVK ->
+   Metal. Rosetta 0, VM 0. (The first attempt failed only because display
+   :2 was down: "no driver could be loaded".)
+   Legacy path for the same probe (x86 Proton under FEX, tests/win/run.sh
+   d3d11): see the number below if present in ~/SteamARM-roots/logs.
+   NEXT: a Steam compatibility tool that runs a game through this Wine
+   (Valve's Proton ARM64 copy + the two prototype patches + LXRT_LOWPAGES=1
+   LXRT_X18_JIT=1), so Schedule I can be measured on it; KosmicKrisp on
+   this path (STEAMARM_VK_ICD); the top-gap ENOMEMs Wine's x64 side logs.
