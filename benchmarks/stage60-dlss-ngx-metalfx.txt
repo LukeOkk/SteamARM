@@ -193,7 +193,20 @@ supersampled scene than MetalFX's spatial scaler (KosmicKrisp): 0.0208
 against 0.0494 at the quarter rate, 0.0878 against 0.1393 at the full
 rate [F]; why is not measured (the two are different filters, and
 MetalFX's gets RCAS after it too).
-RESULT_SYS32
+sys32 (KosmicKrisp, "_nvngx.dll" loaded by its C:\windows\system32 path,
+as NVIDIA's static NGX SDK loads the core; the DLL copied into the test's
+own prefix for the run):
+    ok    sys32 (18 s)
+  LoadLibraryW(C:\windows\system32\_nvngx.dll) [sys32] -> 00006FFFFF1C0000 (error 0)
+  module: C:\windows\system32\_nvngx.dll, builtin marker yes
+  wine: trace:loaddll:build_module Loaded L"C:\\windows\\system32\\_nvngx.dll" at 00006FFFFF1C0000: builtin
+    ok    DLSS 1 -> the shim's spatial pass (EASU+RCAS, MetalFX spatial on KosmicKrisp), every frame OK: RMSE 0.0494 mean 0.499 (full-rate pattern 0.1393)
+Its first run (in the sys32 nokk mvk vkmvk batch) died 2 s in with
+"48138 Killed: 9" on the launch line, before Wine had loaded the program
+(the log ends in wine's own start-up): something on the machine killed
+the run's processes (not this test: its STEAMARM_RUN_ID stop runs after
+the program ends); the three modes after it in the same batch and the
+rerun passed.
 
 3. The game tool (dry run of the x86 client's wrapper, steamarm-ffx, on
 three made-up games: one shipping nvngx_dlss.dll in an Unreal plugin
