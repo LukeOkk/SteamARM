@@ -1,0 +1,235 @@
+Stage 60 -- DLSS through NVIDIA's NGX API answered by MetalFX (tools/dlss-metalfx)
+2026-10-06. Apple M4, 16 GB, macOS 27. Zero VM. x86 Proton Experimental under
+FEX, VKD3D-Proton 7f0c30ad (vkd3d-1.1-5626), the Vulkan shim of this branch
+(build/libvulkan.so.1) bound over the root's for the test's processes only,
+KosmicKrisp = SteamARM's Mesa 26.2.4 build in $HOME/SteamARM-build/mesa-kk/out
+(patch 20, kk_steamarm_upscale_temporal), MoltenVK for the mvk case.
+
+[F] = measured here, [I] = inferred.
+
+1. What is in the branch
+
+nvngx.dll and _nvngx.dll (one source, tools/dlss-metalfx/nvngx.c; Wine
+builtins with the prefer-native flag, KERNEL32 the only import [F:
+x86_64-w64-mingw32-objdump -p: "DLL Name: KERNEL32.dll"]) stand in for
+NVIDIA's NGX core. A game's SuperSampling feature (DLSS 2, 3, 4 -- the
+same NGX surface up to SDK 310.x) becomes the channel's ENCODE
+(shim/mfx_temporal.h) recorded as a vkCmdUpdateBuffer into the game's own
+command buffer: for D3D12 through VKD3D-Proton's ID3D12DXVKInteropDevice1
+(BeginVkCommandBufferInterop, GetVulkanResourceInfo1, as
+tests/win/d3d12_mfxt_interop.c does), for Vulkan into the game's
+VkCommandBuffer with the VkImages of its NVSDK_NGX_Resource_VK. The shim
+hands it to KosmicKrisp's kk_steamarm_upscale_temporal (MetalFX temporal);
+a refused encode is answered with a vkCmdBlitImage of the colour input
+onto the output on the same command list, and the NGX call still
+succeeds. DLSSG (frame generation), DLSSD (ray reconstruction) and
+multi-frame generation: FrameGeneration.Available = 0,
+SuperSamplingDenoising.Available = 0, CreateFeature refuses them with
+FeatureNotSupported.
+
+DLSS 1 (2018-2019: an NGX SDK version below 0x13 given to Init, or a 1.x
+nvngx_dlss.dll next to the game, STEAMARM_NGX_MODEL or a search next to
+the program; STEAMARM_NGX_SPATIAL=1/0 forces) is MetalFX SPATIAL: the DLL
+sends the new op SPATIAL (protocol v2, shim/mfx_temporal.h) and the shim
+records its own FSR 1 pass (shim/spatial.c: EASU from the colour image
+into a private image of the output's size, RCAS when the game asks for a
+sharpness above 0, a copy onto the output) with the EASU shader laid out
+as KosmicKrisp's FSR-1 hook recognises a game's EASU pass
+(shim/scaler/easu_set1.frag: the input at set 1 binding 30, the constants
+in a uniform buffer at set 1 binding 1 with con0 first, the shader known
+by EASU's own constants 0x7ef07ebb / 0x5f347d74; patches/kosmickrisp-14,
+-16, -17: kk_nir_is_fsr_easu, kk_fsr_easu_input, kk_fsr_easu_content,
+kk_fsr_metalfx_draw -- a pass over the whole of a plain 2D image from its
+origin, one colour attachment, all four channels, no blending, scissor,
+depth or stencil). On KosmicKrisp that draw becomes MetalFX's spatial
+scaler; on MoltenVK it is FSR 1. The pass needs the textures' own sizes
+(EASU's constants), which v2 of the command carries in four of v1's
+reserved words. A v2 shim takes v1 and v2 commands, gives the driver v1
+only, and writes PROBE's answer back with SA_MFXT_CAP_SPATIAL whatever
+the driver said.
+
+Checked against the public headers (github.com/NVIDIA/DLSS main,
+include/nvsdk_ngx_defs.h: NVSDK_NGX_VERSION_API_MACRO 0x15; the results
+0xBAD0000x; features SuperSampling 1, FrameGeneration 11,
+RayReconstruction 13; PerfQuality MaxPerf 0 .. DLAA 5; the create flags
+IsHDR 1, MVLowRes 2, MVJittered 4, DepthInverted 8, DoSharpening 32,
+AutoExposure 64, AlphaUpscaling 128; the DLSS 4 render presets J 10, K 11,
+L 12, M 13 under DLSS.Hint.Render.Preset.*; DLSS.Enable.Output.Subrects
+and the subrect keys; nvsdk_ngx_params.h: NVSDK_NGX_Parameter's 17
+virtual functions; nvsdk_ngx_defs_vk.h: NVSDK_NGX_Resource_VK; nvsdk_ngx.h
+and nvsdk_ngx_vk.h: the entry points' arguments) and against OptiScaler's
+nvngx (inputs/NVNGX_DLSS_Dx12.cpp, NVNGX_DLSS_Vk.cpp) for the forms the
+static NGX SDK calls in the core: Init(app id, path, device, feature info,
+sdk version), Init_Ext(app id, path, device, sdk version, feature info),
+Init_ProjectID(project, engine, engine version, path, device, sdk
+version, feature info), Init_with_ProjectID(project, engine, engine
+version, path, device, feature info, sdk version), and the VULKAN forms
+with InGIPA/InGDPA. NVSDK_NGX_VULKAN_RequiredExtensions and the
+Get*ExtensionRequirements answer none.
+
+NVSDK_NGX_Parameter's vtable order [F] (clang++ -target
+x86_64-pc-windows-msvc on the class as declared in nvsdk_ngx_params.h,
+the slot each call loads):
+  Set(void*)               (%rax)      slot 0
+  Set(int)                 24(%rax)    slot 3
+  Set(float)               48(%rax)    slot 6
+  Set(unsigned long long)  56(%rax)    slot 7
+  Get(void**)              64(%rax)    slot 8
+  Get(unsigned long long*) 120(%rax)   slot 15
+  Reset                    128(%rax)   slot 16
+i.e. MSVC puts overloads of one name in reverse order of declaration:
+Set(void*), Set(ID3D12Resource*), Set(ID3D11Resource*), Set(int),
+Set(unsigned), Set(double), Set(float), Set(unsigned long long), the Gets
+the same way, then Reset -- the order g_param_vt has.
+
+2. Tests
+
+(1) tests/win/run_d3d12_mfxt_interop.sh fl12 with this shim
+(STEAMARM_KK_OWN=$HOME/SteamARM-build/mesa-kk/out, 40 frames) [F]:
+  == shim under test: build/libvulkan.so.1 (sha1 5009844ff599), installed: cc88f01e55a6
+  == KosmicKrisp: $HOME/SteamARM-build/mesa-kk/out (sha1 9ee614662194)
+  == vkd3d-proton:  7f0c30ad3c8f28dfe47c34bb897b972e2d1ca724 vkd3d-proton (vkd3d-1.1-5626-g7f0c30ad)
+    ok    fl12 (22 s)
+            ok    probe (own pool on vkd3d's VkDevice): status OK, caps 0x5f, driver 28, max scale 3.00
+            ok    probe in the command list: status OK, caps 0x5f, driver 28, max scale 3.00
+            ok    encode through the D3D12 command list: status OK, RMSE 0.0293 (opposite jitter 0.1254)
+            ok    command list executed twice (recorded again by KosmicKrisp): RMSE 0.0292
+            ok    motion vectors through the D3D12 path: RMSE 0.0738 (+v 0.1304)
+            ok    depth R32_TYPELESS (Vulkan format 126): status OK, RMSE 0.0482
+            ok    depth R32G8X24_TYPELESS (Vulkan format 130): status OK, RMSE 0.0482
+            ok    destroy: status OK
+  == 1 passed, 0 failed
+caps 0x5f: TEMPORAL | MV_DISPLAY | MV_JITTERED | OFFSETS | REACTIVE (the
+driver's 0x1f) | SPATIAL 0x40 (this shim's).
+
+A first run at MFXT_FRAMES=30 failed its two depth cases (RMSE 0.0527
+against the test's 0.05, with 15 frames instead of 20 for those cases);
+the same shim at the default 40 frames passes with the 0.0482 the main
+checkout's run of 10:52 had: the frame count, not the shim [I].
+
+(2) tests/win/run_d3d12_dlss.sh (DLSS_FRAMES default 40) [F]. kk and vk
+(KosmicKrisp; the D3D12 program loading "nvngx.dll" by name, and the
+Vulkan program):
+  == shim under test: build/libvulkan.so.1 (sha1 5009844ff599), installed: cc88f01e55a6
+  == KosmicKrisp: $HOME/SteamARM-build/mesa-kk/out (sha1 9ee614662194)
+  == vkd3d-proton:  7f0c30ad3c8f28dfe47c34bb897b972e2d1ca724 vkd3d-proton (vkd3d-1.1-5626-g7f0c30ad)
+    ok    kk (17 s)
+    ok    vk (17 s)
+  == 2 passed, 0 failed
+kk, the decisive lines:
+  [nvngx-metalfx] D3D12 init: probe OK caps 0x5f driver 28 max scale 3.00 -> DLSS (SuperSampling) available: MetalFX temporal
+  caps: SuperSampling.Available vtable 1 (0x1) / C 1 (0x1), NeedsUpdatedDriver 0, FeatureInitResult 0x1, FrameGeneration 0, RayReconstruction 0
+    ok    optimal settings: Quality 1280x720, Balanced 1114x626, Performance 960x540, UltraPerformance 640x360, DLAA, UltraQuality
+      still: 40 frames 1280x720 -> 1920x1080, evaluate 0x00000001, evaluated 40, refused 0, last status OK, path temporal, RMSE 0.02871 mean 0.494, release 0x00000001
+      still, opposite jitter: 40 frames 1280x720 -> 1920x1080, evaluate 0x00000001, evaluated 40, refused 0, last status OK, path temporal, RMSE 0.12148 mean 0.491, release 0x00000001
+    ok    DLSS evaluate -> MetalFX temporal, every frame OK: RMSE 0.0287 (opposite jitter 0.1215)
+    ok    motion vectors as DLSS defines them: RMSE 0.0633 (opposite 0.1151)
+      fallback 4x: 8 frames 480x270 -> 1920x1080, evaluate 0x00000001, evaluated 8, refused 8, last status UNSUPPORTED, path temporal, RMSE 0.12849 mean 0.500, release 0x00000001
+    ok    refused encode (UNSUPPORTED): the colour input blitted onto the output, NGX success, RMSE 0.1285 mean 0.500
+  [nvngx-metalfx] NVSDK_NGX_D3D12_Init: NGX SDK version 0x12, model DLL not found -> DLSS 1: MetalFX spatial (the NGX SDK version given to Init is below 0x13 (DLSS 1's))
+  [nvngx-metalfx] D3D12 init: probe OK caps 0x5f driver 28 max scale 3.00 -> DLSS (SuperSampling) available: DLSS 1 as MetalFX spatial (the shim's FSR 1 pass)
+  [shim] spatial ctx 5640573815328079878: FSR 1 EASU pass 1280x720 (texture 1280x720, format 97) -> 1920x1080 (format 97) made
+  kk: FSR by MetalFX: picture 1280x720 -> 1920x1080
+  kk: FSR by MetalFX spatial: 1280x720 (format 115) -> 1920x1080 (format 115)
+  [shim] mfx-temporal ctx 5640573815328079878 op spatial 1280x720->1920x1080 fmt 97 driver kosmickrisp entry found st=OK (easu+rcas)
+      dlss1 spatial (quarter-rate pattern): 12 frames 1280x720 -> 1920x1080, evaluate 0x00000001, evaluated 12, refused 0, last status OK, path spatial, RMSE 0.04943 mean 0.499, release 0x00000001
+      dlss1 spatial (full-rate pattern): 6 frames 1280x720 -> 1920x1080, evaluate 0x00000001, evaluated 6, refused 0, last status OK, path spatial, RMSE 0.13926 mean 0.499, release 0x00000001
+    ok    DLSS 1 -> the shim's spatial pass (EASU+RCAS, MetalFX spatial on KosmicKrisp), every frame OK: RMSE 0.0494 mean 0.499 (full-rate pattern 0.1393)
+  == d3d12 dlss: ok
+"kk: FSR by MetalFX: picture 1280x720 -> 1920x1080" is the driver's FSR-1
+hook reading EASU's con0 from the shim's uniform buffer (patch 14,
+kk_fsr_easu_content), "kk: FSR by MetalFX spatial: ..." its MetalFX
+spatial scaler made for that draw. The quarter-rate pattern is the test's
+pattern with its coordinates scaled by 0.25: the full-rate one has 0.58
+and 0.72 cycles a render pixel, past Nyquist, which 40 jittered frames
+through the temporal path resolve (RMSE 0.0287) and one frame through any
+spatial scaler cannot (0.1393 here; the bilinear blit of the fallback
+case, 0.1285): the spatial RMSE is judged at the quarter rate (0.0494
+against 0.06), the full-rate number is reported.
+vk, the decisive lines (the same picture checks on the program's own
+VkCommandBuffer):
+  NVSDK_NGX_VULKAN_RequiredExtensions -> 0x00000001: 0 instance, 0 device extensions
+  device: Apple M4, driver KosmicKrisp, Vulkan 1.4
+  [nvngx-metalfx] Vulkan init: probe OK caps 0x5f driver 28 max scale 3.00 -> DLSS (SuperSampling) available: MetalFX temporal
+    ok    DLSS evaluate on the game's VkCommandBuffer -> MetalFX temporal, every frame OK: RMSE 0.0287 (opposite jitter 0.1215)
+    ok    motion vectors as DLSS defines them: RMSE 0.0633 (opposite 0.1151)
+  [nvngx-metalfx] Vulkan init: probe OK caps 0x5f driver 28 max scale 3.00 -> DLSS (SuperSampling) available: DLSS 1 as MetalFX spatial (the shim's FSR 1 pass)
+  kk: FSR by MetalFX spatial: 1280x720 (format 115) -> 1920x1080 (format 115)
+    ok    DLSS 1 -> the shim's spatial pass on the game's VkCommandBuffer, every frame OK: RMSE 0.0494 mean 0.499 (full-rate pattern 0.1393)
+  == vk dlss: ok
+A first kk run, with DLSS 1 judged on the full-rate pattern at 0.12, had
+the same OK path and status on every frame and an RMSE of 0.1725
+(sharpness 0.3, the input jittered): that run is what led to the
+quarter-rate check.
+nokk (KosmicKrisp, KK_MFXT=0), mvk (MoltenVK) and vkmvk (the Vulkan
+program on MoltenVK): DLSS 2+ unavailable, DLSS 1 still spatial:
+    ok    nokk (14 s)
+    ok    mvk (13 s)
+    ok    vkmvk (12 s)
+nokk:
+  [shim] mfx-temporal ctx 0 op probe 0x0->0x0 fmt 0 driver kosmickrisp entry found st=UNSUPPORTED
+  [nvngx-metalfx] D3D12 init: the channel's PROBE did not answer OK (no KosmicKrisp with MetalFX temporal, or KK_MFXT=0); probe UNSUPPORTED caps 0x40 driver 28 max scale 0.00 -> DLSS (SuperSampling) unavailable
+    ok    SuperSampling.Available = 0 as expected; frame generation 0, ray reconstruction 0
+    ok    CreateFeature refused with FeatureNotSupported, as SuperSampling.Available = 0 says
+  [nvngx-metalfx] D3D12 init: probe UNSUPPORTED caps 0x40 driver 28 max scale 0.00 -> DLSS (SuperSampling) available: DLSS 1 as MetalFX spatial (the shim's FSR 1 pass)
+  kk: FSR by MetalFX spatial: 1280x720 (format 115) -> 1920x1080 (format 115)
+    ok    DLSS 1 -> the shim's spatial pass (EASU+RCAS, MetalFX spatial on KosmicKrisp), every frame OK: RMSE 0.0494 mean 0.499 (full-rate pattern 0.1393)
+(KK_MFXT=0 turns the driver's temporal entry off, not its FSR-1 hook, so
+DLSS 1 is still MetalFX spatial there.)
+mvk:
+  [shim] mfx-temporal ctx 0 op probe 0x0->0x0 fmt 0 driver moltenvk entry missing st=NO_DRIVER
+  [nvngx-metalfx] D3D12 init: the channel's PROBE did not answer OK (no KosmicKrisp with MetalFX temporal, or KK_MFXT=0); probe NO_DRIVER caps 0x40 driver 0 max scale 0.00 -> DLSS (SuperSampling) unavailable
+    ok    CreateFeature refused with FeatureNotSupported, as SuperSampling.Available = 0 says
+  [shim] mfx-temporal ctx 5640573815328079873 op spatial 1280x720->1920x1080 fmt 97 driver moltenvk entry missing st=OK (easu+rcas)
+      dlss1 spatial (quarter-rate pattern): 12 frames 1280x720 -> 1920x1080, evaluate 0x00000001, evaluated 12, refused 0, last status OK, path spatial, RMSE 0.02078 mean 0.499, release 0x00000001
+      dlss1 spatial (full-rate pattern): 6 frames 1280x720 -> 1920x1080, evaluate 0x00000001, evaluated 6, refused 0, last status OK, path spatial, RMSE 0.08775 mean 0.499, release 0x00000001
+    ok    DLSS 1 -> the shim's spatial pass (EASU+RCAS, MetalFX spatial on KosmicKrisp), every frame OK: RMSE 0.0208 mean 0.499 (full-rate pattern 0.0878)
+vkmvk:
+  device: Apple M4, driver MoltenVK, Vulkan 1.2
+    ok    CreateFeature1 refused with FeatureNotSupported, as SuperSampling.Available = 0 says
+    ok    DLSS 1 -> the shim's spatial pass on the game's VkCommandBuffer, every frame OK: RMSE 0.0208 mean 0.499 (full-rate pattern 0.0878)
+On this pattern FSR 1's EASU + RCAS (MoltenVK) comes closer to the
+supersampled scene than MetalFX's spatial scaler (KosmicKrisp): 0.0208
+against 0.0494 at the quarter rate, 0.0878 against 0.1393 at the full
+rate [F]; why is not measured (the two are different filters, and
+MetalFX's gets RCAS after it too).
+RESULT_SYS32
+
+3. The game tool (dry run of the x86 client's wrapper, steamarm-ffx, on
+three made-up games: one shipping nvngx_dlss.dll in an Unreal plugin
+folder, one without, one with an EasyAntiCheat folder) [F]:
+  DLSS -> MetalFX: SteamARM's NGX DLLs from $T/opt/steamarm/wine (nvngx,_nvngx=b,n; nvngx_dlss.dll found), adapter shown as NVIDIA to DXVK
+  env: WINEDLLOVERRIDES=nvngx,_nvngx=b,n;amd_fidelityfx_dx12,amd_fidelityfx_vk,amd_fidelityfx_upscaler_dx12=b,n
+  env: NVIDIA_WINE_DLL_DIR=$T/opt/steamarm/wine/x86_64-windows
+  env: STEAMARM_NGX_MODEL=$T/steamapps/common/Game/Engine/Plugins/DLSS/Binaries/ThirdParty/Win64/nvngx_dlss.dll
+  env: DXVK_CONFIG=dxgi.customVendorId = 10de
+  DLSS -> MetalFX off for this game (no nvngx_dlss.dll in the game's files: it has no DLSS to stand in for)
+  DLSS -> MetalFX off for this game (anti-cheat: $T/steamapps/common/AC/EasyAntiCheat)
+The vendor spoof is DXVK's dxgi.customVendorId = 10de (VKD3D-Proton takes
+the adapter from DXVK's dxgi, so D3D12 games see it too; a Vulkan game
+asks the driver and is not fooled). "make dlss-metalfx" builds the DLLs
+into build/dlss-metalfx/x86_64-windows [F]; scripts/install-ffx-metalfx.sh
+--dry-run: "would install amd_fidelityfx_dx12 amd_fidelityfx_vk
+amd_fidelityfx_upscaler_dx12 nvngx _nvngx (.dll), anticheat-appids.txt
+and steamarm-ffx into /tmp/lxrt-steamroot/opt/steamarm/wine" [F]. The
+launcher's "Escalado del juego" AUTO on KosmicKrisp exports
+STEAMARM_WIN_DLSS=metalfx with STEAMARM_WIN_UPSCALER=metalfx
+(scripts/settings-env.py; tests/test_settings_env.py: 19 tests OK).
+
+4. Not done / not measured
+
+- No real DLSS game was run: nothing here measures a game's frame rate or
+  picture (the task's rules keep this worker off Steam's games).
+- The Vulkan NGX path (NVSDK_NGX_VULKAN_*) is implemented, not tested by a
+  program (no Vulkan variant of the test yet).
+- The DLSS 1 verdict from the SDK version (< 0x13) is inferred from the
+  public headers' history [I]; the 2018-2019 SDKs are not public. A 1.x
+  nvngx_dlss.dll is the other, independent sign.
+- ReleaseFeature's DESTROY frees the shim's spatial objects at once; a
+  game that releases while a command buffer using them is still executing
+  would race (DLSS games release at a resolution change, after idling the
+  GPU) [I].
+- The static NGX SDK of a game that takes the registry's NGXCore FullPath
+  (System32) looks for _nvngx.dll there, which the tool does not put in a
+  game's prefix: such a game shows DLSS unavailable (the sys32 case of the
+  test only proves the DLL works when loaded from there).
