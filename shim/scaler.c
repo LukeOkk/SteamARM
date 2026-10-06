@@ -1422,10 +1422,43 @@ static void fps_limit_wait(void)
     next = now > next + interval ? now + interval : next + interval;
 }
 
+// LXRT_VK_FRAMETIMES=<file>: the time between one present and the next, one
+// line per present in microseconds (frame pacing: average, 1 % and 0.1 % lows,
+// p99; tests/win and the Schedule I measurements). Appended in 4 KiB pieces.
+extern int open(const char *, int, ...);
+extern long write(int, const void *, size_t);
+extern int snprintf(char *, size_t, const char *, ...);
+static void frametime_note(uint64_t t)
+{
+    static int fd = -1;
+    static uint64_t last;
+    static char buf[4096];
+    static unsigned n;
+    if (fd == -1) {
+        const char *e = getenv("LXRT_VK_FRAMETIMES");
+        fd = e && *e ? open(e, 01 | 0100 | 02000, 0644) : -2;   // O_WRONLY|O_CREAT|O_APPEND (Linux)
+    }
+    if (fd < 0)
+        return;
+    lock();
+    if (last) {
+        int k = snprintf(buf + n, sizeof buf - n, "%llu\n", (unsigned long long)((t - last) / 1000));
+        if (k > 0)
+            n += (unsigned)k;
+        if (n > sizeof buf - 32) {
+            write(fd, buf, n);
+            n = 0;
+        }
+    }
+    last = t;
+    unlock();
+}
+
 static VkResult present_inner(VkQueue q, const VkPresentInfoKHR *pi);
 VkResult lxrt_inner_vkQueuePresentKHR(VkQueue q, const VkPresentInfoKHR *pi)
 {
     fps_limit_wait();
+    frametime_note(now_ns());
     if (!timing_on())
         return present_inner(q, pi);
     uint64_t t0 = now_ns();
