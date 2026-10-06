@@ -4,7 +4,6 @@
     "name": "SteamARM",
     "kind": "steam",
     "builtIn": true,
-    "readiness": "experimental",
     "command": [
       "/tmp/armhome/.local/share/Steam/steamrtarm64/steam"
     ],
