@@ -239,3 +239,4 @@ histogram, never the average alone: smoothness is a claim about the tail.
 Compare ZERO-VM against CrossOver and against a native macOS build where one
 exists; the VM baseline is history. No game has been measured this way yet
 (`docs/PERFORMANCE_BASELINE.md`, "Not measured").
+| 61 | `stage61-cs2-stutter.txt` | 10-06 | CS2 stutter at high fps: memory pressure (compressor 5-6 GB) plus two runtime overheads sampled in stalls (readlink per path prefix, the JIT-output rescan scanning 27 GB/run); prefix cache and exact-range rescan |

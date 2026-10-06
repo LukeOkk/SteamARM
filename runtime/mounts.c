@@ -13,6 +13,9 @@
 #include <string.h>
 #include <sys/stat.h>
 #include <unistd.h>
+#include <pthread.h>
+#include <stdatomic.h>
+#include <time.h>
 
 #define LERR(e) (-(long)lxrt_errno_to_linux(e))
 bool lxrt_trace_on(void);
@@ -123,6 +126,94 @@ const char *lxrt_mounts_untranslate(const char *host, char *buf, size_t n)
     return NULL;
 }
 
+// Prefix cache for through_root_symlinks(): every absolute path of every
+// path syscall walked its /a, /a/b, ... prefixes with one readlink() each,
+// again and again for the same directories -- a quarter of a game's loading
+// thread was in readlink while Counter-Strike 2 opened its assets (sampled,
+// benchmarks/stage61-cs2-stutter.txt). The symlinks in the sandbox root are
+// made when the tree is set up and the guest's own writes go to the binds,
+// so the answer for a prefix (plain, or a link and its target) is kept for a
+// short while and dropped when this process makes, moves or removes anything
+// (lxrt_mounts_symlinks_changed()). Other guest processes writing links into
+// the root itself are what the time limit is for.
+#define SYMCACHE_SLOTS 512
+#define SYMCACHE_TTL_NS (2ull * 1000 * 1000 * 1000)
+struct symcache_entry {
+    char *prefix;           // in_root path, malloc'd
+    char *target;           // readlink() result, or NULL for a plain entry
+    uint64_t when;          // CLOCK_MONOTONIC ns of the lookup
+    uint64_t gen;
+};
+static struct symcache_entry g_symcache[SYMCACHE_SLOTS];
+static pthread_mutex_t g_symcache_lock = PTHREAD_MUTEX_INITIALIZER;
+static _Atomic uint64_t g_symcache_gen = 1;
+
+void lxrt_mounts_symlinks_changed(void) { atomic_fetch_add(&g_symcache_gen, 1); }
+
+static uint64_t symcache_now(void)
+{
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (uint64_t)ts.tv_sec * 1000000000ull + (uint64_t)ts.tv_nsec;
+}
+
+static unsigned symcache_hash(const char *s)
+{
+    unsigned h = 2166136261u;
+    for (; *s; s++) h = (h ^ (unsigned char)*s) * 16777619u;
+    return h % SYMCACHE_SLOTS;
+}
+
+// readlink(in_root) through the cache. Returns the target length, 0 for a
+// plain entry (no link), -1 when the cache could not answer and the caller
+// must ask the kernel. A signal handler that reaches path translation must
+// not block on the lock: trylock, and the kernel is asked when it is held.
+static ssize_t symcache_readlink(const char *in_root, char *target, size_t n)
+{
+    if (getenv("LXRT_NO_SYMCACHE"))
+        return -1;
+    if (pthread_mutex_trylock(&g_symcache_lock) != 0)
+        return -1;
+    ssize_t rc = -1;
+    struct symcache_entry *e = &g_symcache[symcache_hash(in_root)];
+    uint64_t gen = atomic_load(&g_symcache_gen);
+    if (e->prefix && e->gen == gen && strcmp(e->prefix, in_root) == 0 &&
+        symcache_now() - e->when < SYMCACHE_TTL_NS) {
+        if (!e->target) {
+            rc = 0;
+        } else {
+            size_t tl = strlen(e->target);
+            if (tl < n) {
+                memcpy(target, e->target, tl + 1);
+                rc = (ssize_t)tl;
+            }
+        }
+    }
+    pthread_mutex_unlock(&g_symcache_lock);
+    return rc;
+}
+
+static void symcache_store(const char *in_root, const char *target)
+{
+    if (pthread_mutex_trylock(&g_symcache_lock) != 0)
+        return;
+    struct symcache_entry *e = &g_symcache[symcache_hash(in_root)];
+    char *p = strdup(in_root);
+    char *t = target ? strdup(target) : NULL;
+    if (p && (!target || t)) {
+        free(e->prefix);
+        free(e->target);
+        e->prefix = p;
+        e->target = t;
+        e->when = symcache_now();
+        e->gen = atomic_load(&g_symcache_gen);
+    } else {
+        free(p);
+        free(t);
+    }
+    pthread_mutex_unlock(&g_symcache_lock);
+}
+
 // Symlinks that --symlink created in the sandbox root (/lib -> usr/lib, ...)
 // point INTO binds; left to the host kernel they resolve against the empty
 // directories standing in for the bind targets. Rewrite them in guest terms
@@ -153,7 +244,16 @@ static const char *through_root_symlinks(const char *path, char *out, size_t n)
             if (bound) { *slash = save; break; }
             char in_root[PATH_MAX], target[PATH_MAX];
             snprintf(in_root, sizeof in_root, "%s%s", root, cur);
-            ssize_t tl = readlink(in_root, target, sizeof target - 1);
+            ssize_t tl = symcache_readlink(in_root, target, sizeof target);
+            if (tl < 0) {
+                tl = readlink(in_root, target, sizeof target - 1);
+                if (tl > 0) {
+                    target[tl] = '\0';
+                    symcache_store(in_root, target);
+                } else if (tl < 0 && errno == EINVAL) {
+                    symcache_store(in_root, NULL);     // exists, not a link
+                }
+            }
             if (tl > 0) {
                 target[tl] = '\0';
                 char next[PATH_MAX];

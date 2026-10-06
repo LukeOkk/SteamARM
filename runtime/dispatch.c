@@ -3573,11 +3573,13 @@ restart:
         break;
     }
     case LNR_mkdirat:
+        lxrt_mounts_symlinks_changed();
         if (lxrt_mounts_readonly((const char *)a1)) { ret = LERR(EROFS); break; }
         ret = ret_of(mkdirat(lxrt_dirfd_to_darwin((int)a0),
                              translate((const char *)a1), (mode_t)a2));
         break;
     case LNR_unlinkat:
+        lxrt_mounts_symlinks_changed();
         if (lxrt_mounts_readonly((const char *)a1)) { ret = LERR(EROFS); break; }
         {
             // LXRT_KEEP_DUMPS=1 (debugging aid): crash reporters delete their
@@ -3608,6 +3610,7 @@ restart:
         break;
     case LNR_renameat:
     case LNR_renameat2: {
+        lxrt_mounts_symlinks_changed();
         if (lxrt_mounts_readonly((const char *)a1) || lxrt_mounts_readonly((const char *)a3)) {
             ret = LERR(EROFS);
             break;
@@ -3800,6 +3803,7 @@ restart:
         break;
     }
     case LNR_symlinkat: {
+        lxrt_mounts_symlinks_changed();
         // An absolute target is a guest path; the host kernel resolves it
         // against the host's "/". Store the host path of the target instead
         // (readlinkat strips it back), so walking the link lands inside the
@@ -4416,6 +4420,7 @@ restart:
         ret = lxrt_fdatasync((int)a0);
         break;
     case LNR_linkat_n: {
+        lxrt_mounts_symlinks_changed();
         // translate() hands back a thread-local buffer, so the first path has
         // to be copied out before the second one overwrites it.
         static _Thread_local char oldcopy[1024];

@@ -39,3 +39,6 @@ long lxrt_bwrap_exec(char *const argv[], char *const envp[],
                      long (*exec_guest)(const char *path, char *const argv[],
                                         char *const envp[]));
 #endif
+// A link, directory or file made, moved or removed by this process: drop the
+// prefix cache of through_root_symlinks().
+void lxrt_mounts_symlinks_changed(void);

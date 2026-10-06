@@ -219,6 +219,28 @@ static void note_written(int idx, uint64_t addr)
 
 // Rewrite anything the JIT emitted that the runtime cannot let run as-is.
 // Only the range that was actually written is scanned.
+// How much JIT output the rescan has read, for the sigstats line (signal.c).
+_Atomic uint64_t lxrt_rescan_calls, lxrt_rescan_words;
+
+// Scan one range of a region, clipped to it, for svc / sysreg / x18 sites.
+static void rescan_exact(int idx, uint64_t lo, uint64_t hi)
+{
+    if (lo < g_jit[idx].start) lo = g_jit[idx].start;
+    if (hi > g_jit[idx].end)   hi = g_jit[idx].end;
+    lo &= ~3ull;
+    hi = (hi + 3) & ~3ull;
+    if (hi > g_jit[idx].end)   hi = g_jit[idx].end;
+    if (lo >= hi)
+        return;
+    atomic_fetch_add(&lxrt_rescan_calls, 1);
+    atomic_fetch_add(&lxrt_rescan_words, (hi - lo) / 4);
+    struct lxrt_rewrite_report rep;
+    char *err = NULL;
+    if (lxrt_rewrite_range(lo, hi, &rep, &err) == 0 && rep.sites_found)
+        fprintf(lxrt_trace_stream(), "[lxrt] JIT output: %zu svc sites rewritten, %zu poisoned\n",
+                rep.sites_rewritten, rep.sites_unreachable);
+}
+
 static void rescan(int idx)
 {
     uint64_t lo = atomic_exchange(&g_jit[idx].dirty_lo, UINT64_MAX);
@@ -231,6 +253,8 @@ static void rescan(int idx)
     hi &= ~3ull;
     if (lo >= hi)
         return;
+    atomic_fetch_add(&lxrt_rescan_calls, 1);
+    atomic_fetch_add(&lxrt_rescan_words, (hi - lo) / 4);
 
     struct lxrt_rewrite_report rep;
     char *err = NULL;
@@ -273,10 +297,18 @@ long lxrt_jit_set_write(int enable, uint64_t addr, uint64_t len)
             if (idx >= 0) {
                 uint64_t end = addr + len;
                 if (end > g_jit[idx].end) end = g_jit[idx].end;
-                note_range(idx, addr, end);
                 // Still in write mode here: the rewriter needs to store into
-                // the range it is fixing up.
-                rescan(idx);
+                // the range it is fixing up. Exactly this scope's range: the
+                // region's dirty window is shared by every thread, and one
+                // thread's 4-byte branch patch far from another's new block
+                // made the union of the two cover the distance between them
+                // -- Counter-Strike 2 loading scanned 1 GB of JIT output per
+                // 5 s for a few MB written (sigstats rescan counters,
+                // benchmarks/stage61-cs2-stutter.txt). A range noted while a
+                // thread was still writing it could also be taken by another
+                // thread's rescan before the write was done.
+                rescan_exact(idx, addr, end);
+                rescan(idx);                // pages noted by write faults
             } else if (lxrt_trace_on()) {
                 fprintf(lxrt_trace_stream(), "[lxrt]    jit_set_write(1) range 0x%llx+0x%llx "
                                 "outside every registered region\n",

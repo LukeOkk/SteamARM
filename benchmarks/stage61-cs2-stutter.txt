@@ -1,0 +1,84 @@
+Stage 61: Counter-Strike 2 stutter at high frame rates (2026-10-06)
+===================================================================
+
+The user: "stuttering muy seguido a pesar de altos fps". Dust2 with bots
+(+map de_dust2, local), 1920x1080 windowed, textures medium, MSAA 2x,
+shaders low, FSR detail 2; M4, 16 GB, macOS 27; SteamARM 0.3.53 + the
+fixed shim (stage 60's gen_rebase fix); KosmicKrisp. Frame times from
+LXRT_VK_FRAMETIMES (shim/scaler.c), 90-150 s windows after a 75 s warm-up,
+measured by the session's cs2game.sh driver (Steam restarted per run with
+the launcher's environment; the game killed at the end).
+
+1. Symptom, measured
+--------------------
+run   window  avg fps  1% low  0.1% low  frames >150 ms   first 20 s stalled
+1     90 s    57.9     5.4     1.0       26 of 10322      --
+2     90 s    69.9     19.3    4.9       15 of 11104      --
+3     90 s    65.1     19.6    3.7       16                --
+4     90 s    72.2     8.1     1.0       --                --
+5     90 s    74.1     28.3    12.4      --                --
+6     90 s    73.1     20.8    4.1       13                13.7 s of 20.0 s
+7     90 s    70.2     18.8    3.9       15 of 11072      15.8 s of 19.9 s
+Two classes: the round start freezes 8-16 s (one 8-12 s stall, then
+0.2-1.5 s ones for ten seconds) and, during play, 0.3-1.9 s stalls every
+30-60 s. The menu is not representative (49 fps, 0 faults).
+
+2. Memory
+---------
+vm_stat sampled every 1-2 s during run 6 (per-second deltas in the second
+of each stall):
+  t=  9.5 s  9507 ms  pagein  45 MB  compress  209 MB  decompress 134 MB  free  89 MB  level 50
+  t= 15.0 s   243 ms  pagein 173 MB  compress 1153 MB  decompress 332 MB  free  41 MB  level 39
+  t= 16.3 s   783 ms  pagein  77 MB  compress  563 MB  decompress 505 MB  free 249 MB  level 39
+  t= 57.1 s  1855 ms  pagein 140 MB  compress    0 MB  decompress   5 MB  free 332 MB  level 33
+  t=124.8 s  1078 ms  pagein  86 MB  compress    0 MB  decompress  15 MB  free 202 MB  level 30
+The compressor holds 5.1-5.9 GB during play; free memory sits at 40-330 MB;
+kern.memorystatus_level 30-65 (100 = no pressure). Page-ins total 9.5-11 GB
+per run (file-backed: assets re-read because the page cache is evicted);
+swap-ins ~0 (the game's cold pages live in the compressor, not on disk).
+The game's process (footprint 7.6 GB): anonymous 3.7 GB dirty, IOAccelerator
+2.4 GB + 0.4 GB owned graphics, host malloc "Medium" 718 MB dirty, Small
+158 MB. Steam's web helpers: ~2 GB RSS + ~1 GB IOAccelerator (766 + 307 MB)
+while the game runs. The round-start freeze is this: the kernel compressing
+at 1 GB/s with nothing free.
+
+3. What the game's threads do in a stall
+----------------------------------------
+A watchdog on the frame-time file (no growth for 400 ms) runs `sample <pid> 1`.
+Round-start stalls (run 7, 8 samples), leaf frames of the busy thread:
+  __ulock_wait (futex)                        8-49 %
+  JIT-code (FEX output)                       4-37 %
+  lxrt_rewrite_range_code <- lxrt_jit_set_write   5-24 %
+  readlink <- lxrt_mounts_translate <- through_root_symlinks   3-25 %
+Two runtime overheads, both measured, both fixed below.
+
+3a. readlink per path prefix. through_root_symlinks() (runtime/mounts.c)
+walked /a, /a/b, ... of every absolute path of every path syscall with one
+readlink() each, to resolve the --symlink entries of the sandbox root in
+guest terms. A game opening thousands of assets paid 2-6 syscalls per
+lookup. Fix: a 512-slot prefix cache (2 s TTL, dropped by this process's
+mkdirat/unlinkat/renameat/symlinkat/linkat; LXRT_NO_SYMCACHE=1 disables).
+
+3b. The rescan of FEX's JIT output. Every FEX write into its code buffer is
+wrapped in a WriteScope (FEXCore/include/FEXCore/Utils/LxrtJit.h) that
+names the exact range written; the runtime scans it for the sites Darwin
+cannot run as emitted (the inline getcpu `svc`, `mrs CNTVCT_EL0` for rdtsc,
+x18). The scan went through a per-region dirty window shared by all
+threads: one thread's 4-byte branch patch far from another thread's new
+block made the union cover the distance between them. Counted with the new
+sigstats fields (per 5 s window, the game's process):
+  loading:  186442 calls  254440 Kwords (1.0 GB) ... 58597 calls 767503 Kwords (3.1 GB)
+  playing:    2051 calls   75711 Kwords (0.3 GB) ...  4239 calls 222183 Kwords (0.9 GB)
+i.e. ~50 K words scanned per 4-byte patch during play. LXRT_NO_RESCAN=1
+(unsafe: svc sites) as the upper bound of the gain, run 9 vs 6/7: first
+20 s stalled 11.0 s (13.7/15.8), stalls >150 ms 10 per 150 s (15 per 90 s),
+1% low 33.0 fps (18.8-20.8), 0.1% low 11.9 (3.9-4.1). Fix: scan exactly the
+scope's own range (rescan_exact in runtime/jit.c); the shared window only
+collects pages noted by write faults. (The old union could also hand a
+range still being written by one thread to another thread's scan, and the
+writer then found nothing left to scan: a missed svc site is a Darwin
+syscall executed with Linux arguments.)
+
+4. Results with the fixes
+-------------------------
+(filled in below as the runs complete)
