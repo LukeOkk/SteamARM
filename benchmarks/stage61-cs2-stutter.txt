@@ -81,4 +81,26 @@ syscall executed with Linux arguments.)
 
 4. Results with the fixes
 -------------------------
-(filled in below as the runs complete)
+run  runtime                         window  avg fps  1% low  0.1% low  >150 ms   first 20 s stalled  rescan (words/run)
+9    LXRT_NO_RESCAN=1 (bound)        150 s   70.1     33.0    11.9      10        11.0 s              0
+10   prefix cache, old rescan        150 s   67.8     10.1    2.3       16        14.0 s              6.8 G
+11   prefix cache + exact rescan     150 s   64.1     13.8    1.9       11        11.5 s              0.59 G
+The exact rescan removes 11x of the scanning (max 5 s window 168 M words,
+was 767 M). The round-start freeze stays: that is the compressor (section
+2), and the rest of the tail is noise between runs of a machine with 40-300
+MB free.
+
+5. KosmicKrisp leaked one object per render pass
+------------------------------------------------
+`heap` of the game's process at four minutes (run 11): 2,247,105
+MTLRenderPassColorAttachmentDescriptorArrayInternal, 215 MB, next to 199,205
+untyped malloc blocks (800 MB) and the Metal textures. Only 5
+MTL4RenderPassDescriptor alive, so the arrays were not held by descriptors:
+the bridge made each descriptor with [[MTL4RenderPassDescriptor new] init]
+-- -init run a second time on an initialized object -- and the second init
+replaces the attachment array without releasing the first. Measured in
+isolation (scratch mtl4leak.m): 200,000 [[new] init] descriptors +19 MB of
+footprint, 200,000 [new] +128 KB. Patch kosmickrisp-23 initializes the
+five descriptor kinds once. With ~90 render passes a frame this was ~9 MB a
+minute of memory that is never given back while the game runs.
+Confirmed in run 12 (patch 23 installed): 2 MTLRenderPassColorAttachmentDescriptorArrayInternal alive at four minutes (2,247,105 before). The untyped malloc blocks stay (221,130, 925 MB, ~4 KB each): the next memory item.

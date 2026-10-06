@@ -106,6 +106,19 @@ total − 2 GB up to 8 GB, total − 4 GB above that. So 8 GB → 6, 16 GB → 1
 - **VRAM** is the video memory reported to games: the Vulkan heap size seen
   by DXVK/VKD3D-Proton, and DXVK's `dxgi.maxDeviceMemory`.
 
+### Native Proton ARM64 (experimental)
+
+Next to "SteamARM: Proton x86 via FEX" (the usual path: all of Proton runs
+translated) SteamARM installs the compatibility tool **"SteamARM: Proton
+ARM64 nativo (experimental)"**: only the game's x86-64 code is translated
+(by FEX's ARM64EC JIT inside Wine); Wine, wineserver, DXVK and VKD3D run as
+native ARM64 code. Pick it per game in Steam: Properties > Compatibility.
+It needs "Proton Experimental (ARM64)" installed from Steam's compatibility
+list; `scripts/install-native-proton.sh` prepares the copy (two changes
+macOS needs; Valve's copy is left alone). Limits: no 32-bit games; games
+with their own x86 JIT (Mono/.NET) still break; IL2CPP and native C++ games
+are the candidates.
+
 ## Controllers (Entrada)
 
 Plug in or pair a controller with the Mac as usual (USB or Bluetooth). Then

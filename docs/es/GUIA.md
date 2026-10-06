@@ -117,6 +117,20 @@ La ventana de configuración sigue el diseño de Ryujinx:
   "terminó con la señal 9".
 - La VRAM es la memoria de vídeo que ven los juegos.
 
+### Proton ARM64 nativo (experimental)
+
+Además de «SteamARM: Proton x86 via FEX» (la ruta habitual: todo Proton
+corre traducido), SteamARM instala la herramienta de compatibilidad
+**«SteamARM: Proton ARM64 nativo (experimental)»**: solo el código x86-64 del
+juego se traduce (por el JIT ARM64EC de FEX dentro de Wine), y Wine,
+wineserver, DXVK y VKD3D corren como código nativo ARM64. Se elige por juego
+en Steam: Propiedades → Compatibilidad. Hace falta tener instalado «Proton
+Experimental (ARM64)» desde la lista de compatibilidad de Steam; la
+herramienta se prepara con `scripts/install-native-proton.sh` (una copia
+con dos cambios que macOS necesita; la copia de Valve no se toca). Límites: juegos
+de 32 bits no; juegos con JIT x86 propio (Mono/.NET) aún se corrompen; los
+IL2CPP y los nativos C++ son los candidatos.
+
 ## Mandos
 
 Conecta el mando al Mac (USB o Bluetooth). En **Configuración → Entrada**

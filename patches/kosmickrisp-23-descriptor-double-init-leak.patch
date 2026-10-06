@@ -1,0 +1,64 @@
+KosmicKrisp: a descriptor is initialized once, not twice
+
+[[MTL4RenderPassDescriptor new] init] (and the argument-table, commit-options,
+stencil and depth-stencil descriptors) ran -init on an object -new had already
+initialized. MTL4RenderPassDescriptor's second init replaces its colour
+attachment array without releasing the first: one
+MTLRenderPassColorAttachmentDescriptorArrayInternal (96 bytes) leaked per
+render pass -- 2.25 million of them, 215 MB, after four minutes of
+Counter-Strike 2 (heap of the game's process, stage 61), growing for as long
+as the game runs on a 16 GB machine that is already compressing memory.
+Measured in isolation: 200000 [[new] init] descriptors +19 MB of footprint,
+200000 [new] +128 KB.
+
+--- a/src/kosmickrisp/bridge/mtl_argument_table.m
++++ b/src/kosmickrisp/bridge/mtl_argument_table.m
+@@ -13,7 +13,7 @@
+ mtl_new_argument_table_descriptor()
+ {
+    @autoreleasepool {
+-      return [[MTL4ArgumentTableDescriptor new] init];
++      return [MTL4ArgumentTableDescriptor new];
+    }
+ }
+ 
+--- a/src/kosmickrisp/bridge/mtl_command_queue.m
++++ b/src/kosmickrisp/bridge/mtl_command_queue.m
+@@ -14,7 +14,7 @@
+ mtl_new_commit_options(void)
+ {
+    @autoreleasepool {
+-      return [[MTL4CommitOptions new] init];
++      return [MTL4CommitOptions new];
+    }
+ }
+ 
+--- a/src/kosmickrisp/bridge/mtl_render_state.m
++++ b/src/kosmickrisp/bridge/mtl_render_state.m
+@@ -22,7 +22,7 @@
+ mtl_new_render_pass_descriptor(void)
+ {
+    @autoreleasepool {
+-      return [[MTL4RenderPassDescriptor new] init];
++      return [MTL4RenderPassDescriptor new];
+    }
+ }
+ 
+@@ -216,7 +216,7 @@
+ mtl_new_stencil_descriptor()
+ {
+    @autoreleasepool {
+-      return [[MTLStencilDescriptor new] init];
++      return [MTLStencilDescriptor new];
+    }
+ }
+ 
+@@ -306,7 +306,7 @@
+ mtl_new_depth_stencil_descriptor()
+ {
+    @autoreleasepool {
+-      return [[MTLDepthStencilDescriptor new] init];
++      return [MTLDepthStencilDescriptor new];
+    }
+ }
+ 
