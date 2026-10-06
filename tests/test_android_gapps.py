@@ -746,7 +746,7 @@ class PolicyTests(unittest.TestCase):
     def test_no_google_package_in_the_repository(self):
         found = []
         for dirpath, dirs, files in os.walk(REPO):
-            dirs[:] = [d for d in dirs if not d.startswith(".") and d not in ("build", "node_modules")]
+            dirs[:] = [d for d in dirs if not d.startswith(".") and d not in ("build", "node_modules", "graphify-out")]
             found += [os.path.join(dirpath, f) for f in files
                       if f.lower().endswith((".apk", ".apks", ".xapk", ".tar.lz")) or
                       f.lower().startswith(("mindthegapps", "open_gapps", "litegapps"))]

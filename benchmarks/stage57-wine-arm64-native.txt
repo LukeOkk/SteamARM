@@ -68,3 +68,21 @@ the failures one by one with a prototype: an APFS clone of that Proton tree
 
 Not measured: performance. Nothing of this reaches a game yet; the x86
 Proton path is unchanged (LXRT_LOWPAGES is off by default).
+
+5. REACHED (2026-10-06 05:05): `wine cmd /c ver` prints "Microsoft Windows
+   10.0.19045" -- Valve's Wine ARM64 running natively under the runtime:
+   aarch64 wineserver and unix side, ARM64X ntdll/kernel32, cmd.exe (ARM64),
+   no FEX, no Rosetta, no VM. What made it: runtime/pefile.c. Wine's loader
+   does not mmap a DLL's sections (4 KiB file alignment on 16 KiB host
+   pages): it reads the file into anonymous memory at the image base and
+   mprotects the code executable, so no file is at hand when the runtime
+   rewrites that code. The MZ/PE headers are in memory at a 64 KiB boundary
+   below the code: found there, the CHPE code map (ARM64 and ARM64EC ranges
+   only, never the x64 ones) gives the aarch64 windows, each registered as a
+   function table, and the x18 pass rewrites them (ntdll.dll: 1299 sites,
+   kernel32: 924, cmd.exe: 41; 0 unsupported). At exit wineserver's tgkill
+   SIGQUITs to the threads are delivered and the process exits 0.
+   NEXT: x64 code through libarm64ecfex.dll (FEX's ARM64EC JIT) inside
+   this Wine -- its generated code reads x18 (the TEB) and nothing rewrites
+   JIT output for x18; and the 'virtual_setup_exception stack overflow'
+   seen with x18 broken, if it returns.

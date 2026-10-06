@@ -801,6 +801,11 @@ static long nt_wait(struct nt_hdr *h, bool all, struct nt_wait_args *uargs)
     int32_t sig = atomic_load(&q->signaled);
     bool dead = q->ownerdead;
     q->state = 0;
+    // q_high bounds signal_obj's scans. Retired tail slots must not keep
+    // every later signal scanning the peak number of concurrent waiters
+    // (a signaled waiter stays occupied until it reaches this cleanup).
+    while (h->q_high && qv[h->q_high - 1].state == 0)
+        h->q_high--;
     nt_unlock(h);
     if (sig != -1) {
         // Even if a signal or the timeout came too, the objects were taken.

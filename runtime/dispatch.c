@@ -994,6 +994,7 @@ static long do_munmap(uint64_t addr, uint64_t len)
         if (lxrt_lowpage_munmap(addr, len, &lr))
             return lr;
     }
+    lxrt_pe_forget(addr, len);      // code windows of a PE image unmapped here
     long r = do_munmap_inner(addr, len);
     if (r == 0)
         lxrt_arena_unmapped(addr, len);    // holes in the guest's arena get its reservation back

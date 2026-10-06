@@ -509,6 +509,16 @@ void *lxrt_build_stack(const struct lxrt_image *img, int argc, char **argv,
 
 // main.c
 // Transfers control. Does not return.
+// pefile.c: the aarch64 code of PE images the guest's loader maps (Wine
+// ARM64's ARM64X / ARM64EC DLLs), for the x18 pass.
+bool lxrt_pe_is(int fd);
+int lxrt_pe_exec_sections(int fd, uint64_t file_off, uint64_t len, uint64_t addr,
+                          struct lxrt_range *code, int max);
+int lxrt_pe_code_windows(uint64_t start, uint64_t end, struct lxrt_range *out, int max);
+bool lxrt_pe_intersects(uint64_t start, uint64_t end);
+void lxrt_pe_forget(uint64_t addr, uint64_t len);
+void lxrt_fn_register(uint64_t lo, uint64_t hi, struct lxrt_range *r, int n);
+
 // lowpage.c: virtual pages below 4 GiB for native guests (LXRT_LOWPAGES=1).
 bool lxrt_lowpage_on(void);
 bool lxrt_lowpage_mmap(uint64_t addr, uint64_t len, long prot, long lflags,

@@ -340,7 +340,9 @@ bool lxrt_rewrite_has_candidates(uint64_t start, uint64_t end)
     unsigned hit = 0;
     for (size_t i = 0; i < words; i++)
         hit |= (w[i] == INSN_SVC0) | ((w[i] & 0xFFD00000u) == 0xD5100000u);
-    return hit != 0;
+    // The code of a PE image the guest mapped (pefile.c) may hold x18 sites
+    // and none of the above: looked at either way.
+    return hit != 0 || lxrt_pe_intersects(start, end);
 }
 
 // Returns the total trampoline bytes the range needs.
@@ -486,6 +488,17 @@ size_t lxrt_rewrite_count(uint64_t start, uint64_t end)
             continue;               // and these (kept ranges, tls.c)
         n++;
     }
+    // x18 sites in the code of a PE image the guest mapped (pefile.c): the
+    // same test rewrite_chunk_code applies, so the W^X loop's count settles
+    // after one rewrite (a rewritten site is a branch, a refused one brk).
+    struct lxrt_range pe[32];
+    int npe = lxrt_pe_intersects(start, end) ? lxrt_pe_code_windows(start, end, pe, 32) : 0;
+    for (int k = 0; k < npe; k++) {
+        uint64_t lo = LXRT_ALIGN_UP(pe[k].start, 4), hi = pe[k].end & ~3ull;
+        for (uint64_t a = lo; a + 4 <= hi; a += 4)
+            if (x18_site(a, *(const uint32_t *)(uintptr_t)a, pe, npe))
+                n++;
+    }
     return n;
 }
 
@@ -502,6 +515,18 @@ static int rewrite_chunk_code(uint64_t start, uint64_t end,
     memset(rep, 0, sizeof(*rep));
     if (end <= start)
         return 0;
+
+    // No windows from the caller (an mprotect to executable, a W^X flip, a
+    // sub-page scan): the code of a PE image the guest's own loader mapped
+    // there, if any (pefile.c), is where the x18 pass runs.
+    struct lxrt_range pe_code[32];
+    if (ncode <= 0 && lxrt_pe_intersects(start, end)) {     // finds the image if need be
+        int npe = lxrt_pe_code_windows(start, end, pe_code, 32);
+        if (npe > 0) {
+            code = pe_code;
+            ncode = npe;
+        }
+    }
 
     size_t need = count_sites(start, end, rep, code, ncode);
     if (need == 0) {

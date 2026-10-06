@@ -185,6 +185,16 @@ static int cmp_range(const void *a, const void *b)
 
 // The table takes `r` (n entries, none at all is fine): an empty table still
 // says "no function here" for its whole window.
+static void fn_register(uint64_t lo, uint64_t hi, struct lxrt_range *r, int n);
+
+// A table from outside this file: the function bounds of a PE image's code
+// window (runtime/pefile.c), looked up exactly like an ELF's.
+void lxrt_fn_register(uint64_t lo, uint64_t hi, struct lxrt_range *r, int n)
+{
+    if (hi <= lo) { free(r); return; }
+    fn_register(lo, hi, r, n);
+}
+
 static void fn_register(uint64_t lo, uint64_t hi, struct lxrt_range *r, int n)
 {
     if (n > 1)
@@ -452,6 +462,12 @@ static void register_fips(int fd, const struct elf64_ehdr_ *eh, const struct elf
 int lxrt_elf_exec_sections(int fd, uint64_t file_off, uint64_t len,
                            uint64_t map_base, struct lxrt_range *out, int max)
 {
+#ifndef LXRT_NO_PE
+    // A PE image the guest's own loader maps (Wine ARM64's DLLs): its
+    // aarch64 code windows, from the CHPE code map (pefile.c).
+    if (lxrt_pe_is(fd))
+        return lxrt_pe_exec_sections(fd, file_off, len, map_base, out, max);
+#endif
     struct elf64_ehdr_ eh;
     if (fd < 0 || max <= 0 || !read_all(fd, 0, &eh, sizeof eh))
         return 0;
