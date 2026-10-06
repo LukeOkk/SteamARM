@@ -1,6 +1,6 @@
 #!/bin/bash
-# Build SteamARM's FidelityFX API DLLs (ffx_stub.c) as Wine builtins, in the
-# layout WINEDLLPATH expects: one source, one DLL per name AMD ships.
+# Build SteamARM's FidelityFX API DLLs (ffx_metalfx.c) as Wine builtins, in
+# the layout WINEDLLPATH expects: one source, one DLL per name AMD ships.
 #
 #   tools/ffx-metalfx/build.sh [OUTDIR]     (default build/ffx-metalfx)
 #     -> OUTDIR/x86_64-windows/amd_fidelityfx_dx12.dll           WINEDLLPATH=OUTDIR
@@ -23,13 +23,15 @@
 # FFX_OUT=file       write exactly this one file instead (its name, without
 #                    .dll, is the DLL's name)
 #
-# Needs mingw-w64 (x86_64-w64-mingw32-gcc, Homebrew) and python3.
+# Needs mingw-w64 (x86_64-w64-mingw32-gcc), vulkan-headers (VK_HEADERS, default
+# Homebrew's) and python3.
 set -eu
 here=$(cd "$(dirname "$0")" && pwd)
 cd "$here/../.."
 out=${1:-build/ffx-metalfx}
 CC=${CC:-x86_64-w64-mingw32-gcc}
 command -v "$CC" >/dev/null || CC=/opt/homebrew/bin/x86_64-w64-mingw32-gcc
+VK_HEADERS="${VK_HEADERS:-$(brew --prefix vulkan-headers 2>/dev/null || echo /opt/homebrew/opt/vulkan-headers)}"
 tmp=$(mktemp -d)
 trap 'rm -rf "$tmp"' EXIT
 
@@ -37,12 +39,15 @@ build_one() {   # build_one FILE: the DLL named after FILE
     local dll=$1 name def
     name=${dll##*/}; name=${name%.[dD][lL][lL]}
     def="$tmp/$name.def"
-    sed "s/^LIBRARY .*/LIBRARY $name.dll/" "$here/ffx_stub.def" > "$def"
+    sed "s/^LIBRARY .*/LIBRARY $name.dll/" "$here/ffx_exports.def" > "$def"
     mkdir -p "$(dirname "$dll")"
     # KERNEL32 only: no C runtime, so DllMain is the entry point.
-    "$CC" -O2 -shared -s -nostdlib -ffreestanding -fno-stack-protector \
+    # -ffp-contract=off: the jitter sequence must come out bit for bit as
+    # AMD's DLL computes it (no fused multiply-add in halton()).
+    "$CC" -std=gnu11 -O2 -ffp-contract=off -shared -s -nostdlib -ffreestanding -fno-stack-protector -fno-asynchronous-unwind-tables \
+        -Wall -Wextra -Wno-unused-parameter -I"$VK_HEADERS/include" \
         -DFFX_IDENT="\"${FFX_IDENT:-steamarm-builtin}\"" -DFFX_DLL_NAME="\"$name\"" \
-        -Wl,-e,DllMain -o "$dll" "$here/ffx_stub.c" "$def" -lkernel32
+        -Wl,-e,DllMain -o "$dll" "$here/ffx_metalfx.c" "$def" -lkernel32
     if [ "${FFX_MARK:-1}" = 1 ]; then
         local flags=()
         [ "${FFX_PREFER_NATIVE:-1}" = 1 ] && flags+=(--prefer-native)
