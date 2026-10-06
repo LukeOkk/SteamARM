@@ -361,23 +361,29 @@ struct run {
     float vx, vy;       /* the content moves by +v render pixels a frame */
     float mv_mul;       /* motion vectors written = mv_mul * v */
     int frames;
-    int dlss1;          /* DLSS 1 style: Colour, Output, Sharpness, no depth or motion vectors */
+    int dlss1;          /* DLSS 1 style: Colour, Output, Sharpness, no depth or motion vectors, no jitter in the input */
+    float pscale;       /* the pattern's coordinates scaled by this (0: 1). A spatial upscaler cannot undo the
+                           aliasing of the full-rate pattern (0.58 and 0.72 cycles a render pixel are past Nyquist;
+                           the temporal path accumulates 40 jittered frames): DLSS 1 is checked on the pattern at a
+                           quarter of its rate, which one frame holds. */
     /* out */
     unsigned rc_create, rc_eval, rc_release;
     unsigned stats[6];
     double err, mean;
 };
 
+static float pscale_of(const struct run *r) { return r->pscale > 0 ? r->pscale : 1.0f; }
 static void write_color(const struct run *r, int t, float sx, float sy)
 {
     const struct inputs *in = r->in;
     unsigned char *base = in->upload_map + in->fp_color.Offset;
+    const float s = pscale_of(r);
     for (int y = 0; y < in->h; y++) {
         uint16_t *o = (uint16_t *)(base + (size_t)y * in->fp_color.Footprint.RowPitch);
         float py = (float)y + 0.5f + sy - r->vy * (float)t;
         for (int x = 0; x < in->w; x++) {
             float px = (float)x + 0.5f + sx - r->vx * (float)t;
-            uint16_t v = f2h(pattern(px, py));
+            uint16_t v = f2h(pattern(px * s, py * s));
             o[x * 4] = o[x * 4 + 1] = o[x * 4 + 2] = v;
             o[x * 4 + 3] = 0x3c00;
         }
@@ -398,15 +404,15 @@ static double rmse(const struct run *r, int t, double *mean)
 {
     double se = 0, sum = 0;
     long n = 0;
-    const float k = (float)r->in->w / OW;
+    const float k = (float)r->in->w / OW, s = pscale_of(r);
     for (int y = 16; y < OH - 16; y += 4) {
         const uint16_t *row = (const uint16_t *)(readback_map + fp_out.Offset + (size_t)y * fp_out.Footprint.RowPitch);
         for (int x = 16; x < OW - 16; x += 4) {
             float ref = 0;
             for (int j = 0; j < 4; j++)
                 for (int i = 0; i < 4; i++)
-                    ref += pattern(((float)x + (i + 0.5f) / 4) * k - r->vx * (float)t,
-                                   ((float)y + (j + 0.5f) / 4) * k - r->vy * (float)t);
+                    ref += pattern((((float)x + (i + 0.5f) / 4) * k - r->vx * (float)t) * s,
+                                   (((float)y + (j + 0.5f) / 4) * k - r->vy * (float)t) * s);
             ref /= 16;
             double v = h2f(row[x * 4]);
             se += (v - ref) * (v - ref);
@@ -449,6 +455,7 @@ static void run_case(struct run *r)
     r->rc_eval = NGX_OK;
     for (int t = 0; t < r->frames; t++) {
         float sx = halton(t % 32 + 1, 2) - 0.5f, sy = halton(t % 32 + 1, 3) - 0.5f;
+        if (r->dlss1) sx = sy = 0.0f;   /* a spatial upscaler knows no jitter */
         write_color(r, t, sx, sy);
         int measure = t >= r->frames - MEASURE;
         reset_list();
@@ -764,18 +771,25 @@ dlss1:
         GETI(caps, "SuperSampling.Available", &a);
         if (a != 1) BAD("DLSS 1: SuperSampling.Available = %d, expected 1 (the shim's spatial pass is there on any driver)", a);
         else {
-            struct run d1 = { "dlss1 spatial", &quality, -1, 0, 0, 0, frames < 12 ? frames : 12, 1 };
+            /* The pattern at a quarter of its rate, which one frame holds (the
+             * full-rate pattern is past Nyquist at the render size: the
+             * temporal path's 40 jittered frames resolve it, one frame
+             * cannot, whatever the scaler); for comparison the full-rate one
+             * too, reported, not judged. */
+            struct run d1 = { "dlss1 spatial (quarter-rate pattern)", &quality, 0, 0, 0, 0, frames < 12 ? frames : 12, 1, 0.25f };
+            struct run d1f = { "dlss1 spatial (full-rate pattern)", &quality, 0, 0, 0, 0, MEASURE + 2, 1, 1.0f };
             run_case(&d1);
+            run_case(&d1f);
             if (d1.rc_create != NGX_OK || d1.rc_eval != NGX_OK || d1.rc_release != NGX_OK)
                 BAD("dlss1: create 0x%08x evaluate 0x%08x release 0x%08x", d1.rc_create, d1.rc_eval, d1.rc_release);
             else if (d1.stats[4] != 1 || d1.stats[1] != 0 || d1.stats[2] != SA_ST_OK || d1.stats[0] != (unsigned)d1.frames)
                 BAD("dlss1: path %s, %u evaluated, %u refused, last status %s: not every frame went to the shim's spatial pass",
                     d1.stats[4] ? "spatial" : "temporal", d1.stats[0], d1.stats[1], status_name(d1.stats[2]));
-            else if (d1.err < 0 || d1.err > 0.12 || fabs(d1.mean - 0.5) > 0.05)
+            else if (d1.err < 0 || d1.err > 0.06 || fabs(d1.mean - 0.5) > 0.05)
                 BAD("dlss1: RMSE %.4f mean %.3f: the spatial pass did not leave the upscaled picture on the output", d1.err, d1.mean);
             else
-                OK("DLSS 1 -> the shim's spatial pass (EASU+RCAS, MetalFX spatial on KosmicKrisp), every frame OK: RMSE %.4f mean %.3f",
-                   d1.err, d1.mean);
+                OK("DLSS 1 -> the shim's spatial pass (EASU+RCAS, MetalFX spatial on KosmicKrisp), every frame OK: RMSE %.4f mean %.3f (full-rate pattern %.4f)",
+                   d1.err, d1.mean, d1f.err);
         }
     }
 

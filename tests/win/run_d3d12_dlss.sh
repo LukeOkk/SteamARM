@@ -6,7 +6,7 @@
 # VKD3D-Proton's interop -> vulkan-1 -> winevulkan -> FEX's Vulkan thunks ->
 # the Vulkan shim -> KosmicKrisp -> MetalFX.
 #
-#   tests/win/run_d3d12_dlss.sh                kk sys32 nokk mvk
+#   tests/win/run_d3d12_dlss.sh                kk sys32 nokk mvk vk vkmvk
 #   tests/win/run_d3d12_dlss.sh kk             one or more of them
 #
 # kk     KosmicKrisp, the DLL next to the program and in WINEDLLPATH, loaded
@@ -22,6 +22,9 @@
 #        DLSS 1 still available (the spatial pass is the shim's)
 # mvk    MoltenVK: no kk_steamarm_upscale_temporal, so the same as nokk;
 #        DLSS 1 as FSR 1 (EASU + RCAS) in the shim
+# vk     the Vulkan side (tests/win/vk_dlss.c: NVSDK_NGX_VULKAN_* on the
+#        program's own VkCommandBuffer), KosmicKrisp
+# vkmvk  the same on MoltenVK (DLSS 2+ unavailable, DLSS 1 as FSR 1)
 #
 # The shim under test is build/libvulkan.so.1 (DLSS_SHIM overrides), bound
 # over the root's for this run's processes only (LXRT_MOUNTS, as
@@ -110,16 +113,21 @@ cp "$ROOT$T/dllpath/x86_64-windows/nvngx.dll" "$ROOT$T/dllpath/x86_64-windows/_n
 x86_64-w64-mingw32-gcc -O2 -mconsole -Wall -Wextra -Wno-missing-field-initializers -I"$VK_HEADERS/include" \
     -o "$ROOT$T/game/d3d12_dlss.exe" tests/win/d3d12_dlss.c -ld3d12 -ldxguid -luuid ||
     { echo "  FAIL  build"; cleanup; exit 1; }
+x86_64-w64-mingw32-gcc -O2 -mconsole -Wall -Wextra -Wno-missing-field-initializers -I"$VK_HEADERS/include" \
+    -o "$ROOT$T/game/vk_dlss.exe" tests/win/vk_dlss.c ||
+    { echo "  FAIL  build (vk)"; cleanup; exit 1; }
 
 PASS=0 FAIL=0
-for mode in ${@:-kk sys32 nokk mvk}; do
+for mode in ${@:-kk sys32 nokk mvk vk vkmvk}; do
     args=("frames=$FRAMES")
-    sys32_copy=0
+    sys32_copy=0 exe=d3d12_dlss.exe okline="== d3d12 dlss: ok"
     case $mode in
         kk)    menv=(STEAMARM_VK_ICD=kosmickrisp STEAMARM_KK_DIR="$PRIV/kk") ;;
         sys32) menv=(STEAMARM_VK_ICD=kosmickrisp STEAMARM_KK_DIR="$PRIV/kk"); args+=(load=sys32); sys32_copy=1 ;;
         nokk)  menv=(STEAMARM_VK_ICD=kosmickrisp STEAMARM_KK_DIR="$PRIV/kk" KK_MFXT=0); args+=(expect=unavailable) ;;
         mvk)   menv=(STEAMARM_VK_ICD=moltenvk); args+=(expect=unavailable) ;;
+        vk)    menv=(STEAMARM_VK_ICD=kosmickrisp STEAMARM_KK_DIR="$PRIV/kk"); exe=vk_dlss.exe okline="== vk dlss: ok" ;;
+        vkmvk) menv=(STEAMARM_VK_ICD=moltenvk); args+=(expect=unavailable); exe=vk_dlss.exe okline="== vk dlss: ok" ;;
         *) echo "  FAIL  unknown mode $mode"; FAIL=$((FAIL + 1)); continue ;;
     esac
     if [ "$sys32_copy" = 1 ]; then
@@ -136,7 +144,7 @@ for mode in ${@:-kk sys32 nokk mvk}; do
         VKD3D_FEATURE_LEVEL=12_0 VKD3D_DEBUG=warn \
         WINEDLLPATH="$T/dllpath" WINEDLLOVERRIDES="nvngx,_nvngx=b,n;d3d12,d3d12core,dxgi=n" \
         DISPLAY=:2 WINEPREFIX=$PFX_GUEST WINEDEBUG=-all,+loaddll LXRT_ROOT=$ROOT FEX_ROOTFS=/ \
-        scripts/run-fex.sh "$PROTON_GUEST/bin/wine" "Z:${T//\//\\}\\game\\d3d12_dlss.exe" "${args[@]}" > "$log" 2>&1 &
+        scripts/run-fex.sh "$PROTON_GUEST/bin/wine" "Z:${T//\//\\}\\game\\$exe" "${args[@]}" > "$log" 2>&1 &
     pid=$!
     for _ in $(seq 1 "$TIMEOUT"); do kill -0 $pid 2>/dev/null || break; sleep 1; done
     if kill -0 $pid 2>/dev/null; then
@@ -147,14 +155,14 @@ for mode in ${@:-kk sys32 nokk mvk}; do
     for _ in $(seq 1 15); do [ -n "$(ours)" ] || break; sleep 1; done
     stop_ours
     [ "$sys32_copy" = 0 ] || rm -f "$SYS32/_nvngx.dll"
-    if grep -q "^== d3d12 dlss: ok" "$log"; then
+    if grep -q "^$okline" "$log"; then
         echo "  ok    $mode ($((SECONDS - start)) s)"
         PASS=$((PASS + 1))
     else
         echo "  FAIL  $mode ($((SECONDS - start)) s; log $log)"
         FAIL=$((FAIL + 1))
     fi
-    grep -a -E '^(env:|LoadLibraryW|module:|ident:|D3D12CreateDevice|NVSDK_NGX|device:|caps:|  ok|  FAIL|    |== d3d12|\[shim\] (mfx-temporal|spatial)|\[n?_?nvngx-metalfx\]|kk: (MetalFX|FSR by MetalFX))' "$log" |
+    grep -a -E '^(env:|LoadLibraryW|module:|ident:|D3D12CreateDevice|NVSDK_NGX|device:|caps:|vk:|  ok|  FAIL|    |== (d3d12|vk) dlss|\[shim\] (mfx-temporal|spatial)|\[n?_?nvngx-metalfx\]|kk: (MetalFX|FSR by MetalFX))' "$log" |
         tr -d '\r' | sed 's/^/        /'
     grep -a -E 'Loaded L?"[^"]*n?_?nvngx' "$log" | tr -d '\r' | sed 's/^[0-9a-f]*:[0-9a-f]*://; s/^/        wine: /' | head -3
 done
