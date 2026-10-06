@@ -6,44 +6,13 @@
 
     .text
 
-    .globl  lxrt_mvk_vk_icdGetInstanceProcAddr
-    .hidden lxrt_mvk_vk_icdGetInstanceProcAddr
-    .type   lxrt_mvk_vk_icdGetInstanceProcAddr,%function
-lxrt_mvk_vk_icdGetInstanceProcAddr:
-    adrp    x16, lxrt_vk_table
-    add     x16, x16, :lo12:lxrt_vk_table
-    ldr     x16, [x16, #0]
-    cbz     x16, .Lmissing
-    br      x16
-    .size   lxrt_mvk_vk_icdGetInstanceProcAddr, .-lxrt_mvk_vk_icdGetInstanceProcAddr
-
-    .globl  vk_icdGetPhysicalDeviceProcAddr
-    .type   vk_icdGetPhysicalDeviceProcAddr,%function
-vk_icdGetPhysicalDeviceProcAddr:
-    adrp    x16, lxrt_vk_table
-    add     x16, x16, :lo12:lxrt_vk_table
-    ldr     x16, [x16, #8]
-    cbz     x16, .Lmissing
-    br      x16
-    .size   vk_icdGetPhysicalDeviceProcAddr, .-vk_icdGetPhysicalDeviceProcAddr
-
-    .globl  vk_icdNegotiateLoaderICDInterfaceVersion
-    .type   vk_icdNegotiateLoaderICDInterfaceVersion,%function
-vk_icdNegotiateLoaderICDInterfaceVersion:
-    adrp    x16, lxrt_vk_table
-    add     x16, x16, :lo12:lxrt_vk_table
-    ldr     x16, [x16, #16]
-    cbz     x16, .Lmissing
-    br      x16
-    .size   vk_icdNegotiateLoaderICDInterfaceVersion, .-vk_icdNegotiateLoaderICDInterfaceVersion
-
     .globl  lxrt_mvk_vkAcquireNextImage2KHR
     .hidden lxrt_mvk_vkAcquireNextImage2KHR
     .type   lxrt_mvk_vkAcquireNextImage2KHR,%function
 lxrt_mvk_vkAcquireNextImage2KHR:
     adrp    x16, lxrt_vk_table
     add     x16, x16, :lo12:lxrt_vk_table
-    ldr     x16, [x16, #24]
+    ldr     x16, [x16, #0]
     cbz     x16, .Lmissing
     br      x16
     .size   lxrt_mvk_vkAcquireNextImage2KHR, .-lxrt_mvk_vkAcquireNextImage2KHR
@@ -54,7 +23,7 @@ lxrt_mvk_vkAcquireNextImage2KHR:
 lxrt_mvk_vkAcquireNextImageKHR:
     adrp    x16, lxrt_vk_table
     add     x16, x16, :lo12:lxrt_vk_table
-    ldr     x16, [x16, #32]
+    ldr     x16, [x16, #8]
     cbz     x16, .Lmissing
     br      x16
     .size   lxrt_mvk_vkAcquireNextImageKHR, .-lxrt_mvk_vkAcquireNextImageKHR
@@ -65,7 +34,7 @@ lxrt_mvk_vkAcquireNextImageKHR:
 lxrt_mvk_vkAllocateCommandBuffers:
     adrp    x16, lxrt_vk_table
     add     x16, x16, :lo12:lxrt_vk_table
-    ldr     x16, [x16, #40]
+    ldr     x16, [x16, #16]
     cbz     x16, .Lmissing
     br      x16
     .size   lxrt_mvk_vkAllocateCommandBuffers, .-lxrt_mvk_vkAllocateCommandBuffers
@@ -76,7 +45,7 @@ lxrt_mvk_vkAllocateCommandBuffers:
 lxrt_mvk_vkAllocateDescriptorSets:
     adrp    x16, lxrt_vk_table
     add     x16, x16, :lo12:lxrt_vk_table
-    ldr     x16, [x16, #48]
+    ldr     x16, [x16, #24]
     cbz     x16, .Lmissing
     br      x16
     .size   lxrt_mvk_vkAllocateDescriptorSets, .-lxrt_mvk_vkAllocateDescriptorSets
@@ -87,7 +56,7 @@ lxrt_mvk_vkAllocateDescriptorSets:
 lxrt_mvk_vkAllocateMemory:
     adrp    x16, lxrt_vk_table
     add     x16, x16, :lo12:lxrt_vk_table
-    ldr     x16, [x16, #56]
+    ldr     x16, [x16, #32]
     cbz     x16, .Lmissing
     br      x16
     .size   lxrt_mvk_vkAllocateMemory, .-lxrt_mvk_vkAllocateMemory
@@ -98,7 +67,7 @@ lxrt_mvk_vkAllocateMemory:
 lxrt_mvk_vkBeginCommandBuffer:
     adrp    x16, lxrt_vk_table
     add     x16, x16, :lo12:lxrt_vk_table
-    ldr     x16, [x16, #64]
+    ldr     x16, [x16, #40]
     cbz     x16, .Lmissing
     br      x16
     .size   lxrt_mvk_vkBeginCommandBuffer, .-lxrt_mvk_vkBeginCommandBuffer
@@ -109,7 +78,7 @@ lxrt_mvk_vkBeginCommandBuffer:
 lxrt_mvk_vkBindBufferMemory:
     adrp    x16, lxrt_vk_table
     add     x16, x16, :lo12:lxrt_vk_table
-    ldr     x16, [x16, #72]
+    ldr     x16, [x16, #48]
     cbz     x16, .Lmissing
     br      x16
     .size   lxrt_mvk_vkBindBufferMemory, .-lxrt_mvk_vkBindBufferMemory
@@ -120,7 +89,7 @@ lxrt_mvk_vkBindBufferMemory:
 lxrt_mvk_vkBindBufferMemory2:
     adrp    x16, lxrt_vk_table
     add     x16, x16, :lo12:lxrt_vk_table
-    ldr     x16, [x16, #80]
+    ldr     x16, [x16, #56]
     cbz     x16, .Lmissing
     br      x16
     .size   lxrt_mvk_vkBindBufferMemory2, .-lxrt_mvk_vkBindBufferMemory2
@@ -131,7 +100,7 @@ lxrt_mvk_vkBindBufferMemory2:
 lxrt_mvk_vkBindBufferMemory2KHR:
     adrp    x16, lxrt_vk_table
     add     x16, x16, :lo12:lxrt_vk_table
-    ldr     x16, [x16, #88]
+    ldr     x16, [x16, #64]
     cbz     x16, .Lmissing
     br      x16
     .size   lxrt_mvk_vkBindBufferMemory2KHR, .-lxrt_mvk_vkBindBufferMemory2KHR
@@ -142,7 +111,7 @@ lxrt_mvk_vkBindBufferMemory2KHR:
 lxrt_mvk_vkBindImageMemory:
     adrp    x16, lxrt_vk_table
     add     x16, x16, :lo12:lxrt_vk_table
-    ldr     x16, [x16, #96]
+    ldr     x16, [x16, #72]
     cbz     x16, .Lmissing
     br      x16
     .size   lxrt_mvk_vkBindImageMemory, .-lxrt_mvk_vkBindImageMemory
@@ -153,7 +122,7 @@ lxrt_mvk_vkBindImageMemory:
 lxrt_mvk_vkBindImageMemory2:
     adrp    x16, lxrt_vk_table
     add     x16, x16, :lo12:lxrt_vk_table
-    ldr     x16, [x16, #104]
+    ldr     x16, [x16, #80]
     cbz     x16, .Lmissing
     br      x16
     .size   lxrt_mvk_vkBindImageMemory2, .-lxrt_mvk_vkBindImageMemory2
@@ -164,7 +133,7 @@ lxrt_mvk_vkBindImageMemory2:
 lxrt_mvk_vkBindImageMemory2KHR:
     adrp    x16, lxrt_vk_table
     add     x16, x16, :lo12:lxrt_vk_table
-    ldr     x16, [x16, #112]
+    ldr     x16, [x16, #88]
     cbz     x16, .Lmissing
     br      x16
     .size   lxrt_mvk_vkBindImageMemory2KHR, .-lxrt_mvk_vkBindImageMemory2KHR
@@ -175,7 +144,7 @@ lxrt_mvk_vkBindImageMemory2KHR:
 lxrt_mvk_vkCmdBeginDebugUtilsLabelEXT:
     adrp    x16, lxrt_vk_table
     add     x16, x16, :lo12:lxrt_vk_table
-    ldr     x16, [x16, #120]
+    ldr     x16, [x16, #96]
     cbz     x16, .Lmissing
     br      x16
     .size   lxrt_mvk_vkCmdBeginDebugUtilsLabelEXT, .-lxrt_mvk_vkCmdBeginDebugUtilsLabelEXT
@@ -186,10 +155,43 @@ lxrt_mvk_vkCmdBeginDebugUtilsLabelEXT:
 lxrt_mvk_vkCmdBeginQuery:
     adrp    x16, lxrt_vk_table
     add     x16, x16, :lo12:lxrt_vk_table
-    ldr     x16, [x16, #128]
+    ldr     x16, [x16, #104]
     cbz     x16, .Lmissing
     br      x16
     .size   lxrt_mvk_vkCmdBeginQuery, .-lxrt_mvk_vkCmdBeginQuery
+
+    .globl  lxrt_mvk_vkCmdBeginRenderPass
+    .hidden lxrt_mvk_vkCmdBeginRenderPass
+    .type   lxrt_mvk_vkCmdBeginRenderPass,%function
+lxrt_mvk_vkCmdBeginRenderPass:
+    adrp    x16, lxrt_vk_table
+    add     x16, x16, :lo12:lxrt_vk_table
+    ldr     x16, [x16, #112]
+    cbz     x16, .Lmissing
+    br      x16
+    .size   lxrt_mvk_vkCmdBeginRenderPass, .-lxrt_mvk_vkCmdBeginRenderPass
+
+    .globl  lxrt_mvk_vkCmdBeginRenderPass2
+    .hidden lxrt_mvk_vkCmdBeginRenderPass2
+    .type   lxrt_mvk_vkCmdBeginRenderPass2,%function
+lxrt_mvk_vkCmdBeginRenderPass2:
+    adrp    x16, lxrt_vk_table
+    add     x16, x16, :lo12:lxrt_vk_table
+    ldr     x16, [x16, #120]
+    cbz     x16, .Lmissing
+    br      x16
+    .size   lxrt_mvk_vkCmdBeginRenderPass2, .-lxrt_mvk_vkCmdBeginRenderPass2
+
+    .globl  lxrt_mvk_vkCmdBeginRenderPass2KHR
+    .hidden lxrt_mvk_vkCmdBeginRenderPass2KHR
+    .type   lxrt_mvk_vkCmdBeginRenderPass2KHR,%function
+lxrt_mvk_vkCmdBeginRenderPass2KHR:
+    adrp    x16, lxrt_vk_table
+    add     x16, x16, :lo12:lxrt_vk_table
+    ldr     x16, [x16, #128]
+    cbz     x16, .Lmissing
+    br      x16
+    .size   lxrt_mvk_vkCmdBeginRenderPass2KHR, .-lxrt_mvk_vkCmdBeginRenderPass2KHR
 
     .globl  lxrt_mvk_vkCmdBeginRendering
     .hidden lxrt_mvk_vkCmdBeginRendering
@@ -213,46 +215,13 @@ lxrt_mvk_vkCmdBeginRenderingKHR:
     br      x16
     .size   lxrt_mvk_vkCmdBeginRenderingKHR, .-lxrt_mvk_vkCmdBeginRenderingKHR
 
-    .globl  lxrt_mvk_vkCmdBeginRenderPass
-    .hidden lxrt_mvk_vkCmdBeginRenderPass
-    .type   lxrt_mvk_vkCmdBeginRenderPass,%function
-lxrt_mvk_vkCmdBeginRenderPass:
-    adrp    x16, lxrt_vk_table
-    add     x16, x16, :lo12:lxrt_vk_table
-    ldr     x16, [x16, #152]
-    cbz     x16, .Lmissing
-    br      x16
-    .size   lxrt_mvk_vkCmdBeginRenderPass, .-lxrt_mvk_vkCmdBeginRenderPass
-
-    .globl  lxrt_mvk_vkCmdBeginRenderPass2
-    .hidden lxrt_mvk_vkCmdBeginRenderPass2
-    .type   lxrt_mvk_vkCmdBeginRenderPass2,%function
-lxrt_mvk_vkCmdBeginRenderPass2:
-    adrp    x16, lxrt_vk_table
-    add     x16, x16, :lo12:lxrt_vk_table
-    ldr     x16, [x16, #160]
-    cbz     x16, .Lmissing
-    br      x16
-    .size   lxrt_mvk_vkCmdBeginRenderPass2, .-lxrt_mvk_vkCmdBeginRenderPass2
-
-    .globl  lxrt_mvk_vkCmdBeginRenderPass2KHR
-    .hidden lxrt_mvk_vkCmdBeginRenderPass2KHR
-    .type   lxrt_mvk_vkCmdBeginRenderPass2KHR,%function
-lxrt_mvk_vkCmdBeginRenderPass2KHR:
-    adrp    x16, lxrt_vk_table
-    add     x16, x16, :lo12:lxrt_vk_table
-    ldr     x16, [x16, #168]
-    cbz     x16, .Lmissing
-    br      x16
-    .size   lxrt_mvk_vkCmdBeginRenderPass2KHR, .-lxrt_mvk_vkCmdBeginRenderPass2KHR
-
     .globl  lxrt_mvk_vkCmdBindDescriptorSets
     .hidden lxrt_mvk_vkCmdBindDescriptorSets
     .type   lxrt_mvk_vkCmdBindDescriptorSets,%function
 lxrt_mvk_vkCmdBindDescriptorSets:
     adrp    x16, lxrt_vk_table
     add     x16, x16, :lo12:lxrt_vk_table
-    ldr     x16, [x16, #176]
+    ldr     x16, [x16, #152]
     cbz     x16, .Lmissing
     br      x16
     .size   lxrt_mvk_vkCmdBindDescriptorSets, .-lxrt_mvk_vkCmdBindDescriptorSets
@@ -263,7 +232,7 @@ lxrt_mvk_vkCmdBindDescriptorSets:
 lxrt_mvk_vkCmdBindDescriptorSets2:
     adrp    x16, lxrt_vk_table
     add     x16, x16, :lo12:lxrt_vk_table
-    ldr     x16, [x16, #184]
+    ldr     x16, [x16, #160]
     cbz     x16, .Lmissing
     br      x16
     .size   lxrt_mvk_vkCmdBindDescriptorSets2, .-lxrt_mvk_vkCmdBindDescriptorSets2
@@ -274,7 +243,7 @@ lxrt_mvk_vkCmdBindDescriptorSets2:
 lxrt_mvk_vkCmdBindDescriptorSets2KHR:
     adrp    x16, lxrt_vk_table
     add     x16, x16, :lo12:lxrt_vk_table
-    ldr     x16, [x16, #192]
+    ldr     x16, [x16, #168]
     cbz     x16, .Lmissing
     br      x16
     .size   lxrt_mvk_vkCmdBindDescriptorSets2KHR, .-lxrt_mvk_vkCmdBindDescriptorSets2KHR
@@ -285,7 +254,7 @@ lxrt_mvk_vkCmdBindDescriptorSets2KHR:
 lxrt_mvk_vkCmdBindIndexBuffer:
     adrp    x16, lxrt_vk_table
     add     x16, x16, :lo12:lxrt_vk_table
-    ldr     x16, [x16, #200]
+    ldr     x16, [x16, #176]
     cbz     x16, .Lmissing
     br      x16
     .size   lxrt_mvk_vkCmdBindIndexBuffer, .-lxrt_mvk_vkCmdBindIndexBuffer
@@ -296,7 +265,7 @@ lxrt_mvk_vkCmdBindIndexBuffer:
 lxrt_mvk_vkCmdBindIndexBuffer2:
     adrp    x16, lxrt_vk_table
     add     x16, x16, :lo12:lxrt_vk_table
-    ldr     x16, [x16, #208]
+    ldr     x16, [x16, #184]
     cbz     x16, .Lmissing
     br      x16
     .size   lxrt_mvk_vkCmdBindIndexBuffer2, .-lxrt_mvk_vkCmdBindIndexBuffer2
@@ -307,7 +276,7 @@ lxrt_mvk_vkCmdBindIndexBuffer2:
 lxrt_mvk_vkCmdBindIndexBuffer2KHR:
     adrp    x16, lxrt_vk_table
     add     x16, x16, :lo12:lxrt_vk_table
-    ldr     x16, [x16, #216]
+    ldr     x16, [x16, #192]
     cbz     x16, .Lmissing
     br      x16
     .size   lxrt_mvk_vkCmdBindIndexBuffer2KHR, .-lxrt_mvk_vkCmdBindIndexBuffer2KHR
@@ -318,7 +287,7 @@ lxrt_mvk_vkCmdBindIndexBuffer2KHR:
 lxrt_mvk_vkCmdBindPipeline:
     adrp    x16, lxrt_vk_table
     add     x16, x16, :lo12:lxrt_vk_table
-    ldr     x16, [x16, #224]
+    ldr     x16, [x16, #200]
     cbz     x16, .Lmissing
     br      x16
     .size   lxrt_mvk_vkCmdBindPipeline, .-lxrt_mvk_vkCmdBindPipeline
@@ -329,7 +298,7 @@ lxrt_mvk_vkCmdBindPipeline:
 lxrt_mvk_vkCmdBindVertexBuffers:
     adrp    x16, lxrt_vk_table
     add     x16, x16, :lo12:lxrt_vk_table
-    ldr     x16, [x16, #232]
+    ldr     x16, [x16, #208]
     cbz     x16, .Lmissing
     br      x16
     .size   lxrt_mvk_vkCmdBindVertexBuffers, .-lxrt_mvk_vkCmdBindVertexBuffers
@@ -340,7 +309,7 @@ lxrt_mvk_vkCmdBindVertexBuffers:
 lxrt_mvk_vkCmdBindVertexBuffers2:
     adrp    x16, lxrt_vk_table
     add     x16, x16, :lo12:lxrt_vk_table
-    ldr     x16, [x16, #240]
+    ldr     x16, [x16, #216]
     cbz     x16, .Lmissing
     br      x16
     .size   lxrt_mvk_vkCmdBindVertexBuffers2, .-lxrt_mvk_vkCmdBindVertexBuffers2
@@ -351,7 +320,7 @@ lxrt_mvk_vkCmdBindVertexBuffers2:
 lxrt_mvk_vkCmdBindVertexBuffers2EXT:
     adrp    x16, lxrt_vk_table
     add     x16, x16, :lo12:lxrt_vk_table
-    ldr     x16, [x16, #248]
+    ldr     x16, [x16, #224]
     cbz     x16, .Lmissing
     br      x16
     .size   lxrt_mvk_vkCmdBindVertexBuffers2EXT, .-lxrt_mvk_vkCmdBindVertexBuffers2EXT
@@ -362,7 +331,7 @@ lxrt_mvk_vkCmdBindVertexBuffers2EXT:
 lxrt_mvk_vkCmdBlitImage:
     adrp    x16, lxrt_vk_table
     add     x16, x16, :lo12:lxrt_vk_table
-    ldr     x16, [x16, #256]
+    ldr     x16, [x16, #232]
     cbz     x16, .Lmissing
     br      x16
     .size   lxrt_mvk_vkCmdBlitImage, .-lxrt_mvk_vkCmdBlitImage
@@ -373,7 +342,7 @@ lxrt_mvk_vkCmdBlitImage:
 lxrt_mvk_vkCmdBlitImage2:
     adrp    x16, lxrt_vk_table
     add     x16, x16, :lo12:lxrt_vk_table
-    ldr     x16, [x16, #264]
+    ldr     x16, [x16, #240]
     cbz     x16, .Lmissing
     br      x16
     .size   lxrt_mvk_vkCmdBlitImage2, .-lxrt_mvk_vkCmdBlitImage2
@@ -384,7 +353,7 @@ lxrt_mvk_vkCmdBlitImage2:
 lxrt_mvk_vkCmdBlitImage2KHR:
     adrp    x16, lxrt_vk_table
     add     x16, x16, :lo12:lxrt_vk_table
-    ldr     x16, [x16, #272]
+    ldr     x16, [x16, #248]
     cbz     x16, .Lmissing
     br      x16
     .size   lxrt_mvk_vkCmdBlitImage2KHR, .-lxrt_mvk_vkCmdBlitImage2KHR
@@ -395,7 +364,7 @@ lxrt_mvk_vkCmdBlitImage2KHR:
 lxrt_mvk_vkCmdClearAttachments:
     adrp    x16, lxrt_vk_table
     add     x16, x16, :lo12:lxrt_vk_table
-    ldr     x16, [x16, #280]
+    ldr     x16, [x16, #256]
     cbz     x16, .Lmissing
     br      x16
     .size   lxrt_mvk_vkCmdClearAttachments, .-lxrt_mvk_vkCmdClearAttachments
@@ -406,7 +375,7 @@ lxrt_mvk_vkCmdClearAttachments:
 lxrt_mvk_vkCmdClearColorImage:
     adrp    x16, lxrt_vk_table
     add     x16, x16, :lo12:lxrt_vk_table
-    ldr     x16, [x16, #288]
+    ldr     x16, [x16, #264]
     cbz     x16, .Lmissing
     br      x16
     .size   lxrt_mvk_vkCmdClearColorImage, .-lxrt_mvk_vkCmdClearColorImage
@@ -417,7 +386,7 @@ lxrt_mvk_vkCmdClearColorImage:
 lxrt_mvk_vkCmdClearDepthStencilImage:
     adrp    x16, lxrt_vk_table
     add     x16, x16, :lo12:lxrt_vk_table
-    ldr     x16, [x16, #296]
+    ldr     x16, [x16, #272]
     cbz     x16, .Lmissing
     br      x16
     .size   lxrt_mvk_vkCmdClearDepthStencilImage, .-lxrt_mvk_vkCmdClearDepthStencilImage
@@ -428,7 +397,7 @@ lxrt_mvk_vkCmdClearDepthStencilImage:
 lxrt_mvk_vkCmdCopyBuffer:
     adrp    x16, lxrt_vk_table
     add     x16, x16, :lo12:lxrt_vk_table
-    ldr     x16, [x16, #304]
+    ldr     x16, [x16, #280]
     cbz     x16, .Lmissing
     br      x16
     .size   lxrt_mvk_vkCmdCopyBuffer, .-lxrt_mvk_vkCmdCopyBuffer
@@ -439,7 +408,7 @@ lxrt_mvk_vkCmdCopyBuffer:
 lxrt_mvk_vkCmdCopyBuffer2:
     adrp    x16, lxrt_vk_table
     add     x16, x16, :lo12:lxrt_vk_table
-    ldr     x16, [x16, #312]
+    ldr     x16, [x16, #288]
     cbz     x16, .Lmissing
     br      x16
     .size   lxrt_mvk_vkCmdCopyBuffer2, .-lxrt_mvk_vkCmdCopyBuffer2
@@ -450,7 +419,7 @@ lxrt_mvk_vkCmdCopyBuffer2:
 lxrt_mvk_vkCmdCopyBuffer2KHR:
     adrp    x16, lxrt_vk_table
     add     x16, x16, :lo12:lxrt_vk_table
-    ldr     x16, [x16, #320]
+    ldr     x16, [x16, #296]
     cbz     x16, .Lmissing
     br      x16
     .size   lxrt_mvk_vkCmdCopyBuffer2KHR, .-lxrt_mvk_vkCmdCopyBuffer2KHR
@@ -461,7 +430,7 @@ lxrt_mvk_vkCmdCopyBuffer2KHR:
 lxrt_mvk_vkCmdCopyBufferToImage:
     adrp    x16, lxrt_vk_table
     add     x16, x16, :lo12:lxrt_vk_table
-    ldr     x16, [x16, #328]
+    ldr     x16, [x16, #304]
     cbz     x16, .Lmissing
     br      x16
     .size   lxrt_mvk_vkCmdCopyBufferToImage, .-lxrt_mvk_vkCmdCopyBufferToImage
@@ -472,7 +441,7 @@ lxrt_mvk_vkCmdCopyBufferToImage:
 lxrt_mvk_vkCmdCopyBufferToImage2:
     adrp    x16, lxrt_vk_table
     add     x16, x16, :lo12:lxrt_vk_table
-    ldr     x16, [x16, #336]
+    ldr     x16, [x16, #312]
     cbz     x16, .Lmissing
     br      x16
     .size   lxrt_mvk_vkCmdCopyBufferToImage2, .-lxrt_mvk_vkCmdCopyBufferToImage2
@@ -483,7 +452,7 @@ lxrt_mvk_vkCmdCopyBufferToImage2:
 lxrt_mvk_vkCmdCopyBufferToImage2KHR:
     adrp    x16, lxrt_vk_table
     add     x16, x16, :lo12:lxrt_vk_table
-    ldr     x16, [x16, #344]
+    ldr     x16, [x16, #320]
     cbz     x16, .Lmissing
     br      x16
     .size   lxrt_mvk_vkCmdCopyBufferToImage2KHR, .-lxrt_mvk_vkCmdCopyBufferToImage2KHR
@@ -494,7 +463,7 @@ lxrt_mvk_vkCmdCopyBufferToImage2KHR:
 lxrt_mvk_vkCmdCopyImage:
     adrp    x16, lxrt_vk_table
     add     x16, x16, :lo12:lxrt_vk_table
-    ldr     x16, [x16, #352]
+    ldr     x16, [x16, #328]
     cbz     x16, .Lmissing
     br      x16
     .size   lxrt_mvk_vkCmdCopyImage, .-lxrt_mvk_vkCmdCopyImage
@@ -505,7 +474,7 @@ lxrt_mvk_vkCmdCopyImage:
 lxrt_mvk_vkCmdCopyImage2:
     adrp    x16, lxrt_vk_table
     add     x16, x16, :lo12:lxrt_vk_table
-    ldr     x16, [x16, #360]
+    ldr     x16, [x16, #336]
     cbz     x16, .Lmissing
     br      x16
     .size   lxrt_mvk_vkCmdCopyImage2, .-lxrt_mvk_vkCmdCopyImage2
@@ -516,7 +485,7 @@ lxrt_mvk_vkCmdCopyImage2:
 lxrt_mvk_vkCmdCopyImage2KHR:
     adrp    x16, lxrt_vk_table
     add     x16, x16, :lo12:lxrt_vk_table
-    ldr     x16, [x16, #368]
+    ldr     x16, [x16, #344]
     cbz     x16, .Lmissing
     br      x16
     .size   lxrt_mvk_vkCmdCopyImage2KHR, .-lxrt_mvk_vkCmdCopyImage2KHR
@@ -527,7 +496,7 @@ lxrt_mvk_vkCmdCopyImage2KHR:
 lxrt_mvk_vkCmdCopyImageToBuffer:
     adrp    x16, lxrt_vk_table
     add     x16, x16, :lo12:lxrt_vk_table
-    ldr     x16, [x16, #376]
+    ldr     x16, [x16, #352]
     cbz     x16, .Lmissing
     br      x16
     .size   lxrt_mvk_vkCmdCopyImageToBuffer, .-lxrt_mvk_vkCmdCopyImageToBuffer
@@ -538,7 +507,7 @@ lxrt_mvk_vkCmdCopyImageToBuffer:
 lxrt_mvk_vkCmdCopyImageToBuffer2:
     adrp    x16, lxrt_vk_table
     add     x16, x16, :lo12:lxrt_vk_table
-    ldr     x16, [x16, #384]
+    ldr     x16, [x16, #360]
     cbz     x16, .Lmissing
     br      x16
     .size   lxrt_mvk_vkCmdCopyImageToBuffer2, .-lxrt_mvk_vkCmdCopyImageToBuffer2
@@ -549,7 +518,7 @@ lxrt_mvk_vkCmdCopyImageToBuffer2:
 lxrt_mvk_vkCmdCopyImageToBuffer2KHR:
     adrp    x16, lxrt_vk_table
     add     x16, x16, :lo12:lxrt_vk_table
-    ldr     x16, [x16, #392]
+    ldr     x16, [x16, #368]
     cbz     x16, .Lmissing
     br      x16
     .size   lxrt_mvk_vkCmdCopyImageToBuffer2KHR, .-lxrt_mvk_vkCmdCopyImageToBuffer2KHR
@@ -560,7 +529,7 @@ lxrt_mvk_vkCmdCopyImageToBuffer2KHR:
 lxrt_mvk_vkCmdCopyQueryPoolResults:
     adrp    x16, lxrt_vk_table
     add     x16, x16, :lo12:lxrt_vk_table
-    ldr     x16, [x16, #400]
+    ldr     x16, [x16, #376]
     cbz     x16, .Lmissing
     br      x16
     .size   lxrt_mvk_vkCmdCopyQueryPoolResults, .-lxrt_mvk_vkCmdCopyQueryPoolResults
@@ -571,7 +540,7 @@ lxrt_mvk_vkCmdCopyQueryPoolResults:
 lxrt_mvk_vkCmdDebugMarkerBeginEXT:
     adrp    x16, lxrt_vk_table
     add     x16, x16, :lo12:lxrt_vk_table
-    ldr     x16, [x16, #408]
+    ldr     x16, [x16, #384]
     cbz     x16, .Lmissing
     br      x16
     .size   lxrt_mvk_vkCmdDebugMarkerBeginEXT, .-lxrt_mvk_vkCmdDebugMarkerBeginEXT
@@ -582,7 +551,7 @@ lxrt_mvk_vkCmdDebugMarkerBeginEXT:
 lxrt_mvk_vkCmdDebugMarkerEndEXT:
     adrp    x16, lxrt_vk_table
     add     x16, x16, :lo12:lxrt_vk_table
-    ldr     x16, [x16, #416]
+    ldr     x16, [x16, #392]
     cbz     x16, .Lmissing
     br      x16
     .size   lxrt_mvk_vkCmdDebugMarkerEndEXT, .-lxrt_mvk_vkCmdDebugMarkerEndEXT
@@ -593,7 +562,7 @@ lxrt_mvk_vkCmdDebugMarkerEndEXT:
 lxrt_mvk_vkCmdDebugMarkerInsertEXT:
     adrp    x16, lxrt_vk_table
     add     x16, x16, :lo12:lxrt_vk_table
-    ldr     x16, [x16, #424]
+    ldr     x16, [x16, #400]
     cbz     x16, .Lmissing
     br      x16
     .size   lxrt_mvk_vkCmdDebugMarkerInsertEXT, .-lxrt_mvk_vkCmdDebugMarkerInsertEXT
@@ -604,7 +573,7 @@ lxrt_mvk_vkCmdDebugMarkerInsertEXT:
 lxrt_mvk_vkCmdDispatch:
     adrp    x16, lxrt_vk_table
     add     x16, x16, :lo12:lxrt_vk_table
-    ldr     x16, [x16, #432]
+    ldr     x16, [x16, #408]
     cbz     x16, .Lmissing
     br      x16
     .size   lxrt_mvk_vkCmdDispatch, .-lxrt_mvk_vkCmdDispatch
@@ -615,7 +584,7 @@ lxrt_mvk_vkCmdDispatch:
 lxrt_mvk_vkCmdDispatchBase:
     adrp    x16, lxrt_vk_table
     add     x16, x16, :lo12:lxrt_vk_table
-    ldr     x16, [x16, #440]
+    ldr     x16, [x16, #416]
     cbz     x16, .Lmissing
     br      x16
     .size   lxrt_mvk_vkCmdDispatchBase, .-lxrt_mvk_vkCmdDispatchBase
@@ -626,7 +595,7 @@ lxrt_mvk_vkCmdDispatchBase:
 lxrt_mvk_vkCmdDispatchBaseKHR:
     adrp    x16, lxrt_vk_table
     add     x16, x16, :lo12:lxrt_vk_table
-    ldr     x16, [x16, #448]
+    ldr     x16, [x16, #424]
     cbz     x16, .Lmissing
     br      x16
     .size   lxrt_mvk_vkCmdDispatchBaseKHR, .-lxrt_mvk_vkCmdDispatchBaseKHR
@@ -637,7 +606,7 @@ lxrt_mvk_vkCmdDispatchBaseKHR:
 lxrt_mvk_vkCmdDispatchIndirect:
     adrp    x16, lxrt_vk_table
     add     x16, x16, :lo12:lxrt_vk_table
-    ldr     x16, [x16, #456]
+    ldr     x16, [x16, #432]
     cbz     x16, .Lmissing
     br      x16
     .size   lxrt_mvk_vkCmdDispatchIndirect, .-lxrt_mvk_vkCmdDispatchIndirect
@@ -648,7 +617,7 @@ lxrt_mvk_vkCmdDispatchIndirect:
 lxrt_mvk_vkCmdDraw:
     adrp    x16, lxrt_vk_table
     add     x16, x16, :lo12:lxrt_vk_table
-    ldr     x16, [x16, #464]
+    ldr     x16, [x16, #440]
     cbz     x16, .Lmissing
     br      x16
     .size   lxrt_mvk_vkCmdDraw, .-lxrt_mvk_vkCmdDraw
@@ -659,7 +628,7 @@ lxrt_mvk_vkCmdDraw:
 lxrt_mvk_vkCmdDrawIndexed:
     adrp    x16, lxrt_vk_table
     add     x16, x16, :lo12:lxrt_vk_table
-    ldr     x16, [x16, #472]
+    ldr     x16, [x16, #448]
     cbz     x16, .Lmissing
     br      x16
     .size   lxrt_mvk_vkCmdDrawIndexed, .-lxrt_mvk_vkCmdDrawIndexed
@@ -670,7 +639,7 @@ lxrt_mvk_vkCmdDrawIndexed:
 lxrt_mvk_vkCmdDrawIndexedIndirect:
     adrp    x16, lxrt_vk_table
     add     x16, x16, :lo12:lxrt_vk_table
-    ldr     x16, [x16, #480]
+    ldr     x16, [x16, #456]
     cbz     x16, .Lmissing
     br      x16
     .size   lxrt_mvk_vkCmdDrawIndexedIndirect, .-lxrt_mvk_vkCmdDrawIndexedIndirect
@@ -681,7 +650,7 @@ lxrt_mvk_vkCmdDrawIndexedIndirect:
 lxrt_mvk_vkCmdDrawIndexedIndirectCount:
     adrp    x16, lxrt_vk_table
     add     x16, x16, :lo12:lxrt_vk_table
-    ldr     x16, [x16, #488]
+    ldr     x16, [x16, #464]
     cbz     x16, .Lmissing
     br      x16
     .size   lxrt_mvk_vkCmdDrawIndexedIndirectCount, .-lxrt_mvk_vkCmdDrawIndexedIndirectCount
@@ -692,7 +661,7 @@ lxrt_mvk_vkCmdDrawIndexedIndirectCount:
 lxrt_mvk_vkCmdDrawIndexedIndirectCountAMD:
     adrp    x16, lxrt_vk_table
     add     x16, x16, :lo12:lxrt_vk_table
-    ldr     x16, [x16, #496]
+    ldr     x16, [x16, #472]
     cbz     x16, .Lmissing
     br      x16
     .size   lxrt_mvk_vkCmdDrawIndexedIndirectCountAMD, .-lxrt_mvk_vkCmdDrawIndexedIndirectCountAMD
@@ -703,7 +672,7 @@ lxrt_mvk_vkCmdDrawIndexedIndirectCountAMD:
 lxrt_mvk_vkCmdDrawIndexedIndirectCountKHR:
     adrp    x16, lxrt_vk_table
     add     x16, x16, :lo12:lxrt_vk_table
-    ldr     x16, [x16, #504]
+    ldr     x16, [x16, #480]
     cbz     x16, .Lmissing
     br      x16
     .size   lxrt_mvk_vkCmdDrawIndexedIndirectCountKHR, .-lxrt_mvk_vkCmdDrawIndexedIndirectCountKHR
@@ -714,7 +683,7 @@ lxrt_mvk_vkCmdDrawIndexedIndirectCountKHR:
 lxrt_mvk_vkCmdDrawIndirect:
     adrp    x16, lxrt_vk_table
     add     x16, x16, :lo12:lxrt_vk_table
-    ldr     x16, [x16, #512]
+    ldr     x16, [x16, #488]
     cbz     x16, .Lmissing
     br      x16
     .size   lxrt_mvk_vkCmdDrawIndirect, .-lxrt_mvk_vkCmdDrawIndirect
@@ -725,7 +694,7 @@ lxrt_mvk_vkCmdDrawIndirect:
 lxrt_mvk_vkCmdDrawIndirectCount:
     adrp    x16, lxrt_vk_table
     add     x16, x16, :lo12:lxrt_vk_table
-    ldr     x16, [x16, #520]
+    ldr     x16, [x16, #496]
     cbz     x16, .Lmissing
     br      x16
     .size   lxrt_mvk_vkCmdDrawIndirectCount, .-lxrt_mvk_vkCmdDrawIndirectCount
@@ -736,7 +705,7 @@ lxrt_mvk_vkCmdDrawIndirectCount:
 lxrt_mvk_vkCmdDrawIndirectCountAMD:
     adrp    x16, lxrt_vk_table
     add     x16, x16, :lo12:lxrt_vk_table
-    ldr     x16, [x16, #528]
+    ldr     x16, [x16, #504]
     cbz     x16, .Lmissing
     br      x16
     .size   lxrt_mvk_vkCmdDrawIndirectCountAMD, .-lxrt_mvk_vkCmdDrawIndirectCountAMD
@@ -747,10 +716,32 @@ lxrt_mvk_vkCmdDrawIndirectCountAMD:
 lxrt_mvk_vkCmdDrawIndirectCountKHR:
     adrp    x16, lxrt_vk_table
     add     x16, x16, :lo12:lxrt_vk_table
-    ldr     x16, [x16, #536]
+    ldr     x16, [x16, #512]
     cbz     x16, .Lmissing
     br      x16
     .size   lxrt_mvk_vkCmdDrawIndirectCountKHR, .-lxrt_mvk_vkCmdDrawIndirectCountKHR
+
+    .globl  lxrt_mvk_vkCmdDrawMultiEXT
+    .hidden lxrt_mvk_vkCmdDrawMultiEXT
+    .type   lxrt_mvk_vkCmdDrawMultiEXT,%function
+lxrt_mvk_vkCmdDrawMultiEXT:
+    adrp    x16, lxrt_vk_table
+    add     x16, x16, :lo12:lxrt_vk_table
+    ldr     x16, [x16, #520]
+    cbz     x16, .Lmissing
+    br      x16
+    .size   lxrt_mvk_vkCmdDrawMultiEXT, .-lxrt_mvk_vkCmdDrawMultiEXT
+
+    .globl  lxrt_mvk_vkCmdDrawMultiIndexedEXT
+    .hidden lxrt_mvk_vkCmdDrawMultiIndexedEXT
+    .type   lxrt_mvk_vkCmdDrawMultiIndexedEXT,%function
+lxrt_mvk_vkCmdDrawMultiIndexedEXT:
+    adrp    x16, lxrt_vk_table
+    add     x16, x16, :lo12:lxrt_vk_table
+    ldr     x16, [x16, #528]
+    cbz     x16, .Lmissing
+    br      x16
+    .size   lxrt_mvk_vkCmdDrawMultiIndexedEXT, .-lxrt_mvk_vkCmdDrawMultiIndexedEXT
 
     .globl  lxrt_mvk_vkCmdEndDebugUtilsLabelEXT
     .hidden lxrt_mvk_vkCmdEndDebugUtilsLabelEXT
@@ -758,7 +749,7 @@ lxrt_mvk_vkCmdDrawIndirectCountKHR:
 lxrt_mvk_vkCmdEndDebugUtilsLabelEXT:
     adrp    x16, lxrt_vk_table
     add     x16, x16, :lo12:lxrt_vk_table
-    ldr     x16, [x16, #544]
+    ldr     x16, [x16, #536]
     cbz     x16, .Lmissing
     br      x16
     .size   lxrt_mvk_vkCmdEndDebugUtilsLabelEXT, .-lxrt_mvk_vkCmdEndDebugUtilsLabelEXT
@@ -769,32 +760,10 @@ lxrt_mvk_vkCmdEndDebugUtilsLabelEXT:
 lxrt_mvk_vkCmdEndQuery:
     adrp    x16, lxrt_vk_table
     add     x16, x16, :lo12:lxrt_vk_table
-    ldr     x16, [x16, #552]
+    ldr     x16, [x16, #544]
     cbz     x16, .Lmissing
     br      x16
     .size   lxrt_mvk_vkCmdEndQuery, .-lxrt_mvk_vkCmdEndQuery
-
-    .globl  lxrt_mvk_vkCmdEndRendering
-    .hidden lxrt_mvk_vkCmdEndRendering
-    .type   lxrt_mvk_vkCmdEndRendering,%function
-lxrt_mvk_vkCmdEndRendering:
-    adrp    x16, lxrt_vk_table
-    add     x16, x16, :lo12:lxrt_vk_table
-    ldr     x16, [x16, #560]
-    cbz     x16, .Lmissing
-    br      x16
-    .size   lxrt_mvk_vkCmdEndRendering, .-lxrt_mvk_vkCmdEndRendering
-
-    .globl  lxrt_mvk_vkCmdEndRenderingKHR
-    .hidden lxrt_mvk_vkCmdEndRenderingKHR
-    .type   lxrt_mvk_vkCmdEndRenderingKHR,%function
-lxrt_mvk_vkCmdEndRenderingKHR:
-    adrp    x16, lxrt_vk_table
-    add     x16, x16, :lo12:lxrt_vk_table
-    ldr     x16, [x16, #568]
-    cbz     x16, .Lmissing
-    br      x16
-    .size   lxrt_mvk_vkCmdEndRenderingKHR, .-lxrt_mvk_vkCmdEndRenderingKHR
 
     .globl  lxrt_mvk_vkCmdEndRenderPass
     .hidden lxrt_mvk_vkCmdEndRenderPass
@@ -802,7 +771,7 @@ lxrt_mvk_vkCmdEndRenderingKHR:
 lxrt_mvk_vkCmdEndRenderPass:
     adrp    x16, lxrt_vk_table
     add     x16, x16, :lo12:lxrt_vk_table
-    ldr     x16, [x16, #576]
+    ldr     x16, [x16, #552]
     cbz     x16, .Lmissing
     br      x16
     .size   lxrt_mvk_vkCmdEndRenderPass, .-lxrt_mvk_vkCmdEndRenderPass
@@ -813,7 +782,7 @@ lxrt_mvk_vkCmdEndRenderPass:
 lxrt_mvk_vkCmdEndRenderPass2:
     adrp    x16, lxrt_vk_table
     add     x16, x16, :lo12:lxrt_vk_table
-    ldr     x16, [x16, #584]
+    ldr     x16, [x16, #560]
     cbz     x16, .Lmissing
     br      x16
     .size   lxrt_mvk_vkCmdEndRenderPass2, .-lxrt_mvk_vkCmdEndRenderPass2
@@ -824,10 +793,32 @@ lxrt_mvk_vkCmdEndRenderPass2:
 lxrt_mvk_vkCmdEndRenderPass2KHR:
     adrp    x16, lxrt_vk_table
     add     x16, x16, :lo12:lxrt_vk_table
-    ldr     x16, [x16, #592]
+    ldr     x16, [x16, #568]
     cbz     x16, .Lmissing
     br      x16
     .size   lxrt_mvk_vkCmdEndRenderPass2KHR, .-lxrt_mvk_vkCmdEndRenderPass2KHR
+
+    .globl  lxrt_mvk_vkCmdEndRendering
+    .hidden lxrt_mvk_vkCmdEndRendering
+    .type   lxrt_mvk_vkCmdEndRendering,%function
+lxrt_mvk_vkCmdEndRendering:
+    adrp    x16, lxrt_vk_table
+    add     x16, x16, :lo12:lxrt_vk_table
+    ldr     x16, [x16, #576]
+    cbz     x16, .Lmissing
+    br      x16
+    .size   lxrt_mvk_vkCmdEndRendering, .-lxrt_mvk_vkCmdEndRendering
+
+    .globl  lxrt_mvk_vkCmdEndRenderingKHR
+    .hidden lxrt_mvk_vkCmdEndRenderingKHR
+    .type   lxrt_mvk_vkCmdEndRenderingKHR,%function
+lxrt_mvk_vkCmdEndRenderingKHR:
+    adrp    x16, lxrt_vk_table
+    add     x16, x16, :lo12:lxrt_vk_table
+    ldr     x16, [x16, #584]
+    cbz     x16, .Lmissing
+    br      x16
+    .size   lxrt_mvk_vkCmdEndRenderingKHR, .-lxrt_mvk_vkCmdEndRenderingKHR
 
     .globl  lxrt_mvk_vkCmdExecuteCommands
     .hidden lxrt_mvk_vkCmdExecuteCommands
@@ -835,7 +826,7 @@ lxrt_mvk_vkCmdEndRenderPass2KHR:
 lxrt_mvk_vkCmdExecuteCommands:
     adrp    x16, lxrt_vk_table
     add     x16, x16, :lo12:lxrt_vk_table
-    ldr     x16, [x16, #600]
+    ldr     x16, [x16, #592]
     cbz     x16, .Lmissing
     br      x16
     .size   lxrt_mvk_vkCmdExecuteCommands, .-lxrt_mvk_vkCmdExecuteCommands
@@ -846,7 +837,7 @@ lxrt_mvk_vkCmdExecuteCommands:
 lxrt_mvk_vkCmdFillBuffer:
     adrp    x16, lxrt_vk_table
     add     x16, x16, :lo12:lxrt_vk_table
-    ldr     x16, [x16, #608]
+    ldr     x16, [x16, #600]
     cbz     x16, .Lmissing
     br      x16
     .size   lxrt_mvk_vkCmdFillBuffer, .-lxrt_mvk_vkCmdFillBuffer
@@ -857,7 +848,7 @@ lxrt_mvk_vkCmdFillBuffer:
 lxrt_mvk_vkCmdInsertDebugUtilsLabelEXT:
     adrp    x16, lxrt_vk_table
     add     x16, x16, :lo12:lxrt_vk_table
-    ldr     x16, [x16, #616]
+    ldr     x16, [x16, #608]
     cbz     x16, .Lmissing
     br      x16
     .size   lxrt_mvk_vkCmdInsertDebugUtilsLabelEXT, .-lxrt_mvk_vkCmdInsertDebugUtilsLabelEXT
@@ -868,7 +859,7 @@ lxrt_mvk_vkCmdInsertDebugUtilsLabelEXT:
 lxrt_mvk_vkCmdNextSubpass:
     adrp    x16, lxrt_vk_table
     add     x16, x16, :lo12:lxrt_vk_table
-    ldr     x16, [x16, #624]
+    ldr     x16, [x16, #616]
     cbz     x16, .Lmissing
     br      x16
     .size   lxrt_mvk_vkCmdNextSubpass, .-lxrt_mvk_vkCmdNextSubpass
@@ -879,7 +870,7 @@ lxrt_mvk_vkCmdNextSubpass:
 lxrt_mvk_vkCmdNextSubpass2:
     adrp    x16, lxrt_vk_table
     add     x16, x16, :lo12:lxrt_vk_table
-    ldr     x16, [x16, #632]
+    ldr     x16, [x16, #624]
     cbz     x16, .Lmissing
     br      x16
     .size   lxrt_mvk_vkCmdNextSubpass2, .-lxrt_mvk_vkCmdNextSubpass2
@@ -890,7 +881,7 @@ lxrt_mvk_vkCmdNextSubpass2:
 lxrt_mvk_vkCmdNextSubpass2KHR:
     adrp    x16, lxrt_vk_table
     add     x16, x16, :lo12:lxrt_vk_table
-    ldr     x16, [x16, #640]
+    ldr     x16, [x16, #632]
     cbz     x16, .Lmissing
     br      x16
     .size   lxrt_mvk_vkCmdNextSubpass2KHR, .-lxrt_mvk_vkCmdNextSubpass2KHR
@@ -901,7 +892,7 @@ lxrt_mvk_vkCmdNextSubpass2KHR:
 lxrt_mvk_vkCmdPipelineBarrier:
     adrp    x16, lxrt_vk_table
     add     x16, x16, :lo12:lxrt_vk_table
-    ldr     x16, [x16, #648]
+    ldr     x16, [x16, #640]
     cbz     x16, .Lmissing
     br      x16
     .size   lxrt_mvk_vkCmdPipelineBarrier, .-lxrt_mvk_vkCmdPipelineBarrier
@@ -912,7 +903,7 @@ lxrt_mvk_vkCmdPipelineBarrier:
 lxrt_mvk_vkCmdPipelineBarrier2:
     adrp    x16, lxrt_vk_table
     add     x16, x16, :lo12:lxrt_vk_table
-    ldr     x16, [x16, #656]
+    ldr     x16, [x16, #648]
     cbz     x16, .Lmissing
     br      x16
     .size   lxrt_mvk_vkCmdPipelineBarrier2, .-lxrt_mvk_vkCmdPipelineBarrier2
@@ -923,7 +914,7 @@ lxrt_mvk_vkCmdPipelineBarrier2:
 lxrt_mvk_vkCmdPipelineBarrier2KHR:
     adrp    x16, lxrt_vk_table
     add     x16, x16, :lo12:lxrt_vk_table
-    ldr     x16, [x16, #664]
+    ldr     x16, [x16, #656]
     cbz     x16, .Lmissing
     br      x16
     .size   lxrt_mvk_vkCmdPipelineBarrier2KHR, .-lxrt_mvk_vkCmdPipelineBarrier2KHR
@@ -934,7 +925,7 @@ lxrt_mvk_vkCmdPipelineBarrier2KHR:
 lxrt_mvk_vkCmdPushConstants:
     adrp    x16, lxrt_vk_table
     add     x16, x16, :lo12:lxrt_vk_table
-    ldr     x16, [x16, #672]
+    ldr     x16, [x16, #664]
     cbz     x16, .Lmissing
     br      x16
     .size   lxrt_mvk_vkCmdPushConstants, .-lxrt_mvk_vkCmdPushConstants
@@ -945,7 +936,7 @@ lxrt_mvk_vkCmdPushConstants:
 lxrt_mvk_vkCmdPushConstants2:
     adrp    x16, lxrt_vk_table
     add     x16, x16, :lo12:lxrt_vk_table
-    ldr     x16, [x16, #680]
+    ldr     x16, [x16, #672]
     cbz     x16, .Lmissing
     br      x16
     .size   lxrt_mvk_vkCmdPushConstants2, .-lxrt_mvk_vkCmdPushConstants2
@@ -956,7 +947,7 @@ lxrt_mvk_vkCmdPushConstants2:
 lxrt_mvk_vkCmdPushConstants2KHR:
     adrp    x16, lxrt_vk_table
     add     x16, x16, :lo12:lxrt_vk_table
-    ldr     x16, [x16, #688]
+    ldr     x16, [x16, #680]
     cbz     x16, .Lmissing
     br      x16
     .size   lxrt_mvk_vkCmdPushConstants2KHR, .-lxrt_mvk_vkCmdPushConstants2KHR
@@ -967,7 +958,7 @@ lxrt_mvk_vkCmdPushConstants2KHR:
 lxrt_mvk_vkCmdPushDescriptorSet:
     adrp    x16, lxrt_vk_table
     add     x16, x16, :lo12:lxrt_vk_table
-    ldr     x16, [x16, #696]
+    ldr     x16, [x16, #688]
     cbz     x16, .Lmissing
     br      x16
     .size   lxrt_mvk_vkCmdPushDescriptorSet, .-lxrt_mvk_vkCmdPushDescriptorSet
@@ -978,7 +969,7 @@ lxrt_mvk_vkCmdPushDescriptorSet:
 lxrt_mvk_vkCmdPushDescriptorSet2:
     adrp    x16, lxrt_vk_table
     add     x16, x16, :lo12:lxrt_vk_table
-    ldr     x16, [x16, #704]
+    ldr     x16, [x16, #696]
     cbz     x16, .Lmissing
     br      x16
     .size   lxrt_mvk_vkCmdPushDescriptorSet2, .-lxrt_mvk_vkCmdPushDescriptorSet2
@@ -989,7 +980,7 @@ lxrt_mvk_vkCmdPushDescriptorSet2:
 lxrt_mvk_vkCmdPushDescriptorSet2KHR:
     adrp    x16, lxrt_vk_table
     add     x16, x16, :lo12:lxrt_vk_table
-    ldr     x16, [x16, #712]
+    ldr     x16, [x16, #704]
     cbz     x16, .Lmissing
     br      x16
     .size   lxrt_mvk_vkCmdPushDescriptorSet2KHR, .-lxrt_mvk_vkCmdPushDescriptorSet2KHR
@@ -1000,7 +991,7 @@ lxrt_mvk_vkCmdPushDescriptorSet2KHR:
 lxrt_mvk_vkCmdPushDescriptorSetKHR:
     adrp    x16, lxrt_vk_table
     add     x16, x16, :lo12:lxrt_vk_table
-    ldr     x16, [x16, #720]
+    ldr     x16, [x16, #712]
     cbz     x16, .Lmissing
     br      x16
     .size   lxrt_mvk_vkCmdPushDescriptorSetKHR, .-lxrt_mvk_vkCmdPushDescriptorSetKHR
@@ -1011,7 +1002,7 @@ lxrt_mvk_vkCmdPushDescriptorSetKHR:
 lxrt_mvk_vkCmdPushDescriptorSetWithTemplate:
     adrp    x16, lxrt_vk_table
     add     x16, x16, :lo12:lxrt_vk_table
-    ldr     x16, [x16, #728]
+    ldr     x16, [x16, #720]
     cbz     x16, .Lmissing
     br      x16
     .size   lxrt_mvk_vkCmdPushDescriptorSetWithTemplate, .-lxrt_mvk_vkCmdPushDescriptorSetWithTemplate
@@ -1022,7 +1013,7 @@ lxrt_mvk_vkCmdPushDescriptorSetWithTemplate:
 lxrt_mvk_vkCmdPushDescriptorSetWithTemplate2:
     adrp    x16, lxrt_vk_table
     add     x16, x16, :lo12:lxrt_vk_table
-    ldr     x16, [x16, #736]
+    ldr     x16, [x16, #728]
     cbz     x16, .Lmissing
     br      x16
     .size   lxrt_mvk_vkCmdPushDescriptorSetWithTemplate2, .-lxrt_mvk_vkCmdPushDescriptorSetWithTemplate2
@@ -1033,7 +1024,7 @@ lxrt_mvk_vkCmdPushDescriptorSetWithTemplate2:
 lxrt_mvk_vkCmdPushDescriptorSetWithTemplate2KHR:
     adrp    x16, lxrt_vk_table
     add     x16, x16, :lo12:lxrt_vk_table
-    ldr     x16, [x16, #744]
+    ldr     x16, [x16, #736]
     cbz     x16, .Lmissing
     br      x16
     .size   lxrt_mvk_vkCmdPushDescriptorSetWithTemplate2KHR, .-lxrt_mvk_vkCmdPushDescriptorSetWithTemplate2KHR
@@ -1044,7 +1035,7 @@ lxrt_mvk_vkCmdPushDescriptorSetWithTemplate2KHR:
 lxrt_mvk_vkCmdPushDescriptorSetWithTemplateKHR:
     adrp    x16, lxrt_vk_table
     add     x16, x16, :lo12:lxrt_vk_table
-    ldr     x16, [x16, #752]
+    ldr     x16, [x16, #744]
     cbz     x16, .Lmissing
     br      x16
     .size   lxrt_mvk_vkCmdPushDescriptorSetWithTemplateKHR, .-lxrt_mvk_vkCmdPushDescriptorSetWithTemplateKHR
@@ -1055,7 +1046,7 @@ lxrt_mvk_vkCmdPushDescriptorSetWithTemplateKHR:
 lxrt_mvk_vkCmdResetEvent:
     adrp    x16, lxrt_vk_table
     add     x16, x16, :lo12:lxrt_vk_table
-    ldr     x16, [x16, #760]
+    ldr     x16, [x16, #752]
     cbz     x16, .Lmissing
     br      x16
     .size   lxrt_mvk_vkCmdResetEvent, .-lxrt_mvk_vkCmdResetEvent
@@ -1066,7 +1057,7 @@ lxrt_mvk_vkCmdResetEvent:
 lxrt_mvk_vkCmdResetEvent2:
     adrp    x16, lxrt_vk_table
     add     x16, x16, :lo12:lxrt_vk_table
-    ldr     x16, [x16, #768]
+    ldr     x16, [x16, #760]
     cbz     x16, .Lmissing
     br      x16
     .size   lxrt_mvk_vkCmdResetEvent2, .-lxrt_mvk_vkCmdResetEvent2
@@ -1077,7 +1068,7 @@ lxrt_mvk_vkCmdResetEvent2:
 lxrt_mvk_vkCmdResetEvent2KHR:
     adrp    x16, lxrt_vk_table
     add     x16, x16, :lo12:lxrt_vk_table
-    ldr     x16, [x16, #776]
+    ldr     x16, [x16, #768]
     cbz     x16, .Lmissing
     br      x16
     .size   lxrt_mvk_vkCmdResetEvent2KHR, .-lxrt_mvk_vkCmdResetEvent2KHR
@@ -1088,7 +1079,7 @@ lxrt_mvk_vkCmdResetEvent2KHR:
 lxrt_mvk_vkCmdResetQueryPool:
     adrp    x16, lxrt_vk_table
     add     x16, x16, :lo12:lxrt_vk_table
-    ldr     x16, [x16, #784]
+    ldr     x16, [x16, #776]
     cbz     x16, .Lmissing
     br      x16
     .size   lxrt_mvk_vkCmdResetQueryPool, .-lxrt_mvk_vkCmdResetQueryPool
@@ -1099,7 +1090,7 @@ lxrt_mvk_vkCmdResetQueryPool:
 lxrt_mvk_vkCmdResolveImage:
     adrp    x16, lxrt_vk_table
     add     x16, x16, :lo12:lxrt_vk_table
-    ldr     x16, [x16, #792]
+    ldr     x16, [x16, #784]
     cbz     x16, .Lmissing
     br      x16
     .size   lxrt_mvk_vkCmdResolveImage, .-lxrt_mvk_vkCmdResolveImage
@@ -1110,7 +1101,7 @@ lxrt_mvk_vkCmdResolveImage:
 lxrt_mvk_vkCmdResolveImage2:
     adrp    x16, lxrt_vk_table
     add     x16, x16, :lo12:lxrt_vk_table
-    ldr     x16, [x16, #800]
+    ldr     x16, [x16, #792]
     cbz     x16, .Lmissing
     br      x16
     .size   lxrt_mvk_vkCmdResolveImage2, .-lxrt_mvk_vkCmdResolveImage2
@@ -1121,7 +1112,7 @@ lxrt_mvk_vkCmdResolveImage2:
 lxrt_mvk_vkCmdResolveImage2KHR:
     adrp    x16, lxrt_vk_table
     add     x16, x16, :lo12:lxrt_vk_table
-    ldr     x16, [x16, #808]
+    ldr     x16, [x16, #800]
     cbz     x16, .Lmissing
     br      x16
     .size   lxrt_mvk_vkCmdResolveImage2KHR, .-lxrt_mvk_vkCmdResolveImage2KHR
@@ -1132,7 +1123,7 @@ lxrt_mvk_vkCmdResolveImage2KHR:
 lxrt_mvk_vkCmdSetAlphaToCoverageEnableEXT:
     adrp    x16, lxrt_vk_table
     add     x16, x16, :lo12:lxrt_vk_table
-    ldr     x16, [x16, #816]
+    ldr     x16, [x16, #808]
     cbz     x16, .Lmissing
     br      x16
     .size   lxrt_mvk_vkCmdSetAlphaToCoverageEnableEXT, .-lxrt_mvk_vkCmdSetAlphaToCoverageEnableEXT
@@ -1143,7 +1134,7 @@ lxrt_mvk_vkCmdSetAlphaToCoverageEnableEXT:
 lxrt_mvk_vkCmdSetAlphaToOneEnableEXT:
     adrp    x16, lxrt_vk_table
     add     x16, x16, :lo12:lxrt_vk_table
-    ldr     x16, [x16, #824]
+    ldr     x16, [x16, #816]
     cbz     x16, .Lmissing
     br      x16
     .size   lxrt_mvk_vkCmdSetAlphaToOneEnableEXT, .-lxrt_mvk_vkCmdSetAlphaToOneEnableEXT
@@ -1154,7 +1145,7 @@ lxrt_mvk_vkCmdSetAlphaToOneEnableEXT:
 lxrt_mvk_vkCmdSetBlendConstants:
     adrp    x16, lxrt_vk_table
     add     x16, x16, :lo12:lxrt_vk_table
-    ldr     x16, [x16, #832]
+    ldr     x16, [x16, #824]
     cbz     x16, .Lmissing
     br      x16
     .size   lxrt_mvk_vkCmdSetBlendConstants, .-lxrt_mvk_vkCmdSetBlendConstants
@@ -1165,7 +1156,7 @@ lxrt_mvk_vkCmdSetBlendConstants:
 lxrt_mvk_vkCmdSetColorBlendAdvancedEXT:
     adrp    x16, lxrt_vk_table
     add     x16, x16, :lo12:lxrt_vk_table
-    ldr     x16, [x16, #840]
+    ldr     x16, [x16, #832]
     cbz     x16, .Lmissing
     br      x16
     .size   lxrt_mvk_vkCmdSetColorBlendAdvancedEXT, .-lxrt_mvk_vkCmdSetColorBlendAdvancedEXT
@@ -1176,7 +1167,7 @@ lxrt_mvk_vkCmdSetColorBlendAdvancedEXT:
 lxrt_mvk_vkCmdSetColorBlendEnableEXT:
     adrp    x16, lxrt_vk_table
     add     x16, x16, :lo12:lxrt_vk_table
-    ldr     x16, [x16, #848]
+    ldr     x16, [x16, #840]
     cbz     x16, .Lmissing
     br      x16
     .size   lxrt_mvk_vkCmdSetColorBlendEnableEXT, .-lxrt_mvk_vkCmdSetColorBlendEnableEXT
@@ -1187,7 +1178,7 @@ lxrt_mvk_vkCmdSetColorBlendEnableEXT:
 lxrt_mvk_vkCmdSetColorBlendEquationEXT:
     adrp    x16, lxrt_vk_table
     add     x16, x16, :lo12:lxrt_vk_table
-    ldr     x16, [x16, #856]
+    ldr     x16, [x16, #848]
     cbz     x16, .Lmissing
     br      x16
     .size   lxrt_mvk_vkCmdSetColorBlendEquationEXT, .-lxrt_mvk_vkCmdSetColorBlendEquationEXT
@@ -1198,7 +1189,7 @@ lxrt_mvk_vkCmdSetColorBlendEquationEXT:
 lxrt_mvk_vkCmdSetColorWriteMaskEXT:
     adrp    x16, lxrt_vk_table
     add     x16, x16, :lo12:lxrt_vk_table
-    ldr     x16, [x16, #864]
+    ldr     x16, [x16, #856]
     cbz     x16, .Lmissing
     br      x16
     .size   lxrt_mvk_vkCmdSetColorWriteMaskEXT, .-lxrt_mvk_vkCmdSetColorWriteMaskEXT
@@ -1209,7 +1200,7 @@ lxrt_mvk_vkCmdSetColorWriteMaskEXT:
 lxrt_mvk_vkCmdSetConservativeRasterizationModeEXT:
     adrp    x16, lxrt_vk_table
     add     x16, x16, :lo12:lxrt_vk_table
-    ldr     x16, [x16, #872]
+    ldr     x16, [x16, #864]
     cbz     x16, .Lmissing
     br      x16
     .size   lxrt_mvk_vkCmdSetConservativeRasterizationModeEXT, .-lxrt_mvk_vkCmdSetConservativeRasterizationModeEXT
@@ -1220,7 +1211,7 @@ lxrt_mvk_vkCmdSetConservativeRasterizationModeEXT:
 lxrt_mvk_vkCmdSetCullMode:
     adrp    x16, lxrt_vk_table
     add     x16, x16, :lo12:lxrt_vk_table
-    ldr     x16, [x16, #880]
+    ldr     x16, [x16, #872]
     cbz     x16, .Lmissing
     br      x16
     .size   lxrt_mvk_vkCmdSetCullMode, .-lxrt_mvk_vkCmdSetCullMode
@@ -1231,7 +1222,7 @@ lxrt_mvk_vkCmdSetCullMode:
 lxrt_mvk_vkCmdSetCullModeEXT:
     adrp    x16, lxrt_vk_table
     add     x16, x16, :lo12:lxrt_vk_table
-    ldr     x16, [x16, #888]
+    ldr     x16, [x16, #880]
     cbz     x16, .Lmissing
     br      x16
     .size   lxrt_mvk_vkCmdSetCullModeEXT, .-lxrt_mvk_vkCmdSetCullModeEXT
@@ -1242,7 +1233,7 @@ lxrt_mvk_vkCmdSetCullModeEXT:
 lxrt_mvk_vkCmdSetDepthBias:
     adrp    x16, lxrt_vk_table
     add     x16, x16, :lo12:lxrt_vk_table
-    ldr     x16, [x16, #896]
+    ldr     x16, [x16, #888]
     cbz     x16, .Lmissing
     br      x16
     .size   lxrt_mvk_vkCmdSetDepthBias, .-lxrt_mvk_vkCmdSetDepthBias
@@ -1253,7 +1244,7 @@ lxrt_mvk_vkCmdSetDepthBias:
 lxrt_mvk_vkCmdSetDepthBiasEnable:
     adrp    x16, lxrt_vk_table
     add     x16, x16, :lo12:lxrt_vk_table
-    ldr     x16, [x16, #904]
+    ldr     x16, [x16, #896]
     cbz     x16, .Lmissing
     br      x16
     .size   lxrt_mvk_vkCmdSetDepthBiasEnable, .-lxrt_mvk_vkCmdSetDepthBiasEnable
@@ -1264,7 +1255,7 @@ lxrt_mvk_vkCmdSetDepthBiasEnable:
 lxrt_mvk_vkCmdSetDepthBiasEnableEXT:
     adrp    x16, lxrt_vk_table
     add     x16, x16, :lo12:lxrt_vk_table
-    ldr     x16, [x16, #912]
+    ldr     x16, [x16, #904]
     cbz     x16, .Lmissing
     br      x16
     .size   lxrt_mvk_vkCmdSetDepthBiasEnableEXT, .-lxrt_mvk_vkCmdSetDepthBiasEnableEXT
@@ -1275,7 +1266,7 @@ lxrt_mvk_vkCmdSetDepthBiasEnableEXT:
 lxrt_mvk_vkCmdSetDepthBounds:
     adrp    x16, lxrt_vk_table
     add     x16, x16, :lo12:lxrt_vk_table
-    ldr     x16, [x16, #920]
+    ldr     x16, [x16, #912]
     cbz     x16, .Lmissing
     br      x16
     .size   lxrt_mvk_vkCmdSetDepthBounds, .-lxrt_mvk_vkCmdSetDepthBounds
@@ -1286,7 +1277,7 @@ lxrt_mvk_vkCmdSetDepthBounds:
 lxrt_mvk_vkCmdSetDepthBoundsTestEnable:
     adrp    x16, lxrt_vk_table
     add     x16, x16, :lo12:lxrt_vk_table
-    ldr     x16, [x16, #928]
+    ldr     x16, [x16, #920]
     cbz     x16, .Lmissing
     br      x16
     .size   lxrt_mvk_vkCmdSetDepthBoundsTestEnable, .-lxrt_mvk_vkCmdSetDepthBoundsTestEnable
@@ -1297,7 +1288,7 @@ lxrt_mvk_vkCmdSetDepthBoundsTestEnable:
 lxrt_mvk_vkCmdSetDepthBoundsTestEnableEXT:
     adrp    x16, lxrt_vk_table
     add     x16, x16, :lo12:lxrt_vk_table
-    ldr     x16, [x16, #936]
+    ldr     x16, [x16, #928]
     cbz     x16, .Lmissing
     br      x16
     .size   lxrt_mvk_vkCmdSetDepthBoundsTestEnableEXT, .-lxrt_mvk_vkCmdSetDepthBoundsTestEnableEXT
@@ -1308,7 +1299,7 @@ lxrt_mvk_vkCmdSetDepthBoundsTestEnableEXT:
 lxrt_mvk_vkCmdSetDepthClampEnableEXT:
     adrp    x16, lxrt_vk_table
     add     x16, x16, :lo12:lxrt_vk_table
-    ldr     x16, [x16, #944]
+    ldr     x16, [x16, #936]
     cbz     x16, .Lmissing
     br      x16
     .size   lxrt_mvk_vkCmdSetDepthClampEnableEXT, .-lxrt_mvk_vkCmdSetDepthClampEnableEXT
@@ -1319,7 +1310,7 @@ lxrt_mvk_vkCmdSetDepthClampEnableEXT:
 lxrt_mvk_vkCmdSetDepthClipEnableEXT:
     adrp    x16, lxrt_vk_table
     add     x16, x16, :lo12:lxrt_vk_table
-    ldr     x16, [x16, #952]
+    ldr     x16, [x16, #944]
     cbz     x16, .Lmissing
     br      x16
     .size   lxrt_mvk_vkCmdSetDepthClipEnableEXT, .-lxrt_mvk_vkCmdSetDepthClipEnableEXT
@@ -1330,7 +1321,7 @@ lxrt_mvk_vkCmdSetDepthClipEnableEXT:
 lxrt_mvk_vkCmdSetDepthClipNegativeOneToOneEXT:
     adrp    x16, lxrt_vk_table
     add     x16, x16, :lo12:lxrt_vk_table
-    ldr     x16, [x16, #960]
+    ldr     x16, [x16, #952]
     cbz     x16, .Lmissing
     br      x16
     .size   lxrt_mvk_vkCmdSetDepthClipNegativeOneToOneEXT, .-lxrt_mvk_vkCmdSetDepthClipNegativeOneToOneEXT
@@ -1341,7 +1332,7 @@ lxrt_mvk_vkCmdSetDepthClipNegativeOneToOneEXT:
 lxrt_mvk_vkCmdSetDepthCompareOp:
     adrp    x16, lxrt_vk_table
     add     x16, x16, :lo12:lxrt_vk_table
-    ldr     x16, [x16, #968]
+    ldr     x16, [x16, #960]
     cbz     x16, .Lmissing
     br      x16
     .size   lxrt_mvk_vkCmdSetDepthCompareOp, .-lxrt_mvk_vkCmdSetDepthCompareOp
@@ -1352,7 +1343,7 @@ lxrt_mvk_vkCmdSetDepthCompareOp:
 lxrt_mvk_vkCmdSetDepthCompareOpEXT:
     adrp    x16, lxrt_vk_table
     add     x16, x16, :lo12:lxrt_vk_table
-    ldr     x16, [x16, #976]
+    ldr     x16, [x16, #968]
     cbz     x16, .Lmissing
     br      x16
     .size   lxrt_mvk_vkCmdSetDepthCompareOpEXT, .-lxrt_mvk_vkCmdSetDepthCompareOpEXT
@@ -1363,7 +1354,7 @@ lxrt_mvk_vkCmdSetDepthCompareOpEXT:
 lxrt_mvk_vkCmdSetDepthTestEnable:
     adrp    x16, lxrt_vk_table
     add     x16, x16, :lo12:lxrt_vk_table
-    ldr     x16, [x16, #984]
+    ldr     x16, [x16, #976]
     cbz     x16, .Lmissing
     br      x16
     .size   lxrt_mvk_vkCmdSetDepthTestEnable, .-lxrt_mvk_vkCmdSetDepthTestEnable
@@ -1374,7 +1365,7 @@ lxrt_mvk_vkCmdSetDepthTestEnable:
 lxrt_mvk_vkCmdSetDepthTestEnableEXT:
     adrp    x16, lxrt_vk_table
     add     x16, x16, :lo12:lxrt_vk_table
-    ldr     x16, [x16, #992]
+    ldr     x16, [x16, #984]
     cbz     x16, .Lmissing
     br      x16
     .size   lxrt_mvk_vkCmdSetDepthTestEnableEXT, .-lxrt_mvk_vkCmdSetDepthTestEnableEXT
@@ -1385,7 +1376,7 @@ lxrt_mvk_vkCmdSetDepthTestEnableEXT:
 lxrt_mvk_vkCmdSetDepthWriteEnable:
     adrp    x16, lxrt_vk_table
     add     x16, x16, :lo12:lxrt_vk_table
-    ldr     x16, [x16, #1000]
+    ldr     x16, [x16, #992]
     cbz     x16, .Lmissing
     br      x16
     .size   lxrt_mvk_vkCmdSetDepthWriteEnable, .-lxrt_mvk_vkCmdSetDepthWriteEnable
@@ -1396,7 +1387,7 @@ lxrt_mvk_vkCmdSetDepthWriteEnable:
 lxrt_mvk_vkCmdSetDepthWriteEnableEXT:
     adrp    x16, lxrt_vk_table
     add     x16, x16, :lo12:lxrt_vk_table
-    ldr     x16, [x16, #1008]
+    ldr     x16, [x16, #1000]
     cbz     x16, .Lmissing
     br      x16
     .size   lxrt_mvk_vkCmdSetDepthWriteEnableEXT, .-lxrt_mvk_vkCmdSetDepthWriteEnableEXT
@@ -1407,7 +1398,7 @@ lxrt_mvk_vkCmdSetDepthWriteEnableEXT:
 lxrt_mvk_vkCmdSetDeviceMask:
     adrp    x16, lxrt_vk_table
     add     x16, x16, :lo12:lxrt_vk_table
-    ldr     x16, [x16, #1016]
+    ldr     x16, [x16, #1008]
     cbz     x16, .Lmissing
     br      x16
     .size   lxrt_mvk_vkCmdSetDeviceMask, .-lxrt_mvk_vkCmdSetDeviceMask
@@ -1418,7 +1409,7 @@ lxrt_mvk_vkCmdSetDeviceMask:
 lxrt_mvk_vkCmdSetDeviceMaskKHR:
     adrp    x16, lxrt_vk_table
     add     x16, x16, :lo12:lxrt_vk_table
-    ldr     x16, [x16, #1024]
+    ldr     x16, [x16, #1016]
     cbz     x16, .Lmissing
     br      x16
     .size   lxrt_mvk_vkCmdSetDeviceMaskKHR, .-lxrt_mvk_vkCmdSetDeviceMaskKHR
@@ -1429,7 +1420,7 @@ lxrt_mvk_vkCmdSetDeviceMaskKHR:
 lxrt_mvk_vkCmdSetEvent:
     adrp    x16, lxrt_vk_table
     add     x16, x16, :lo12:lxrt_vk_table
-    ldr     x16, [x16, #1032]
+    ldr     x16, [x16, #1024]
     cbz     x16, .Lmissing
     br      x16
     .size   lxrt_mvk_vkCmdSetEvent, .-lxrt_mvk_vkCmdSetEvent
@@ -1440,7 +1431,7 @@ lxrt_mvk_vkCmdSetEvent:
 lxrt_mvk_vkCmdSetEvent2:
     adrp    x16, lxrt_vk_table
     add     x16, x16, :lo12:lxrt_vk_table
-    ldr     x16, [x16, #1040]
+    ldr     x16, [x16, #1032]
     cbz     x16, .Lmissing
     br      x16
     .size   lxrt_mvk_vkCmdSetEvent2, .-lxrt_mvk_vkCmdSetEvent2
@@ -1451,7 +1442,7 @@ lxrt_mvk_vkCmdSetEvent2:
 lxrt_mvk_vkCmdSetEvent2KHR:
     adrp    x16, lxrt_vk_table
     add     x16, x16, :lo12:lxrt_vk_table
-    ldr     x16, [x16, #1048]
+    ldr     x16, [x16, #1040]
     cbz     x16, .Lmissing
     br      x16
     .size   lxrt_mvk_vkCmdSetEvent2KHR, .-lxrt_mvk_vkCmdSetEvent2KHR
@@ -1462,7 +1453,7 @@ lxrt_mvk_vkCmdSetEvent2KHR:
 lxrt_mvk_vkCmdSetExtraPrimitiveOverestimationSizeEXT:
     adrp    x16, lxrt_vk_table
     add     x16, x16, :lo12:lxrt_vk_table
-    ldr     x16, [x16, #1056]
+    ldr     x16, [x16, #1048]
     cbz     x16, .Lmissing
     br      x16
     .size   lxrt_mvk_vkCmdSetExtraPrimitiveOverestimationSizeEXT, .-lxrt_mvk_vkCmdSetExtraPrimitiveOverestimationSizeEXT
@@ -1473,7 +1464,7 @@ lxrt_mvk_vkCmdSetExtraPrimitiveOverestimationSizeEXT:
 lxrt_mvk_vkCmdSetFrontFace:
     adrp    x16, lxrt_vk_table
     add     x16, x16, :lo12:lxrt_vk_table
-    ldr     x16, [x16, #1064]
+    ldr     x16, [x16, #1056]
     cbz     x16, .Lmissing
     br      x16
     .size   lxrt_mvk_vkCmdSetFrontFace, .-lxrt_mvk_vkCmdSetFrontFace
@@ -1484,7 +1475,7 @@ lxrt_mvk_vkCmdSetFrontFace:
 lxrt_mvk_vkCmdSetFrontFaceEXT:
     adrp    x16, lxrt_vk_table
     add     x16, x16, :lo12:lxrt_vk_table
-    ldr     x16, [x16, #1072]
+    ldr     x16, [x16, #1064]
     cbz     x16, .Lmissing
     br      x16
     .size   lxrt_mvk_vkCmdSetFrontFaceEXT, .-lxrt_mvk_vkCmdSetFrontFaceEXT
@@ -1495,7 +1486,7 @@ lxrt_mvk_vkCmdSetFrontFaceEXT:
 lxrt_mvk_vkCmdSetLineRasterizationModeEXT:
     adrp    x16, lxrt_vk_table
     add     x16, x16, :lo12:lxrt_vk_table
-    ldr     x16, [x16, #1080]
+    ldr     x16, [x16, #1072]
     cbz     x16, .Lmissing
     br      x16
     .size   lxrt_mvk_vkCmdSetLineRasterizationModeEXT, .-lxrt_mvk_vkCmdSetLineRasterizationModeEXT
@@ -1506,10 +1497,21 @@ lxrt_mvk_vkCmdSetLineRasterizationModeEXT:
 lxrt_mvk_vkCmdSetLineStipple:
     adrp    x16, lxrt_vk_table
     add     x16, x16, :lo12:lxrt_vk_table
-    ldr     x16, [x16, #1088]
+    ldr     x16, [x16, #1080]
     cbz     x16, .Lmissing
     br      x16
     .size   lxrt_mvk_vkCmdSetLineStipple, .-lxrt_mvk_vkCmdSetLineStipple
+
+    .globl  lxrt_mvk_vkCmdSetLineStippleEXT
+    .hidden lxrt_mvk_vkCmdSetLineStippleEXT
+    .type   lxrt_mvk_vkCmdSetLineStippleEXT,%function
+lxrt_mvk_vkCmdSetLineStippleEXT:
+    adrp    x16, lxrt_vk_table
+    add     x16, x16, :lo12:lxrt_vk_table
+    ldr     x16, [x16, #1088]
+    cbz     x16, .Lmissing
+    br      x16
+    .size   lxrt_mvk_vkCmdSetLineStippleEXT, .-lxrt_mvk_vkCmdSetLineStippleEXT
 
     .globl  lxrt_mvk_vkCmdSetLineStippleEnableEXT
     .hidden lxrt_mvk_vkCmdSetLineStippleEnableEXT
@@ -1522,24 +1524,13 @@ lxrt_mvk_vkCmdSetLineStippleEnableEXT:
     br      x16
     .size   lxrt_mvk_vkCmdSetLineStippleEnableEXT, .-lxrt_mvk_vkCmdSetLineStippleEnableEXT
 
-    .globl  lxrt_mvk_vkCmdSetLineStippleEXT
-    .hidden lxrt_mvk_vkCmdSetLineStippleEXT
-    .type   lxrt_mvk_vkCmdSetLineStippleEXT,%function
-lxrt_mvk_vkCmdSetLineStippleEXT:
-    adrp    x16, lxrt_vk_table
-    add     x16, x16, :lo12:lxrt_vk_table
-    ldr     x16, [x16, #1104]
-    cbz     x16, .Lmissing
-    br      x16
-    .size   lxrt_mvk_vkCmdSetLineStippleEXT, .-lxrt_mvk_vkCmdSetLineStippleEXT
-
     .globl  lxrt_mvk_vkCmdSetLineStippleKHR
     .hidden lxrt_mvk_vkCmdSetLineStippleKHR
     .type   lxrt_mvk_vkCmdSetLineStippleKHR,%function
 lxrt_mvk_vkCmdSetLineStippleKHR:
     adrp    x16, lxrt_vk_table
     add     x16, x16, :lo12:lxrt_vk_table
-    ldr     x16, [x16, #1112]
+    ldr     x16, [x16, #1104]
     cbz     x16, .Lmissing
     br      x16
     .size   lxrt_mvk_vkCmdSetLineStippleKHR, .-lxrt_mvk_vkCmdSetLineStippleKHR
@@ -1550,10 +1541,21 @@ lxrt_mvk_vkCmdSetLineStippleKHR:
 lxrt_mvk_vkCmdSetLineWidth:
     adrp    x16, lxrt_vk_table
     add     x16, x16, :lo12:lxrt_vk_table
-    ldr     x16, [x16, #1120]
+    ldr     x16, [x16, #1112]
     cbz     x16, .Lmissing
     br      x16
     .size   lxrt_mvk_vkCmdSetLineWidth, .-lxrt_mvk_vkCmdSetLineWidth
+
+    .globl  lxrt_mvk_vkCmdSetLogicOpEXT
+    .hidden lxrt_mvk_vkCmdSetLogicOpEXT
+    .type   lxrt_mvk_vkCmdSetLogicOpEXT,%function
+lxrt_mvk_vkCmdSetLogicOpEXT:
+    adrp    x16, lxrt_vk_table
+    add     x16, x16, :lo12:lxrt_vk_table
+    ldr     x16, [x16, #1120]
+    cbz     x16, .Lmissing
+    br      x16
+    .size   lxrt_mvk_vkCmdSetLogicOpEXT, .-lxrt_mvk_vkCmdSetLogicOpEXT
 
     .globl  lxrt_mvk_vkCmdSetLogicOpEnableEXT
     .hidden lxrt_mvk_vkCmdSetLogicOpEnableEXT
@@ -1566,24 +1568,13 @@ lxrt_mvk_vkCmdSetLogicOpEnableEXT:
     br      x16
     .size   lxrt_mvk_vkCmdSetLogicOpEnableEXT, .-lxrt_mvk_vkCmdSetLogicOpEnableEXT
 
-    .globl  lxrt_mvk_vkCmdSetLogicOpEXT
-    .hidden lxrt_mvk_vkCmdSetLogicOpEXT
-    .type   lxrt_mvk_vkCmdSetLogicOpEXT,%function
-lxrt_mvk_vkCmdSetLogicOpEXT:
-    adrp    x16, lxrt_vk_table
-    add     x16, x16, :lo12:lxrt_vk_table
-    ldr     x16, [x16, #1136]
-    cbz     x16, .Lmissing
-    br      x16
-    .size   lxrt_mvk_vkCmdSetLogicOpEXT, .-lxrt_mvk_vkCmdSetLogicOpEXT
-
     .globl  lxrt_mvk_vkCmdSetPatchControlPointsEXT
     .hidden lxrt_mvk_vkCmdSetPatchControlPointsEXT
     .type   lxrt_mvk_vkCmdSetPatchControlPointsEXT,%function
 lxrt_mvk_vkCmdSetPatchControlPointsEXT:
     adrp    x16, lxrt_vk_table
     add     x16, x16, :lo12:lxrt_vk_table
-    ldr     x16, [x16, #1144]
+    ldr     x16, [x16, #1136]
     cbz     x16, .Lmissing
     br      x16
     .size   lxrt_mvk_vkCmdSetPatchControlPointsEXT, .-lxrt_mvk_vkCmdSetPatchControlPointsEXT
@@ -1594,7 +1585,7 @@ lxrt_mvk_vkCmdSetPatchControlPointsEXT:
 lxrt_mvk_vkCmdSetPolygonModeEXT:
     adrp    x16, lxrt_vk_table
     add     x16, x16, :lo12:lxrt_vk_table
-    ldr     x16, [x16, #1152]
+    ldr     x16, [x16, #1144]
     cbz     x16, .Lmissing
     br      x16
     .size   lxrt_mvk_vkCmdSetPolygonModeEXT, .-lxrt_mvk_vkCmdSetPolygonModeEXT
@@ -1605,7 +1596,7 @@ lxrt_mvk_vkCmdSetPolygonModeEXT:
 lxrt_mvk_vkCmdSetPrimitiveRestartEnable:
     adrp    x16, lxrt_vk_table
     add     x16, x16, :lo12:lxrt_vk_table
-    ldr     x16, [x16, #1160]
+    ldr     x16, [x16, #1152]
     cbz     x16, .Lmissing
     br      x16
     .size   lxrt_mvk_vkCmdSetPrimitiveRestartEnable, .-lxrt_mvk_vkCmdSetPrimitiveRestartEnable
@@ -1616,7 +1607,7 @@ lxrt_mvk_vkCmdSetPrimitiveRestartEnable:
 lxrt_mvk_vkCmdSetPrimitiveRestartEnableEXT:
     adrp    x16, lxrt_vk_table
     add     x16, x16, :lo12:lxrt_vk_table
-    ldr     x16, [x16, #1168]
+    ldr     x16, [x16, #1160]
     cbz     x16, .Lmissing
     br      x16
     .size   lxrt_mvk_vkCmdSetPrimitiveRestartEnableEXT, .-lxrt_mvk_vkCmdSetPrimitiveRestartEnableEXT
@@ -1627,7 +1618,7 @@ lxrt_mvk_vkCmdSetPrimitiveRestartEnableEXT:
 lxrt_mvk_vkCmdSetPrimitiveTopology:
     adrp    x16, lxrt_vk_table
     add     x16, x16, :lo12:lxrt_vk_table
-    ldr     x16, [x16, #1176]
+    ldr     x16, [x16, #1168]
     cbz     x16, .Lmissing
     br      x16
     .size   lxrt_mvk_vkCmdSetPrimitiveTopology, .-lxrt_mvk_vkCmdSetPrimitiveTopology
@@ -1638,7 +1629,7 @@ lxrt_mvk_vkCmdSetPrimitiveTopology:
 lxrt_mvk_vkCmdSetPrimitiveTopologyEXT:
     adrp    x16, lxrt_vk_table
     add     x16, x16, :lo12:lxrt_vk_table
-    ldr     x16, [x16, #1184]
+    ldr     x16, [x16, #1176]
     cbz     x16, .Lmissing
     br      x16
     .size   lxrt_mvk_vkCmdSetPrimitiveTopologyEXT, .-lxrt_mvk_vkCmdSetPrimitiveTopologyEXT
@@ -1649,7 +1640,7 @@ lxrt_mvk_vkCmdSetPrimitiveTopologyEXT:
 lxrt_mvk_vkCmdSetProvokingVertexModeEXT:
     adrp    x16, lxrt_vk_table
     add     x16, x16, :lo12:lxrt_vk_table
-    ldr     x16, [x16, #1192]
+    ldr     x16, [x16, #1184]
     cbz     x16, .Lmissing
     br      x16
     .size   lxrt_mvk_vkCmdSetProvokingVertexModeEXT, .-lxrt_mvk_vkCmdSetProvokingVertexModeEXT
@@ -1660,7 +1651,7 @@ lxrt_mvk_vkCmdSetProvokingVertexModeEXT:
 lxrt_mvk_vkCmdSetRasterizationSamplesEXT:
     adrp    x16, lxrt_vk_table
     add     x16, x16, :lo12:lxrt_vk_table
-    ldr     x16, [x16, #1200]
+    ldr     x16, [x16, #1192]
     cbz     x16, .Lmissing
     br      x16
     .size   lxrt_mvk_vkCmdSetRasterizationSamplesEXT, .-lxrt_mvk_vkCmdSetRasterizationSamplesEXT
@@ -1671,7 +1662,7 @@ lxrt_mvk_vkCmdSetRasterizationSamplesEXT:
 lxrt_mvk_vkCmdSetRasterizationStreamEXT:
     adrp    x16, lxrt_vk_table
     add     x16, x16, :lo12:lxrt_vk_table
-    ldr     x16, [x16, #1208]
+    ldr     x16, [x16, #1200]
     cbz     x16, .Lmissing
     br      x16
     .size   lxrt_mvk_vkCmdSetRasterizationStreamEXT, .-lxrt_mvk_vkCmdSetRasterizationStreamEXT
@@ -1682,7 +1673,7 @@ lxrt_mvk_vkCmdSetRasterizationStreamEXT:
 lxrt_mvk_vkCmdSetRasterizerDiscardEnable:
     adrp    x16, lxrt_vk_table
     add     x16, x16, :lo12:lxrt_vk_table
-    ldr     x16, [x16, #1216]
+    ldr     x16, [x16, #1208]
     cbz     x16, .Lmissing
     br      x16
     .size   lxrt_mvk_vkCmdSetRasterizerDiscardEnable, .-lxrt_mvk_vkCmdSetRasterizerDiscardEnable
@@ -1693,7 +1684,7 @@ lxrt_mvk_vkCmdSetRasterizerDiscardEnable:
 lxrt_mvk_vkCmdSetRasterizerDiscardEnableEXT:
     adrp    x16, lxrt_vk_table
     add     x16, x16, :lo12:lxrt_vk_table
-    ldr     x16, [x16, #1224]
+    ldr     x16, [x16, #1216]
     cbz     x16, .Lmissing
     br      x16
     .size   lxrt_mvk_vkCmdSetRasterizerDiscardEnableEXT, .-lxrt_mvk_vkCmdSetRasterizerDiscardEnableEXT
@@ -1704,7 +1695,7 @@ lxrt_mvk_vkCmdSetRasterizerDiscardEnableEXT:
 lxrt_mvk_vkCmdSetRenderingAttachmentLocations:
     adrp    x16, lxrt_vk_table
     add     x16, x16, :lo12:lxrt_vk_table
-    ldr     x16, [x16, #1232]
+    ldr     x16, [x16, #1224]
     cbz     x16, .Lmissing
     br      x16
     .size   lxrt_mvk_vkCmdSetRenderingAttachmentLocations, .-lxrt_mvk_vkCmdSetRenderingAttachmentLocations
@@ -1715,7 +1706,7 @@ lxrt_mvk_vkCmdSetRenderingAttachmentLocations:
 lxrt_mvk_vkCmdSetRenderingAttachmentLocationsKHR:
     adrp    x16, lxrt_vk_table
     add     x16, x16, :lo12:lxrt_vk_table
-    ldr     x16, [x16, #1240]
+    ldr     x16, [x16, #1232]
     cbz     x16, .Lmissing
     br      x16
     .size   lxrt_mvk_vkCmdSetRenderingAttachmentLocationsKHR, .-lxrt_mvk_vkCmdSetRenderingAttachmentLocationsKHR
@@ -1726,7 +1717,7 @@ lxrt_mvk_vkCmdSetRenderingAttachmentLocationsKHR:
 lxrt_mvk_vkCmdSetRenderingInputAttachmentIndices:
     adrp    x16, lxrt_vk_table
     add     x16, x16, :lo12:lxrt_vk_table
-    ldr     x16, [x16, #1248]
+    ldr     x16, [x16, #1240]
     cbz     x16, .Lmissing
     br      x16
     .size   lxrt_mvk_vkCmdSetRenderingInputAttachmentIndices, .-lxrt_mvk_vkCmdSetRenderingInputAttachmentIndices
@@ -1737,7 +1728,7 @@ lxrt_mvk_vkCmdSetRenderingInputAttachmentIndices:
 lxrt_mvk_vkCmdSetRenderingInputAttachmentIndicesKHR:
     adrp    x16, lxrt_vk_table
     add     x16, x16, :lo12:lxrt_vk_table
-    ldr     x16, [x16, #1256]
+    ldr     x16, [x16, #1248]
     cbz     x16, .Lmissing
     br      x16
     .size   lxrt_mvk_vkCmdSetRenderingInputAttachmentIndicesKHR, .-lxrt_mvk_vkCmdSetRenderingInputAttachmentIndicesKHR
@@ -1748,7 +1739,7 @@ lxrt_mvk_vkCmdSetRenderingInputAttachmentIndicesKHR:
 lxrt_mvk_vkCmdSetSampleLocationsEnableEXT:
     adrp    x16, lxrt_vk_table
     add     x16, x16, :lo12:lxrt_vk_table
-    ldr     x16, [x16, #1264]
+    ldr     x16, [x16, #1256]
     cbz     x16, .Lmissing
     br      x16
     .size   lxrt_mvk_vkCmdSetSampleLocationsEnableEXT, .-lxrt_mvk_vkCmdSetSampleLocationsEnableEXT
@@ -1759,7 +1750,7 @@ lxrt_mvk_vkCmdSetSampleLocationsEnableEXT:
 lxrt_mvk_vkCmdSetSampleMaskEXT:
     adrp    x16, lxrt_vk_table
     add     x16, x16, :lo12:lxrt_vk_table
-    ldr     x16, [x16, #1272]
+    ldr     x16, [x16, #1264]
     cbz     x16, .Lmissing
     br      x16
     .size   lxrt_mvk_vkCmdSetSampleMaskEXT, .-lxrt_mvk_vkCmdSetSampleMaskEXT
@@ -1770,7 +1761,7 @@ lxrt_mvk_vkCmdSetSampleMaskEXT:
 lxrt_mvk_vkCmdSetScissor:
     adrp    x16, lxrt_vk_table
     add     x16, x16, :lo12:lxrt_vk_table
-    ldr     x16, [x16, #1280]
+    ldr     x16, [x16, #1272]
     cbz     x16, .Lmissing
     br      x16
     .size   lxrt_mvk_vkCmdSetScissor, .-lxrt_mvk_vkCmdSetScissor
@@ -1781,7 +1772,7 @@ lxrt_mvk_vkCmdSetScissor:
 lxrt_mvk_vkCmdSetScissorWithCount:
     adrp    x16, lxrt_vk_table
     add     x16, x16, :lo12:lxrt_vk_table
-    ldr     x16, [x16, #1288]
+    ldr     x16, [x16, #1280]
     cbz     x16, .Lmissing
     br      x16
     .size   lxrt_mvk_vkCmdSetScissorWithCount, .-lxrt_mvk_vkCmdSetScissorWithCount
@@ -1792,7 +1783,7 @@ lxrt_mvk_vkCmdSetScissorWithCount:
 lxrt_mvk_vkCmdSetScissorWithCountEXT:
     adrp    x16, lxrt_vk_table
     add     x16, x16, :lo12:lxrt_vk_table
-    ldr     x16, [x16, #1296]
+    ldr     x16, [x16, #1288]
     cbz     x16, .Lmissing
     br      x16
     .size   lxrt_mvk_vkCmdSetScissorWithCountEXT, .-lxrt_mvk_vkCmdSetScissorWithCountEXT
@@ -1803,7 +1794,7 @@ lxrt_mvk_vkCmdSetScissorWithCountEXT:
 lxrt_mvk_vkCmdSetStencilCompareMask:
     adrp    x16, lxrt_vk_table
     add     x16, x16, :lo12:lxrt_vk_table
-    ldr     x16, [x16, #1304]
+    ldr     x16, [x16, #1296]
     cbz     x16, .Lmissing
     br      x16
     .size   lxrt_mvk_vkCmdSetStencilCompareMask, .-lxrt_mvk_vkCmdSetStencilCompareMask
@@ -1814,7 +1805,7 @@ lxrt_mvk_vkCmdSetStencilCompareMask:
 lxrt_mvk_vkCmdSetStencilOp:
     adrp    x16, lxrt_vk_table
     add     x16, x16, :lo12:lxrt_vk_table
-    ldr     x16, [x16, #1312]
+    ldr     x16, [x16, #1304]
     cbz     x16, .Lmissing
     br      x16
     .size   lxrt_mvk_vkCmdSetStencilOp, .-lxrt_mvk_vkCmdSetStencilOp
@@ -1825,7 +1816,7 @@ lxrt_mvk_vkCmdSetStencilOp:
 lxrt_mvk_vkCmdSetStencilOpEXT:
     adrp    x16, lxrt_vk_table
     add     x16, x16, :lo12:lxrt_vk_table
-    ldr     x16, [x16, #1320]
+    ldr     x16, [x16, #1312]
     cbz     x16, .Lmissing
     br      x16
     .size   lxrt_mvk_vkCmdSetStencilOpEXT, .-lxrt_mvk_vkCmdSetStencilOpEXT
@@ -1836,7 +1827,7 @@ lxrt_mvk_vkCmdSetStencilOpEXT:
 lxrt_mvk_vkCmdSetStencilReference:
     adrp    x16, lxrt_vk_table
     add     x16, x16, :lo12:lxrt_vk_table
-    ldr     x16, [x16, #1328]
+    ldr     x16, [x16, #1320]
     cbz     x16, .Lmissing
     br      x16
     .size   lxrt_mvk_vkCmdSetStencilReference, .-lxrt_mvk_vkCmdSetStencilReference
@@ -1847,7 +1838,7 @@ lxrt_mvk_vkCmdSetStencilReference:
 lxrt_mvk_vkCmdSetStencilTestEnable:
     adrp    x16, lxrt_vk_table
     add     x16, x16, :lo12:lxrt_vk_table
-    ldr     x16, [x16, #1336]
+    ldr     x16, [x16, #1328]
     cbz     x16, .Lmissing
     br      x16
     .size   lxrt_mvk_vkCmdSetStencilTestEnable, .-lxrt_mvk_vkCmdSetStencilTestEnable
@@ -1858,7 +1849,7 @@ lxrt_mvk_vkCmdSetStencilTestEnable:
 lxrt_mvk_vkCmdSetStencilTestEnableEXT:
     adrp    x16, lxrt_vk_table
     add     x16, x16, :lo12:lxrt_vk_table
-    ldr     x16, [x16, #1344]
+    ldr     x16, [x16, #1336]
     cbz     x16, .Lmissing
     br      x16
     .size   lxrt_mvk_vkCmdSetStencilTestEnableEXT, .-lxrt_mvk_vkCmdSetStencilTestEnableEXT
@@ -1869,7 +1860,7 @@ lxrt_mvk_vkCmdSetStencilTestEnableEXT:
 lxrt_mvk_vkCmdSetStencilWriteMask:
     adrp    x16, lxrt_vk_table
     add     x16, x16, :lo12:lxrt_vk_table
-    ldr     x16, [x16, #1352]
+    ldr     x16, [x16, #1344]
     cbz     x16, .Lmissing
     br      x16
     .size   lxrt_mvk_vkCmdSetStencilWriteMask, .-lxrt_mvk_vkCmdSetStencilWriteMask
@@ -1880,7 +1871,7 @@ lxrt_mvk_vkCmdSetStencilWriteMask:
 lxrt_mvk_vkCmdSetTessellationDomainOriginEXT:
     adrp    x16, lxrt_vk_table
     add     x16, x16, :lo12:lxrt_vk_table
-    ldr     x16, [x16, #1360]
+    ldr     x16, [x16, #1352]
     cbz     x16, .Lmissing
     br      x16
     .size   lxrt_mvk_vkCmdSetTessellationDomainOriginEXT, .-lxrt_mvk_vkCmdSetTessellationDomainOriginEXT
@@ -1891,7 +1882,7 @@ lxrt_mvk_vkCmdSetTessellationDomainOriginEXT:
 lxrt_mvk_vkCmdSetViewport:
     adrp    x16, lxrt_vk_table
     add     x16, x16, :lo12:lxrt_vk_table
-    ldr     x16, [x16, #1368]
+    ldr     x16, [x16, #1360]
     cbz     x16, .Lmissing
     br      x16
     .size   lxrt_mvk_vkCmdSetViewport, .-lxrt_mvk_vkCmdSetViewport
@@ -1902,7 +1893,7 @@ lxrt_mvk_vkCmdSetViewport:
 lxrt_mvk_vkCmdSetViewportWithCount:
     adrp    x16, lxrt_vk_table
     add     x16, x16, :lo12:lxrt_vk_table
-    ldr     x16, [x16, #1376]
+    ldr     x16, [x16, #1368]
     cbz     x16, .Lmissing
     br      x16
     .size   lxrt_mvk_vkCmdSetViewportWithCount, .-lxrt_mvk_vkCmdSetViewportWithCount
@@ -1913,7 +1904,7 @@ lxrt_mvk_vkCmdSetViewportWithCount:
 lxrt_mvk_vkCmdSetViewportWithCountEXT:
     adrp    x16, lxrt_vk_table
     add     x16, x16, :lo12:lxrt_vk_table
-    ldr     x16, [x16, #1384]
+    ldr     x16, [x16, #1376]
     cbz     x16, .Lmissing
     br      x16
     .size   lxrt_mvk_vkCmdSetViewportWithCountEXT, .-lxrt_mvk_vkCmdSetViewportWithCountEXT
@@ -1924,7 +1915,7 @@ lxrt_mvk_vkCmdSetViewportWithCountEXT:
 lxrt_mvk_vkCmdUpdateBuffer:
     adrp    x16, lxrt_vk_table
     add     x16, x16, :lo12:lxrt_vk_table
-    ldr     x16, [x16, #1392]
+    ldr     x16, [x16, #1384]
     cbz     x16, .Lmissing
     br      x16
     .size   lxrt_mvk_vkCmdUpdateBuffer, .-lxrt_mvk_vkCmdUpdateBuffer
@@ -1935,7 +1926,7 @@ lxrt_mvk_vkCmdUpdateBuffer:
 lxrt_mvk_vkCmdWaitEvents:
     adrp    x16, lxrt_vk_table
     add     x16, x16, :lo12:lxrt_vk_table
-    ldr     x16, [x16, #1400]
+    ldr     x16, [x16, #1392]
     cbz     x16, .Lmissing
     br      x16
     .size   lxrt_mvk_vkCmdWaitEvents, .-lxrt_mvk_vkCmdWaitEvents
@@ -1946,7 +1937,7 @@ lxrt_mvk_vkCmdWaitEvents:
 lxrt_mvk_vkCmdWaitEvents2:
     adrp    x16, lxrt_vk_table
     add     x16, x16, :lo12:lxrt_vk_table
-    ldr     x16, [x16, #1408]
+    ldr     x16, [x16, #1400]
     cbz     x16, .Lmissing
     br      x16
     .size   lxrt_mvk_vkCmdWaitEvents2, .-lxrt_mvk_vkCmdWaitEvents2
@@ -1957,7 +1948,7 @@ lxrt_mvk_vkCmdWaitEvents2:
 lxrt_mvk_vkCmdWaitEvents2KHR:
     adrp    x16, lxrt_vk_table
     add     x16, x16, :lo12:lxrt_vk_table
-    ldr     x16, [x16, #1416]
+    ldr     x16, [x16, #1408]
     cbz     x16, .Lmissing
     br      x16
     .size   lxrt_mvk_vkCmdWaitEvents2KHR, .-lxrt_mvk_vkCmdWaitEvents2KHR
@@ -1968,7 +1959,7 @@ lxrt_mvk_vkCmdWaitEvents2KHR:
 lxrt_mvk_vkCmdWriteTimestamp:
     adrp    x16, lxrt_vk_table
     add     x16, x16, :lo12:lxrt_vk_table
-    ldr     x16, [x16, #1424]
+    ldr     x16, [x16, #1416]
     cbz     x16, .Lmissing
     br      x16
     .size   lxrt_mvk_vkCmdWriteTimestamp, .-lxrt_mvk_vkCmdWriteTimestamp
@@ -1979,7 +1970,7 @@ lxrt_mvk_vkCmdWriteTimestamp:
 lxrt_mvk_vkCmdWriteTimestamp2:
     adrp    x16, lxrt_vk_table
     add     x16, x16, :lo12:lxrt_vk_table
-    ldr     x16, [x16, #1432]
+    ldr     x16, [x16, #1424]
     cbz     x16, .Lmissing
     br      x16
     .size   lxrt_mvk_vkCmdWriteTimestamp2, .-lxrt_mvk_vkCmdWriteTimestamp2
@@ -1990,7 +1981,7 @@ lxrt_mvk_vkCmdWriteTimestamp2:
 lxrt_mvk_vkCmdWriteTimestamp2KHR:
     adrp    x16, lxrt_vk_table
     add     x16, x16, :lo12:lxrt_vk_table
-    ldr     x16, [x16, #1440]
+    ldr     x16, [x16, #1432]
     cbz     x16, .Lmissing
     br      x16
     .size   lxrt_mvk_vkCmdWriteTimestamp2KHR, .-lxrt_mvk_vkCmdWriteTimestamp2KHR
@@ -2001,7 +1992,7 @@ lxrt_mvk_vkCmdWriteTimestamp2KHR:
 lxrt_mvk_vkCopyImageToImage:
     adrp    x16, lxrt_vk_table
     add     x16, x16, :lo12:lxrt_vk_table
-    ldr     x16, [x16, #1448]
+    ldr     x16, [x16, #1440]
     cbz     x16, .Lmissing
     br      x16
     .size   lxrt_mvk_vkCopyImageToImage, .-lxrt_mvk_vkCopyImageToImage
@@ -2012,7 +2003,7 @@ lxrt_mvk_vkCopyImageToImage:
 lxrt_mvk_vkCopyImageToImageEXT:
     adrp    x16, lxrt_vk_table
     add     x16, x16, :lo12:lxrt_vk_table
-    ldr     x16, [x16, #1456]
+    ldr     x16, [x16, #1448]
     cbz     x16, .Lmissing
     br      x16
     .size   lxrt_mvk_vkCopyImageToImageEXT, .-lxrt_mvk_vkCopyImageToImageEXT
@@ -2023,7 +2014,7 @@ lxrt_mvk_vkCopyImageToImageEXT:
 lxrt_mvk_vkCopyImageToMemory:
     adrp    x16, lxrt_vk_table
     add     x16, x16, :lo12:lxrt_vk_table
-    ldr     x16, [x16, #1464]
+    ldr     x16, [x16, #1456]
     cbz     x16, .Lmissing
     br      x16
     .size   lxrt_mvk_vkCopyImageToMemory, .-lxrt_mvk_vkCopyImageToMemory
@@ -2034,7 +2025,7 @@ lxrt_mvk_vkCopyImageToMemory:
 lxrt_mvk_vkCopyImageToMemoryEXT:
     adrp    x16, lxrt_vk_table
     add     x16, x16, :lo12:lxrt_vk_table
-    ldr     x16, [x16, #1472]
+    ldr     x16, [x16, #1464]
     cbz     x16, .Lmissing
     br      x16
     .size   lxrt_mvk_vkCopyImageToMemoryEXT, .-lxrt_mvk_vkCopyImageToMemoryEXT
@@ -2045,7 +2036,7 @@ lxrt_mvk_vkCopyImageToMemoryEXT:
 lxrt_mvk_vkCopyMemoryToImage:
     adrp    x16, lxrt_vk_table
     add     x16, x16, :lo12:lxrt_vk_table
-    ldr     x16, [x16, #1480]
+    ldr     x16, [x16, #1472]
     cbz     x16, .Lmissing
     br      x16
     .size   lxrt_mvk_vkCopyMemoryToImage, .-lxrt_mvk_vkCopyMemoryToImage
@@ -2056,7 +2047,7 @@ lxrt_mvk_vkCopyMemoryToImage:
 lxrt_mvk_vkCopyMemoryToImageEXT:
     adrp    x16, lxrt_vk_table
     add     x16, x16, :lo12:lxrt_vk_table
-    ldr     x16, [x16, #1488]
+    ldr     x16, [x16, #1480]
     cbz     x16, .Lmissing
     br      x16
     .size   lxrt_mvk_vkCopyMemoryToImageEXT, .-lxrt_mvk_vkCopyMemoryToImageEXT
@@ -2067,7 +2058,7 @@ lxrt_mvk_vkCopyMemoryToImageEXT:
 lxrt_mvk_vkCreateBuffer:
     adrp    x16, lxrt_vk_table
     add     x16, x16, :lo12:lxrt_vk_table
-    ldr     x16, [x16, #1496]
+    ldr     x16, [x16, #1488]
     cbz     x16, .Lmissing
     br      x16
     .size   lxrt_mvk_vkCreateBuffer, .-lxrt_mvk_vkCreateBuffer
@@ -2078,7 +2069,7 @@ lxrt_mvk_vkCreateBuffer:
 lxrt_mvk_vkCreateBufferView:
     adrp    x16, lxrt_vk_table
     add     x16, x16, :lo12:lxrt_vk_table
-    ldr     x16, [x16, #1504]
+    ldr     x16, [x16, #1496]
     cbz     x16, .Lmissing
     br      x16
     .size   lxrt_mvk_vkCreateBufferView, .-lxrt_mvk_vkCreateBufferView
@@ -2089,7 +2080,7 @@ lxrt_mvk_vkCreateBufferView:
 lxrt_mvk_vkCreateCommandPool:
     adrp    x16, lxrt_vk_table
     add     x16, x16, :lo12:lxrt_vk_table
-    ldr     x16, [x16, #1512]
+    ldr     x16, [x16, #1504]
     cbz     x16, .Lmissing
     br      x16
     .size   lxrt_mvk_vkCreateCommandPool, .-lxrt_mvk_vkCreateCommandPool
@@ -2100,7 +2091,7 @@ lxrt_mvk_vkCreateCommandPool:
 lxrt_mvk_vkCreateComputePipelines:
     adrp    x16, lxrt_vk_table
     add     x16, x16, :lo12:lxrt_vk_table
-    ldr     x16, [x16, #1520]
+    ldr     x16, [x16, #1512]
     cbz     x16, .Lmissing
     br      x16
     .size   lxrt_mvk_vkCreateComputePipelines, .-lxrt_mvk_vkCreateComputePipelines
@@ -2111,7 +2102,7 @@ lxrt_mvk_vkCreateComputePipelines:
 lxrt_mvk_vkCreateDebugReportCallbackEXT:
     adrp    x16, lxrt_vk_table
     add     x16, x16, :lo12:lxrt_vk_table
-    ldr     x16, [x16, #1528]
+    ldr     x16, [x16, #1520]
     cbz     x16, .Lmissing
     br      x16
     .size   lxrt_mvk_vkCreateDebugReportCallbackEXT, .-lxrt_mvk_vkCreateDebugReportCallbackEXT
@@ -2122,7 +2113,7 @@ lxrt_mvk_vkCreateDebugReportCallbackEXT:
 lxrt_mvk_vkCreateDebugUtilsMessengerEXT:
     adrp    x16, lxrt_vk_table
     add     x16, x16, :lo12:lxrt_vk_table
-    ldr     x16, [x16, #1536]
+    ldr     x16, [x16, #1528]
     cbz     x16, .Lmissing
     br      x16
     .size   lxrt_mvk_vkCreateDebugUtilsMessengerEXT, .-lxrt_mvk_vkCreateDebugUtilsMessengerEXT
@@ -2133,7 +2124,7 @@ lxrt_mvk_vkCreateDebugUtilsMessengerEXT:
 lxrt_mvk_vkCreateDeferredOperationKHR:
     adrp    x16, lxrt_vk_table
     add     x16, x16, :lo12:lxrt_vk_table
-    ldr     x16, [x16, #1544]
+    ldr     x16, [x16, #1536]
     cbz     x16, .Lmissing
     br      x16
     .size   lxrt_mvk_vkCreateDeferredOperationKHR, .-lxrt_mvk_vkCreateDeferredOperationKHR
@@ -2144,7 +2135,7 @@ lxrt_mvk_vkCreateDeferredOperationKHR:
 lxrt_mvk_vkCreateDescriptorPool:
     adrp    x16, lxrt_vk_table
     add     x16, x16, :lo12:lxrt_vk_table
-    ldr     x16, [x16, #1552]
+    ldr     x16, [x16, #1544]
     cbz     x16, .Lmissing
     br      x16
     .size   lxrt_mvk_vkCreateDescriptorPool, .-lxrt_mvk_vkCreateDescriptorPool
@@ -2155,7 +2146,7 @@ lxrt_mvk_vkCreateDescriptorPool:
 lxrt_mvk_vkCreateDescriptorSetLayout:
     adrp    x16, lxrt_vk_table
     add     x16, x16, :lo12:lxrt_vk_table
-    ldr     x16, [x16, #1560]
+    ldr     x16, [x16, #1552]
     cbz     x16, .Lmissing
     br      x16
     .size   lxrt_mvk_vkCreateDescriptorSetLayout, .-lxrt_mvk_vkCreateDescriptorSetLayout
@@ -2166,7 +2157,7 @@ lxrt_mvk_vkCreateDescriptorSetLayout:
 lxrt_mvk_vkCreateDescriptorUpdateTemplate:
     adrp    x16, lxrt_vk_table
     add     x16, x16, :lo12:lxrt_vk_table
-    ldr     x16, [x16, #1568]
+    ldr     x16, [x16, #1560]
     cbz     x16, .Lmissing
     br      x16
     .size   lxrt_mvk_vkCreateDescriptorUpdateTemplate, .-lxrt_mvk_vkCreateDescriptorUpdateTemplate
@@ -2177,7 +2168,7 @@ lxrt_mvk_vkCreateDescriptorUpdateTemplate:
 lxrt_mvk_vkCreateDescriptorUpdateTemplateKHR:
     adrp    x16, lxrt_vk_table
     add     x16, x16, :lo12:lxrt_vk_table
-    ldr     x16, [x16, #1576]
+    ldr     x16, [x16, #1568]
     cbz     x16, .Lmissing
     br      x16
     .size   lxrt_mvk_vkCreateDescriptorUpdateTemplateKHR, .-lxrt_mvk_vkCreateDescriptorUpdateTemplateKHR
@@ -2188,7 +2179,7 @@ lxrt_mvk_vkCreateDescriptorUpdateTemplateKHR:
 lxrt_mvk_vkCreateDevice:
     adrp    x16, lxrt_vk_table
     add     x16, x16, :lo12:lxrt_vk_table
-    ldr     x16, [x16, #1584]
+    ldr     x16, [x16, #1576]
     cbz     x16, .Lmissing
     br      x16
     .size   lxrt_mvk_vkCreateDevice, .-lxrt_mvk_vkCreateDevice
@@ -2199,7 +2190,7 @@ lxrt_mvk_vkCreateDevice:
 lxrt_mvk_vkCreateEvent:
     adrp    x16, lxrt_vk_table
     add     x16, x16, :lo12:lxrt_vk_table
-    ldr     x16, [x16, #1592]
+    ldr     x16, [x16, #1584]
     cbz     x16, .Lmissing
     br      x16
     .size   lxrt_mvk_vkCreateEvent, .-lxrt_mvk_vkCreateEvent
@@ -2210,7 +2201,7 @@ lxrt_mvk_vkCreateEvent:
 lxrt_mvk_vkCreateFence:
     adrp    x16, lxrt_vk_table
     add     x16, x16, :lo12:lxrt_vk_table
-    ldr     x16, [x16, #1600]
+    ldr     x16, [x16, #1592]
     cbz     x16, .Lmissing
     br      x16
     .size   lxrt_mvk_vkCreateFence, .-lxrt_mvk_vkCreateFence
@@ -2221,7 +2212,7 @@ lxrt_mvk_vkCreateFence:
 lxrt_mvk_vkCreateFramebuffer:
     adrp    x16, lxrt_vk_table
     add     x16, x16, :lo12:lxrt_vk_table
-    ldr     x16, [x16, #1608]
+    ldr     x16, [x16, #1600]
     cbz     x16, .Lmissing
     br      x16
     .size   lxrt_mvk_vkCreateFramebuffer, .-lxrt_mvk_vkCreateFramebuffer
@@ -2232,7 +2223,7 @@ lxrt_mvk_vkCreateFramebuffer:
 lxrt_mvk_vkCreateGraphicsPipelines:
     adrp    x16, lxrt_vk_table
     add     x16, x16, :lo12:lxrt_vk_table
-    ldr     x16, [x16, #1616]
+    ldr     x16, [x16, #1608]
     cbz     x16, .Lmissing
     br      x16
     .size   lxrt_mvk_vkCreateGraphicsPipelines, .-lxrt_mvk_vkCreateGraphicsPipelines
@@ -2243,7 +2234,7 @@ lxrt_mvk_vkCreateGraphicsPipelines:
 lxrt_mvk_vkCreateHeadlessSurfaceEXT:
     adrp    x16, lxrt_vk_table
     add     x16, x16, :lo12:lxrt_vk_table
-    ldr     x16, [x16, #1624]
+    ldr     x16, [x16, #1616]
     cbz     x16, .Lmissing
     br      x16
     .size   lxrt_mvk_vkCreateHeadlessSurfaceEXT, .-lxrt_mvk_vkCreateHeadlessSurfaceEXT
@@ -2254,7 +2245,7 @@ lxrt_mvk_vkCreateHeadlessSurfaceEXT:
 lxrt_mvk_vkCreateImage:
     adrp    x16, lxrt_vk_table
     add     x16, x16, :lo12:lxrt_vk_table
-    ldr     x16, [x16, #1632]
+    ldr     x16, [x16, #1624]
     cbz     x16, .Lmissing
     br      x16
     .size   lxrt_mvk_vkCreateImage, .-lxrt_mvk_vkCreateImage
@@ -2265,7 +2256,7 @@ lxrt_mvk_vkCreateImage:
 lxrt_mvk_vkCreateImageView:
     adrp    x16, lxrt_vk_table
     add     x16, x16, :lo12:lxrt_vk_table
-    ldr     x16, [x16, #1640]
+    ldr     x16, [x16, #1632]
     cbz     x16, .Lmissing
     br      x16
     .size   lxrt_mvk_vkCreateImageView, .-lxrt_mvk_vkCreateImageView
@@ -2276,7 +2267,7 @@ lxrt_mvk_vkCreateImageView:
 lxrt_mvk_vkCreateInstance:
     adrp    x16, lxrt_vk_table
     add     x16, x16, :lo12:lxrt_vk_table
-    ldr     x16, [x16, #1648]
+    ldr     x16, [x16, #1640]
     cbz     x16, .Lmissing
     br      x16
     .size   lxrt_mvk_vkCreateInstance, .-lxrt_mvk_vkCreateInstance
@@ -2286,7 +2277,7 @@ lxrt_mvk_vkCreateInstance:
 vkCreateMacOSSurfaceMVK:
     adrp    x16, lxrt_vk_table
     add     x16, x16, :lo12:lxrt_vk_table
-    ldr     x16, [x16, #1656]
+    ldr     x16, [x16, #1648]
     cbz     x16, .Lmissing
     br      x16
     .size   vkCreateMacOSSurfaceMVK, .-vkCreateMacOSSurfaceMVK
@@ -2297,7 +2288,7 @@ vkCreateMacOSSurfaceMVK:
 lxrt_mvk_vkCreateMetalSurfaceEXT:
     adrp    x16, lxrt_vk_table
     add     x16, x16, :lo12:lxrt_vk_table
-    ldr     x16, [x16, #1664]
+    ldr     x16, [x16, #1656]
     cbz     x16, .Lmissing
     br      x16
     .size   lxrt_mvk_vkCreateMetalSurfaceEXT, .-lxrt_mvk_vkCreateMetalSurfaceEXT
@@ -2308,7 +2299,7 @@ lxrt_mvk_vkCreateMetalSurfaceEXT:
 lxrt_mvk_vkCreatePipelineCache:
     adrp    x16, lxrt_vk_table
     add     x16, x16, :lo12:lxrt_vk_table
-    ldr     x16, [x16, #1672]
+    ldr     x16, [x16, #1664]
     cbz     x16, .Lmissing
     br      x16
     .size   lxrt_mvk_vkCreatePipelineCache, .-lxrt_mvk_vkCreatePipelineCache
@@ -2319,7 +2310,7 @@ lxrt_mvk_vkCreatePipelineCache:
 lxrt_mvk_vkCreatePipelineLayout:
     adrp    x16, lxrt_vk_table
     add     x16, x16, :lo12:lxrt_vk_table
-    ldr     x16, [x16, #1680]
+    ldr     x16, [x16, #1672]
     cbz     x16, .Lmissing
     br      x16
     .size   lxrt_mvk_vkCreatePipelineLayout, .-lxrt_mvk_vkCreatePipelineLayout
@@ -2330,7 +2321,7 @@ lxrt_mvk_vkCreatePipelineLayout:
 lxrt_mvk_vkCreatePrivateDataSlot:
     adrp    x16, lxrt_vk_table
     add     x16, x16, :lo12:lxrt_vk_table
-    ldr     x16, [x16, #1688]
+    ldr     x16, [x16, #1680]
     cbz     x16, .Lmissing
     br      x16
     .size   lxrt_mvk_vkCreatePrivateDataSlot, .-lxrt_mvk_vkCreatePrivateDataSlot
@@ -2341,7 +2332,7 @@ lxrt_mvk_vkCreatePrivateDataSlot:
 lxrt_mvk_vkCreatePrivateDataSlotEXT:
     adrp    x16, lxrt_vk_table
     add     x16, x16, :lo12:lxrt_vk_table
-    ldr     x16, [x16, #1696]
+    ldr     x16, [x16, #1688]
     cbz     x16, .Lmissing
     br      x16
     .size   lxrt_mvk_vkCreatePrivateDataSlotEXT, .-lxrt_mvk_vkCreatePrivateDataSlotEXT
@@ -2352,7 +2343,7 @@ lxrt_mvk_vkCreatePrivateDataSlotEXT:
 lxrt_mvk_vkCreateQueryPool:
     adrp    x16, lxrt_vk_table
     add     x16, x16, :lo12:lxrt_vk_table
-    ldr     x16, [x16, #1704]
+    ldr     x16, [x16, #1696]
     cbz     x16, .Lmissing
     br      x16
     .size   lxrt_mvk_vkCreateQueryPool, .-lxrt_mvk_vkCreateQueryPool
@@ -2363,7 +2354,7 @@ lxrt_mvk_vkCreateQueryPool:
 lxrt_mvk_vkCreateRenderPass:
     adrp    x16, lxrt_vk_table
     add     x16, x16, :lo12:lxrt_vk_table
-    ldr     x16, [x16, #1712]
+    ldr     x16, [x16, #1704]
     cbz     x16, .Lmissing
     br      x16
     .size   lxrt_mvk_vkCreateRenderPass, .-lxrt_mvk_vkCreateRenderPass
@@ -2374,7 +2365,7 @@ lxrt_mvk_vkCreateRenderPass:
 lxrt_mvk_vkCreateRenderPass2:
     adrp    x16, lxrt_vk_table
     add     x16, x16, :lo12:lxrt_vk_table
-    ldr     x16, [x16, #1720]
+    ldr     x16, [x16, #1712]
     cbz     x16, .Lmissing
     br      x16
     .size   lxrt_mvk_vkCreateRenderPass2, .-lxrt_mvk_vkCreateRenderPass2
@@ -2385,7 +2376,7 @@ lxrt_mvk_vkCreateRenderPass2:
 lxrt_mvk_vkCreateRenderPass2KHR:
     adrp    x16, lxrt_vk_table
     add     x16, x16, :lo12:lxrt_vk_table
-    ldr     x16, [x16, #1728]
+    ldr     x16, [x16, #1720]
     cbz     x16, .Lmissing
     br      x16
     .size   lxrt_mvk_vkCreateRenderPass2KHR, .-lxrt_mvk_vkCreateRenderPass2KHR
@@ -2396,7 +2387,7 @@ lxrt_mvk_vkCreateRenderPass2KHR:
 lxrt_mvk_vkCreateSampler:
     adrp    x16, lxrt_vk_table
     add     x16, x16, :lo12:lxrt_vk_table
-    ldr     x16, [x16, #1736]
+    ldr     x16, [x16, #1728]
     cbz     x16, .Lmissing
     br      x16
     .size   lxrt_mvk_vkCreateSampler, .-lxrt_mvk_vkCreateSampler
@@ -2407,7 +2398,7 @@ lxrt_mvk_vkCreateSampler:
 lxrt_mvk_vkCreateSamplerYcbcrConversion:
     adrp    x16, lxrt_vk_table
     add     x16, x16, :lo12:lxrt_vk_table
-    ldr     x16, [x16, #1744]
+    ldr     x16, [x16, #1736]
     cbz     x16, .Lmissing
     br      x16
     .size   lxrt_mvk_vkCreateSamplerYcbcrConversion, .-lxrt_mvk_vkCreateSamplerYcbcrConversion
@@ -2418,7 +2409,7 @@ lxrt_mvk_vkCreateSamplerYcbcrConversion:
 lxrt_mvk_vkCreateSamplerYcbcrConversionKHR:
     adrp    x16, lxrt_vk_table
     add     x16, x16, :lo12:lxrt_vk_table
-    ldr     x16, [x16, #1752]
+    ldr     x16, [x16, #1744]
     cbz     x16, .Lmissing
     br      x16
     .size   lxrt_mvk_vkCreateSamplerYcbcrConversionKHR, .-lxrt_mvk_vkCreateSamplerYcbcrConversionKHR
@@ -2429,7 +2420,7 @@ lxrt_mvk_vkCreateSamplerYcbcrConversionKHR:
 lxrt_mvk_vkCreateSemaphore:
     adrp    x16, lxrt_vk_table
     add     x16, x16, :lo12:lxrt_vk_table
-    ldr     x16, [x16, #1760]
+    ldr     x16, [x16, #1752]
     cbz     x16, .Lmissing
     br      x16
     .size   lxrt_mvk_vkCreateSemaphore, .-lxrt_mvk_vkCreateSemaphore
@@ -2440,7 +2431,7 @@ lxrt_mvk_vkCreateSemaphore:
 lxrt_mvk_vkCreateShaderModule:
     adrp    x16, lxrt_vk_table
     add     x16, x16, :lo12:lxrt_vk_table
-    ldr     x16, [x16, #1768]
+    ldr     x16, [x16, #1760]
     cbz     x16, .Lmissing
     br      x16
     .size   lxrt_mvk_vkCreateShaderModule, .-lxrt_mvk_vkCreateShaderModule
@@ -2451,7 +2442,7 @@ lxrt_mvk_vkCreateShaderModule:
 lxrt_mvk_vkCreateSwapchainKHR:
     adrp    x16, lxrt_vk_table
     add     x16, x16, :lo12:lxrt_vk_table
-    ldr     x16, [x16, #1776]
+    ldr     x16, [x16, #1768]
     cbz     x16, .Lmissing
     br      x16
     .size   lxrt_mvk_vkCreateSwapchainKHR, .-lxrt_mvk_vkCreateSwapchainKHR
@@ -2462,7 +2453,7 @@ lxrt_mvk_vkCreateSwapchainKHR:
 lxrt_mvk_vkDebugMarkerSetObjectNameEXT:
     adrp    x16, lxrt_vk_table
     add     x16, x16, :lo12:lxrt_vk_table
-    ldr     x16, [x16, #1784]
+    ldr     x16, [x16, #1776]
     cbz     x16, .Lmissing
     br      x16
     .size   lxrt_mvk_vkDebugMarkerSetObjectNameEXT, .-lxrt_mvk_vkDebugMarkerSetObjectNameEXT
@@ -2473,7 +2464,7 @@ lxrt_mvk_vkDebugMarkerSetObjectNameEXT:
 lxrt_mvk_vkDebugMarkerSetObjectTagEXT:
     adrp    x16, lxrt_vk_table
     add     x16, x16, :lo12:lxrt_vk_table
-    ldr     x16, [x16, #1792]
+    ldr     x16, [x16, #1784]
     cbz     x16, .Lmissing
     br      x16
     .size   lxrt_mvk_vkDebugMarkerSetObjectTagEXT, .-lxrt_mvk_vkDebugMarkerSetObjectTagEXT
@@ -2484,7 +2475,7 @@ lxrt_mvk_vkDebugMarkerSetObjectTagEXT:
 lxrt_mvk_vkDebugReportMessageEXT:
     adrp    x16, lxrt_vk_table
     add     x16, x16, :lo12:lxrt_vk_table
-    ldr     x16, [x16, #1800]
+    ldr     x16, [x16, #1792]
     cbz     x16, .Lmissing
     br      x16
     .size   lxrt_mvk_vkDebugReportMessageEXT, .-lxrt_mvk_vkDebugReportMessageEXT
@@ -2495,7 +2486,7 @@ lxrt_mvk_vkDebugReportMessageEXT:
 lxrt_mvk_vkDeferredOperationJoinKHR:
     adrp    x16, lxrt_vk_table
     add     x16, x16, :lo12:lxrt_vk_table
-    ldr     x16, [x16, #1808]
+    ldr     x16, [x16, #1800]
     cbz     x16, .Lmissing
     br      x16
     .size   lxrt_mvk_vkDeferredOperationJoinKHR, .-lxrt_mvk_vkDeferredOperationJoinKHR
@@ -2506,7 +2497,7 @@ lxrt_mvk_vkDeferredOperationJoinKHR:
 lxrt_mvk_vkDestroyBuffer:
     adrp    x16, lxrt_vk_table
     add     x16, x16, :lo12:lxrt_vk_table
-    ldr     x16, [x16, #1816]
+    ldr     x16, [x16, #1808]
     cbz     x16, .Lmissing
     br      x16
     .size   lxrt_mvk_vkDestroyBuffer, .-lxrt_mvk_vkDestroyBuffer
@@ -2517,7 +2508,7 @@ lxrt_mvk_vkDestroyBuffer:
 lxrt_mvk_vkDestroyBufferView:
     adrp    x16, lxrt_vk_table
     add     x16, x16, :lo12:lxrt_vk_table
-    ldr     x16, [x16, #1824]
+    ldr     x16, [x16, #1816]
     cbz     x16, .Lmissing
     br      x16
     .size   lxrt_mvk_vkDestroyBufferView, .-lxrt_mvk_vkDestroyBufferView
@@ -2528,7 +2519,7 @@ lxrt_mvk_vkDestroyBufferView:
 lxrt_mvk_vkDestroyCommandPool:
     adrp    x16, lxrt_vk_table
     add     x16, x16, :lo12:lxrt_vk_table
-    ldr     x16, [x16, #1832]
+    ldr     x16, [x16, #1824]
     cbz     x16, .Lmissing
     br      x16
     .size   lxrt_mvk_vkDestroyCommandPool, .-lxrt_mvk_vkDestroyCommandPool
@@ -2539,7 +2530,7 @@ lxrt_mvk_vkDestroyCommandPool:
 lxrt_mvk_vkDestroyDebugReportCallbackEXT:
     adrp    x16, lxrt_vk_table
     add     x16, x16, :lo12:lxrt_vk_table
-    ldr     x16, [x16, #1840]
+    ldr     x16, [x16, #1832]
     cbz     x16, .Lmissing
     br      x16
     .size   lxrt_mvk_vkDestroyDebugReportCallbackEXT, .-lxrt_mvk_vkDestroyDebugReportCallbackEXT
@@ -2550,7 +2541,7 @@ lxrt_mvk_vkDestroyDebugReportCallbackEXT:
 lxrt_mvk_vkDestroyDebugUtilsMessengerEXT:
     adrp    x16, lxrt_vk_table
     add     x16, x16, :lo12:lxrt_vk_table
-    ldr     x16, [x16, #1848]
+    ldr     x16, [x16, #1840]
     cbz     x16, .Lmissing
     br      x16
     .size   lxrt_mvk_vkDestroyDebugUtilsMessengerEXT, .-lxrt_mvk_vkDestroyDebugUtilsMessengerEXT
@@ -2561,7 +2552,7 @@ lxrt_mvk_vkDestroyDebugUtilsMessengerEXT:
 lxrt_mvk_vkDestroyDeferredOperationKHR:
     adrp    x16, lxrt_vk_table
     add     x16, x16, :lo12:lxrt_vk_table
-    ldr     x16, [x16, #1856]
+    ldr     x16, [x16, #1848]
     cbz     x16, .Lmissing
     br      x16
     .size   lxrt_mvk_vkDestroyDeferredOperationKHR, .-lxrt_mvk_vkDestroyDeferredOperationKHR
@@ -2572,7 +2563,7 @@ lxrt_mvk_vkDestroyDeferredOperationKHR:
 lxrt_mvk_vkDestroyDescriptorPool:
     adrp    x16, lxrt_vk_table
     add     x16, x16, :lo12:lxrt_vk_table
-    ldr     x16, [x16, #1864]
+    ldr     x16, [x16, #1856]
     cbz     x16, .Lmissing
     br      x16
     .size   lxrt_mvk_vkDestroyDescriptorPool, .-lxrt_mvk_vkDestroyDescriptorPool
@@ -2583,7 +2574,7 @@ lxrt_mvk_vkDestroyDescriptorPool:
 lxrt_mvk_vkDestroyDescriptorSetLayout:
     adrp    x16, lxrt_vk_table
     add     x16, x16, :lo12:lxrt_vk_table
-    ldr     x16, [x16, #1872]
+    ldr     x16, [x16, #1864]
     cbz     x16, .Lmissing
     br      x16
     .size   lxrt_mvk_vkDestroyDescriptorSetLayout, .-lxrt_mvk_vkDestroyDescriptorSetLayout
@@ -2594,7 +2585,7 @@ lxrt_mvk_vkDestroyDescriptorSetLayout:
 lxrt_mvk_vkDestroyDescriptorUpdateTemplate:
     adrp    x16, lxrt_vk_table
     add     x16, x16, :lo12:lxrt_vk_table
-    ldr     x16, [x16, #1880]
+    ldr     x16, [x16, #1872]
     cbz     x16, .Lmissing
     br      x16
     .size   lxrt_mvk_vkDestroyDescriptorUpdateTemplate, .-lxrt_mvk_vkDestroyDescriptorUpdateTemplate
@@ -2605,7 +2596,7 @@ lxrt_mvk_vkDestroyDescriptorUpdateTemplate:
 lxrt_mvk_vkDestroyDescriptorUpdateTemplateKHR:
     adrp    x16, lxrt_vk_table
     add     x16, x16, :lo12:lxrt_vk_table
-    ldr     x16, [x16, #1888]
+    ldr     x16, [x16, #1880]
     cbz     x16, .Lmissing
     br      x16
     .size   lxrt_mvk_vkDestroyDescriptorUpdateTemplateKHR, .-lxrt_mvk_vkDestroyDescriptorUpdateTemplateKHR
@@ -2616,7 +2607,7 @@ lxrt_mvk_vkDestroyDescriptorUpdateTemplateKHR:
 lxrt_mvk_vkDestroyDevice:
     adrp    x16, lxrt_vk_table
     add     x16, x16, :lo12:lxrt_vk_table
-    ldr     x16, [x16, #1896]
+    ldr     x16, [x16, #1888]
     cbz     x16, .Lmissing
     br      x16
     .size   lxrt_mvk_vkDestroyDevice, .-lxrt_mvk_vkDestroyDevice
@@ -2627,7 +2618,7 @@ lxrt_mvk_vkDestroyDevice:
 lxrt_mvk_vkDestroyEvent:
     adrp    x16, lxrt_vk_table
     add     x16, x16, :lo12:lxrt_vk_table
-    ldr     x16, [x16, #1904]
+    ldr     x16, [x16, #1896]
     cbz     x16, .Lmissing
     br      x16
     .size   lxrt_mvk_vkDestroyEvent, .-lxrt_mvk_vkDestroyEvent
@@ -2638,7 +2629,7 @@ lxrt_mvk_vkDestroyEvent:
 lxrt_mvk_vkDestroyFence:
     adrp    x16, lxrt_vk_table
     add     x16, x16, :lo12:lxrt_vk_table
-    ldr     x16, [x16, #1912]
+    ldr     x16, [x16, #1904]
     cbz     x16, .Lmissing
     br      x16
     .size   lxrt_mvk_vkDestroyFence, .-lxrt_mvk_vkDestroyFence
@@ -2649,7 +2640,7 @@ lxrt_mvk_vkDestroyFence:
 lxrt_mvk_vkDestroyFramebuffer:
     adrp    x16, lxrt_vk_table
     add     x16, x16, :lo12:lxrt_vk_table
-    ldr     x16, [x16, #1920]
+    ldr     x16, [x16, #1912]
     cbz     x16, .Lmissing
     br      x16
     .size   lxrt_mvk_vkDestroyFramebuffer, .-lxrt_mvk_vkDestroyFramebuffer
@@ -2660,7 +2651,7 @@ lxrt_mvk_vkDestroyFramebuffer:
 lxrt_mvk_vkDestroyImage:
     adrp    x16, lxrt_vk_table
     add     x16, x16, :lo12:lxrt_vk_table
-    ldr     x16, [x16, #1928]
+    ldr     x16, [x16, #1920]
     cbz     x16, .Lmissing
     br      x16
     .size   lxrt_mvk_vkDestroyImage, .-lxrt_mvk_vkDestroyImage
@@ -2671,7 +2662,7 @@ lxrt_mvk_vkDestroyImage:
 lxrt_mvk_vkDestroyImageView:
     adrp    x16, lxrt_vk_table
     add     x16, x16, :lo12:lxrt_vk_table
-    ldr     x16, [x16, #1936]
+    ldr     x16, [x16, #1928]
     cbz     x16, .Lmissing
     br      x16
     .size   lxrt_mvk_vkDestroyImageView, .-lxrt_mvk_vkDestroyImageView
@@ -2682,7 +2673,7 @@ lxrt_mvk_vkDestroyImageView:
 lxrt_mvk_vkDestroyInstance:
     adrp    x16, lxrt_vk_table
     add     x16, x16, :lo12:lxrt_vk_table
-    ldr     x16, [x16, #1944]
+    ldr     x16, [x16, #1936]
     cbz     x16, .Lmissing
     br      x16
     .size   lxrt_mvk_vkDestroyInstance, .-lxrt_mvk_vkDestroyInstance
@@ -2693,7 +2684,7 @@ lxrt_mvk_vkDestroyInstance:
 lxrt_mvk_vkDestroyPipeline:
     adrp    x16, lxrt_vk_table
     add     x16, x16, :lo12:lxrt_vk_table
-    ldr     x16, [x16, #1952]
+    ldr     x16, [x16, #1944]
     cbz     x16, .Lmissing
     br      x16
     .size   lxrt_mvk_vkDestroyPipeline, .-lxrt_mvk_vkDestroyPipeline
@@ -2704,7 +2695,7 @@ lxrt_mvk_vkDestroyPipeline:
 lxrt_mvk_vkDestroyPipelineCache:
     adrp    x16, lxrt_vk_table
     add     x16, x16, :lo12:lxrt_vk_table
-    ldr     x16, [x16, #1960]
+    ldr     x16, [x16, #1952]
     cbz     x16, .Lmissing
     br      x16
     .size   lxrt_mvk_vkDestroyPipelineCache, .-lxrt_mvk_vkDestroyPipelineCache
@@ -2715,7 +2706,7 @@ lxrt_mvk_vkDestroyPipelineCache:
 lxrt_mvk_vkDestroyPipelineLayout:
     adrp    x16, lxrt_vk_table
     add     x16, x16, :lo12:lxrt_vk_table
-    ldr     x16, [x16, #1968]
+    ldr     x16, [x16, #1960]
     cbz     x16, .Lmissing
     br      x16
     .size   lxrt_mvk_vkDestroyPipelineLayout, .-lxrt_mvk_vkDestroyPipelineLayout
@@ -2726,7 +2717,7 @@ lxrt_mvk_vkDestroyPipelineLayout:
 lxrt_mvk_vkDestroyPrivateDataSlot:
     adrp    x16, lxrt_vk_table
     add     x16, x16, :lo12:lxrt_vk_table
-    ldr     x16, [x16, #1976]
+    ldr     x16, [x16, #1968]
     cbz     x16, .Lmissing
     br      x16
     .size   lxrt_mvk_vkDestroyPrivateDataSlot, .-lxrt_mvk_vkDestroyPrivateDataSlot
@@ -2737,7 +2728,7 @@ lxrt_mvk_vkDestroyPrivateDataSlot:
 lxrt_mvk_vkDestroyPrivateDataSlotEXT:
     adrp    x16, lxrt_vk_table
     add     x16, x16, :lo12:lxrt_vk_table
-    ldr     x16, [x16, #1984]
+    ldr     x16, [x16, #1976]
     cbz     x16, .Lmissing
     br      x16
     .size   lxrt_mvk_vkDestroyPrivateDataSlotEXT, .-lxrt_mvk_vkDestroyPrivateDataSlotEXT
@@ -2748,7 +2739,7 @@ lxrt_mvk_vkDestroyPrivateDataSlotEXT:
 lxrt_mvk_vkDestroyQueryPool:
     adrp    x16, lxrt_vk_table
     add     x16, x16, :lo12:lxrt_vk_table
-    ldr     x16, [x16, #1992]
+    ldr     x16, [x16, #1984]
     cbz     x16, .Lmissing
     br      x16
     .size   lxrt_mvk_vkDestroyQueryPool, .-lxrt_mvk_vkDestroyQueryPool
@@ -2759,7 +2750,7 @@ lxrt_mvk_vkDestroyQueryPool:
 lxrt_mvk_vkDestroyRenderPass:
     adrp    x16, lxrt_vk_table
     add     x16, x16, :lo12:lxrt_vk_table
-    ldr     x16, [x16, #2000]
+    ldr     x16, [x16, #1992]
     cbz     x16, .Lmissing
     br      x16
     .size   lxrt_mvk_vkDestroyRenderPass, .-lxrt_mvk_vkDestroyRenderPass
@@ -2770,7 +2761,7 @@ lxrt_mvk_vkDestroyRenderPass:
 lxrt_mvk_vkDestroySampler:
     adrp    x16, lxrt_vk_table
     add     x16, x16, :lo12:lxrt_vk_table
-    ldr     x16, [x16, #2008]
+    ldr     x16, [x16, #2000]
     cbz     x16, .Lmissing
     br      x16
     .size   lxrt_mvk_vkDestroySampler, .-lxrt_mvk_vkDestroySampler
@@ -2781,7 +2772,7 @@ lxrt_mvk_vkDestroySampler:
 lxrt_mvk_vkDestroySamplerYcbcrConversion:
     adrp    x16, lxrt_vk_table
     add     x16, x16, :lo12:lxrt_vk_table
-    ldr     x16, [x16, #2016]
+    ldr     x16, [x16, #2008]
     cbz     x16, .Lmissing
     br      x16
     .size   lxrt_mvk_vkDestroySamplerYcbcrConversion, .-lxrt_mvk_vkDestroySamplerYcbcrConversion
@@ -2792,7 +2783,7 @@ lxrt_mvk_vkDestroySamplerYcbcrConversion:
 lxrt_mvk_vkDestroySamplerYcbcrConversionKHR:
     adrp    x16, lxrt_vk_table
     add     x16, x16, :lo12:lxrt_vk_table
-    ldr     x16, [x16, #2024]
+    ldr     x16, [x16, #2016]
     cbz     x16, .Lmissing
     br      x16
     .size   lxrt_mvk_vkDestroySamplerYcbcrConversionKHR, .-lxrt_mvk_vkDestroySamplerYcbcrConversionKHR
@@ -2803,7 +2794,7 @@ lxrt_mvk_vkDestroySamplerYcbcrConversionKHR:
 lxrt_mvk_vkDestroySemaphore:
     adrp    x16, lxrt_vk_table
     add     x16, x16, :lo12:lxrt_vk_table
-    ldr     x16, [x16, #2032]
+    ldr     x16, [x16, #2024]
     cbz     x16, .Lmissing
     br      x16
     .size   lxrt_mvk_vkDestroySemaphore, .-lxrt_mvk_vkDestroySemaphore
@@ -2814,7 +2805,7 @@ lxrt_mvk_vkDestroySemaphore:
 lxrt_mvk_vkDestroyShaderModule:
     adrp    x16, lxrt_vk_table
     add     x16, x16, :lo12:lxrt_vk_table
-    ldr     x16, [x16, #2040]
+    ldr     x16, [x16, #2032]
     cbz     x16, .Lmissing
     br      x16
     .size   lxrt_mvk_vkDestroyShaderModule, .-lxrt_mvk_vkDestroyShaderModule
@@ -2825,7 +2816,7 @@ lxrt_mvk_vkDestroyShaderModule:
 lxrt_mvk_vkDestroySurfaceKHR:
     adrp    x16, lxrt_vk_table
     add     x16, x16, :lo12:lxrt_vk_table
-    ldr     x16, [x16, #2048]
+    ldr     x16, [x16, #2040]
     cbz     x16, .Lmissing
     br      x16
     .size   lxrt_mvk_vkDestroySurfaceKHR, .-lxrt_mvk_vkDestroySurfaceKHR
@@ -2836,7 +2827,7 @@ lxrt_mvk_vkDestroySurfaceKHR:
 lxrt_mvk_vkDestroySwapchainKHR:
     adrp    x16, lxrt_vk_table
     add     x16, x16, :lo12:lxrt_vk_table
-    ldr     x16, [x16, #2056]
+    ldr     x16, [x16, #2048]
     cbz     x16, .Lmissing
     br      x16
     .size   lxrt_mvk_vkDestroySwapchainKHR, .-lxrt_mvk_vkDestroySwapchainKHR
@@ -2847,7 +2838,7 @@ lxrt_mvk_vkDestroySwapchainKHR:
 lxrt_mvk_vkDeviceWaitIdle:
     adrp    x16, lxrt_vk_table
     add     x16, x16, :lo12:lxrt_vk_table
-    ldr     x16, [x16, #2064]
+    ldr     x16, [x16, #2056]
     cbz     x16, .Lmissing
     br      x16
     .size   lxrt_mvk_vkDeviceWaitIdle, .-lxrt_mvk_vkDeviceWaitIdle
@@ -2858,7 +2849,7 @@ lxrt_mvk_vkDeviceWaitIdle:
 lxrt_mvk_vkEndCommandBuffer:
     adrp    x16, lxrt_vk_table
     add     x16, x16, :lo12:lxrt_vk_table
-    ldr     x16, [x16, #2072]
+    ldr     x16, [x16, #2064]
     cbz     x16, .Lmissing
     br      x16
     .size   lxrt_mvk_vkEndCommandBuffer, .-lxrt_mvk_vkEndCommandBuffer
@@ -2869,7 +2860,7 @@ lxrt_mvk_vkEndCommandBuffer:
 lxrt_mvk_vkEnumerateDeviceExtensionProperties:
     adrp    x16, lxrt_vk_table
     add     x16, x16, :lo12:lxrt_vk_table
-    ldr     x16, [x16, #2080]
+    ldr     x16, [x16, #2072]
     cbz     x16, .Lmissing
     br      x16
     .size   lxrt_mvk_vkEnumerateDeviceExtensionProperties, .-lxrt_mvk_vkEnumerateDeviceExtensionProperties
@@ -2880,7 +2871,7 @@ lxrt_mvk_vkEnumerateDeviceExtensionProperties:
 lxrt_mvk_vkEnumerateDeviceLayerProperties:
     adrp    x16, lxrt_vk_table
     add     x16, x16, :lo12:lxrt_vk_table
-    ldr     x16, [x16, #2088]
+    ldr     x16, [x16, #2080]
     cbz     x16, .Lmissing
     br      x16
     .size   lxrt_mvk_vkEnumerateDeviceLayerProperties, .-lxrt_mvk_vkEnumerateDeviceLayerProperties
@@ -2891,7 +2882,7 @@ lxrt_mvk_vkEnumerateDeviceLayerProperties:
 lxrt_mvk_vkEnumerateInstanceExtensionProperties:
     adrp    x16, lxrt_vk_table
     add     x16, x16, :lo12:lxrt_vk_table
-    ldr     x16, [x16, #2096]
+    ldr     x16, [x16, #2088]
     cbz     x16, .Lmissing
     br      x16
     .size   lxrt_mvk_vkEnumerateInstanceExtensionProperties, .-lxrt_mvk_vkEnumerateInstanceExtensionProperties
@@ -2902,7 +2893,7 @@ lxrt_mvk_vkEnumerateInstanceExtensionProperties:
 lxrt_mvk_vkEnumerateInstanceLayerProperties:
     adrp    x16, lxrt_vk_table
     add     x16, x16, :lo12:lxrt_vk_table
-    ldr     x16, [x16, #2104]
+    ldr     x16, [x16, #2096]
     cbz     x16, .Lmissing
     br      x16
     .size   lxrt_mvk_vkEnumerateInstanceLayerProperties, .-lxrt_mvk_vkEnumerateInstanceLayerProperties
@@ -2913,7 +2904,7 @@ lxrt_mvk_vkEnumerateInstanceLayerProperties:
 lxrt_mvk_vkEnumerateInstanceVersion:
     adrp    x16, lxrt_vk_table
     add     x16, x16, :lo12:lxrt_vk_table
-    ldr     x16, [x16, #2112]
+    ldr     x16, [x16, #2104]
     cbz     x16, .Lmissing
     br      x16
     .size   lxrt_mvk_vkEnumerateInstanceVersion, .-lxrt_mvk_vkEnumerateInstanceVersion
@@ -2924,7 +2915,7 @@ lxrt_mvk_vkEnumerateInstanceVersion:
 lxrt_mvk_vkEnumeratePhysicalDeviceGroups:
     adrp    x16, lxrt_vk_table
     add     x16, x16, :lo12:lxrt_vk_table
-    ldr     x16, [x16, #2120]
+    ldr     x16, [x16, #2112]
     cbz     x16, .Lmissing
     br      x16
     .size   lxrt_mvk_vkEnumeratePhysicalDeviceGroups, .-lxrt_mvk_vkEnumeratePhysicalDeviceGroups
@@ -2935,7 +2926,7 @@ lxrt_mvk_vkEnumeratePhysicalDeviceGroups:
 lxrt_mvk_vkEnumeratePhysicalDeviceGroupsKHR:
     adrp    x16, lxrt_vk_table
     add     x16, x16, :lo12:lxrt_vk_table
-    ldr     x16, [x16, #2128]
+    ldr     x16, [x16, #2120]
     cbz     x16, .Lmissing
     br      x16
     .size   lxrt_mvk_vkEnumeratePhysicalDeviceGroupsKHR, .-lxrt_mvk_vkEnumeratePhysicalDeviceGroupsKHR
@@ -2946,7 +2937,7 @@ lxrt_mvk_vkEnumeratePhysicalDeviceGroupsKHR:
 lxrt_mvk_vkEnumeratePhysicalDevices:
     adrp    x16, lxrt_vk_table
     add     x16, x16, :lo12:lxrt_vk_table
-    ldr     x16, [x16, #2136]
+    ldr     x16, [x16, #2128]
     cbz     x16, .Lmissing
     br      x16
     .size   lxrt_mvk_vkEnumeratePhysicalDevices, .-lxrt_mvk_vkEnumeratePhysicalDevices
@@ -2957,7 +2948,7 @@ lxrt_mvk_vkEnumeratePhysicalDevices:
 lxrt_mvk_vkExportMetalObjectsEXT:
     adrp    x16, lxrt_vk_table
     add     x16, x16, :lo12:lxrt_vk_table
-    ldr     x16, [x16, #2144]
+    ldr     x16, [x16, #2136]
     cbz     x16, .Lmissing
     br      x16
     .size   lxrt_mvk_vkExportMetalObjectsEXT, .-lxrt_mvk_vkExportMetalObjectsEXT
@@ -2968,7 +2959,7 @@ lxrt_mvk_vkExportMetalObjectsEXT:
 lxrt_mvk_vkFlushMappedMemoryRanges:
     adrp    x16, lxrt_vk_table
     add     x16, x16, :lo12:lxrt_vk_table
-    ldr     x16, [x16, #2152]
+    ldr     x16, [x16, #2144]
     cbz     x16, .Lmissing
     br      x16
     .size   lxrt_mvk_vkFlushMappedMemoryRanges, .-lxrt_mvk_vkFlushMappedMemoryRanges
@@ -2979,7 +2970,7 @@ lxrt_mvk_vkFlushMappedMemoryRanges:
 lxrt_mvk_vkFreeCommandBuffers:
     adrp    x16, lxrt_vk_table
     add     x16, x16, :lo12:lxrt_vk_table
-    ldr     x16, [x16, #2160]
+    ldr     x16, [x16, #2152]
     cbz     x16, .Lmissing
     br      x16
     .size   lxrt_mvk_vkFreeCommandBuffers, .-lxrt_mvk_vkFreeCommandBuffers
@@ -2990,7 +2981,7 @@ lxrt_mvk_vkFreeCommandBuffers:
 lxrt_mvk_vkFreeDescriptorSets:
     adrp    x16, lxrt_vk_table
     add     x16, x16, :lo12:lxrt_vk_table
-    ldr     x16, [x16, #2168]
+    ldr     x16, [x16, #2160]
     cbz     x16, .Lmissing
     br      x16
     .size   lxrt_mvk_vkFreeDescriptorSets, .-lxrt_mvk_vkFreeDescriptorSets
@@ -3001,7 +2992,7 @@ lxrt_mvk_vkFreeDescriptorSets:
 lxrt_mvk_vkFreeMemory:
     adrp    x16, lxrt_vk_table
     add     x16, x16, :lo12:lxrt_vk_table
-    ldr     x16, [x16, #2176]
+    ldr     x16, [x16, #2168]
     cbz     x16, .Lmissing
     br      x16
     .size   lxrt_mvk_vkFreeMemory, .-lxrt_mvk_vkFreeMemory
@@ -3012,7 +3003,7 @@ lxrt_mvk_vkFreeMemory:
 lxrt_mvk_vkGetBufferDeviceAddress:
     adrp    x16, lxrt_vk_table
     add     x16, x16, :lo12:lxrt_vk_table
-    ldr     x16, [x16, #2184]
+    ldr     x16, [x16, #2176]
     cbz     x16, .Lmissing
     br      x16
     .size   lxrt_mvk_vkGetBufferDeviceAddress, .-lxrt_mvk_vkGetBufferDeviceAddress
@@ -3023,7 +3014,7 @@ lxrt_mvk_vkGetBufferDeviceAddress:
 lxrt_mvk_vkGetBufferDeviceAddressEXT:
     adrp    x16, lxrt_vk_table
     add     x16, x16, :lo12:lxrt_vk_table
-    ldr     x16, [x16, #2192]
+    ldr     x16, [x16, #2184]
     cbz     x16, .Lmissing
     br      x16
     .size   lxrt_mvk_vkGetBufferDeviceAddressEXT, .-lxrt_mvk_vkGetBufferDeviceAddressEXT
@@ -3034,7 +3025,7 @@ lxrt_mvk_vkGetBufferDeviceAddressEXT:
 lxrt_mvk_vkGetBufferDeviceAddressKHR:
     adrp    x16, lxrt_vk_table
     add     x16, x16, :lo12:lxrt_vk_table
-    ldr     x16, [x16, #2200]
+    ldr     x16, [x16, #2192]
     cbz     x16, .Lmissing
     br      x16
     .size   lxrt_mvk_vkGetBufferDeviceAddressKHR, .-lxrt_mvk_vkGetBufferDeviceAddressKHR
@@ -3045,7 +3036,7 @@ lxrt_mvk_vkGetBufferDeviceAddressKHR:
 lxrt_mvk_vkGetBufferMemoryRequirements:
     adrp    x16, lxrt_vk_table
     add     x16, x16, :lo12:lxrt_vk_table
-    ldr     x16, [x16, #2208]
+    ldr     x16, [x16, #2200]
     cbz     x16, .Lmissing
     br      x16
     .size   lxrt_mvk_vkGetBufferMemoryRequirements, .-lxrt_mvk_vkGetBufferMemoryRequirements
@@ -3056,7 +3047,7 @@ lxrt_mvk_vkGetBufferMemoryRequirements:
 lxrt_mvk_vkGetBufferMemoryRequirements2:
     adrp    x16, lxrt_vk_table
     add     x16, x16, :lo12:lxrt_vk_table
-    ldr     x16, [x16, #2216]
+    ldr     x16, [x16, #2208]
     cbz     x16, .Lmissing
     br      x16
     .size   lxrt_mvk_vkGetBufferMemoryRequirements2, .-lxrt_mvk_vkGetBufferMemoryRequirements2
@@ -3067,7 +3058,7 @@ lxrt_mvk_vkGetBufferMemoryRequirements2:
 lxrt_mvk_vkGetBufferMemoryRequirements2KHR:
     adrp    x16, lxrt_vk_table
     add     x16, x16, :lo12:lxrt_vk_table
-    ldr     x16, [x16, #2224]
+    ldr     x16, [x16, #2216]
     cbz     x16, .Lmissing
     br      x16
     .size   lxrt_mvk_vkGetBufferMemoryRequirements2KHR, .-lxrt_mvk_vkGetBufferMemoryRequirements2KHR
@@ -3078,7 +3069,7 @@ lxrt_mvk_vkGetBufferMemoryRequirements2KHR:
 lxrt_mvk_vkGetBufferOpaqueCaptureAddress:
     adrp    x16, lxrt_vk_table
     add     x16, x16, :lo12:lxrt_vk_table
-    ldr     x16, [x16, #2232]
+    ldr     x16, [x16, #2224]
     cbz     x16, .Lmissing
     br      x16
     .size   lxrt_mvk_vkGetBufferOpaqueCaptureAddress, .-lxrt_mvk_vkGetBufferOpaqueCaptureAddress
@@ -3089,7 +3080,7 @@ lxrt_mvk_vkGetBufferOpaqueCaptureAddress:
 lxrt_mvk_vkGetBufferOpaqueCaptureAddressKHR:
     adrp    x16, lxrt_vk_table
     add     x16, x16, :lo12:lxrt_vk_table
-    ldr     x16, [x16, #2240]
+    ldr     x16, [x16, #2232]
     cbz     x16, .Lmissing
     br      x16
     .size   lxrt_mvk_vkGetBufferOpaqueCaptureAddressKHR, .-lxrt_mvk_vkGetBufferOpaqueCaptureAddressKHR
@@ -3100,7 +3091,7 @@ lxrt_mvk_vkGetBufferOpaqueCaptureAddressKHR:
 lxrt_mvk_vkGetCalibratedTimestampsEXT:
     adrp    x16, lxrt_vk_table
     add     x16, x16, :lo12:lxrt_vk_table
-    ldr     x16, [x16, #2248]
+    ldr     x16, [x16, #2240]
     cbz     x16, .Lmissing
     br      x16
     .size   lxrt_mvk_vkGetCalibratedTimestampsEXT, .-lxrt_mvk_vkGetCalibratedTimestampsEXT
@@ -3111,7 +3102,7 @@ lxrt_mvk_vkGetCalibratedTimestampsEXT:
 lxrt_mvk_vkGetCalibratedTimestampsKHR:
     adrp    x16, lxrt_vk_table
     add     x16, x16, :lo12:lxrt_vk_table
-    ldr     x16, [x16, #2256]
+    ldr     x16, [x16, #2248]
     cbz     x16, .Lmissing
     br      x16
     .size   lxrt_mvk_vkGetCalibratedTimestampsKHR, .-lxrt_mvk_vkGetCalibratedTimestampsKHR
@@ -3122,7 +3113,7 @@ lxrt_mvk_vkGetCalibratedTimestampsKHR:
 lxrt_mvk_vkGetDeferredOperationMaxConcurrencyKHR:
     adrp    x16, lxrt_vk_table
     add     x16, x16, :lo12:lxrt_vk_table
-    ldr     x16, [x16, #2264]
+    ldr     x16, [x16, #2256]
     cbz     x16, .Lmissing
     br      x16
     .size   lxrt_mvk_vkGetDeferredOperationMaxConcurrencyKHR, .-lxrt_mvk_vkGetDeferredOperationMaxConcurrencyKHR
@@ -3133,7 +3124,7 @@ lxrt_mvk_vkGetDeferredOperationMaxConcurrencyKHR:
 lxrt_mvk_vkGetDeferredOperationResultKHR:
     adrp    x16, lxrt_vk_table
     add     x16, x16, :lo12:lxrt_vk_table
-    ldr     x16, [x16, #2272]
+    ldr     x16, [x16, #2264]
     cbz     x16, .Lmissing
     br      x16
     .size   lxrt_mvk_vkGetDeferredOperationResultKHR, .-lxrt_mvk_vkGetDeferredOperationResultKHR
@@ -3144,7 +3135,7 @@ lxrt_mvk_vkGetDeferredOperationResultKHR:
 lxrt_mvk_vkGetDescriptorSetLayoutSupport:
     adrp    x16, lxrt_vk_table
     add     x16, x16, :lo12:lxrt_vk_table
-    ldr     x16, [x16, #2280]
+    ldr     x16, [x16, #2272]
     cbz     x16, .Lmissing
     br      x16
     .size   lxrt_mvk_vkGetDescriptorSetLayoutSupport, .-lxrt_mvk_vkGetDescriptorSetLayoutSupport
@@ -3155,7 +3146,7 @@ lxrt_mvk_vkGetDescriptorSetLayoutSupport:
 lxrt_mvk_vkGetDescriptorSetLayoutSupportKHR:
     adrp    x16, lxrt_vk_table
     add     x16, x16, :lo12:lxrt_vk_table
-    ldr     x16, [x16, #2288]
+    ldr     x16, [x16, #2280]
     cbz     x16, .Lmissing
     br      x16
     .size   lxrt_mvk_vkGetDescriptorSetLayoutSupportKHR, .-lxrt_mvk_vkGetDescriptorSetLayoutSupportKHR
@@ -3166,7 +3157,7 @@ lxrt_mvk_vkGetDescriptorSetLayoutSupportKHR:
 lxrt_mvk_vkGetDeviceBufferMemoryRequirements:
     adrp    x16, lxrt_vk_table
     add     x16, x16, :lo12:lxrt_vk_table
-    ldr     x16, [x16, #2296]
+    ldr     x16, [x16, #2288]
     cbz     x16, .Lmissing
     br      x16
     .size   lxrt_mvk_vkGetDeviceBufferMemoryRequirements, .-lxrt_mvk_vkGetDeviceBufferMemoryRequirements
@@ -3177,7 +3168,7 @@ lxrt_mvk_vkGetDeviceBufferMemoryRequirements:
 lxrt_mvk_vkGetDeviceBufferMemoryRequirementsKHR:
     adrp    x16, lxrt_vk_table
     add     x16, x16, :lo12:lxrt_vk_table
-    ldr     x16, [x16, #2304]
+    ldr     x16, [x16, #2296]
     cbz     x16, .Lmissing
     br      x16
     .size   lxrt_mvk_vkGetDeviceBufferMemoryRequirementsKHR, .-lxrt_mvk_vkGetDeviceBufferMemoryRequirementsKHR
@@ -3188,7 +3179,7 @@ lxrt_mvk_vkGetDeviceBufferMemoryRequirementsKHR:
 lxrt_mvk_vkGetDeviceGroupPeerMemoryFeatures:
     adrp    x16, lxrt_vk_table
     add     x16, x16, :lo12:lxrt_vk_table
-    ldr     x16, [x16, #2312]
+    ldr     x16, [x16, #2304]
     cbz     x16, .Lmissing
     br      x16
     .size   lxrt_mvk_vkGetDeviceGroupPeerMemoryFeatures, .-lxrt_mvk_vkGetDeviceGroupPeerMemoryFeatures
@@ -3199,7 +3190,7 @@ lxrt_mvk_vkGetDeviceGroupPeerMemoryFeatures:
 lxrt_mvk_vkGetDeviceGroupPeerMemoryFeaturesKHR:
     adrp    x16, lxrt_vk_table
     add     x16, x16, :lo12:lxrt_vk_table
-    ldr     x16, [x16, #2320]
+    ldr     x16, [x16, #2312]
     cbz     x16, .Lmissing
     br      x16
     .size   lxrt_mvk_vkGetDeviceGroupPeerMemoryFeaturesKHR, .-lxrt_mvk_vkGetDeviceGroupPeerMemoryFeaturesKHR
@@ -3210,7 +3201,7 @@ lxrt_mvk_vkGetDeviceGroupPeerMemoryFeaturesKHR:
 lxrt_mvk_vkGetDeviceGroupPresentCapabilitiesKHR:
     adrp    x16, lxrt_vk_table
     add     x16, x16, :lo12:lxrt_vk_table
-    ldr     x16, [x16, #2328]
+    ldr     x16, [x16, #2320]
     cbz     x16, .Lmissing
     br      x16
     .size   lxrt_mvk_vkGetDeviceGroupPresentCapabilitiesKHR, .-lxrt_mvk_vkGetDeviceGroupPresentCapabilitiesKHR
@@ -3221,7 +3212,7 @@ lxrt_mvk_vkGetDeviceGroupPresentCapabilitiesKHR:
 lxrt_mvk_vkGetDeviceGroupSurfacePresentModesKHR:
     adrp    x16, lxrt_vk_table
     add     x16, x16, :lo12:lxrt_vk_table
-    ldr     x16, [x16, #2336]
+    ldr     x16, [x16, #2328]
     cbz     x16, .Lmissing
     br      x16
     .size   lxrt_mvk_vkGetDeviceGroupSurfacePresentModesKHR, .-lxrt_mvk_vkGetDeviceGroupSurfacePresentModesKHR
@@ -3232,7 +3223,7 @@ lxrt_mvk_vkGetDeviceGroupSurfacePresentModesKHR:
 lxrt_mvk_vkGetDeviceImageMemoryRequirements:
     adrp    x16, lxrt_vk_table
     add     x16, x16, :lo12:lxrt_vk_table
-    ldr     x16, [x16, #2344]
+    ldr     x16, [x16, #2336]
     cbz     x16, .Lmissing
     br      x16
     .size   lxrt_mvk_vkGetDeviceImageMemoryRequirements, .-lxrt_mvk_vkGetDeviceImageMemoryRequirements
@@ -3243,7 +3234,7 @@ lxrt_mvk_vkGetDeviceImageMemoryRequirements:
 lxrt_mvk_vkGetDeviceImageMemoryRequirementsKHR:
     adrp    x16, lxrt_vk_table
     add     x16, x16, :lo12:lxrt_vk_table
-    ldr     x16, [x16, #2352]
+    ldr     x16, [x16, #2344]
     cbz     x16, .Lmissing
     br      x16
     .size   lxrt_mvk_vkGetDeviceImageMemoryRequirementsKHR, .-lxrt_mvk_vkGetDeviceImageMemoryRequirementsKHR
@@ -3254,7 +3245,7 @@ lxrt_mvk_vkGetDeviceImageMemoryRequirementsKHR:
 lxrt_mvk_vkGetDeviceImageSparseMemoryRequirements:
     adrp    x16, lxrt_vk_table
     add     x16, x16, :lo12:lxrt_vk_table
-    ldr     x16, [x16, #2360]
+    ldr     x16, [x16, #2352]
     cbz     x16, .Lmissing
     br      x16
     .size   lxrt_mvk_vkGetDeviceImageSparseMemoryRequirements, .-lxrt_mvk_vkGetDeviceImageSparseMemoryRequirements
@@ -3265,7 +3256,7 @@ lxrt_mvk_vkGetDeviceImageSparseMemoryRequirements:
 lxrt_mvk_vkGetDeviceImageSparseMemoryRequirementsKHR:
     adrp    x16, lxrt_vk_table
     add     x16, x16, :lo12:lxrt_vk_table
-    ldr     x16, [x16, #2368]
+    ldr     x16, [x16, #2360]
     cbz     x16, .Lmissing
     br      x16
     .size   lxrt_mvk_vkGetDeviceImageSparseMemoryRequirementsKHR, .-lxrt_mvk_vkGetDeviceImageSparseMemoryRequirementsKHR
@@ -3276,7 +3267,7 @@ lxrt_mvk_vkGetDeviceImageSparseMemoryRequirementsKHR:
 lxrt_mvk_vkGetDeviceImageSubresourceLayout:
     adrp    x16, lxrt_vk_table
     add     x16, x16, :lo12:lxrt_vk_table
-    ldr     x16, [x16, #2376]
+    ldr     x16, [x16, #2368]
     cbz     x16, .Lmissing
     br      x16
     .size   lxrt_mvk_vkGetDeviceImageSubresourceLayout, .-lxrt_mvk_vkGetDeviceImageSubresourceLayout
@@ -3287,7 +3278,7 @@ lxrt_mvk_vkGetDeviceImageSubresourceLayout:
 lxrt_mvk_vkGetDeviceImageSubresourceLayoutKHR:
     adrp    x16, lxrt_vk_table
     add     x16, x16, :lo12:lxrt_vk_table
-    ldr     x16, [x16, #2384]
+    ldr     x16, [x16, #2376]
     cbz     x16, .Lmissing
     br      x16
     .size   lxrt_mvk_vkGetDeviceImageSubresourceLayoutKHR, .-lxrt_mvk_vkGetDeviceImageSubresourceLayoutKHR
@@ -3298,7 +3289,7 @@ lxrt_mvk_vkGetDeviceImageSubresourceLayoutKHR:
 lxrt_mvk_vkGetDeviceMemoryCommitment:
     adrp    x16, lxrt_vk_table
     add     x16, x16, :lo12:lxrt_vk_table
-    ldr     x16, [x16, #2392]
+    ldr     x16, [x16, #2384]
     cbz     x16, .Lmissing
     br      x16
     .size   lxrt_mvk_vkGetDeviceMemoryCommitment, .-lxrt_mvk_vkGetDeviceMemoryCommitment
@@ -3309,7 +3300,7 @@ lxrt_mvk_vkGetDeviceMemoryCommitment:
 lxrt_mvk_vkGetDeviceMemoryOpaqueCaptureAddress:
     adrp    x16, lxrt_vk_table
     add     x16, x16, :lo12:lxrt_vk_table
-    ldr     x16, [x16, #2400]
+    ldr     x16, [x16, #2392]
     cbz     x16, .Lmissing
     br      x16
     .size   lxrt_mvk_vkGetDeviceMemoryOpaqueCaptureAddress, .-lxrt_mvk_vkGetDeviceMemoryOpaqueCaptureAddress
@@ -3320,7 +3311,7 @@ lxrt_mvk_vkGetDeviceMemoryOpaqueCaptureAddress:
 lxrt_mvk_vkGetDeviceMemoryOpaqueCaptureAddressKHR:
     adrp    x16, lxrt_vk_table
     add     x16, x16, :lo12:lxrt_vk_table
-    ldr     x16, [x16, #2408]
+    ldr     x16, [x16, #2400]
     cbz     x16, .Lmissing
     br      x16
     .size   lxrt_mvk_vkGetDeviceMemoryOpaqueCaptureAddressKHR, .-lxrt_mvk_vkGetDeviceMemoryOpaqueCaptureAddressKHR
@@ -3331,7 +3322,7 @@ lxrt_mvk_vkGetDeviceMemoryOpaqueCaptureAddressKHR:
 lxrt_mvk_vkGetDeviceProcAddr:
     adrp    x16, lxrt_vk_table
     add     x16, x16, :lo12:lxrt_vk_table
-    ldr     x16, [x16, #2416]
+    ldr     x16, [x16, #2408]
     cbz     x16, .Lmissing
     br      x16
     .size   lxrt_mvk_vkGetDeviceProcAddr, .-lxrt_mvk_vkGetDeviceProcAddr
@@ -3342,7 +3333,7 @@ lxrt_mvk_vkGetDeviceProcAddr:
 lxrt_mvk_vkGetDeviceQueue:
     adrp    x16, lxrt_vk_table
     add     x16, x16, :lo12:lxrt_vk_table
-    ldr     x16, [x16, #2424]
+    ldr     x16, [x16, #2416]
     cbz     x16, .Lmissing
     br      x16
     .size   lxrt_mvk_vkGetDeviceQueue, .-lxrt_mvk_vkGetDeviceQueue
@@ -3353,7 +3344,7 @@ lxrt_mvk_vkGetDeviceQueue:
 lxrt_mvk_vkGetDeviceQueue2:
     adrp    x16, lxrt_vk_table
     add     x16, x16, :lo12:lxrt_vk_table
-    ldr     x16, [x16, #2432]
+    ldr     x16, [x16, #2424]
     cbz     x16, .Lmissing
     br      x16
     .size   lxrt_mvk_vkGetDeviceQueue2, .-lxrt_mvk_vkGetDeviceQueue2
@@ -3364,7 +3355,7 @@ lxrt_mvk_vkGetDeviceQueue2:
 lxrt_mvk_vkGetEventStatus:
     adrp    x16, lxrt_vk_table
     add     x16, x16, :lo12:lxrt_vk_table
-    ldr     x16, [x16, #2440]
+    ldr     x16, [x16, #2432]
     cbz     x16, .Lmissing
     br      x16
     .size   lxrt_mvk_vkGetEventStatus, .-lxrt_mvk_vkGetEventStatus
@@ -3375,10 +3366,20 @@ lxrt_mvk_vkGetEventStatus:
 lxrt_mvk_vkGetFenceStatus:
     adrp    x16, lxrt_vk_table
     add     x16, x16, :lo12:lxrt_vk_table
-    ldr     x16, [x16, #2448]
+    ldr     x16, [x16, #2440]
     cbz     x16, .Lmissing
     br      x16
     .size   lxrt_mvk_vkGetFenceStatus, .-lxrt_mvk_vkGetFenceStatus
+
+    .globl  vkGetIOSurfaceMVK
+    .type   vkGetIOSurfaceMVK,%function
+vkGetIOSurfaceMVK:
+    adrp    x16, lxrt_vk_table
+    add     x16, x16, :lo12:lxrt_vk_table
+    ldr     x16, [x16, #2448]
+    cbz     x16, .Lmissing
+    br      x16
+    .size   vkGetIOSurfaceMVK, .-vkGetIOSurfaceMVK
 
     .globl  lxrt_mvk_vkGetImageMemoryRequirements
     .hidden lxrt_mvk_vkGetImageMemoryRequirements
@@ -3501,15 +3502,45 @@ lxrt_mvk_vkGetInstanceProcAddr:
     br      x16
     .size   lxrt_mvk_vkGetInstanceProcAddr, .-lxrt_mvk_vkGetInstanceProcAddr
 
-    .globl  vkGetIOSurfaceMVK
-    .type   vkGetIOSurfaceMVK,%function
-vkGetIOSurfaceMVK:
+    .globl  vkGetMTLBufferMVK
+    .type   vkGetMTLBufferMVK,%function
+vkGetMTLBufferMVK:
     adrp    x16, lxrt_vk_table
     add     x16, x16, :lo12:lxrt_vk_table
     ldr     x16, [x16, #2544]
     cbz     x16, .Lmissing
     br      x16
-    .size   vkGetIOSurfaceMVK, .-vkGetIOSurfaceMVK
+    .size   vkGetMTLBufferMVK, .-vkGetMTLBufferMVK
+
+    .globl  vkGetMTLCommandQueueMVK
+    .type   vkGetMTLCommandQueueMVK,%function
+vkGetMTLCommandQueueMVK:
+    adrp    x16, lxrt_vk_table
+    add     x16, x16, :lo12:lxrt_vk_table
+    ldr     x16, [x16, #2552]
+    cbz     x16, .Lmissing
+    br      x16
+    .size   vkGetMTLCommandQueueMVK, .-vkGetMTLCommandQueueMVK
+
+    .globl  vkGetMTLDeviceMVK
+    .type   vkGetMTLDeviceMVK,%function
+vkGetMTLDeviceMVK:
+    adrp    x16, lxrt_vk_table
+    add     x16, x16, :lo12:lxrt_vk_table
+    ldr     x16, [x16, #2560]
+    cbz     x16, .Lmissing
+    br      x16
+    .size   vkGetMTLDeviceMVK, .-vkGetMTLDeviceMVK
+
+    .globl  vkGetMTLTextureMVK
+    .type   vkGetMTLTextureMVK,%function
+vkGetMTLTextureMVK:
+    adrp    x16, lxrt_vk_table
+    add     x16, x16, :lo12:lxrt_vk_table
+    ldr     x16, [x16, #2568]
+    cbz     x16, .Lmissing
+    br      x16
+    .size   vkGetMTLTextureMVK, .-vkGetMTLTextureMVK
 
     .globl  lxrt_mvk_vkGetMemoryHostPointerPropertiesEXT
     .hidden lxrt_mvk_vkGetMemoryHostPointerPropertiesEXT
@@ -3517,7 +3548,7 @@ vkGetIOSurfaceMVK:
 lxrt_mvk_vkGetMemoryHostPointerPropertiesEXT:
     adrp    x16, lxrt_vk_table
     add     x16, x16, :lo12:lxrt_vk_table
-    ldr     x16, [x16, #2552]
+    ldr     x16, [x16, #2576]
     cbz     x16, .Lmissing
     br      x16
     .size   lxrt_mvk_vkGetMemoryHostPointerPropertiesEXT, .-lxrt_mvk_vkGetMemoryHostPointerPropertiesEXT
@@ -3528,7 +3559,7 @@ lxrt_mvk_vkGetMemoryHostPointerPropertiesEXT:
 lxrt_mvk_vkGetMemoryMetalHandleEXT:
     adrp    x16, lxrt_vk_table
     add     x16, x16, :lo12:lxrt_vk_table
-    ldr     x16, [x16, #2560]
+    ldr     x16, [x16, #2584]
     cbz     x16, .Lmissing
     br      x16
     .size   lxrt_mvk_vkGetMemoryMetalHandleEXT, .-lxrt_mvk_vkGetMemoryMetalHandleEXT
@@ -3539,7 +3570,7 @@ lxrt_mvk_vkGetMemoryMetalHandleEXT:
 lxrt_mvk_vkGetMemoryMetalHandlePropertiesEXT:
     adrp    x16, lxrt_vk_table
     add     x16, x16, :lo12:lxrt_vk_table
-    ldr     x16, [x16, #2568]
+    ldr     x16, [x16, #2592]
     cbz     x16, .Lmissing
     br      x16
     .size   lxrt_mvk_vkGetMemoryMetalHandlePropertiesEXT, .-lxrt_mvk_vkGetMemoryMetalHandlePropertiesEXT
@@ -3549,50 +3580,10 @@ lxrt_mvk_vkGetMemoryMetalHandlePropertiesEXT:
 vkGetMoltenVKConfigurationMVK:
     adrp    x16, lxrt_vk_table
     add     x16, x16, :lo12:lxrt_vk_table
-    ldr     x16, [x16, #2576]
-    cbz     x16, .Lmissing
-    br      x16
-    .size   vkGetMoltenVKConfigurationMVK, .-vkGetMoltenVKConfigurationMVK
-
-    .globl  vkGetMTLBufferMVK
-    .type   vkGetMTLBufferMVK,%function
-vkGetMTLBufferMVK:
-    adrp    x16, lxrt_vk_table
-    add     x16, x16, :lo12:lxrt_vk_table
-    ldr     x16, [x16, #2584]
-    cbz     x16, .Lmissing
-    br      x16
-    .size   vkGetMTLBufferMVK, .-vkGetMTLBufferMVK
-
-    .globl  vkGetMTLCommandQueueMVK
-    .type   vkGetMTLCommandQueueMVK,%function
-vkGetMTLCommandQueueMVK:
-    adrp    x16, lxrt_vk_table
-    add     x16, x16, :lo12:lxrt_vk_table
-    ldr     x16, [x16, #2592]
-    cbz     x16, .Lmissing
-    br      x16
-    .size   vkGetMTLCommandQueueMVK, .-vkGetMTLCommandQueueMVK
-
-    .globl  vkGetMTLDeviceMVK
-    .type   vkGetMTLDeviceMVK,%function
-vkGetMTLDeviceMVK:
-    adrp    x16, lxrt_vk_table
-    add     x16, x16, :lo12:lxrt_vk_table
     ldr     x16, [x16, #2600]
     cbz     x16, .Lmissing
     br      x16
-    .size   vkGetMTLDeviceMVK, .-vkGetMTLDeviceMVK
-
-    .globl  vkGetMTLTextureMVK
-    .type   vkGetMTLTextureMVK,%function
-vkGetMTLTextureMVK:
-    adrp    x16, lxrt_vk_table
-    add     x16, x16, :lo12:lxrt_vk_table
-    ldr     x16, [x16, #2608]
-    cbz     x16, .Lmissing
-    br      x16
-    .size   vkGetMTLTextureMVK, .-vkGetMTLTextureMVK
+    .size   vkGetMoltenVKConfigurationMVK, .-vkGetMoltenVKConfigurationMVK
 
     .globl  lxrt_mvk_vkGetPastPresentationTimingGOOGLE
     .hidden lxrt_mvk_vkGetPastPresentationTimingGOOGLE
@@ -3600,7 +3591,7 @@ vkGetMTLTextureMVK:
 lxrt_mvk_vkGetPastPresentationTimingGOOGLE:
     adrp    x16, lxrt_vk_table
     add     x16, x16, :lo12:lxrt_vk_table
-    ldr     x16, [x16, #2616]
+    ldr     x16, [x16, #2608]
     cbz     x16, .Lmissing
     br      x16
     .size   lxrt_mvk_vkGetPastPresentationTimingGOOGLE, .-lxrt_mvk_vkGetPastPresentationTimingGOOGLE
@@ -3610,7 +3601,7 @@ lxrt_mvk_vkGetPastPresentationTimingGOOGLE:
 vkGetPerformanceStatisticsMVK:
     adrp    x16, lxrt_vk_table
     add     x16, x16, :lo12:lxrt_vk_table
-    ldr     x16, [x16, #2624]
+    ldr     x16, [x16, #2616]
     cbz     x16, .Lmissing
     br      x16
     .size   vkGetPerformanceStatisticsMVK, .-vkGetPerformanceStatisticsMVK
@@ -3621,7 +3612,7 @@ vkGetPerformanceStatisticsMVK:
 lxrt_mvk_vkGetPhysicalDeviceCalibrateableTimeDomainsEXT:
     adrp    x16, lxrt_vk_table
     add     x16, x16, :lo12:lxrt_vk_table
-    ldr     x16, [x16, #2632]
+    ldr     x16, [x16, #2624]
     cbz     x16, .Lmissing
     br      x16
     .size   lxrt_mvk_vkGetPhysicalDeviceCalibrateableTimeDomainsEXT, .-lxrt_mvk_vkGetPhysicalDeviceCalibrateableTimeDomainsEXT
@@ -3632,7 +3623,7 @@ lxrt_mvk_vkGetPhysicalDeviceCalibrateableTimeDomainsEXT:
 lxrt_mvk_vkGetPhysicalDeviceCalibrateableTimeDomainsKHR:
     adrp    x16, lxrt_vk_table
     add     x16, x16, :lo12:lxrt_vk_table
-    ldr     x16, [x16, #2640]
+    ldr     x16, [x16, #2632]
     cbz     x16, .Lmissing
     br      x16
     .size   lxrt_mvk_vkGetPhysicalDeviceCalibrateableTimeDomainsKHR, .-lxrt_mvk_vkGetPhysicalDeviceCalibrateableTimeDomainsKHR
@@ -3643,7 +3634,7 @@ lxrt_mvk_vkGetPhysicalDeviceCalibrateableTimeDomainsKHR:
 lxrt_mvk_vkGetPhysicalDeviceExternalBufferProperties:
     adrp    x16, lxrt_vk_table
     add     x16, x16, :lo12:lxrt_vk_table
-    ldr     x16, [x16, #2648]
+    ldr     x16, [x16, #2640]
     cbz     x16, .Lmissing
     br      x16
     .size   lxrt_mvk_vkGetPhysicalDeviceExternalBufferProperties, .-lxrt_mvk_vkGetPhysicalDeviceExternalBufferProperties
@@ -3654,7 +3645,7 @@ lxrt_mvk_vkGetPhysicalDeviceExternalBufferProperties:
 lxrt_mvk_vkGetPhysicalDeviceExternalBufferPropertiesKHR:
     adrp    x16, lxrt_vk_table
     add     x16, x16, :lo12:lxrt_vk_table
-    ldr     x16, [x16, #2656]
+    ldr     x16, [x16, #2648]
     cbz     x16, .Lmissing
     br      x16
     .size   lxrt_mvk_vkGetPhysicalDeviceExternalBufferPropertiesKHR, .-lxrt_mvk_vkGetPhysicalDeviceExternalBufferPropertiesKHR
@@ -3665,7 +3656,7 @@ lxrt_mvk_vkGetPhysicalDeviceExternalBufferPropertiesKHR:
 lxrt_mvk_vkGetPhysicalDeviceExternalFenceProperties:
     adrp    x16, lxrt_vk_table
     add     x16, x16, :lo12:lxrt_vk_table
-    ldr     x16, [x16, #2664]
+    ldr     x16, [x16, #2656]
     cbz     x16, .Lmissing
     br      x16
     .size   lxrt_mvk_vkGetPhysicalDeviceExternalFenceProperties, .-lxrt_mvk_vkGetPhysicalDeviceExternalFenceProperties
@@ -3676,7 +3667,7 @@ lxrt_mvk_vkGetPhysicalDeviceExternalFenceProperties:
 lxrt_mvk_vkGetPhysicalDeviceExternalFencePropertiesKHR:
     adrp    x16, lxrt_vk_table
     add     x16, x16, :lo12:lxrt_vk_table
-    ldr     x16, [x16, #2672]
+    ldr     x16, [x16, #2664]
     cbz     x16, .Lmissing
     br      x16
     .size   lxrt_mvk_vkGetPhysicalDeviceExternalFencePropertiesKHR, .-lxrt_mvk_vkGetPhysicalDeviceExternalFencePropertiesKHR
@@ -3687,7 +3678,7 @@ lxrt_mvk_vkGetPhysicalDeviceExternalFencePropertiesKHR:
 lxrt_mvk_vkGetPhysicalDeviceExternalSemaphoreProperties:
     adrp    x16, lxrt_vk_table
     add     x16, x16, :lo12:lxrt_vk_table
-    ldr     x16, [x16, #2680]
+    ldr     x16, [x16, #2672]
     cbz     x16, .Lmissing
     br      x16
     .size   lxrt_mvk_vkGetPhysicalDeviceExternalSemaphoreProperties, .-lxrt_mvk_vkGetPhysicalDeviceExternalSemaphoreProperties
@@ -3698,7 +3689,7 @@ lxrt_mvk_vkGetPhysicalDeviceExternalSemaphoreProperties:
 lxrt_mvk_vkGetPhysicalDeviceExternalSemaphorePropertiesKHR:
     adrp    x16, lxrt_vk_table
     add     x16, x16, :lo12:lxrt_vk_table
-    ldr     x16, [x16, #2688]
+    ldr     x16, [x16, #2680]
     cbz     x16, .Lmissing
     br      x16
     .size   lxrt_mvk_vkGetPhysicalDeviceExternalSemaphorePropertiesKHR, .-lxrt_mvk_vkGetPhysicalDeviceExternalSemaphorePropertiesKHR
@@ -3709,7 +3700,7 @@ lxrt_mvk_vkGetPhysicalDeviceExternalSemaphorePropertiesKHR:
 lxrt_mvk_vkGetPhysicalDeviceFeatures:
     adrp    x16, lxrt_vk_table
     add     x16, x16, :lo12:lxrt_vk_table
-    ldr     x16, [x16, #2696]
+    ldr     x16, [x16, #2688]
     cbz     x16, .Lmissing
     br      x16
     .size   lxrt_mvk_vkGetPhysicalDeviceFeatures, .-lxrt_mvk_vkGetPhysicalDeviceFeatures
@@ -3720,7 +3711,7 @@ lxrt_mvk_vkGetPhysicalDeviceFeatures:
 lxrt_mvk_vkGetPhysicalDeviceFeatures2:
     adrp    x16, lxrt_vk_table
     add     x16, x16, :lo12:lxrt_vk_table
-    ldr     x16, [x16, #2704]
+    ldr     x16, [x16, #2696]
     cbz     x16, .Lmissing
     br      x16
     .size   lxrt_mvk_vkGetPhysicalDeviceFeatures2, .-lxrt_mvk_vkGetPhysicalDeviceFeatures2
@@ -3731,7 +3722,7 @@ lxrt_mvk_vkGetPhysicalDeviceFeatures2:
 lxrt_mvk_vkGetPhysicalDeviceFeatures2KHR:
     adrp    x16, lxrt_vk_table
     add     x16, x16, :lo12:lxrt_vk_table
-    ldr     x16, [x16, #2712]
+    ldr     x16, [x16, #2704]
     cbz     x16, .Lmissing
     br      x16
     .size   lxrt_mvk_vkGetPhysicalDeviceFeatures2KHR, .-lxrt_mvk_vkGetPhysicalDeviceFeatures2KHR
@@ -3742,7 +3733,7 @@ lxrt_mvk_vkGetPhysicalDeviceFeatures2KHR:
 lxrt_mvk_vkGetPhysicalDeviceFormatProperties:
     adrp    x16, lxrt_vk_table
     add     x16, x16, :lo12:lxrt_vk_table
-    ldr     x16, [x16, #2720]
+    ldr     x16, [x16, #2712]
     cbz     x16, .Lmissing
     br      x16
     .size   lxrt_mvk_vkGetPhysicalDeviceFormatProperties, .-lxrt_mvk_vkGetPhysicalDeviceFormatProperties
@@ -3753,7 +3744,7 @@ lxrt_mvk_vkGetPhysicalDeviceFormatProperties:
 lxrt_mvk_vkGetPhysicalDeviceFormatProperties2:
     adrp    x16, lxrt_vk_table
     add     x16, x16, :lo12:lxrt_vk_table
-    ldr     x16, [x16, #2728]
+    ldr     x16, [x16, #2720]
     cbz     x16, .Lmissing
     br      x16
     .size   lxrt_mvk_vkGetPhysicalDeviceFormatProperties2, .-lxrt_mvk_vkGetPhysicalDeviceFormatProperties2
@@ -3764,7 +3755,7 @@ lxrt_mvk_vkGetPhysicalDeviceFormatProperties2:
 lxrt_mvk_vkGetPhysicalDeviceFormatProperties2KHR:
     adrp    x16, lxrt_vk_table
     add     x16, x16, :lo12:lxrt_vk_table
-    ldr     x16, [x16, #2736]
+    ldr     x16, [x16, #2728]
     cbz     x16, .Lmissing
     br      x16
     .size   lxrt_mvk_vkGetPhysicalDeviceFormatProperties2KHR, .-lxrt_mvk_vkGetPhysicalDeviceFormatProperties2KHR
@@ -3775,7 +3766,7 @@ lxrt_mvk_vkGetPhysicalDeviceFormatProperties2KHR:
 lxrt_mvk_vkGetPhysicalDeviceImageFormatProperties:
     adrp    x16, lxrt_vk_table
     add     x16, x16, :lo12:lxrt_vk_table
-    ldr     x16, [x16, #2744]
+    ldr     x16, [x16, #2736]
     cbz     x16, .Lmissing
     br      x16
     .size   lxrt_mvk_vkGetPhysicalDeviceImageFormatProperties, .-lxrt_mvk_vkGetPhysicalDeviceImageFormatProperties
@@ -3786,7 +3777,7 @@ lxrt_mvk_vkGetPhysicalDeviceImageFormatProperties:
 lxrt_mvk_vkGetPhysicalDeviceImageFormatProperties2:
     adrp    x16, lxrt_vk_table
     add     x16, x16, :lo12:lxrt_vk_table
-    ldr     x16, [x16, #2752]
+    ldr     x16, [x16, #2744]
     cbz     x16, .Lmissing
     br      x16
     .size   lxrt_mvk_vkGetPhysicalDeviceImageFormatProperties2, .-lxrt_mvk_vkGetPhysicalDeviceImageFormatProperties2
@@ -3797,7 +3788,7 @@ lxrt_mvk_vkGetPhysicalDeviceImageFormatProperties2:
 lxrt_mvk_vkGetPhysicalDeviceImageFormatProperties2KHR:
     adrp    x16, lxrt_vk_table
     add     x16, x16, :lo12:lxrt_vk_table
-    ldr     x16, [x16, #2760]
+    ldr     x16, [x16, #2752]
     cbz     x16, .Lmissing
     br      x16
     .size   lxrt_mvk_vkGetPhysicalDeviceImageFormatProperties2KHR, .-lxrt_mvk_vkGetPhysicalDeviceImageFormatProperties2KHR
@@ -3808,7 +3799,7 @@ lxrt_mvk_vkGetPhysicalDeviceImageFormatProperties2KHR:
 lxrt_mvk_vkGetPhysicalDeviceMemoryProperties:
     adrp    x16, lxrt_vk_table
     add     x16, x16, :lo12:lxrt_vk_table
-    ldr     x16, [x16, #2768]
+    ldr     x16, [x16, #2760]
     cbz     x16, .Lmissing
     br      x16
     .size   lxrt_mvk_vkGetPhysicalDeviceMemoryProperties, .-lxrt_mvk_vkGetPhysicalDeviceMemoryProperties
@@ -3819,7 +3810,7 @@ lxrt_mvk_vkGetPhysicalDeviceMemoryProperties:
 lxrt_mvk_vkGetPhysicalDeviceMemoryProperties2:
     adrp    x16, lxrt_vk_table
     add     x16, x16, :lo12:lxrt_vk_table
-    ldr     x16, [x16, #2776]
+    ldr     x16, [x16, #2768]
     cbz     x16, .Lmissing
     br      x16
     .size   lxrt_mvk_vkGetPhysicalDeviceMemoryProperties2, .-lxrt_mvk_vkGetPhysicalDeviceMemoryProperties2
@@ -3830,7 +3821,7 @@ lxrt_mvk_vkGetPhysicalDeviceMemoryProperties2:
 lxrt_mvk_vkGetPhysicalDeviceMemoryProperties2KHR:
     adrp    x16, lxrt_vk_table
     add     x16, x16, :lo12:lxrt_vk_table
-    ldr     x16, [x16, #2784]
+    ldr     x16, [x16, #2776]
     cbz     x16, .Lmissing
     br      x16
     .size   lxrt_mvk_vkGetPhysicalDeviceMemoryProperties2KHR, .-lxrt_mvk_vkGetPhysicalDeviceMemoryProperties2KHR
@@ -3840,7 +3831,7 @@ lxrt_mvk_vkGetPhysicalDeviceMemoryProperties2KHR:
 vkGetPhysicalDeviceMetalFeaturesMVK:
     adrp    x16, lxrt_vk_table
     add     x16, x16, :lo12:lxrt_vk_table
-    ldr     x16, [x16, #2792]
+    ldr     x16, [x16, #2784]
     cbz     x16, .Lmissing
     br      x16
     .size   vkGetPhysicalDeviceMetalFeaturesMVK, .-vkGetPhysicalDeviceMetalFeaturesMVK
@@ -3851,7 +3842,7 @@ vkGetPhysicalDeviceMetalFeaturesMVK:
 lxrt_mvk_vkGetPhysicalDevicePresentRectanglesKHR:
     adrp    x16, lxrt_vk_table
     add     x16, x16, :lo12:lxrt_vk_table
-    ldr     x16, [x16, #2800]
+    ldr     x16, [x16, #2792]
     cbz     x16, .Lmissing
     br      x16
     .size   lxrt_mvk_vkGetPhysicalDevicePresentRectanglesKHR, .-lxrt_mvk_vkGetPhysicalDevicePresentRectanglesKHR
@@ -3862,7 +3853,7 @@ lxrt_mvk_vkGetPhysicalDevicePresentRectanglesKHR:
 lxrt_mvk_vkGetPhysicalDeviceProperties:
     adrp    x16, lxrt_vk_table
     add     x16, x16, :lo12:lxrt_vk_table
-    ldr     x16, [x16, #2808]
+    ldr     x16, [x16, #2800]
     cbz     x16, .Lmissing
     br      x16
     .size   lxrt_mvk_vkGetPhysicalDeviceProperties, .-lxrt_mvk_vkGetPhysicalDeviceProperties
@@ -3873,7 +3864,7 @@ lxrt_mvk_vkGetPhysicalDeviceProperties:
 lxrt_mvk_vkGetPhysicalDeviceProperties2:
     adrp    x16, lxrt_vk_table
     add     x16, x16, :lo12:lxrt_vk_table
-    ldr     x16, [x16, #2816]
+    ldr     x16, [x16, #2808]
     cbz     x16, .Lmissing
     br      x16
     .size   lxrt_mvk_vkGetPhysicalDeviceProperties2, .-lxrt_mvk_vkGetPhysicalDeviceProperties2
@@ -3884,7 +3875,7 @@ lxrt_mvk_vkGetPhysicalDeviceProperties2:
 lxrt_mvk_vkGetPhysicalDeviceProperties2KHR:
     adrp    x16, lxrt_vk_table
     add     x16, x16, :lo12:lxrt_vk_table
-    ldr     x16, [x16, #2824]
+    ldr     x16, [x16, #2816]
     cbz     x16, .Lmissing
     br      x16
     .size   lxrt_mvk_vkGetPhysicalDeviceProperties2KHR, .-lxrt_mvk_vkGetPhysicalDeviceProperties2KHR
@@ -3895,7 +3886,7 @@ lxrt_mvk_vkGetPhysicalDeviceProperties2KHR:
 lxrt_mvk_vkGetPhysicalDeviceQueueFamilyProperties:
     adrp    x16, lxrt_vk_table
     add     x16, x16, :lo12:lxrt_vk_table
-    ldr     x16, [x16, #2832]
+    ldr     x16, [x16, #2824]
     cbz     x16, .Lmissing
     br      x16
     .size   lxrt_mvk_vkGetPhysicalDeviceQueueFamilyProperties, .-lxrt_mvk_vkGetPhysicalDeviceQueueFamilyProperties
@@ -3906,7 +3897,7 @@ lxrt_mvk_vkGetPhysicalDeviceQueueFamilyProperties:
 lxrt_mvk_vkGetPhysicalDeviceQueueFamilyProperties2:
     adrp    x16, lxrt_vk_table
     add     x16, x16, :lo12:lxrt_vk_table
-    ldr     x16, [x16, #2840]
+    ldr     x16, [x16, #2832]
     cbz     x16, .Lmissing
     br      x16
     .size   lxrt_mvk_vkGetPhysicalDeviceQueueFamilyProperties2, .-lxrt_mvk_vkGetPhysicalDeviceQueueFamilyProperties2
@@ -3917,7 +3908,7 @@ lxrt_mvk_vkGetPhysicalDeviceQueueFamilyProperties2:
 lxrt_mvk_vkGetPhysicalDeviceQueueFamilyProperties2KHR:
     adrp    x16, lxrt_vk_table
     add     x16, x16, :lo12:lxrt_vk_table
-    ldr     x16, [x16, #2848]
+    ldr     x16, [x16, #2840]
     cbz     x16, .Lmissing
     br      x16
     .size   lxrt_mvk_vkGetPhysicalDeviceQueueFamilyProperties2KHR, .-lxrt_mvk_vkGetPhysicalDeviceQueueFamilyProperties2KHR
@@ -3928,7 +3919,7 @@ lxrt_mvk_vkGetPhysicalDeviceQueueFamilyProperties2KHR:
 lxrt_mvk_vkGetPhysicalDeviceSparseImageFormatProperties:
     adrp    x16, lxrt_vk_table
     add     x16, x16, :lo12:lxrt_vk_table
-    ldr     x16, [x16, #2856]
+    ldr     x16, [x16, #2848]
     cbz     x16, .Lmissing
     br      x16
     .size   lxrt_mvk_vkGetPhysicalDeviceSparseImageFormatProperties, .-lxrt_mvk_vkGetPhysicalDeviceSparseImageFormatProperties
@@ -3939,7 +3930,7 @@ lxrt_mvk_vkGetPhysicalDeviceSparseImageFormatProperties:
 lxrt_mvk_vkGetPhysicalDeviceSparseImageFormatProperties2:
     adrp    x16, lxrt_vk_table
     add     x16, x16, :lo12:lxrt_vk_table
-    ldr     x16, [x16, #2864]
+    ldr     x16, [x16, #2856]
     cbz     x16, .Lmissing
     br      x16
     .size   lxrt_mvk_vkGetPhysicalDeviceSparseImageFormatProperties2, .-lxrt_mvk_vkGetPhysicalDeviceSparseImageFormatProperties2
@@ -3950,7 +3941,7 @@ lxrt_mvk_vkGetPhysicalDeviceSparseImageFormatProperties2:
 lxrt_mvk_vkGetPhysicalDeviceSparseImageFormatProperties2KHR:
     adrp    x16, lxrt_vk_table
     add     x16, x16, :lo12:lxrt_vk_table
-    ldr     x16, [x16, #2872]
+    ldr     x16, [x16, #2864]
     cbz     x16, .Lmissing
     br      x16
     .size   lxrt_mvk_vkGetPhysicalDeviceSparseImageFormatProperties2KHR, .-lxrt_mvk_vkGetPhysicalDeviceSparseImageFormatProperties2KHR
@@ -3961,7 +3952,7 @@ lxrt_mvk_vkGetPhysicalDeviceSparseImageFormatProperties2KHR:
 lxrt_mvk_vkGetPhysicalDeviceSurfaceCapabilities2KHR:
     adrp    x16, lxrt_vk_table
     add     x16, x16, :lo12:lxrt_vk_table
-    ldr     x16, [x16, #2880]
+    ldr     x16, [x16, #2872]
     cbz     x16, .Lmissing
     br      x16
     .size   lxrt_mvk_vkGetPhysicalDeviceSurfaceCapabilities2KHR, .-lxrt_mvk_vkGetPhysicalDeviceSurfaceCapabilities2KHR
@@ -3972,7 +3963,7 @@ lxrt_mvk_vkGetPhysicalDeviceSurfaceCapabilities2KHR:
 lxrt_mvk_vkGetPhysicalDeviceSurfaceCapabilitiesKHR:
     adrp    x16, lxrt_vk_table
     add     x16, x16, :lo12:lxrt_vk_table
-    ldr     x16, [x16, #2888]
+    ldr     x16, [x16, #2880]
     cbz     x16, .Lmissing
     br      x16
     .size   lxrt_mvk_vkGetPhysicalDeviceSurfaceCapabilitiesKHR, .-lxrt_mvk_vkGetPhysicalDeviceSurfaceCapabilitiesKHR
@@ -3983,7 +3974,7 @@ lxrt_mvk_vkGetPhysicalDeviceSurfaceCapabilitiesKHR:
 lxrt_mvk_vkGetPhysicalDeviceSurfaceFormats2KHR:
     adrp    x16, lxrt_vk_table
     add     x16, x16, :lo12:lxrt_vk_table
-    ldr     x16, [x16, #2896]
+    ldr     x16, [x16, #2888]
     cbz     x16, .Lmissing
     br      x16
     .size   lxrt_mvk_vkGetPhysicalDeviceSurfaceFormats2KHR, .-lxrt_mvk_vkGetPhysicalDeviceSurfaceFormats2KHR
@@ -3994,7 +3985,7 @@ lxrt_mvk_vkGetPhysicalDeviceSurfaceFormats2KHR:
 lxrt_mvk_vkGetPhysicalDeviceSurfaceFormatsKHR:
     adrp    x16, lxrt_vk_table
     add     x16, x16, :lo12:lxrt_vk_table
-    ldr     x16, [x16, #2904]
+    ldr     x16, [x16, #2896]
     cbz     x16, .Lmissing
     br      x16
     .size   lxrt_mvk_vkGetPhysicalDeviceSurfaceFormatsKHR, .-lxrt_mvk_vkGetPhysicalDeviceSurfaceFormatsKHR
@@ -4005,7 +3996,7 @@ lxrt_mvk_vkGetPhysicalDeviceSurfaceFormatsKHR:
 lxrt_mvk_vkGetPhysicalDeviceSurfacePresentModesKHR:
     adrp    x16, lxrt_vk_table
     add     x16, x16, :lo12:lxrt_vk_table
-    ldr     x16, [x16, #2912]
+    ldr     x16, [x16, #2904]
     cbz     x16, .Lmissing
     br      x16
     .size   lxrt_mvk_vkGetPhysicalDeviceSurfacePresentModesKHR, .-lxrt_mvk_vkGetPhysicalDeviceSurfacePresentModesKHR
@@ -4016,7 +4007,7 @@ lxrt_mvk_vkGetPhysicalDeviceSurfacePresentModesKHR:
 lxrt_mvk_vkGetPhysicalDeviceSurfaceSupportKHR:
     adrp    x16, lxrt_vk_table
     add     x16, x16, :lo12:lxrt_vk_table
-    ldr     x16, [x16, #2920]
+    ldr     x16, [x16, #2912]
     cbz     x16, .Lmissing
     br      x16
     .size   lxrt_mvk_vkGetPhysicalDeviceSurfaceSupportKHR, .-lxrt_mvk_vkGetPhysicalDeviceSurfaceSupportKHR
@@ -4027,7 +4018,7 @@ lxrt_mvk_vkGetPhysicalDeviceSurfaceSupportKHR:
 lxrt_mvk_vkGetPhysicalDeviceToolProperties:
     adrp    x16, lxrt_vk_table
     add     x16, x16, :lo12:lxrt_vk_table
-    ldr     x16, [x16, #2928]
+    ldr     x16, [x16, #2920]
     cbz     x16, .Lmissing
     br      x16
     .size   lxrt_mvk_vkGetPhysicalDeviceToolProperties, .-lxrt_mvk_vkGetPhysicalDeviceToolProperties
@@ -4038,7 +4029,7 @@ lxrt_mvk_vkGetPhysicalDeviceToolProperties:
 lxrt_mvk_vkGetPhysicalDeviceToolPropertiesEXT:
     adrp    x16, lxrt_vk_table
     add     x16, x16, :lo12:lxrt_vk_table
-    ldr     x16, [x16, #2936]
+    ldr     x16, [x16, #2928]
     cbz     x16, .Lmissing
     br      x16
     .size   lxrt_mvk_vkGetPhysicalDeviceToolPropertiesEXT, .-lxrt_mvk_vkGetPhysicalDeviceToolPropertiesEXT
@@ -4049,7 +4040,7 @@ lxrt_mvk_vkGetPhysicalDeviceToolPropertiesEXT:
 lxrt_mvk_vkGetPipelineCacheData:
     adrp    x16, lxrt_vk_table
     add     x16, x16, :lo12:lxrt_vk_table
-    ldr     x16, [x16, #2944]
+    ldr     x16, [x16, #2936]
     cbz     x16, .Lmissing
     br      x16
     .size   lxrt_mvk_vkGetPipelineCacheData, .-lxrt_mvk_vkGetPipelineCacheData
@@ -4060,7 +4051,7 @@ lxrt_mvk_vkGetPipelineCacheData:
 lxrt_mvk_vkGetPrivateData:
     adrp    x16, lxrt_vk_table
     add     x16, x16, :lo12:lxrt_vk_table
-    ldr     x16, [x16, #2952]
+    ldr     x16, [x16, #2944]
     cbz     x16, .Lmissing
     br      x16
     .size   lxrt_mvk_vkGetPrivateData, .-lxrt_mvk_vkGetPrivateData
@@ -4071,7 +4062,7 @@ lxrt_mvk_vkGetPrivateData:
 lxrt_mvk_vkGetPrivateDataEXT:
     adrp    x16, lxrt_vk_table
     add     x16, x16, :lo12:lxrt_vk_table
-    ldr     x16, [x16, #2960]
+    ldr     x16, [x16, #2952]
     cbz     x16, .Lmissing
     br      x16
     .size   lxrt_mvk_vkGetPrivateDataEXT, .-lxrt_mvk_vkGetPrivateDataEXT
@@ -4082,7 +4073,7 @@ lxrt_mvk_vkGetPrivateDataEXT:
 lxrt_mvk_vkGetQueryPoolResults:
     adrp    x16, lxrt_vk_table
     add     x16, x16, :lo12:lxrt_vk_table
-    ldr     x16, [x16, #2968]
+    ldr     x16, [x16, #2960]
     cbz     x16, .Lmissing
     br      x16
     .size   lxrt_mvk_vkGetQueryPoolResults, .-lxrt_mvk_vkGetQueryPoolResults
@@ -4093,7 +4084,7 @@ lxrt_mvk_vkGetQueryPoolResults:
 lxrt_mvk_vkGetRefreshCycleDurationGOOGLE:
     adrp    x16, lxrt_vk_table
     add     x16, x16, :lo12:lxrt_vk_table
-    ldr     x16, [x16, #2976]
+    ldr     x16, [x16, #2968]
     cbz     x16, .Lmissing
     br      x16
     .size   lxrt_mvk_vkGetRefreshCycleDurationGOOGLE, .-lxrt_mvk_vkGetRefreshCycleDurationGOOGLE
@@ -4104,7 +4095,7 @@ lxrt_mvk_vkGetRefreshCycleDurationGOOGLE:
 lxrt_mvk_vkGetRenderAreaGranularity:
     adrp    x16, lxrt_vk_table
     add     x16, x16, :lo12:lxrt_vk_table
-    ldr     x16, [x16, #2984]
+    ldr     x16, [x16, #2976]
     cbz     x16, .Lmissing
     br      x16
     .size   lxrt_mvk_vkGetRenderAreaGranularity, .-lxrt_mvk_vkGetRenderAreaGranularity
@@ -4115,7 +4106,7 @@ lxrt_mvk_vkGetRenderAreaGranularity:
 lxrt_mvk_vkGetRenderingAreaGranularity:
     adrp    x16, lxrt_vk_table
     add     x16, x16, :lo12:lxrt_vk_table
-    ldr     x16, [x16, #2992]
+    ldr     x16, [x16, #2984]
     cbz     x16, .Lmissing
     br      x16
     .size   lxrt_mvk_vkGetRenderingAreaGranularity, .-lxrt_mvk_vkGetRenderingAreaGranularity
@@ -4126,7 +4117,7 @@ lxrt_mvk_vkGetRenderingAreaGranularity:
 lxrt_mvk_vkGetRenderingAreaGranularityKHR:
     adrp    x16, lxrt_vk_table
     add     x16, x16, :lo12:lxrt_vk_table
-    ldr     x16, [x16, #3000]
+    ldr     x16, [x16, #2992]
     cbz     x16, .Lmissing
     br      x16
     .size   lxrt_mvk_vkGetRenderingAreaGranularityKHR, .-lxrt_mvk_vkGetRenderingAreaGranularityKHR
@@ -4137,7 +4128,7 @@ lxrt_mvk_vkGetRenderingAreaGranularityKHR:
 lxrt_mvk_vkGetSemaphoreCounterValue:
     adrp    x16, lxrt_vk_table
     add     x16, x16, :lo12:lxrt_vk_table
-    ldr     x16, [x16, #3008]
+    ldr     x16, [x16, #3000]
     cbz     x16, .Lmissing
     br      x16
     .size   lxrt_mvk_vkGetSemaphoreCounterValue, .-lxrt_mvk_vkGetSemaphoreCounterValue
@@ -4148,7 +4139,7 @@ lxrt_mvk_vkGetSemaphoreCounterValue:
 lxrt_mvk_vkGetSemaphoreCounterValueKHR:
     adrp    x16, lxrt_vk_table
     add     x16, x16, :lo12:lxrt_vk_table
-    ldr     x16, [x16, #3016]
+    ldr     x16, [x16, #3008]
     cbz     x16, .Lmissing
     br      x16
     .size   lxrt_mvk_vkGetSemaphoreCounterValueKHR, .-lxrt_mvk_vkGetSemaphoreCounterValueKHR
@@ -4159,7 +4150,7 @@ lxrt_mvk_vkGetSemaphoreCounterValueKHR:
 lxrt_mvk_vkGetSwapchainImagesKHR:
     adrp    x16, lxrt_vk_table
     add     x16, x16, :lo12:lxrt_vk_table
-    ldr     x16, [x16, #3024]
+    ldr     x16, [x16, #3016]
     cbz     x16, .Lmissing
     br      x16
     .size   lxrt_mvk_vkGetSwapchainImagesKHR, .-lxrt_mvk_vkGetSwapchainImagesKHR
@@ -4169,7 +4160,7 @@ lxrt_mvk_vkGetSwapchainImagesKHR:
 vkGetVersionStringsMVK:
     adrp    x16, lxrt_vk_table
     add     x16, x16, :lo12:lxrt_vk_table
-    ldr     x16, [x16, #3032]
+    ldr     x16, [x16, #3024]
     cbz     x16, .Lmissing
     br      x16
     .size   vkGetVersionStringsMVK, .-vkGetVersionStringsMVK
@@ -4180,7 +4171,7 @@ vkGetVersionStringsMVK:
 lxrt_mvk_vkInvalidateMappedMemoryRanges:
     adrp    x16, lxrt_vk_table
     add     x16, x16, :lo12:lxrt_vk_table
-    ldr     x16, [x16, #3040]
+    ldr     x16, [x16, #3032]
     cbz     x16, .Lmissing
     br      x16
     .size   lxrt_mvk_vkInvalidateMappedMemoryRanges, .-lxrt_mvk_vkInvalidateMappedMemoryRanges
@@ -4191,7 +4182,7 @@ lxrt_mvk_vkInvalidateMappedMemoryRanges:
 lxrt_mvk_vkMapMemory:
     adrp    x16, lxrt_vk_table
     add     x16, x16, :lo12:lxrt_vk_table
-    ldr     x16, [x16, #3048]
+    ldr     x16, [x16, #3040]
     cbz     x16, .Lmissing
     br      x16
     .size   lxrt_mvk_vkMapMemory, .-lxrt_mvk_vkMapMemory
@@ -4202,7 +4193,7 @@ lxrt_mvk_vkMapMemory:
 lxrt_mvk_vkMapMemory2:
     adrp    x16, lxrt_vk_table
     add     x16, x16, :lo12:lxrt_vk_table
-    ldr     x16, [x16, #3056]
+    ldr     x16, [x16, #3048]
     cbz     x16, .Lmissing
     br      x16
     .size   lxrt_mvk_vkMapMemory2, .-lxrt_mvk_vkMapMemory2
@@ -4213,7 +4204,7 @@ lxrt_mvk_vkMapMemory2:
 lxrt_mvk_vkMapMemory2KHR:
     adrp    x16, lxrt_vk_table
     add     x16, x16, :lo12:lxrt_vk_table
-    ldr     x16, [x16, #3064]
+    ldr     x16, [x16, #3056]
     cbz     x16, .Lmissing
     br      x16
     .size   lxrt_mvk_vkMapMemory2KHR, .-lxrt_mvk_vkMapMemory2KHR
@@ -4224,7 +4215,7 @@ lxrt_mvk_vkMapMemory2KHR:
 lxrt_mvk_vkMergePipelineCaches:
     adrp    x16, lxrt_vk_table
     add     x16, x16, :lo12:lxrt_vk_table
-    ldr     x16, [x16, #3072]
+    ldr     x16, [x16, #3064]
     cbz     x16, .Lmissing
     br      x16
     .size   lxrt_mvk_vkMergePipelineCaches, .-lxrt_mvk_vkMergePipelineCaches
@@ -4235,7 +4226,7 @@ lxrt_mvk_vkMergePipelineCaches:
 lxrt_mvk_vkQueueBeginDebugUtilsLabelEXT:
     adrp    x16, lxrt_vk_table
     add     x16, x16, :lo12:lxrt_vk_table
-    ldr     x16, [x16, #3080]
+    ldr     x16, [x16, #3072]
     cbz     x16, .Lmissing
     br      x16
     .size   lxrt_mvk_vkQueueBeginDebugUtilsLabelEXT, .-lxrt_mvk_vkQueueBeginDebugUtilsLabelEXT
@@ -4246,7 +4237,7 @@ lxrt_mvk_vkQueueBeginDebugUtilsLabelEXT:
 lxrt_mvk_vkQueueBindSparse:
     adrp    x16, lxrt_vk_table
     add     x16, x16, :lo12:lxrt_vk_table
-    ldr     x16, [x16, #3088]
+    ldr     x16, [x16, #3080]
     cbz     x16, .Lmissing
     br      x16
     .size   lxrt_mvk_vkQueueBindSparse, .-lxrt_mvk_vkQueueBindSparse
@@ -4257,7 +4248,7 @@ lxrt_mvk_vkQueueBindSparse:
 lxrt_mvk_vkQueueEndDebugUtilsLabelEXT:
     adrp    x16, lxrt_vk_table
     add     x16, x16, :lo12:lxrt_vk_table
-    ldr     x16, [x16, #3096]
+    ldr     x16, [x16, #3088]
     cbz     x16, .Lmissing
     br      x16
     .size   lxrt_mvk_vkQueueEndDebugUtilsLabelEXT, .-lxrt_mvk_vkQueueEndDebugUtilsLabelEXT
@@ -4268,7 +4259,7 @@ lxrt_mvk_vkQueueEndDebugUtilsLabelEXT:
 lxrt_mvk_vkQueueInsertDebugUtilsLabelEXT:
     adrp    x16, lxrt_vk_table
     add     x16, x16, :lo12:lxrt_vk_table
-    ldr     x16, [x16, #3104]
+    ldr     x16, [x16, #3096]
     cbz     x16, .Lmissing
     br      x16
     .size   lxrt_mvk_vkQueueInsertDebugUtilsLabelEXT, .-lxrt_mvk_vkQueueInsertDebugUtilsLabelEXT
@@ -4279,7 +4270,7 @@ lxrt_mvk_vkQueueInsertDebugUtilsLabelEXT:
 lxrt_mvk_vkQueuePresentKHR:
     adrp    x16, lxrt_vk_table
     add     x16, x16, :lo12:lxrt_vk_table
-    ldr     x16, [x16, #3112]
+    ldr     x16, [x16, #3104]
     cbz     x16, .Lmissing
     br      x16
     .size   lxrt_mvk_vkQueuePresentKHR, .-lxrt_mvk_vkQueuePresentKHR
@@ -4290,7 +4281,7 @@ lxrt_mvk_vkQueuePresentKHR:
 lxrt_mvk_vkQueueSubmit:
     adrp    x16, lxrt_vk_table
     add     x16, x16, :lo12:lxrt_vk_table
-    ldr     x16, [x16, #3120]
+    ldr     x16, [x16, #3112]
     cbz     x16, .Lmissing
     br      x16
     .size   lxrt_mvk_vkQueueSubmit, .-lxrt_mvk_vkQueueSubmit
@@ -4301,7 +4292,7 @@ lxrt_mvk_vkQueueSubmit:
 lxrt_mvk_vkQueueSubmit2:
     adrp    x16, lxrt_vk_table
     add     x16, x16, :lo12:lxrt_vk_table
-    ldr     x16, [x16, #3128]
+    ldr     x16, [x16, #3120]
     cbz     x16, .Lmissing
     br      x16
     .size   lxrt_mvk_vkQueueSubmit2, .-lxrt_mvk_vkQueueSubmit2
@@ -4312,7 +4303,7 @@ lxrt_mvk_vkQueueSubmit2:
 lxrt_mvk_vkQueueSubmit2KHR:
     adrp    x16, lxrt_vk_table
     add     x16, x16, :lo12:lxrt_vk_table
-    ldr     x16, [x16, #3136]
+    ldr     x16, [x16, #3128]
     cbz     x16, .Lmissing
     br      x16
     .size   lxrt_mvk_vkQueueSubmit2KHR, .-lxrt_mvk_vkQueueSubmit2KHR
@@ -4323,7 +4314,7 @@ lxrt_mvk_vkQueueSubmit2KHR:
 lxrt_mvk_vkQueueWaitIdle:
     adrp    x16, lxrt_vk_table
     add     x16, x16, :lo12:lxrt_vk_table
-    ldr     x16, [x16, #3144]
+    ldr     x16, [x16, #3136]
     cbz     x16, .Lmissing
     br      x16
     .size   lxrt_mvk_vkQueueWaitIdle, .-lxrt_mvk_vkQueueWaitIdle
@@ -4334,7 +4325,7 @@ lxrt_mvk_vkQueueWaitIdle:
 lxrt_mvk_vkReleaseSwapchainImagesEXT:
     adrp    x16, lxrt_vk_table
     add     x16, x16, :lo12:lxrt_vk_table
-    ldr     x16, [x16, #3152]
+    ldr     x16, [x16, #3144]
     cbz     x16, .Lmissing
     br      x16
     .size   lxrt_mvk_vkReleaseSwapchainImagesEXT, .-lxrt_mvk_vkReleaseSwapchainImagesEXT
@@ -4345,7 +4336,7 @@ lxrt_mvk_vkReleaseSwapchainImagesEXT:
 lxrt_mvk_vkReleaseSwapchainImagesKHR:
     adrp    x16, lxrt_vk_table
     add     x16, x16, :lo12:lxrt_vk_table
-    ldr     x16, [x16, #3160]
+    ldr     x16, [x16, #3152]
     cbz     x16, .Lmissing
     br      x16
     .size   lxrt_mvk_vkReleaseSwapchainImagesKHR, .-lxrt_mvk_vkReleaseSwapchainImagesKHR
@@ -4356,7 +4347,7 @@ lxrt_mvk_vkReleaseSwapchainImagesKHR:
 lxrt_mvk_vkResetCommandBuffer:
     adrp    x16, lxrt_vk_table
     add     x16, x16, :lo12:lxrt_vk_table
-    ldr     x16, [x16, #3168]
+    ldr     x16, [x16, #3160]
     cbz     x16, .Lmissing
     br      x16
     .size   lxrt_mvk_vkResetCommandBuffer, .-lxrt_mvk_vkResetCommandBuffer
@@ -4367,7 +4358,7 @@ lxrt_mvk_vkResetCommandBuffer:
 lxrt_mvk_vkResetCommandPool:
     adrp    x16, lxrt_vk_table
     add     x16, x16, :lo12:lxrt_vk_table
-    ldr     x16, [x16, #3176]
+    ldr     x16, [x16, #3168]
     cbz     x16, .Lmissing
     br      x16
     .size   lxrt_mvk_vkResetCommandPool, .-lxrt_mvk_vkResetCommandPool
@@ -4378,7 +4369,7 @@ lxrt_mvk_vkResetCommandPool:
 lxrt_mvk_vkResetDescriptorPool:
     adrp    x16, lxrt_vk_table
     add     x16, x16, :lo12:lxrt_vk_table
-    ldr     x16, [x16, #3184]
+    ldr     x16, [x16, #3176]
     cbz     x16, .Lmissing
     br      x16
     .size   lxrt_mvk_vkResetDescriptorPool, .-lxrt_mvk_vkResetDescriptorPool
@@ -4389,7 +4380,7 @@ lxrt_mvk_vkResetDescriptorPool:
 lxrt_mvk_vkResetEvent:
     adrp    x16, lxrt_vk_table
     add     x16, x16, :lo12:lxrt_vk_table
-    ldr     x16, [x16, #3192]
+    ldr     x16, [x16, #3184]
     cbz     x16, .Lmissing
     br      x16
     .size   lxrt_mvk_vkResetEvent, .-lxrt_mvk_vkResetEvent
@@ -4400,7 +4391,7 @@ lxrt_mvk_vkResetEvent:
 lxrt_mvk_vkResetFences:
     adrp    x16, lxrt_vk_table
     add     x16, x16, :lo12:lxrt_vk_table
-    ldr     x16, [x16, #3200]
+    ldr     x16, [x16, #3192]
     cbz     x16, .Lmissing
     br      x16
     .size   lxrt_mvk_vkResetFences, .-lxrt_mvk_vkResetFences
@@ -4411,7 +4402,7 @@ lxrt_mvk_vkResetFences:
 lxrt_mvk_vkResetQueryPool:
     adrp    x16, lxrt_vk_table
     add     x16, x16, :lo12:lxrt_vk_table
-    ldr     x16, [x16, #3208]
+    ldr     x16, [x16, #3200]
     cbz     x16, .Lmissing
     br      x16
     .size   lxrt_mvk_vkResetQueryPool, .-lxrt_mvk_vkResetQueryPool
@@ -4422,7 +4413,7 @@ lxrt_mvk_vkResetQueryPool:
 lxrt_mvk_vkResetQueryPoolEXT:
     adrp    x16, lxrt_vk_table
     add     x16, x16, :lo12:lxrt_vk_table
-    ldr     x16, [x16, #3216]
+    ldr     x16, [x16, #3208]
     cbz     x16, .Lmissing
     br      x16
     .size   lxrt_mvk_vkResetQueryPoolEXT, .-lxrt_mvk_vkResetQueryPoolEXT
@@ -4433,7 +4424,7 @@ lxrt_mvk_vkResetQueryPoolEXT:
 lxrt_mvk_vkSetDebugUtilsObjectNameEXT:
     adrp    x16, lxrt_vk_table
     add     x16, x16, :lo12:lxrt_vk_table
-    ldr     x16, [x16, #3224]
+    ldr     x16, [x16, #3216]
     cbz     x16, .Lmissing
     br      x16
     .size   lxrt_mvk_vkSetDebugUtilsObjectNameEXT, .-lxrt_mvk_vkSetDebugUtilsObjectNameEXT
@@ -4444,7 +4435,7 @@ lxrt_mvk_vkSetDebugUtilsObjectNameEXT:
 lxrt_mvk_vkSetDebugUtilsObjectTagEXT:
     adrp    x16, lxrt_vk_table
     add     x16, x16, :lo12:lxrt_vk_table
-    ldr     x16, [x16, #3232]
+    ldr     x16, [x16, #3224]
     cbz     x16, .Lmissing
     br      x16
     .size   lxrt_mvk_vkSetDebugUtilsObjectTagEXT, .-lxrt_mvk_vkSetDebugUtilsObjectTagEXT
@@ -4455,7 +4446,7 @@ lxrt_mvk_vkSetDebugUtilsObjectTagEXT:
 lxrt_mvk_vkSetEvent:
     adrp    x16, lxrt_vk_table
     add     x16, x16, :lo12:lxrt_vk_table
-    ldr     x16, [x16, #3240]
+    ldr     x16, [x16, #3232]
     cbz     x16, .Lmissing
     br      x16
     .size   lxrt_mvk_vkSetEvent, .-lxrt_mvk_vkSetEvent
@@ -4466,10 +4457,20 @@ lxrt_mvk_vkSetEvent:
 lxrt_mvk_vkSetHdrMetadataEXT:
     adrp    x16, lxrt_vk_table
     add     x16, x16, :lo12:lxrt_vk_table
-    ldr     x16, [x16, #3248]
+    ldr     x16, [x16, #3240]
     cbz     x16, .Lmissing
     br      x16
     .size   lxrt_mvk_vkSetHdrMetadataEXT, .-lxrt_mvk_vkSetHdrMetadataEXT
+
+    .globl  vkSetMTLTextureMVK
+    .type   vkSetMTLTextureMVK,%function
+vkSetMTLTextureMVK:
+    adrp    x16, lxrt_vk_table
+    add     x16, x16, :lo12:lxrt_vk_table
+    ldr     x16, [x16, #3248]
+    cbz     x16, .Lmissing
+    br      x16
+    .size   vkSetMTLTextureMVK, .-vkSetMTLTextureMVK
 
     .globl  vkSetMoltenVKConfigurationMVK
     .type   vkSetMoltenVKConfigurationMVK,%function
@@ -4481,23 +4482,13 @@ vkSetMoltenVKConfigurationMVK:
     br      x16
     .size   vkSetMoltenVKConfigurationMVK, .-vkSetMoltenVKConfigurationMVK
 
-    .globl  vkSetMTLTextureMVK
-    .type   vkSetMTLTextureMVK,%function
-vkSetMTLTextureMVK:
-    adrp    x16, lxrt_vk_table
-    add     x16, x16, :lo12:lxrt_vk_table
-    ldr     x16, [x16, #3264]
-    cbz     x16, .Lmissing
-    br      x16
-    .size   vkSetMTLTextureMVK, .-vkSetMTLTextureMVK
-
     .globl  lxrt_mvk_vkSetPrivateData
     .hidden lxrt_mvk_vkSetPrivateData
     .type   lxrt_mvk_vkSetPrivateData,%function
 lxrt_mvk_vkSetPrivateData:
     adrp    x16, lxrt_vk_table
     add     x16, x16, :lo12:lxrt_vk_table
-    ldr     x16, [x16, #3272]
+    ldr     x16, [x16, #3264]
     cbz     x16, .Lmissing
     br      x16
     .size   lxrt_mvk_vkSetPrivateData, .-lxrt_mvk_vkSetPrivateData
@@ -4508,7 +4499,7 @@ lxrt_mvk_vkSetPrivateData:
 lxrt_mvk_vkSetPrivateDataEXT:
     adrp    x16, lxrt_vk_table
     add     x16, x16, :lo12:lxrt_vk_table
-    ldr     x16, [x16, #3280]
+    ldr     x16, [x16, #3272]
     cbz     x16, .Lmissing
     br      x16
     .size   lxrt_mvk_vkSetPrivateDataEXT, .-lxrt_mvk_vkSetPrivateDataEXT
@@ -4518,7 +4509,7 @@ lxrt_mvk_vkSetPrivateDataEXT:
 vkSetWorkgroupSizeMVK:
     adrp    x16, lxrt_vk_table
     add     x16, x16, :lo12:lxrt_vk_table
-    ldr     x16, [x16, #3288]
+    ldr     x16, [x16, #3280]
     cbz     x16, .Lmissing
     br      x16
     .size   vkSetWorkgroupSizeMVK, .-vkSetWorkgroupSizeMVK
@@ -4529,7 +4520,7 @@ vkSetWorkgroupSizeMVK:
 lxrt_mvk_vkSignalSemaphore:
     adrp    x16, lxrt_vk_table
     add     x16, x16, :lo12:lxrt_vk_table
-    ldr     x16, [x16, #3296]
+    ldr     x16, [x16, #3288]
     cbz     x16, .Lmissing
     br      x16
     .size   lxrt_mvk_vkSignalSemaphore, .-lxrt_mvk_vkSignalSemaphore
@@ -4540,7 +4531,7 @@ lxrt_mvk_vkSignalSemaphore:
 lxrt_mvk_vkSignalSemaphoreKHR:
     adrp    x16, lxrt_vk_table
     add     x16, x16, :lo12:lxrt_vk_table
-    ldr     x16, [x16, #3304]
+    ldr     x16, [x16, #3296]
     cbz     x16, .Lmissing
     br      x16
     .size   lxrt_mvk_vkSignalSemaphoreKHR, .-lxrt_mvk_vkSignalSemaphoreKHR
@@ -4551,7 +4542,7 @@ lxrt_mvk_vkSignalSemaphoreKHR:
 lxrt_mvk_vkSubmitDebugUtilsMessageEXT:
     adrp    x16, lxrt_vk_table
     add     x16, x16, :lo12:lxrt_vk_table
-    ldr     x16, [x16, #3312]
+    ldr     x16, [x16, #3304]
     cbz     x16, .Lmissing
     br      x16
     .size   lxrt_mvk_vkSubmitDebugUtilsMessageEXT, .-lxrt_mvk_vkSubmitDebugUtilsMessageEXT
@@ -4562,7 +4553,7 @@ lxrt_mvk_vkSubmitDebugUtilsMessageEXT:
 lxrt_mvk_vkTransitionImageLayout:
     adrp    x16, lxrt_vk_table
     add     x16, x16, :lo12:lxrt_vk_table
-    ldr     x16, [x16, #3320]
+    ldr     x16, [x16, #3312]
     cbz     x16, .Lmissing
     br      x16
     .size   lxrt_mvk_vkTransitionImageLayout, .-lxrt_mvk_vkTransitionImageLayout
@@ -4573,7 +4564,7 @@ lxrt_mvk_vkTransitionImageLayout:
 lxrt_mvk_vkTransitionImageLayoutEXT:
     adrp    x16, lxrt_vk_table
     add     x16, x16, :lo12:lxrt_vk_table
-    ldr     x16, [x16, #3328]
+    ldr     x16, [x16, #3320]
     cbz     x16, .Lmissing
     br      x16
     .size   lxrt_mvk_vkTransitionImageLayoutEXT, .-lxrt_mvk_vkTransitionImageLayoutEXT
@@ -4584,7 +4575,7 @@ lxrt_mvk_vkTransitionImageLayoutEXT:
 lxrt_mvk_vkTrimCommandPool:
     adrp    x16, lxrt_vk_table
     add     x16, x16, :lo12:lxrt_vk_table
-    ldr     x16, [x16, #3336]
+    ldr     x16, [x16, #3328]
     cbz     x16, .Lmissing
     br      x16
     .size   lxrt_mvk_vkTrimCommandPool, .-lxrt_mvk_vkTrimCommandPool
@@ -4595,7 +4586,7 @@ lxrt_mvk_vkTrimCommandPool:
 lxrt_mvk_vkTrimCommandPoolKHR:
     adrp    x16, lxrt_vk_table
     add     x16, x16, :lo12:lxrt_vk_table
-    ldr     x16, [x16, #3344]
+    ldr     x16, [x16, #3336]
     cbz     x16, .Lmissing
     br      x16
     .size   lxrt_mvk_vkTrimCommandPoolKHR, .-lxrt_mvk_vkTrimCommandPoolKHR
@@ -4606,7 +4597,7 @@ lxrt_mvk_vkTrimCommandPoolKHR:
 lxrt_mvk_vkUnmapMemory:
     adrp    x16, lxrt_vk_table
     add     x16, x16, :lo12:lxrt_vk_table
-    ldr     x16, [x16, #3352]
+    ldr     x16, [x16, #3344]
     cbz     x16, .Lmissing
     br      x16
     .size   lxrt_mvk_vkUnmapMemory, .-lxrt_mvk_vkUnmapMemory
@@ -4617,7 +4608,7 @@ lxrt_mvk_vkUnmapMemory:
 lxrt_mvk_vkUnmapMemory2:
     adrp    x16, lxrt_vk_table
     add     x16, x16, :lo12:lxrt_vk_table
-    ldr     x16, [x16, #3360]
+    ldr     x16, [x16, #3352]
     cbz     x16, .Lmissing
     br      x16
     .size   lxrt_mvk_vkUnmapMemory2, .-lxrt_mvk_vkUnmapMemory2
@@ -4628,21 +4619,10 @@ lxrt_mvk_vkUnmapMemory2:
 lxrt_mvk_vkUnmapMemory2KHR:
     adrp    x16, lxrt_vk_table
     add     x16, x16, :lo12:lxrt_vk_table
-    ldr     x16, [x16, #3368]
+    ldr     x16, [x16, #3360]
     cbz     x16, .Lmissing
     br      x16
     .size   lxrt_mvk_vkUnmapMemory2KHR, .-lxrt_mvk_vkUnmapMemory2KHR
-
-    .globl  lxrt_mvk_vkUpdateDescriptorSets
-    .hidden lxrt_mvk_vkUpdateDescriptorSets
-    .type   lxrt_mvk_vkUpdateDescriptorSets,%function
-lxrt_mvk_vkUpdateDescriptorSets:
-    adrp    x16, lxrt_vk_table
-    add     x16, x16, :lo12:lxrt_vk_table
-    ldr     x16, [x16, #3376]
-    cbz     x16, .Lmissing
-    br      x16
-    .size   lxrt_mvk_vkUpdateDescriptorSets, .-lxrt_mvk_vkUpdateDescriptorSets
 
     .globl  lxrt_mvk_vkUpdateDescriptorSetWithTemplate
     .hidden lxrt_mvk_vkUpdateDescriptorSetWithTemplate
@@ -4650,7 +4630,7 @@ lxrt_mvk_vkUpdateDescriptorSets:
 lxrt_mvk_vkUpdateDescriptorSetWithTemplate:
     adrp    x16, lxrt_vk_table
     add     x16, x16, :lo12:lxrt_vk_table
-    ldr     x16, [x16, #3384]
+    ldr     x16, [x16, #3368]
     cbz     x16, .Lmissing
     br      x16
     .size   lxrt_mvk_vkUpdateDescriptorSetWithTemplate, .-lxrt_mvk_vkUpdateDescriptorSetWithTemplate
@@ -4661,17 +4641,28 @@ lxrt_mvk_vkUpdateDescriptorSetWithTemplate:
 lxrt_mvk_vkUpdateDescriptorSetWithTemplateKHR:
     adrp    x16, lxrt_vk_table
     add     x16, x16, :lo12:lxrt_vk_table
-    ldr     x16, [x16, #3392]
+    ldr     x16, [x16, #3376]
     cbz     x16, .Lmissing
     br      x16
     .size   lxrt_mvk_vkUpdateDescriptorSetWithTemplateKHR, .-lxrt_mvk_vkUpdateDescriptorSetWithTemplateKHR
+
+    .globl  lxrt_mvk_vkUpdateDescriptorSets
+    .hidden lxrt_mvk_vkUpdateDescriptorSets
+    .type   lxrt_mvk_vkUpdateDescriptorSets,%function
+lxrt_mvk_vkUpdateDescriptorSets:
+    adrp    x16, lxrt_vk_table
+    add     x16, x16, :lo12:lxrt_vk_table
+    ldr     x16, [x16, #3384]
+    cbz     x16, .Lmissing
+    br      x16
+    .size   lxrt_mvk_vkUpdateDescriptorSets, .-lxrt_mvk_vkUpdateDescriptorSets
 
     .globl  vkUseIOSurfaceMVK
     .type   vkUseIOSurfaceMVK,%function
 vkUseIOSurfaceMVK:
     adrp    x16, lxrt_vk_table
     add     x16, x16, :lo12:lxrt_vk_table
-    ldr     x16, [x16, #3400]
+    ldr     x16, [x16, #3392]
     cbz     x16, .Lmissing
     br      x16
     .size   vkUseIOSurfaceMVK, .-vkUseIOSurfaceMVK
@@ -4682,7 +4673,7 @@ vkUseIOSurfaceMVK:
 lxrt_mvk_vkWaitForFences:
     adrp    x16, lxrt_vk_table
     add     x16, x16, :lo12:lxrt_vk_table
-    ldr     x16, [x16, #3408]
+    ldr     x16, [x16, #3400]
     cbz     x16, .Lmissing
     br      x16
     .size   lxrt_mvk_vkWaitForFences, .-lxrt_mvk_vkWaitForFences
@@ -4693,7 +4684,7 @@ lxrt_mvk_vkWaitForFences:
 lxrt_mvk_vkWaitForPresent2KHR:
     adrp    x16, lxrt_vk_table
     add     x16, x16, :lo12:lxrt_vk_table
-    ldr     x16, [x16, #3416]
+    ldr     x16, [x16, #3408]
     cbz     x16, .Lmissing
     br      x16
     .size   lxrt_mvk_vkWaitForPresent2KHR, .-lxrt_mvk_vkWaitForPresent2KHR
@@ -4704,7 +4695,7 @@ lxrt_mvk_vkWaitForPresent2KHR:
 lxrt_mvk_vkWaitForPresentKHR:
     adrp    x16, lxrt_vk_table
     add     x16, x16, :lo12:lxrt_vk_table
-    ldr     x16, [x16, #3424]
+    ldr     x16, [x16, #3416]
     cbz     x16, .Lmissing
     br      x16
     .size   lxrt_mvk_vkWaitForPresentKHR, .-lxrt_mvk_vkWaitForPresentKHR
@@ -4715,7 +4706,7 @@ lxrt_mvk_vkWaitForPresentKHR:
 lxrt_mvk_vkWaitSemaphores:
     adrp    x16, lxrt_vk_table
     add     x16, x16, :lo12:lxrt_vk_table
-    ldr     x16, [x16, #3432]
+    ldr     x16, [x16, #3424]
     cbz     x16, .Lmissing
     br      x16
     .size   lxrt_mvk_vkWaitSemaphores, .-lxrt_mvk_vkWaitSemaphores
@@ -4726,10 +4717,41 @@ lxrt_mvk_vkWaitSemaphores:
 lxrt_mvk_vkWaitSemaphoresKHR:
     adrp    x16, lxrt_vk_table
     add     x16, x16, :lo12:lxrt_vk_table
-    ldr     x16, [x16, #3440]
+    ldr     x16, [x16, #3432]
     cbz     x16, .Lmissing
     br      x16
     .size   lxrt_mvk_vkWaitSemaphoresKHR, .-lxrt_mvk_vkWaitSemaphoresKHR
+
+    .globl  lxrt_mvk_vk_icdGetInstanceProcAddr
+    .hidden lxrt_mvk_vk_icdGetInstanceProcAddr
+    .type   lxrt_mvk_vk_icdGetInstanceProcAddr,%function
+lxrt_mvk_vk_icdGetInstanceProcAddr:
+    adrp    x16, lxrt_vk_table
+    add     x16, x16, :lo12:lxrt_vk_table
+    ldr     x16, [x16, #3440]
+    cbz     x16, .Lmissing
+    br      x16
+    .size   lxrt_mvk_vk_icdGetInstanceProcAddr, .-lxrt_mvk_vk_icdGetInstanceProcAddr
+
+    .globl  vk_icdGetPhysicalDeviceProcAddr
+    .type   vk_icdGetPhysicalDeviceProcAddr,%function
+vk_icdGetPhysicalDeviceProcAddr:
+    adrp    x16, lxrt_vk_table
+    add     x16, x16, :lo12:lxrt_vk_table
+    ldr     x16, [x16, #3448]
+    cbz     x16, .Lmissing
+    br      x16
+    .size   vk_icdGetPhysicalDeviceProcAddr, .-vk_icdGetPhysicalDeviceProcAddr
+
+    .globl  vk_icdNegotiateLoaderICDInterfaceVersion
+    .type   vk_icdNegotiateLoaderICDInterfaceVersion,%function
+vk_icdNegotiateLoaderICDInterfaceVersion:
+    adrp    x16, lxrt_vk_table
+    add     x16, x16, :lo12:lxrt_vk_table
+    ldr     x16, [x16, #3456]
+    cbz     x16, .Lmissing
+    br      x16
+    .size   vk_icdNegotiateLoaderICDInterfaceVersion, .-vk_icdNegotiateLoaderICDInterfaceVersion
 
 // MoltenVK did not export this entry point. Failing loudly beats branching
 // through zero, and the runtime's fault reporter names the address.
@@ -9482,6 +9504,28 @@ lxrt_mvk_vkWaitSemaphoresKHR:
     ldr     x16, [x16, #3440]
     br      x16
 
+.Lcnt431:
+    adrp    x17, lxrt_vk_counts
+    add     x17, x17, :lo12:lxrt_vk_counts
+    ldr     x16, [x17, #3448]
+    add     x16, x16, #1
+    str     x16, [x17, #3448]
+    adrp    x16, lxrt_vk_real
+    add     x16, x16, :lo12:lxrt_vk_real
+    ldr     x16, [x16, #3448]
+    br      x16
+
+.Lcnt432:
+    adrp    x17, lxrt_vk_counts
+    add     x17, x17, :lo12:lxrt_vk_counts
+    ldr     x16, [x17, #3456]
+    add     x16, x16, #1
+    str     x16, [x17, #3456]
+    adrp    x16, lxrt_vk_real
+    add     x16, x16, :lo12:lxrt_vk_real
+    ldr     x16, [x16, #3456]
+    br      x16
+
     .section .data.rel.ro,"aw"
     .p2align 3
     .globl  lxrt_vk_cnt_thunks
@@ -9918,3 +9962,5 @@ lxrt_vk_cnt_thunks:
     .quad   .Lcnt428
     .quad   .Lcnt429
     .quad   .Lcnt430
+    .quad   .Lcnt431
+    .quad   .Lcnt432
