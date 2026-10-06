@@ -406,11 +406,19 @@ def env_from_settings(s, total=None, chip=None, display=None):
     #   on the game tool (steamarm-fex-proton): without this variable, and
     #   for games with an anti-cheat, it adds no DLL override, so the
     #   game's own DLL loads untouched.
-    # "fsr" leaves the game's FSR as it is.
+    # - DLSS of Windows games likewise: SteamARM's NGX DLLs (Wine builtins
+    #   over nvngx / _nvngx, tools/dlss-metalfx) send DLSS 2/3/4 to MetalFX's
+    #   temporal scaler and DLSS 1 to MetalFX's spatial one, when
+    #   STEAMARM_WIN_DLSS=metalfx; the tool gives them only to a game that
+    #   ships nvngx_dlss.dll and has no anti-cheat. KosmicKrisp with the
+    #   FidelityFX DLLs (DLSS 1's spatial path works on MoltenVK too: set
+    #   STEAMARM_WIN_DLSS=metalfx by hand there).
+    # "fsr" leaves the game's FSR (and DLSS) as it is.
     upscaler = game_upscaler(s)
     env["KK_FSR_METALFX"] = "1" if upscaler == "auto" else "0"
     if upscaler == "auto" and env.get("STEAMARM_VK_ICD") == "kosmickrisp":
         env["STEAMARM_WIN_UPSCALER"] = "metalfx"
+        env["STEAMARM_WIN_DLSS"] = "metalfx"
     # "Escala de render": games whose window covers the screen render at this
     # fraction of it (the game tool passes STEAMARM_RENDER_SCALE to the game
     # only as LXRT_VK_RENDER_SCALE; shim/wsi.c render_scale) and the shim

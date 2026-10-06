@@ -179,12 +179,15 @@ class SettingsEnvironmentTests(unittest.TestCase):
             # spatial, and FSR 3.1 / FSR 4 of Windows games to MetalFX temporal.
             env = self.env(kk)
             self.assertEqual((env["KK_FSR_METALFX"], env["STEAMARM_WIN_UPSCALER"]), ("1", "metalfx"))
+            # DLSS of Windows games goes with it (tools/dlss-metalfx).
+            self.assertEqual(env["STEAMARM_WIN_DLSS"], "metalfx")
             env = self.env(dict(kk, gameUpscaler="auto"))
             self.assertEqual((env["KK_FSR_METALFX"], env["STEAMARM_WIN_UPSCALER"]), ("1", "metalfx"))
             # The game's own FSR: KosmicKrisp leaves its pass, no DLL override.
             env = self.env(dict(kk, gameUpscaler="fsr"))
             self.assertEqual(env["KK_FSR_METALFX"], "0")
             self.assertNotIn("STEAMARM_WIN_UPSCALER", env)
+            self.assertNotIn("STEAMARM_WIN_DLSS", env)
             # Apart from "Filtro de escalado": SteamARM's own filter is unchanged
             # and does not decide the game's once the setting exists.
             env = self.env(dict(kk, gameUpscaler="auto", scalingFilter="fsr"))
@@ -206,6 +209,7 @@ class SettingsEnvironmentTests(unittest.TestCase):
             env = self.env(gfx)
             self.assertEqual(env["KK_FSR_METALFX"], "1")
             self.assertNotIn("STEAMARM_WIN_UPSCALER", env)
+            self.assertNotIn("STEAMARM_WIN_DLSS", env)
             self.assertEqual(self.env(dict(gfx, gameUpscaler="fsr"))["KK_FSR_METALFX"], "0")
         # KosmicKrisp asked for, but a shim that cannot load it: MoltenVK.
         with patch.object(self.settings, "shim_selects_icd", return_value=False):
