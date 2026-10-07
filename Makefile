@@ -7,7 +7,7 @@ CC        := clang
 
 .PHONY: all clean
 
-all: lxrt shim launcher inputd wlmac ffx-metalfx
+all: lxrt shim launcher inputd wlmac ffx-metalfx build/x11spawn
 
 # steamarm-inputd: the Mac's controllers as /dev/input for guests (tools/inputd).
 .PHONY: inputd
@@ -117,6 +117,13 @@ endif
 	@# process killed at its next page-in (Xvnc and the Steam client died
 	@# during a rebuild, MEASURED 2026-09-27). A rename leaves them the old inode.
 	@mv -f $@.new $@
+
+# The client of the X server's spawn service (tools/x11spawn,
+# patches/xquartz-spawn-service.patch): scripts/run-app.sh starts an app and
+# the services beside it through it, in the X server's coalition (Game Mode).
+build/x11spawn: tools/x11spawn/x11spawn.c
+	@mkdir -p build
+	$(CC) -O2 -Wall -Wextra -o $@ $<
 
 # The smallest Linux binary that exercises the whole path: map, rewrite, run.
 CROSS_LD := /opt/homebrew/opt/lld/bin/ld.lld

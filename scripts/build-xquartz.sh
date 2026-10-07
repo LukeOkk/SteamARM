@@ -176,6 +176,25 @@ if [ -d "$XQ_ROOT/SteamARM-X11.app/Contents" ]; then
     ( cd "$PROJECT_DIR/patches" && ls xquartz-*.patch ) > "$XQ_ROOT/SteamARM-X11.app/Contents/Resources/steamarm-patches.txt"
 fi
 
+# Game Mode (benchmarks/stage61, sections 11-12). The server is started by
+# Launch Services (scripts/run-x11-native.sh), and X11.bin -- not XQuartz's
+# X11 stub -- is the bundle's executable: the process macOS's Game Mode
+# daemon labels a game is the one with the bundle's Info.plist bound to its
+# signature (an ad-hoc signature of the whole bundle). And the bundle is made
+# again at a new file node every build: the daemon keeps a verdict per node,
+# and the node that once said public.app-category.utilities stayed "not a
+# game" whatever the Info.plist said afterwards (MEASURED: the same bundle
+# copied to a new node was labelled a game at once).
+APP="$XQ_ROOT/SteamARM-X11.app"
+if [ -d "$APP/Contents" ]; then
+    plutil -replace CFBundleExecutable -string X11.bin "$APP/Contents/Info.plist"
+    rm -rf "$APP.new" "$APP.old"
+    cp -R "$APP" "$APP.new"
+    codesign --force --deep -s - "$APP.new" 2>/dev/null || log "warning: codesign of $APP failed"
+    mv "$APP" "$APP.old" && mv "$APP.new" "$APP" && rm -rf "$APP.old"
+    /System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister -f "$APP" 2>/dev/null || true
+fi
+
 log "done"
 log "server : $XQ_ROOT/SteamARM-X11.app/Contents/MacOS/X11.bin"
 log "wm     : $QWM/src/quartz-wm"

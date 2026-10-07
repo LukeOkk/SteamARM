@@ -1,0 +1,24 @@
+XQuartz bundle: a game, for macOS Game Mode
+
+Every X11 window of SteamARM -- a game's too -- belongs to SteamARM-X11.app,
+and the bundle said public.app-category.utilities: macOS never turned Game
+Mode on for it (Game Mode follows the frontmost app's games category, or
+LSSupportsGameMode, when that app is in full screen). Games category,
+LSSupportsGameMode and GCSupportsGameMode (controllers at the doubled
+Bluetooth polling rate Game Mode gives).
+
+--- a/hw/xquartz/bundle/Info.plist.cpp
++++ b/hw/xquartz/bundle/Info.plist.cpp
+@@ -62,7 +62,11 @@
+                 <string>XQUARTZ_SPARKLE_FEED_URL</string>
+ #endif
+ 	<key>LSApplicationCategoryType</key>
+-		<string>public.app-category.utilities</string>
++		<string>public.app-category.games</string>
++	<key>LSSupportsGameMode</key>
++		<true/>
++	<key>GCSupportsGameMode</key>
++		<true/>
+ 	<key>NSHumanReadableCopyright</key>
+ 		<string>© 2003-2026 Apple Inc.
+ © 2003 XFree86 Project, Inc.

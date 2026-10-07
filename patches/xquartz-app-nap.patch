@@ -1,0 +1,27 @@
+XQuartz: no App Nap, precise timers (the X server shows the games)
+
+Wine's Mac driver holds an NSProcessInfo activity for the life of every
+process (UserInitiatedAllowingIdleSystemSleep; CodeWeavers' sources,
+dlls/winemac.drv/cocoa_app.m), so macOS never naps it. SteamARM-X11.app is
+the application whose windows show every game and, with Game Mode, the
+game macOS sees: the same activity, latency-critical too (timer and I/O
+precision for input and presentation).
+
+--- a/hw/xquartz/X11Application.m
++++ b/hw/xquartz/X11Application.m
+@@ -797,6 +797,15 @@
+         /* Tell the server thread that it can proceed */
+         QuartzInitServer(argc, argv, envp);
+ 
++        /* SteamARM: never App Nap this server -- it shows the games -- and keep
++         * its timers precise, as Wine's Mac driver does for its processes
++         * (cocoa_app.m, beginActivityWithOptions). Held for the process's life. */
++        static id steamarm_activity;
++        steamarm_activity = [[[NSProcessInfo processInfo]
++            beginActivityWithOptions:(NSActivityUserInitiatedAllowingIdleSystemSleep |
++                                      NSActivityLatencyCritical)
++                              reason:@"X server for games"] retain];
++
+         /* This must be done after QuartzInitServer because it can result in
+          * an mieqEnqueue() - <rdar://problem/6300249>
+          */

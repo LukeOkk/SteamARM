@@ -17,6 +17,11 @@ BUNDLE="$XQ_ROOT/SteamARM-X11.app"
 BIN="$BUNDLE/Contents/MacOS/X11.bin"
 BUNDLE_ID=org.steamarm.X11
 LOGDIR="${STEAMARM_STATE:-$HOME/SteamARM-roots}/logs"
+# The server's spawn service (patches/xquartz-spawn-service.patch): the
+# launcher starts an app through it (scripts/run-app.sh, tools/x11spawn), so
+# that the app runs in the X server's coalition, the one macOS Game Mode
+# favours. One per display.
+SPAWN_DIR="${STEAMARM_STATE:-$HOME/SteamARM-roots}/launcher"
 LOG="${X11_NATIVE_LOG:-$LOGDIR/x11-native.log}"
 STDIO_LOG="${LOG%.log}.stdio.log"
 XDPYINFO="$(command -v xdpyinfo || echo /opt/homebrew/bin/xdpyinfo)"
@@ -110,18 +115,40 @@ do_start() {
         defaults write "$BUNDLE_ID" enable_test_extensions -bool true
     fi
 
-    mkdir -p "$LOGDIR"
+    mkdir -p "$LOGDIR" "$SPAWN_DIR"
     # xtrans refuses to create the socket dir when euid != 0; make sure it exists.
     [ -d /tmp/.X11-unix ] || { mkdir -p /tmp/.X11-unix && chmod 1777 /tmp/.X11-unix; }
     msg "starting $BIN $disp (log $LOG)"
     # X11.bin with ":N" as argv[1] runs as a plain DDX: it registers the
     # $BUNDLE_ID Mach service, forks a helper that sends the argv over Mach IPC
     # and then runs the server + NSApplication itself (no launchd needed).
-    # shellcheck disable=SC2086
-    ( cd / && exec env -u DISPLAY XQUARTZ_LOG_FILE="$LOG" \
-        nohup "$BIN" "$disp" -nolisten tcp +iglx ${X11_NATIVE_ARGS:-} \
-        >>"$STDIO_LOG" 2>&1 </dev/null ) &
-    disown || true
+    # Started through Launch Services (open: the bundle's X11 stub, X11.sh,
+    # then X11.bin with these arguments, one pid): only a process launched
+    # that way has an application identity with RunningBoard. Exec'd
+    # directly it was anon<X11.bin> there and, without CFProcessPath, a
+    # foreground app with no bundle for Launch Services, and gamepolicyd, which
+    # identifies a game by its RunningBoard identity and its bundle's games
+    # category (patches/xquartz-game-mode.patch), never turned Game Mode on
+    # for a game in full screen (benchmarks/stage61, section 11). A process
+    # open starts has launchd's environment, not ours (no DISPLAY).
+    # STEAMARM_X11_EXEC=1 execs X11.bin directly as before.
+    if [ "${STEAMARM_X11_EXEC:-0}" != 1 ] && \
+       open -g -n -a "$BUNDLE" --env XQUARTZ_LOG_FILE="$LOG" \
+            --env XQUARTZ_SPAWN_SOCKET="$SPAWN_DIR/x11-spawn${disp#:}.sock" \
+            --stdout "$STDIO_LOG" --stderr "$STDIO_LOG" \
+            --args "$disp" -nolisten tcp +iglx ${X11_NATIVE_ARGS:-} 2>>"$STDIO_LOG"; then
+        :
+    else
+        # CFProcessPath names the bundle's executable, as XQuartz's own X11
+        # stub does, so that Launch Services at least knows the bundle; the
+        # server unsets it at once, so X clients do not inherit it.
+        # shellcheck disable=SC2086
+        ( cd / && exec env -u DISPLAY CFProcessPath="$BUNDLE/Contents/MacOS/X11" XQUARTZ_LOG_FILE="$LOG" \
+            XQUARTZ_SPAWN_SOCKET="$SPAWN_DIR/x11-spawn${disp#:}.sock" \
+            nohup "$BIN" "$disp" -nolisten tcp +iglx ${X11_NATIVE_ARGS:-} \
+            >>"$STDIO_LOG" 2>&1 </dev/null ) &
+        disown || true
+    fi
     for i in $(seq 1 60); do
         if responsive; then
             msg "ready after ~$((i / 4))s (pid $(server_pid || echo '?'), DISPLAY=$disp)"

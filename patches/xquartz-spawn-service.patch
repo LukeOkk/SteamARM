@@ -1,0 +1,258 @@
+XQuartz: a spawn service, so games run in the X server's coalition
+
+macOS Game Mode gives CPU and GPU priority to the coalition of the frontmost
+game in full screen and lowers everything else. Every X11 window belongs to
+SteamARM-X11.app, but the programs that draw them (Steam, a game: build/lxrun
+processes) were started by the launcher, outside its coalition: with Game
+Mode on, Counter-Strike 2 ran at 39 frames a second against 145 off (a test
+app's own child got 47 % more CPU than an outside process under Game Mode).
+With XQUARTZ_SPAWN_SOCKET set, the server listens on that UNIX socket (0600,
+same-user peers only) and starts what tools/x11spawn sends -- working
+directory, arguments, environment and descriptors 0-2 -- as its own child.
+
+--- a/hw/xquartz/quartzStartup.c
++++ b/hw/xquartz/quartzStartup.c
+@@ -95,8 +95,234 @@
+     pthread_attr_destroy(&attr);
+ 
+     return tid;
++}
++
++/* SteamARM: the spawn service. macOS Game Mode gives CPU and GPU priority to
++ * the coalition of the frontmost game in full screen -- this application, the
++ * owner of every X11 window -- and lowers everything else. The programs whose
++ * windows those are (Steam, a game: build/lxrun processes) were started by
++ * the launcher, outside this coalition, and a game ran at 39 frames a second
++ * with Game Mode on against 145 with it off (benchmarks/stage61, section 12).
++ * With XQUARTZ_SPAWN_SOCKET set, the server listens on that UNIX socket
++ * (mode 0600, peers of this user only) and starts what a client sends --
++ * the working directory, the arguments, the environment and three
++ * descriptors for 0, 1 and 2 (tools/x11spawn) -- as a child of this
++ * process, in its coalition, and answers with its pid. */
++#include <spawn.h>
++#include <sys/socket.h>
++#include <sys/un.h>
++#include <sys/wait.h>
++#include <sys/stat.h>
++#include <errno.h>
++#include <stdint.h>
++#include <string.h>
++
++#define XQ_SPAWN_MAGIC 0x53504e31u      /* "SPN1": answer the pid */
++#define XQ_SPAWN_MAGIC_WAIT 0x53504e32u /* "SPN2": the pid, then the wait status */
++struct xq_spawn_hdr { uint32_t magic, argc, envc, len; };
++
++static void *
++xq_spawn_reap(void *arg)
++{
++    pid_t pid = (pid_t)(intptr_t)arg;
++    int st;
++    while (waitpid(pid, &st, 0) < 0 && errno == EINTR)
++        ;
++    return NULL;
++}
++
++static int
++xq_read_all(int fd, void *buf, size_t len)
++{
++    char *p = buf;
++    while (len) {
++        ssize_t n = read(fd, p, len);
++        if (n < 0 && errno == EINTR)
++            continue;
++        if (n <= 0)
++            return -1;
++        p += n;
++        len -= (size_t)n;
++    }
++    return 0;
++}
++
++struct xq_spawn_waiter { pid_t pid; int c; };
++
++static void *
++xq_spawn_wait(void *arg)
++{
++    struct xq_spawn_waiter *w = arg;
++    int st = 0;
++    while (waitpid(w->pid, &st, 0) < 0 && errno == EINTR)
++        ;
++    int32_t status = st;
++    (void)write(w->c, &status, sizeof status);
++    close(w->c);
++    free(w);
++    return NULL;
++}
++
++static void
++xq_spawn_serve(int c)
++{
++    int fds[3] = { -1, -1, -1 };
++    char *blob = NULL;
++    char **argv = NULL, **envv = NULL;
++    int32_t reply = -EINVAL;
++    uid_t euid;
++    gid_t egid;
++    struct xq_spawn_hdr h;
++
++    if (getpeereid(c, &euid, &egid) != 0 || euid != geteuid())
++        goto out;
++
++    struct iovec iov = { &h, sizeof h };
++    char cbuf[CMSG_SPACE(sizeof(int) * 3)];
++    struct msghdr m = { .msg_iov = &iov, .msg_iovlen = 1,
++                        .msg_control = cbuf, .msg_controllen = sizeof cbuf };
++    ssize_t n;
++    do {
++        n = recvmsg(c, &m, MSG_WAITALL);
++    } while (n < 0 && errno == EINTR);
++    for (struct cmsghdr *cm = CMSG_FIRSTHDR(&m); cm; cm = CMSG_NXTHDR(&m, cm)) {
++        if (cm->cmsg_level == SOL_SOCKET && cm->cmsg_type == SCM_RIGHTS &&
++            cm->cmsg_len == CMSG_LEN(sizeof(int) * 3))
++            memcpy(fds, CMSG_DATA(cm), sizeof fds);
++    }
++    if (n != (ssize_t)sizeof h || (h.magic != XQ_SPAWN_MAGIC && h.magic != XQ_SPAWN_MAGIC_WAIT) || fds[0] < 0 ||
++        h.argc == 0 || h.argc > 4096 || h.envc > 65536 || h.len == 0 || h.len > (8u << 20))
++        goto out;
++
++    blob = malloc((size_t)h.len + 1);
++    argv = calloc((size_t)h.argc + 1, sizeof(char *));
++    envv = calloc((size_t)h.envc + 1, sizeof(char *));
++    if (!blob || !argv || !envv || xq_read_all(c, blob, h.len) != 0)
++        goto out;
++    blob[h.len] = '\0';
++
++    /* cwd, then argc arguments, then envc environment strings, each ended by NUL */
++    char *p = blob, *end = blob + h.len;
++    const char *cwd = p;
++    p += strlen(p) + 1;
++    for (uint32_t i = 0; i < h.argc; i++) {
++        if (p >= end)
++            goto out;
++        argv[i] = p;
++        p += strlen(p) + 1;
++    }
++    for (uint32_t i = 0; i < h.envc; i++) {
++        if (p >= end)
++            goto out;
++        envv[i] = p;
++        p += strlen(p) + 1;
++    }
++    if (argv[0][0] != '/')
++        goto out;               /* the client resolves the program */
++
++    posix_spawn_file_actions_t fa;
++    posix_spawnattr_t at;
++    posix_spawn_file_actions_init(&fa);
++    posix_spawnattr_init(&at);
++    for (int i = 0; i < 3; i++)
++        posix_spawn_file_actions_adddup2(&fa, fds[i], i);
++    if (cwd[0])
++        posix_spawn_file_actions_addchdir_np(&fa, cwd);
++    sigset_t none, all;
++    sigemptyset(&none);
++    sigfillset(&all);
++    posix_spawnattr_setsigmask(&at, &none);
++    posix_spawnattr_setsigdefault(&at, &all);
++    /* No new session: the program (scripts/session.py) makes its own, which
++     * a process group leader could not. */
++    posix_spawnattr_setflags(&at, POSIX_SPAWN_SETSIGMASK | POSIX_SPAWN_SETSIGDEF |
++                                  POSIX_SPAWN_CLOEXEC_DEFAULT);
++    pid_t pid;
++    int rc = posix_spawn(&pid, argv[0], &fa, &at, argv, envv);
++    posix_spawn_file_actions_destroy(&fa);
++    posix_spawnattr_destroy(&at);
++    if (rc == 0) {
++        pthread_t t;
++        pthread_attr_t ta;
++        pthread_attr_init(&ta);
++        pthread_attr_setdetachstate(&ta, PTHREAD_CREATE_DETACHED);
++        struct xq_spawn_waiter *w = NULL;
++        if (h.magic == XQ_SPAWN_MAGIC_WAIT && (w = malloc(sizeof *w))) {
++            /* The client waits for the exit status on this connection. */
++            int32_t r = pid;
++            (void)write(c, &r, sizeof r);
++            w->pid = pid;
++            w->c = c;
++            c = -1;
++            pthread_create(&t, &ta, xq_spawn_wait, w);
++        } else {
++            pthread_create(&t, &ta, xq_spawn_reap, (void *)(intptr_t)pid);
++        }
++        pthread_attr_destroy(&ta);
++        reply = pid;
++        ErrorF("spawn service: started %s, pid %d\n", argv[0], (int)pid);
++    } else {
++        reply = -rc;
++        ErrorF("spawn service: %s: %s\n", argv[0], strerror(rc));
++    }
++
++out:
++    if (c >= 0)
++        (void)write(c, &reply, sizeof reply);
++    for (int i = 0; i < 3; i++)
++        if (fds[i] >= 0)
++            close(fds[i]);
++    free(blob);
++    free(argv);
++    free(envv);
++    if (c >= 0)
++        close(c);
+ }
+ 
++static void *
++xq_spawn_service(void *arg)
++{
++    int s = (int)(intptr_t)arg;
++    for (;;) {
++        int c = accept(s, NULL, NULL);
++        if (c < 0) {
++            if (errno == EINTR || errno == ECONNABORTED)
++                continue;
++            ErrorF("spawn service: accept: %s\n", strerror(errno));
++            return NULL;
++        }
++        xq_spawn_serve(c);
++    }
++}
++
++static void
++xq_spawn_service_start(void)
++{
++    const char *path = getenv("XQUARTZ_SPAWN_SOCKET");
++    struct sockaddr_un sa = { .sun_family = AF_UNIX };
++    if (!path || !*path || strlen(path) >= sizeof sa.sun_path)
++        return;
++    strcpy(sa.sun_path, path);
++    int s = socket(AF_UNIX, SOCK_STREAM, 0);
++    if (s < 0)
++        return;
++    fcntl(s, F_SETFD, FD_CLOEXEC);
++    unlink(path);
++    mode_t old = umask(0177);
++    int rc = bind(s, (struct sockaddr *)&sa, sizeof sa);
++    umask(old);
++    if (rc != 0 || listen(s, 8) != 0) {
++        ErrorF("spawn service: %s: %s\n", path, strerror(errno));
++        close(s);
++        return;
++    }
++    unsetenv("XQUARTZ_SPAWN_SOCKET");   /* not for the X clients */
++    if (!create_thread(xq_spawn_service, (void *)(intptr_t)s))
++        close(s);
++    else
++        ErrorF("spawn service: listening on %s\n", path);
++}
++
+ void
+ QuartzInitServer(int argc, char **argv, char **envp)
+ {
+@@ -112,6 +338,8 @@
+         FatalError("can't create secondary thread\n");
+     }
+ 
++    xq_spawn_service_start();
++
+     /* Block signals on the AppKit thread that the X11 expects to handle on its thread */
+     sigset_t set;
+     sigemptyset(&set);

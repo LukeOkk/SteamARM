@@ -28,6 +28,12 @@ Counter-Strike 2, Dust2 with bots, same settings: 84 -> 133 fps average, 1%
 low 8 -> 54, 0.1% low 1.5 -> 14, p99 35 -> 12.5 ms, frames over 100 ms 18
 -> 5 in 120 s; Metal command buffers 9,700/s -> 3,900/s; allocators made
 800/5 s -> 0.
+- Metal's compiler service may run as many compilations at once as it can
+  (setShouldMaximizeConcurrentCompilation, as CodeWeavers' DXMT does): a
+  burst of new pipelines from Source 2's job threads compiled one after
+  another (KK_MAX_CONCURRENT_COMPILE=0: Metal's default).
+- KK_ALLOC_LOG=1 also prints the GPU busy time of the commits per 5 s (from
+  Metal's commit feedback): whether a slow frame rate is the GPU's.
 
 --- a/src/kosmickrisp/vulkan/kk_cmd_buffer.c
 +++ b/src/kosmickrisp/vulkan/kk_cmd_buffer.c
@@ -315,7 +321,7 @@ low 8 -> 54, 0.1% low 1.5 -> 14, p99 35 -> 12.5 ms, frames over 100 ms 18
     const char *mb = getenv("KK_ALLOCATOR_POOL_MB");
     dev->cmd_mem.idle_bytes_max =
        (uint64_t)(mb ? atoi(mb) : KK_ALLOCATOR_POOL_MB) << 20;
-@@ -420,17 +422,96 @@
+@@ -420,17 +422,103 @@
     dev->cmd_mem.in_flight = 0;
  }
  
@@ -325,6 +331,10 @@ low 8 -> 54, 0.1% low 1.5 -> 14, p99 35 -> 12.5 ms, frames over 100 ms 18
 +   int on;
 +   uint64_t made, released, reused, last_ns, max_size, released_bytes;
 +} kk_alloc_stats = { .on = -1 };
++
++/* KK_ALLOC_LOG: GPU busy time of the commits (feedback start..end), per 5 s. */
++static double kk_gpu_busy_ms, kk_gpu_last_end, kk_gpu_union_ms;
++static uint64_t kk_gpu_commits;
 +
 +static void
 +kk_alloc_stats_tick(struct kk_device *dev)
@@ -339,6 +349,9 @@ low 8 -> 54, 0.1% low 1.5 -> 14, p99 35 -> 12.5 ms, frames over 100 ms 18
 +   if (now - kk_alloc_stats.last_ns < 5000000000ull)
 +      return;
 +   kk_alloc_stats.last_ns = now;
++   fprintf(stderr, "[kosmickrisp] gpu: %llu commits, busy %.0f ms (union %.0f ms of 5000)\n",
++           (unsigned long long)kk_gpu_commits, kk_gpu_busy_ms, kk_gpu_union_ms);
++   kk_gpu_commits = 0; kk_gpu_busy_ms = kk_gpu_union_ms = 0;
 +   extern uint64_t kk_mtl_cb_made, kk_mtl_cb_close_dep, kk_mtl_cb_close_other, kk_mtl_cb_reuse;
 +   extern uint64_t kk_mtl_cb_made_gfx, kk_mtl_stop_keep, kk_mtl_stop_flag, kk_mtl_stop_compute_open, kk_mtl_stop_compute;
 +   fprintf(stderr, "[kosmickrisp] encoders: gfx cmd bufs made %llu; gfx stops kept open %llu, closed by flag %llu, "
@@ -415,7 +428,7 @@ low 8 -> 54, 0.1% low 1.5 -> 14, p99 35 -> 12.5 ms, frames over 100 ms 18
     simple_mtx_unlock(&dev->cmd_mem.lock);
  
     return allocator ? allocator : mtl_new_command_allocator(dev->mtl_handle);
-@@ -443,20 +524,54 @@
+@@ -443,20 +531,54 @@
  {
     mtl_command_allocator_reset(allocator);
     const uint64_t size = mtl_command_allocator_allocated_size(allocator);
@@ -479,6 +492,22 @@ low 8 -> 54, 0.1% low 1.5 -> 14, p99 35 -> 12.5 ms, frames over 100 ms 18
  }
  
  /* An upload BO a finished commit gave back, or NULL. */
+@@ -492,6 +614,15 @@
+ {
+    struct kk_retire_slot *slot = data->user_data;
+    struct kk_device *dev = slot->dev;
++   if (data->gpu_end > data->gpu_start && data->gpu_start > 0) {
++      double st = data->gpu_start > kk_gpu_last_end ? data->gpu_start : kk_gpu_last_end;
++      kk_gpu_busy_ms += (data->gpu_end - data->gpu_start) * 1000.0;
++      if (data->gpu_end > st)
++         kk_gpu_union_ms += (data->gpu_end - st) * 1000.0;
++      if (data->gpu_end > kk_gpu_last_end)
++         kk_gpu_last_end = data->gpu_end;
++      kk_gpu_commits++;
++   }
+ 
+    if (data->error != MTL_COMMAND_QUEUE_ERROR_NONE) {
+       vk_device_set_lost(
 --- a/src/kosmickrisp/vulkan/kk_device.h
 +++ b/src/kosmickrisp/vulkan/kk_device.h
 @@ -29,7 +29,7 @@
@@ -509,3 +538,27 @@ low 8 -> 54, 0.1% low 1.5 -> 14, p99 35 -> 12.5 ms, frames over 100 ms 18
  void kk_device_put_allocator(struct kk_device *dev,
                               mtl_command_allocator *allocator);
  struct kk_retire_slot *kk_device_get_retire_slot(struct kk_device *dev);
+--- a/src/kosmickrisp/bridge/mtl_compiler.m
++++ b/src/kosmickrisp/bridge/mtl_compiler.m
+@@ -20,6 +20,21 @@
+    @autoreleasepool {
+       id<MTLDevice> dev = (id<MTLDevice>)device;
+ 
++      /* SteamARM: let Metal's compiler service run as many compilations at
++       * once as it can. A game creates pipelines from several threads (Source
++       * 2's job pool); by default the service runs fewer of them in parallel,
++       * and a burst of new pipelines (a new map, a new effect) was one stall
++       * of 230-415 ms per shader in a row. CodeWeavers' DXMT does the same
++       * (dxmt_device.cpp, setShouldMaximizeConcurrentCompilation:YES).
++       * KK_MAX_CONCURRENT_COMPILE=0 leaves Metal's default. */
++      static int max_cc = -1;
++      if (max_cc < 0) {
++         const char *e = getenv("KK_MAX_CONCURRENT_COMPILE");
++         max_cc = !(e && e[0] == '0');
++      }
++      if (max_cc && [dev respondsToSelector:@selector(setShouldMaximizeConcurrentCompilation:)])
++         dev.shouldMaximizeConcurrentCompilation = YES;
++
+       MTL4CompilerDescriptor *desc = [[MTL4CompilerDescriptor new] autorelease];
+ 
+       NSError *error;

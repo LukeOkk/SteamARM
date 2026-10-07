@@ -178,7 +178,7 @@ the benchmark kills the game, a normal quit saves it). The display is 60 Hz
 (max refresh of the panel): the Metal HUD's frame interval cannot go below
 16.67 ms on it; flat at 16.67 is the target.
 
-11. Game Mode: reachable, and harmful here (not enabled)
+11. Game Mode: reachable, and harmful here (not enabled; see 12)
 --------------------------------------------------------
 The game's window belongs to SteamARM-X11.app. What it took for macOS to
 turn Game Mode on for it (each step MEASURED with gamepolicyd's log; a
@@ -213,3 +213,68 @@ The HUD's "Composited": the overlay is a window of the X server showing a
 layer of the game's process; macOS does not scan it out directly. The
 display here is 60 Hz (CGDisplayCopyAllDisplayModes: max 60.00 Hz): the
 HUD's frame interval cannot be below 16.67 ms on it.
+
+12. Game Mode on: the Metal HUD was the culprit
+----------------------------------------------
+Game Mode is on now: SteamARM-X11.app is in the games category and started
+by Launch Services, and the launcher starts Steam -- and so every game --
+FEXServer, PulseAudio and PipeWire through the X server's spawn service
+(patches/xquartz-game-mode.patch, xquartz-spawn-service.patch,
+tools/x11spawn, scripts/run-app.sh in_x11), in the coalition of the game
+macOS sees. Section 11's slowdown had one cause, and it was not the
+architecture.
+Under Game Mode the game produced a third of the frames without waiting on
+anything measurable: GPU busy 30-60 % of the time (KK_ALLOC_LOG's new
+per-5 s GPU time, from Metal's commit feedback), acquire 0.1 ms, the X
+server idle, single-thread loops inside and outside the X server's
+coalition as fast as without Game Mode, 1 ms sleeps exact. lsappinfo,
+during a run, listed the game's process: "lxrun", type BackgroundOnly --
+an application of its own. It was only there with the HUD on: the HUD's
+main-queue blocks call +[NSApplication sharedApplication] (its keyboard
+shortcuts, HUDKeyboardHookInit) and +[NSScreen mainScreen] (refresh rate,
+safe area: -[HUDMTLLayerTracking _updateInfrequentFields]); both reach
+HIServices' _RegisterApplication (lldb, a window-less Metal 4 test with
+the HUD on: registered after the first CFRunLoop slice). Game Mode then
+ranks the game it recognises -- the X server -- above that "other" app,
+which is the one drawing the frames.
+Metal HUD off, same setup:
+  Game Mode on   94.4 / 126.6 fps   1% low 10.6 / 51.1
+  Game Mode off  72.9 / 128.4 fps   1% low  1.9 / 42.1
+runtime/window.m now answers the HUD's two calls itself, only when they
+come from libMTLHud and the process has no window of its own: no NSApp
+(a game's keys go to the X server; the HUD's shortcuts never worked here)
+and a stand-in screen built from CoreGraphics (refresh rate from the
+display mode, no safe area; anything else NSScreen answers comes back
+zero). Nothing registers (lsappinfo: no lxrun), the HUD draws as before.
+Metal HUD on, Game Mode recognised for the X server (spawn service):
+  before (section 11)  30-53 fps, 1% low 1-4
+  Game Mode on   140.1 / 117.3 fps   1% low 35.4 / 32.4
+  Game Mode off   97.8 / 105.2 fps   1% low  6.2 / 14.4
+  later, the Mac in use between runs (4 GB of 5 in swap): on 80.1 / 74.8,
+  off 76.9 -- the whole machine slower, and Game Mode no longer a cost.
+This bench varies by run (the same setup gave 72.9 and 128.4 above); only
+the 30-53 fps of the HUD under Game Mode was repeated in every run.
+The HUD's "Game Mode On/Off" is system-wide: FramePacing's
+FPMTLMetricsGameModeEnabled reads the com.apple.system.console_mode_changed
+notification's state, so the HUD in the game's process shows On while the
+X server is the game in full screen.
+Also from CodeWeavers' sources (CrossOver 26), as
+their Wine and DXMT do:
+- the X server holds an NSProcessInfo activity (user-initiated,
+  latency-critical) for its whole life (patches/xquartz-app-nap.patch): no
+  App Nap for the application that shows the game, also while another one
+  is in front. No difference measured with the game in front (66.9 fps
+  against 74.8-80.1, one run). The same activity in the process that draws
+  the game registered nothing (lsappinfo) and changed nothing (73.3 / 76.0
+  against 80.1 / 74.8): not kept, a process that is not an application is
+  never napped;
+- KosmicKrisp asks Metal's compiler service for as many compilations at
+  once as it can run (shouldMaximizeConcurrentCompilation, patch 25):
+  new pipelines from Source 2's job threads compiled one after another.
+Not taken: displaySyncEnabled=NO (the window server takes one drawable
+per refresh of a remote layer whatever it says, stage 52; shim/mailbox.c
+already never makes a game wait), msync (Windows games only; ntsync is
+emulated already, runtime/ntsync.c), per-thread Mach priorities
+(guest scheduling calls are translated already; LXRT_QOS=interactive
+measured no gain, stage 51).
+

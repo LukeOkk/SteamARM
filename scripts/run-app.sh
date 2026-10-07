@@ -561,6 +561,20 @@ fi
 # The Steam Frame root's case-sensitive image: attached when it is not, and
 # grown to the Mac's disk when nothing has it open (scripts/image-volume.sh;
 # it was made with 40 GB and Steam showed 22 GB free).
+# The X server's spawn service (patches/xquartz-spawn-service.patch): what
+# runs beside a game -- FEXServer, PulseAudio, PipeWire -- is started in the
+# X server's coalition too, which Game Mode favours: the game waits on them
+# (benchmarks/stage61, sections 11 and 12). in_x11 CMD... runs CMD there and
+# waits for it; without the service, here.
+SPAWN_SOCK="$LDIR/x11-spawn${DISP#:}.sock"
+in_x11() {
+    if [ "$MODE" = native ] && [ "${STEAMARM_X11_SPAWN:-1}" != 0 ] && [ -S "$SPAWN_SOCK" ] && [ -x build/x11spawn ]; then
+        build/x11spawn --wait --stdio /dev/null "$SPAWN_SOCK" "$@"
+        local rc=$?
+        [ "$rc" != 125 ] && return "$rc"
+    fi
+    "$@"
+}
 if [ -z "$APP_ANDROID" ] && [ -d "$STATE/steamframe-root.sparsebundle" ]; then
     frame_link=$(readlink "$STATE/arm64root" 2>/dev/null)
     case "$frame_link" in
@@ -584,13 +598,13 @@ if [ -z "$APP_ANDROID" ]; then
 # Sound (scripts/audio.sh) at the launcher's volume, unless it is muted.
 apply_resolution_scaling "$LDIR/settings.json"
 VOL="$(/usr/bin/python3 scripts/settings-env.py --volume "$LDIR/settings.json")"
-[ -n "$VOL" ] && { LXRT_ROOT="$APP_ROOT" scripts/audio.sh start "$VOL" >/dev/null || echo "run-app: no sound (scripts/audio.sh)" >&2; }
+[ -n "$VOL" ] && { in_x11 env LXRT_ROOT="$APP_ROOT" scripts/audio.sh start "$VOL" >/dev/null || echo "run-app: no sound (scripts/audio.sh)" >&2; }
 # An ARM64 client's games run in the x86 Steam root (steamarm-fex-linux,
 # steamarm-fex-proton) and look for the socket there: it existed only when
 # something else had made it since the server started (the setup's tests),
 # and Counter-Strike 2 had no sound after the Mac's server was restarted.
 if [ -n "$VOL" ] && [ "$APP_ROOT" != "$ROOT" ] && [ -d "$ROOT/usr" ]; then
-    LXRT_ROOT="$ROOT" scripts/audio.sh start >/dev/null 2>&1 || echo "run-app: no sound for games (scripts/audio.sh)" >&2
+    in_x11 env LXRT_ROOT="$ROOT" scripts/audio.sh start >/dev/null 2>&1 || echo "run-app: no sound for games (scripts/audio.sh)" >&2
 fi
 # Controllers (scripts/input.sh): the launcher's Entrada page, as /dev/input.
 scripts/input.sh start >/dev/null || echo "run-app: no controllers for games (scripts/input.sh)" >&2
@@ -617,7 +631,7 @@ export LXRT_STATFS_BACKING
 # not start one itself (docs/FEX_GAME_BOUNDARY.md): started here, with
 # scripts/run-fex.sh's fixed environment.
 if [ "$APP_ARCH" = aarch64 ] && [ "$APP_KIND" = steam ]; then
-    pgrep -f 'lxrun /tmp/lxrt-root/usr/bin/FEXServer' >/dev/null || scripts/run-fex.sh /bin/true >/dev/null 2>&1
+    pgrep -f 'lxrun /tmp/lxrt-root/usr/bin/FEXServer' >/dev/null || in_x11 scripts/run-fex.sh /bin/true >/dev/null 2>&1
     # ~/.steam's links, which Valve's launcher makes and the client starts
     # every game through (scripts/steam-arm64-links.sh).
     guest_home=/tmp/armhome
@@ -629,7 +643,7 @@ if [ "$APP_ARCH" = aarch64 ] && [ "$APP_KIND" = steam ]; then
     # tunnels to the Mac's PulseAudio (scripts/pipewire.sh); not when the
     # launcher's sound is off.
     if [ -n "${VOL:-}" ]; then
-        scripts/pipewire.sh start "$APP_ROOT" >/dev/null ||
+        in_x11 scripts/pipewire.sh start "$APP_ROOT" >/dev/null ||
             echo "run-app: no PipeWire for Steam's audio settings (scripts/pipewire.sh)" >&2
     fi
     # An installed compatibility tool is a copy of the script
@@ -642,14 +656,25 @@ if [ "$APP_ARCH" = aarch64 ] && [ "$APP_KIND" = steam ]; then
         fi
     done
 fi
-if [ "$APP_ARCH" = aarch64 ]; then
-    env ${APP_ENV[@]+"${APP_ENV[@]}"} DISPLAY=$DISP LXRT_ROOT="$APP_ROOT" \
-        nohup "${SESSION[@]}" "${APP_CMD[@]}" >> "$L" 2>&1 < /dev/null &
-else
-    env ${APP_ENV[@]+"${APP_ENV[@]}"} DISPLAY=$DISP LXRT_ROOT="$APP_ROOT" FEX_ROOTFS="$APP_FEXROOTFS" \
-        nohup "${SESSION[@]}" "${APP_CMD[@]}" >> "$L" 2>&1 < /dev/null &
+# On the native display the session is started by the X server itself
+# (its spawn service, patches/xquartz-spawn-service.patch, tools/x11spawn):
+# the app and everything it starts -- a game -- then belong to the X
+# server's coalition, the game macOS Game Mode favours while it is in full
+# screen (patches/xquartz-game-mode.patch; benchmarks/stage61, sections 11
+# and 12). Without the service (an older server, vnc) the launcher starts it
+# as before. STEAMARM_X11_SPAWN=0 always does.
+LEADER=""
+APP_ENV_ALL=(${APP_ENV[@]+"${APP_ENV[@]}"} DISPLAY=$DISP LXRT_ROOT="$APP_ROOT")
+[ "$APP_ARCH" = aarch64 ] || APP_ENV_ALL+=(FEX_ROOTFS="$APP_FEXROOTFS")
+if [ "$MODE" = native ] && [ "${STEAMARM_X11_SPAWN:-1}" != 0 ] && [ -S "$SPAWN_SOCK" ] && [ -x build/x11spawn ]; then
+    LEADER=$(env "${APP_ENV_ALL[@]}" build/x11spawn --stdio "$L" "$SPAWN_SOCK" \
+                 "${SESSION[@]}" "${APP_CMD[@]}" 2>>"$L") || LEADER=""
+    [ -n "$LEADER" ] && echo "run-app: started by the X server (pid $LEADER)" >> "$L"
 fi
-LEADER=$!
+if [ -z "$LEADER" ]; then
+    env "${APP_ENV_ALL[@]}" nohup "${SESSION[@]}" "${APP_CMD[@]}" >> "$L" 2>&1 < /dev/null &
+    LEADER=$!
+fi
 echo "$LEADER" > "$PIDFILE"
 echo "$ID" > "$IDFILE"
 echo "$MODE" > "$MODEFILE"

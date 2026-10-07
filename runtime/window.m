@@ -20,6 +20,8 @@
 #import <Metal/Metal.h>
 
 #include <dispatch/dispatch.h>
+#include <dlfcn.h>
+#include <objc/runtime.h>
 #include <pthread.h>
 #include <time.h>
 #include <stdbool.h>
@@ -126,8 +128,109 @@ static bool g_ui_wanted;
 // HUD tracked every present). Without the HUD nothing changes.
 static bool g_mainq_wanted;
 
+// The Metal HUD also reaches for AppKit: +[NSApplication sharedApplication]
+// for its keyboard shortcuts (HUDKeyboardHookInit) and +[NSScreen mainScreen]
+// for the refresh rate and safe area (-[HUDMTLLayerTracking
+// _updateInfrequentFields]). Either one checks the process in with Launch
+// Services (HIServices _RegisterApplication), and the game became an
+// application of its own, "BackgroundOnly" (lsappinfo). With Game Mode on,
+// macOS ranks the game it recognises -- the X server, whose windows show the
+// game -- above every other application, and that included the one drawing
+// the frames: Counter-Strike 2 at 30-53 frames a second with the HUD against
+// 127 without it, same Game Mode (MEASURED, benchmarks/stage61 section 12).
+// A game's window is the X server's, so the HUD's shortcuts could never fire
+// here anyway (no key reaches this process): the HUD is told there is no
+// NSApp, and gets a stand-in screen made from CoreGraphics, which registers
+// nothing. Only calls made from the HUD's own code are diverted, and none
+// once this process has a window of its own (lxrt_window_create).
+// LXRT_HUD_APPKIT=1: the HUD's calls go to AppKit as before.
+@interface LXRTHudScreen : NSObject
+@end
+
+@implementation LXRTHudScreen
+- (NSInteger)maximumFramesPerSecond
+{
+    CGDisplayModeRef m = CGDisplayCopyDisplayMode(CGMainDisplayID());
+    double hz = m ? CGDisplayModeGetRefreshRate(m) : 0;
+    if (m)
+        CGDisplayModeRelease(m);
+    return hz > 0 ? (NSInteger)(hz + 0.5) : 60;
+}
+- (NSTimeInterval)minimumRefreshInterval { return 1.0 / (double)[self maximumFramesPerSecond]; }
+- (NSTimeInterval)maximumRefreshInterval { return 1.0 / (double)[self maximumFramesPerSecond]; }
+- (NSTimeInterval)displayUpdateGranularity { return 0; }
+- (NSEdgeInsets)safeAreaInsets { return NSEdgeInsetsMake(0, 0, 0, 0); }
+- (NSRect)frame { return NSRectFromCGRect(CGDisplayBounds(CGMainDisplayID())); }
+- (NSRect)visibleFrame { return [self frame]; }
+- (CGFloat)backingScaleFactor { return 1; }
+- (CGFloat)maximumExtendedDynamicRangeColorComponentValue { return 1; }
+- (CGFloat)maximumPotentialExtendedDynamicRangeColorComponentValue { return 1; }
+- (NSString *)localizedName { return @"Display"; }
+- (NSDictionary *)deviceDescription { return @{ @"NSScreenNumber": @(CGMainDisplayID()) }; }
+// Anything else NSScreen answers comes back zero rather than raising.
+- (NSMethodSignature *)methodSignatureForSelector:(SEL)sel
+{
+    NSMethodSignature *m = [super methodSignatureForSelector:sel];
+    return m ? m : [NSScreen instanceMethodSignatureForSelector:sel];
+}
+- (void)forwardInvocation:(NSInvocation *)inv
+{
+    NSUInteger n = inv.methodSignature.methodReturnLength;
+    if (n) {
+        void *zero = calloc(1, n);
+        [inv setReturnValue:zero];
+        free(zero);
+    }
+}
+@end
+
+static IMP g_shared_app_imp, g_main_screen_imp;
+
+static bool called_from_hud(void *ret)
+{
+    if (g_ui_wanted)
+        return false;
+    Dl_info di;
+    return dladdr(ret, &di) && di.dli_fname && strstr(di.dli_fname, "/libMTLHud.");
+}
+
+static id hud_shared_app(id self, SEL cmd)
+{
+    if (called_from_hud(__builtin_return_address(0)))
+        return nil;
+    return ((id (*)(id, SEL))g_shared_app_imp)(self, cmd);
+}
+
+static id hud_main_screen(id self, SEL cmd)
+{
+    if (called_from_hud(__builtin_return_address(0))) {
+        static LXRTHudScreen *screen;
+        static dispatch_once_t once;
+        dispatch_once(&once, ^{ screen = [LXRTHudScreen new]; });
+        return screen;
+    }
+    return ((id (*)(id, SEL))g_main_screen_imp)(self, cmd);
+}
+
+static void hud_keep_out_of_appkit(void)
+{
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        const char *e = getenv("LXRT_HUD_APPKIT");
+        if (e && e[0] == '1')
+            return;
+        Method m = class_getClassMethod([NSApplication class], @selector(sharedApplication));
+        if (m)
+            g_shared_app_imp = method_setImplementation(m, (IMP)hud_shared_app);
+        m = class_getClassMethod([NSScreen class], @selector(mainScreen));
+        if (m)
+            g_main_screen_imp = method_setImplementation(m, (IMP)hud_main_screen);
+    });
+}
+
 void lxrt_window_want_main_queue(void)
 {
+    hud_keep_out_of_appkit();
     pthread_mutex_lock(&g_ui_lock);
     g_mainq_wanted = true;
     pthread_cond_broadcast(&g_ui_cond);
