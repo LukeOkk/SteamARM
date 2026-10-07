@@ -62,18 +62,33 @@ if [ ! -d "$SRC" ] || [ "$(cat "$SRC/.steamarm-patches" 2>/dev/null)" != "$PATCH
     echo "$PATCH_STAMP" > "$SRC/.steamarm-patches"
 fi
 
-if [ ! -f "$PA_ROOT/build/build.ninja" ]; then
-    log "meson setup"
-    meson setup "$PA_ROOT/build" "$SRC" --prefix="$PA_ROOT/out" --sysconfdir="$PA_ROOT/out/etc" \
+# A Homebrew upgrade moves its libraries to a new Cellar directory, and the
+# build's dependency list still named the old one: "ninja: error:
+# '/opt/homebrew/Cellar/glib/2.90.0/lib/libglib-2.0.dylib', needed by ...,
+# missing" and no build (the 0.3.55 setup, after brew updated glib). Such a
+# build directory is configured again from scratch, once.
+pa_configure() {
+    log "meson setup${1:+ ($1)}"
+    meson setup ${2:-} "$PA_ROOT/build" "$SRC" --prefix="$PA_ROOT/out" --sysconfdir="$PA_ROOT/out/etc" \
         --localstatedir="$PA_ROOT/out/var" --buildtype=release \
         -Ddatabase=simple -Ddoxygen=false -Dman=false -Dtests=false \
         -Dstream-restore-clear-old-devices=true -Dalsa=disabled -Ddbus=disabled -Dglib=enabled \
         -Dgtk=disabled -Dopenssl=enabled -Dorc=enabled -Dsoxr=enabled -Dspeex=enabled \
         -Dsystemd=disabled -Dx11=disabled -Dbashcompletiondir=no -Dzshcompletiondir=no \
         > "$PA_ROOT/setup.log" 2>&1 || { tail -20 "$PA_ROOT/setup.log"; log "meson setup failed (log: $PA_ROOT/setup.log)"; exit 1; }
-fi
+}
+[ -f "$PA_ROOT/build/build.ninja" ] || pa_configure
 log "ninja"
-ninja -C "$PA_ROOT/build" > "$PA_ROOT/build.log" 2>&1 || { grep -a "error" "$PA_ROOT/build.log" | head -20; log "build failed (log: $PA_ROOT/build.log)"; exit 1; }
+if ! ninja -C "$PA_ROOT/build" > "$PA_ROOT/build.log" 2>&1; then
+    if grep -aq "^ninja: error: '/opt/homebrew/Cellar/.*missing and no known rule" "$PA_ROOT/build.log"; then
+        pa_configure "a Homebrew library moved" --wipe
+        log "ninja"
+        ninja -C "$PA_ROOT/build" > "$PA_ROOT/build.log" 2>&1 ||
+            { grep -a "error" "$PA_ROOT/build.log" | head -20; log "build failed (log: $PA_ROOT/build.log)"; exit 1; }
+    else
+        grep -a "error" "$PA_ROOT/build.log" | head -20; log "build failed (log: $PA_ROOT/build.log)"; exit 1
+    fi
+fi
 # Installed only when it changed, beside the old one and moved into place at
 # once: scripts/audio.sh may be running the server out of $PA_ROOT/out, and
 # meson install rewrites its libraries in place. The old files, unlinked, stay
