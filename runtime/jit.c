@@ -53,7 +53,6 @@
 
 static struct {
     uint64_t start, end;
-    atomic_ullong dirty_lo, dirty_hi;   // written range awaiting a rescan
 } g_jit[MAX_JIT_REGIONS];
 static atomic_int g_jit_count;
 static pthread_mutex_t g_jit_lock = PTHREAD_MUTEX_INITIALIZER;
@@ -84,8 +83,6 @@ bool lxrt_jit_register(uint64_t start, uint64_t len)
         }
         slot = n;
     }
-    atomic_store(&g_jit[slot].dirty_lo, UINT64_MAX);
-    atomic_store(&g_jit[slot].dirty_hi, 0);
     g_jit[slot].end = start + len;
     g_jit[slot].start = start;
     if (slot == n)
@@ -201,20 +198,43 @@ static int region_of(uint64_t addr)
 
 bool lxrt_jit_contains(uint64_t addr) { return region_of(addr) >= 0; }
 
-static void note_range(int idx, uint64_t lo_new, uint64_t hi_new)
-{
-    uint64_t lo = atomic_load(&g_jit[idx].dirty_lo);
-    while (lo_new < lo && !atomic_compare_exchange_weak(&g_jit[idx].dirty_lo, &lo, lo_new))
-        ;
-    uint64_t hi = atomic_load(&g_jit[idx].dirty_hi);
-    while (hi_new > hi && !atomic_compare_exchange_weak(&g_jit[idx].dirty_hi, &hi, hi_new))
-        ;
-}
 
 // A fault tells us one address and nothing about extent, so guess a page.
+// The pages are this thread's own: write mode is per thread, and so is what
+// it wrote. They used to go into the region's dirty window, shared by every
+// thread, as a lo..hi union: one thread's page at the start of FEX's code
+// buffer and another's near the end made the next rescan read the whole
+// buffer -- Counter-Strike 2 froze for 1-2 s with one thread in
+// lxrt_rewrite_range_code under rescan for every sample of the stall
+// (benchmarks/stage61-cs2-stutter.txt, section 7), and one thread's rescan
+// took the other's page while it was still being written.
+#define WPAGES 32
+static _Thread_local uint64_t g_wpages[WPAGES];
+static _Thread_local int g_wpages_n;
+
+static void rescan_exact(int idx, uint64_t lo, uint64_t hi);
+
+static void rescan_written_pages(void)
+{
+    int n = g_wpages_n;
+    g_wpages_n = 0;
+    for (int i = 0; i < n; i++) {
+        int idx = region_of(g_wpages[i]);
+        if (idx >= 0)
+            rescan_exact(idx, g_wpages[i], g_wpages[i] + 4096);
+    }
+}
+
 static void note_written(int idx, uint64_t addr)
 {
-    note_range(idx, addr, addr + 4096);
+    (void)idx;
+    uint64_t page = addr & ~4095ull;
+    for (int i = 0; i < g_wpages_n; i++)
+        if (g_wpages[i] == page)
+            return;
+    if (g_wpages_n == WPAGES)
+        rescan_written_pages();     // still in write mode: scan what is noted so far
+    g_wpages[g_wpages_n++] = page;
 }
 
 // Rewrite anything the JIT emitted that the runtime cannot let run as-is.
@@ -241,28 +261,11 @@ static void rescan_exact(int idx, uint64_t lo, uint64_t hi)
                 rep.sites_rewritten, rep.sites_unreachable);
 }
 
+// The pages this thread noted by write faults (note_written).
 static void rescan(int idx)
 {
-    uint64_t lo = atomic_exchange(&g_jit[idx].dirty_lo, UINT64_MAX);
-    uint64_t hi = atomic_exchange(&g_jit[idx].dirty_hi, 0);
-    if (lo >= hi)
-        return;
-    if (lo < g_jit[idx].start) lo = g_jit[idx].start;
-    if (hi > g_jit[idx].end)   hi = g_jit[idx].end;
-    lo &= ~3ull;
-    hi &= ~3ull;
-    if (lo >= hi)
-        return;
-    atomic_fetch_add(&lxrt_rescan_calls, 1);
-    atomic_fetch_add(&lxrt_rescan_words, (hi - lo) / 4);
-
-    struct lxrt_rewrite_report rep;
-    char *err = NULL;
-    // The pool cannot be sealed while this thread is in write mode, and it is
-    // a separate mapping anyway, so this is safe here.
-    if (lxrt_rewrite_range(lo, hi, &rep, &err) == 0 && rep.sites_found)
-        fprintf(lxrt_trace_stream(), "[lxrt] JIT output: %zu svc sites rewritten, %zu poisoned\n",
-                rep.sites_rewritten, rep.sites_unreachable);
+    (void)idx;
+    rescan_written_pages();
 }
 
 // Guest-driven W^X. Called for private syscall 0x4C580020.

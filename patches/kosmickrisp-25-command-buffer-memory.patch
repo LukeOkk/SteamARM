@@ -1,0 +1,511 @@
+KosmicKrisp: fewer Metal command buffers, allocators kept by size
+
+Measured with Metal 4 directly: every MTL4CommandBuffer begun on an allocator
+costs ~2.3 MB of it, whatever it holds (30 command buffers of 100 draws on
+one allocator: 69.6 MB, +117 MB of process footprint once executed; one of
+3000 draws: 2.4 MB), and an allocator never gives memory back. Counter-Strike
+2 made ~9,700 Metal command buffers a second (~72 a frame): the shared
+command buffer of the render passes was closed at nearly every barrier
+between two passes (kk_cmd_buffer_dependency), in case work hoisted before a
+pass (pre_gfx: predicates, unrolling, tessellation) would come after it. The
+allocators those command buffers grew reached ~90 MB, the LIFO pool (256 MB)
+was full after three, and ~800 of them were made and destroyed every 5 s --
+29 GB of allocator memory released per 5 s, the Metal4 dispatch queue
+finalizing IOGPU resources while the render thread waited on the GPU for
+1.3 s (stage 61, sections 8-9).
+
+- kk_cmd_buffer_dependency only notes the dependency (dep_since_open); a draw
+  that hoists work after one splits the pass there (kk_draw ->
+  kk_cmd_split_render_pass, before the encoder is used). KK_EAGER_DEP_CLOSE=1
+  closes at the barrier as before.
+- Allocators: a command buffer asks for the sizes its last recording needed
+  (alloc_hint) and gets the smallest idle allocator at least that large;
+  when the pool (now 768 MB) is full the allocator unused the longest goes.
+- KK_ALLOC_LOG=1: allocators made/reused/released and Metal command buffers
+  made, every 5 s.
+
+Counter-Strike 2, Dust2 with bots, same settings: 84 -> 133 fps average, 1%
+low 8 -> 54, 0.1% low 1.5 -> 14, p99 35 -> 12.5 ms, frames over 100 ms 18
+-> 5 in 120 s; Metal command buffers 9,700/s -> 3,900/s; allocators made
+800/5 s -> 0.
+
+--- a/src/kosmickrisp/vulkan/kk_cmd_buffer.c
++++ b/src/kosmickrisp/vulkan/kk_cmd_buffer.c
+@@ -33,6 +33,8 @@
+    }
+ }
+ 
++static void kk_cmd_buffer_note_alloc_hints(struct kk_cmd_buffer *cmd);
++
+ static void
+ kk_cmd_release_resources(struct kk_device *dev, struct kk_cmd_buffer *cmd)
+ {
+@@ -41,6 +43,7 @@
+    /* Destroyed or reset in the middle of a recording */
+    kk_cmd_buffer_close_mtl(cmd);
+    cmd->close_gfx_cmd_buf = false;
++   cmd->dep_since_open = false;
+ 
+    kk_cmd_release_dynamic_ds_state(cmd);
+    kk_descriptor_state_fini(cmd, &cmd->state.gfx.descriptors);
+@@ -56,6 +59,9 @@
+ 
+    /* Still here: this recording was never committed (a commit takes the
+     * allocators with it, kk_cmd_buffer_retire). */
++   if (util_dynarray_num_elements(&cmd->allocators, mtl_command_allocator *))
++      kk_cmd_buffer_note_alloc_hints(cmd);
++   cmd->alloc_next = 0;
+    util_dynarray_foreach(&cmd->allocators, mtl_command_allocator *, allocator) {
+       kk_device_put_allocator(dev, *allocator);
+    }
+@@ -252,6 +258,10 @@
+    }
+    return on;
+ }
++
++/* KK_ALLOC_LOG: Metal command buffers made, and why the shared one closed. */
++uint64_t kk_mtl_cb_made, kk_mtl_cb_close_dep, kk_mtl_cb_close_other, kk_mtl_cb_reuse;
++uint64_t kk_mtl_cb_made_gfx, kk_mtl_stop_keep, kk_mtl_stop_flag, kk_mtl_stop_compute_open, kk_mtl_stop_compute;
+ 
+ /* Ends the render passes' Metal command buffer left open, if any, and queues
+  * it for the commit: whatever begins next comes after it. */
+@@ -265,7 +275,7 @@
+    util_dynarray_append(&cmd->ended_allocators, cmd->open_gfx_allocator);
+    util_dynarray_append(&cmd->submit_cmd_bufs, cmd->open_gfx_cmd_buf);
+    cmd->open_gfx_cmd_buf = NULL;
+-   cmd->open_gfx_allocator = NULL;
++   cmd->open_gfx_allocator = NULL;   cmd->dep_since_open = false;
+ }
+ 
+ /* A pipeline barrier or an event wait. Work the driver hoists before a
+@@ -310,6 +320,24 @@
+    if (!(dst & hoisted))
+       return;
+ 
++   /* Closing here ended the shared command buffer at nearly every barrier
++    * between two passes: Counter-Strike 2 made ~50 Metal command buffers a
++    * frame, each ~2.3 MB of allocator memory (MEASURED with Metal 4
++    * directly: 30 command buffers of 100 draws on one allocator 69.6 MB, one
++    * of 3000 draws 2.4 MB), for hoisted work it never records. Now it is
++    * closed when hoisted work actually comes after such a dependency
++    * (cs_get_compute). KK_EAGER_DEP_CLOSE=1 closes here as before. */
++   static int eager = -1;
++   if (eager < 0) {
++      const char *e = getenv("KK_EAGER_DEP_CLOSE");
++      eager = e && e[0] == '1';
++   }
++   if (!eager) {
++      cmd->dep_since_open = true;
++      return;
++   }
++   if (cmd->open_gfx_cmd_buf)
++      __atomic_fetch_add(&kk_mtl_cb_close_dep, 1, __ATOMIC_RELAXED);
+    kk_cmd_buffer_close_mtl(cmd);
+    if (cmd->gfx.encoder)
+       cmd->close_gfx_cmd_buf = true;
+@@ -323,12 +351,14 @@
+ 
+    if (cmd->open_gfx_cmd_buf) {
+       if (es == &cmd->gfx) {
++         __atomic_fetch_add(&kk_mtl_cb_reuse, 1, __ATOMIC_RELAXED);
+          mtl_command_buffer *cmd_buf = cmd->open_gfx_cmd_buf;
+          es->allocator = cmd->open_gfx_allocator;
+          cmd->open_gfx_cmd_buf = NULL;
+          cmd->open_gfx_allocator = NULL;
+          return cmd_buf;
+       }
++      __atomic_fetch_add(&kk_mtl_cb_close_other, 1, __ATOMIC_RELAXED);
+       kk_cmd_buffer_close_mtl(cmd);
+    }
+ 
+@@ -337,10 +367,18 @@
+       allocator =
+          util_dynarray_pop(&cmd->ended_allocators, mtl_command_allocator *);
+    } else {
+-      allocator = kk_device_get_allocator(dev);
++      uint64_t hint = cmd->alloc_next < cmd->alloc_hint_count
++                         ? cmd->alloc_hint[cmd->alloc_next] : 0;
++      cmd->alloc_next++;
++      allocator = kk_device_get_allocator(dev, hint);
+       util_dynarray_append(&cmd->allocators, allocator);
+    }
+    mtl_command_buffer *cmd_buf = mtl_new_command_buffer(dev->mtl_handle);
++   __atomic_fetch_add(&kk_mtl_cb_made, 1, __ATOMIC_RELAXED);
++   if (es == &cmd->gfx) {
++      __atomic_fetch_add(&kk_mtl_cb_made_gfx, 1, __ATOMIC_RELAXED);
++      cmd->dep_since_open = false;   /* nothing earlier in this one */
++   }
+ 
+    mtl_begin_command_buffer(cmd_buf, allocator);
+    es->allocator = allocator;
+@@ -374,6 +412,21 @@
+  * whose feedback handler releases it. Returns the Metal command buffers to
+  * commit.
+  */
++/* What this recording's allocators grew to: the sizes the next recording of
++ * this command buffer asks for. */
++static void
++kk_cmd_buffer_note_alloc_hints(struct kk_cmd_buffer *cmd)
++{
++   uint32_t n = 0;
++   util_dynarray_foreach(&cmd->allocators, mtl_command_allocator *, allocator) {
++      if (n == KK_CMD_ALLOC_HINTS)
++         break;
++      cmd->alloc_hint[n++] = mtl_command_allocator_allocated_size(*allocator);
++   }
++   cmd->alloc_hint_count = n;
++   cmd->alloc_next = 0;
++}
++
+ mtl_command_buffer **
+ kk_cmd_buffer_retire(struct kk_cmd_buffer *cmd, struct kk_retire_slot *slot)
+ {
+@@ -381,6 +434,7 @@
+    slot->cmd_bufs = cmd->submit_cmd_bufs;
+    cmd->submit_cmd_bufs = empty;
+ 
++   kk_cmd_buffer_note_alloc_hints(cmd);
+    empty = slot->allocators;
+    slot->allocators = cmd->allocators;
+    cmd->allocators = empty;
+@@ -418,6 +472,7 @@
+    kk_cmd_buffer_close_mtl(cmd);
+    kk_cmd_buffer_return_argument_table(cmd);   /* after the encoders */
+    cmd->close_gfx_cmd_buf = false;
++   cmd->dep_since_open = false;
+    cmd->after_metalfx = false;
+    kk_cmd_release_resources(dev, cmd);
+    if (cmd->drawable) {
+@@ -648,6 +703,16 @@
+ 
+    /* The next render pass may begin in this command buffer, unless compute
+     * work is open beside it (it must be committed after it). */
++   if (es == &cmd->gfx) {
++      if (cmd->close_gfx_cmd_buf)
++         __atomic_fetch_add(&kk_mtl_stop_flag, 1, __ATOMIC_RELAXED);
++      else if (cmd->pre_gfx->encoder || cmd->post_gfx->encoder)
++         __atomic_fetch_add(&kk_mtl_stop_compute_open, 1, __ATOMIC_RELAXED);
++      else
++         __atomic_fetch_add(&kk_mtl_stop_keep, 1, __ATOMIC_RELAXED);
++   } else {
++      __atomic_fetch_add(&kk_mtl_stop_compute, 1, __ATOMIC_RELAXED);
++   }
+    if (es == &cmd->gfx && !cmd->close_gfx_cmd_buf && !kk_cmd_buf_per_pass() &&
+        !cmd->pre_gfx->encoder && !cmd->post_gfx->encoder) {
+       assert(cmd->open_gfx_cmd_buf == NULL);
+@@ -657,8 +722,10 @@
+       es->allocator = NULL;
+       return;
+    }
+-   if (es == &cmd->gfx)
++   if (es == &cmd->gfx) {
+       cmd->close_gfx_cmd_buf = false;
++      cmd->dep_since_open = false;    /* this command buffer is ending */
++   }
+ 
+    mtl_end_command_buffer(es->cmd_buf);
+    util_dynarray_append(&cmd->ended_allocators, es->allocator);
+--- a/src/kosmickrisp/vulkan/kk_cmd_buffer.h
++++ b/src/kosmickrisp/vulkan/kk_cmd_buffer.h
+@@ -264,6 +264,10 @@
+    /* A dependency of that kind was recorded inside the current render
+     * pass: the encoder's command buffer is closed when it ends. */
+    bool close_gfx_cmd_buf;
++   /* A dependency whose second scope reaches hoisted work (pre_gfx) was
++    * recorded since the shared command buffer began: if hoisted work comes,
++    * that command buffer is closed first (kk_cmd_split_render_pass). */
++   bool dep_since_open;
+    /* MetalFX encoded work into the command buffer (kk_fsr_metalfx_draw,
+     * kk_mfx_temporal.c): the next encoder waits for all that came before
+     * it. Still set when the command buffer ends: kk_mfxt_end. */
+@@ -299,6 +303,13 @@
+     * VM regions after a single use, however small: MEASURED, Metal 4 on an
+     * M4; one per render pass was most of the driver's memory.) */
+    struct util_dynarray ended_allocators;
++
++   /* The sizes of the allocators the last recording used, in the order it
++    * took them from the device: the size to ask for (kk_device_get_allocator).
++    */
++#define KK_CMD_ALLOC_HINTS 8
++   uint64_t alloc_hint[KK_CMD_ALLOC_HINTS];
++   uint32_t alloc_hint_count, alloc_next;
+ 
+    /* Owned large BOs */
+    struct util_dynarray large_bos;
+@@ -363,6 +374,7 @@
+ void kk_cmd_buffer_close_mtl(struct kk_cmd_buffer *cmd);
+ void kk_cmd_buffer_dependency(struct kk_cmd_buffer *cmd, uint32_t count,
+                               const VkDependencyInfo *deps);
++void kk_cmd_split_render_pass(struct kk_cmd_buffer *cmd);
+ void kk_cmd_buffer_borrow_argument_table(struct kk_cmd_buffer *cmd);
+ void kk_cmd_buffer_return_argument_table(struct kk_cmd_buffer *cmd);
+ void kk_cmd_bind_root_to_argument_table(struct kk_cmd_buffer *cmd,
+--- a/src/kosmickrisp/vulkan/kk_cmd_draw.c
++++ b/src/kosmickrisp/vulkan/kk_cmd_draw.c
+@@ -1128,6 +1128,20 @@
+        * STORE. Metal allows it to be encoded later. */
+       kk_force_attachment_load(cmd);
+    }
++}
++
++/* End the render encoder now; the pass goes on in a new encoder, loading what
++ * this one stored (kk_cmd_buffer_dependency, cs_get_compute). */
++void
++kk_cmd_split_render_pass(struct kk_cmd_buffer *cmd)
++{
++   if (!cmd->gfx.encoder)
++      return;
++   cs_end(cmd);
++   cs_end(cmd);
++   kk_cmd_buffer_dirty_all_gfx(cmd);
++   cmd->state.gfx.need_to_start_render_pass = true;
++   kk_force_attachment_load(cmd);
+ }
+ 
+ static void
+@@ -2258,12 +2272,31 @@
+    if (kk_fsr_metalfx_enabled())
+       kk_fsr_note_drawn(cmd);
+ 
+-   kk_flush_gfx_state(cmd);
+-
+    data->restart = cmd->vk.dynamic_graphics_state.ia.primitive_restart_enable;
+    data->restart_index =
+       cmd->vk.dynamic_graphics_state.ia.primitive_restart_index;
+ 
++   /* Work this draw hoists before the pass (predicates, unrolling,
++    * tessellation: pre_gfx, committed before the gfx command buffer) after a
++    * dependency recorded since that command buffer began
++    * (kk_cmd_buffer_dependency): the pass goes on in a new command buffer,
++    * after the earlier passes that work may depend on. Before the state is
++    * flushed into the encoder: the split ends it. */
++   if (cmd->dep_since_open && cmd->gfx.encoder) {
++      bool hoists = data->predicate_count > 0 ||
++                    cmd->state.shaders[MESA_SHADER_TESS_EVAL] ||
++                    data->prim == MESA_PRIM_TRIANGLE_FAN ||
++                    requires_index_promotion(data) ||
++                    requires_unroll_robustness(cmd, data) ||
++                    requires_unroll_restart(cmd, data);
++      if (hoists) {
++         cmd->close_gfx_cmd_buf = true;
++         kk_cmd_split_render_pass(cmd);
++      }
++   }
++
++   kk_flush_gfx_state(cmd);
++
+    /* Convert to indirect and process predicates. Skip draw if we fail. */
+    if (data->predicate_count > 0 && !kk_predicate_draws(cmd, data))
+       return;
+--- a/src/kosmickrisp/vulkan/kk_device.c
++++ b/src/kosmickrisp/vulkan/kk_device.c
+@@ -6,6 +6,7 @@
+  */
+ 
+ #include "kk_device.h"
++#include "util/os_time.h"
+ 
+ #include "kk_cmd_buffer.h"
+ #include "kk_entrypoints.h"
+@@ -412,6 +413,7 @@
+    simple_mtx_init(&dev->cmd_mem.lock, mtx_plain);
+    dev->cmd_mem.idle_count = 0;
+    dev->cmd_mem.idle_bytes = 0;
++   dev->cmd_mem.tick = 0;
+    const char *mb = getenv("KK_ALLOCATOR_POOL_MB");
+    dev->cmd_mem.idle_bytes_max =
+       (uint64_t)(mb ? atoi(mb) : KK_ALLOCATOR_POOL_MB) << 20;
+@@ -420,17 +422,96 @@
+    dev->cmd_mem.in_flight = 0;
+ }
+ 
++/* KK_ALLOC_LOG=1: every 5 s, how many command allocators were made and
++ * released, the pool's state and the largest allocator given back. */
++static struct {
++   int on;
++   uint64_t made, released, reused, last_ns, max_size, released_bytes;
++} kk_alloc_stats = { .on = -1 };
++
++static void
++kk_alloc_stats_tick(struct kk_device *dev)
++{
++   if (kk_alloc_stats.on < 0) {
++      const char *e = getenv("KK_ALLOC_LOG");
++      kk_alloc_stats.on = e && e[0] == '1';
++   }
++   if (!kk_alloc_stats.on)
++      return;
++   uint64_t now = os_time_get_nano();
++   if (now - kk_alloc_stats.last_ns < 5000000000ull)
++      return;
++   kk_alloc_stats.last_ns = now;
++   extern uint64_t kk_mtl_cb_made, kk_mtl_cb_close_dep, kk_mtl_cb_close_other, kk_mtl_cb_reuse;
++   extern uint64_t kk_mtl_cb_made_gfx, kk_mtl_stop_keep, kk_mtl_stop_flag, kk_mtl_stop_compute_open, kk_mtl_stop_compute;
++   fprintf(stderr, "[kosmickrisp] encoders: gfx cmd bufs made %llu; gfx stops kept open %llu, closed by flag %llu, "
++                   "closed with compute open %llu; compute encoder stops %llu\n",
++           (unsigned long long)__atomic_exchange_n(&kk_mtl_cb_made_gfx, 0, __ATOMIC_RELAXED),
++           (unsigned long long)__atomic_exchange_n(&kk_mtl_stop_keep, 0, __ATOMIC_RELAXED),
++           (unsigned long long)__atomic_exchange_n(&kk_mtl_stop_flag, 0, __ATOMIC_RELAXED),
++           (unsigned long long)__atomic_exchange_n(&kk_mtl_stop_compute_open, 0, __ATOMIC_RELAXED),
++           (unsigned long long)__atomic_exchange_n(&kk_mtl_stop_compute, 0, __ATOMIC_RELAXED));
++   fprintf(stderr, "[kosmickrisp] metal command buffers: made %llu, shared reused %llu, "
++                   "shared closed by a dependency %llu, by other work %llu\n",
++           (unsigned long long)__atomic_exchange_n(&kk_mtl_cb_made, 0, __ATOMIC_RELAXED),
++           (unsigned long long)__atomic_exchange_n(&kk_mtl_cb_reuse, 0, __ATOMIC_RELAXED),
++           (unsigned long long)__atomic_exchange_n(&kk_mtl_cb_close_dep, 0, __ATOMIC_RELAXED),
++           (unsigned long long)__atomic_exchange_n(&kk_mtl_cb_close_other, 0, __ATOMIC_RELAXED));
++   fprintf(stderr, "[kosmickrisp] allocators: made %llu, reused %llu, released %llu (%llu MB); "
++                   "idle %u (%llu MB of %llu); largest given back %llu MB\n",
++           (unsigned long long)kk_alloc_stats.made, (unsigned long long)kk_alloc_stats.reused,
++           (unsigned long long)kk_alloc_stats.released,
++           (unsigned long long)(kk_alloc_stats.released_bytes >> 20),
++           dev->cmd_mem.idle_count, (unsigned long long)(dev->cmd_mem.idle_bytes >> 20),
++           (unsigned long long)(dev->cmd_mem.idle_bytes_max >> 20),
++           (unsigned long long)(kk_alloc_stats.max_size >> 20));
++   kk_alloc_stats.made = kk_alloc_stats.released = kk_alloc_stats.reused = 0;
++   kk_alloc_stats.released_bytes = kk_alloc_stats.max_size = 0;
++}
++
++/* An allocator never gives memory back: reset keeps what it grew to. Handed
++ * out last-in-first-out, every allocator ended up the size of the largest
++ * command buffer any of them had served (~90 MB in Counter-Strike 2), the
++ * pool's byte limit was full after a few, and every one given back beyond it
++ * was destroyed: ~800 allocators made and destroyed every 5 s, 29 GB of
++ * allocator memory released per 5 s, the Metal4 queue finalizing IOGPU
++ * resources while the render thread waited on the GPU (benchmarks/stage61,
++ * section 8). Now a command buffer asks for the size it needed the last time
++ * it recorded (size_hint, 0 = unknown) and gets the smallest idle allocator
++ * at least that large, or the largest below it; the pool forgets the
++ * allocator unused the longest when it is full. */
+ mtl_command_allocator *
+-kk_device_get_allocator(struct kk_device *dev)
++kk_device_get_allocator(struct kk_device *dev, uint64_t size_hint)
+ {
+    mtl_command_allocator *allocator = NULL;
+ 
+    simple_mtx_lock(&dev->cmd_mem.lock);
+-   if (dev->cmd_mem.idle_count > 0) {
+-      uint32_t i = --dev->cmd_mem.idle_count;
++   const uint32_t n = dev->cmd_mem.idle_count;
++   if (n > 0) {
++      uint32_t best = UINT32_MAX, largest = 0, smallest = 0;
++      for (uint32_t i = 0; i < n; i++) {
++         const uint64_t sz = dev->cmd_mem.idle_size[i];
++         if (sz > dev->cmd_mem.idle_size[largest])
++            largest = i;
++         if (sz < dev->cmd_mem.idle_size[smallest])
++            smallest = i;
++         if (size_hint && sz >= size_hint &&
++             (best == UINT32_MAX || sz < dev->cmd_mem.idle_size[best]))
++            best = i;
++      }
++      uint32_t i = size_hint ? (best != UINT32_MAX ? best : largest) : smallest;
+       allocator = dev->cmd_mem.idle[i];
+       dev->cmd_mem.idle_bytes -= dev->cmd_mem.idle_size[i];
++      const uint32_t last = n - 1;
++      dev->cmd_mem.idle[i] = dev->cmd_mem.idle[last];
++      dev->cmd_mem.idle_size[i] = dev->cmd_mem.idle_size[last];
++      dev->cmd_mem.idle_tick[i] = dev->cmd_mem.idle_tick[last];
++      dev->cmd_mem.idle_count = last;
++      kk_alloc_stats.reused++;
++   } else {
++      kk_alloc_stats.made++;
+    }
++   kk_alloc_stats_tick(dev);
+    simple_mtx_unlock(&dev->cmd_mem.lock);
+ 
+    return allocator ? allocator : mtl_new_command_allocator(dev->mtl_handle);
+@@ -443,20 +524,54 @@
+ {
+    mtl_command_allocator_reset(allocator);
+    const uint64_t size = mtl_command_allocator_allocated_size(allocator);
++   mtl_command_allocator *evicted[8];
++   uint32_t evicted_count = 0;
+ 
+    simple_mtx_lock(&dev->cmd_mem.lock);
+-   if (dev->cmd_mem.idle_count < KK_ALLOCATOR_POOL_SIZE &&
+-       dev->cmd_mem.idle_bytes + size <= dev->cmd_mem.idle_bytes_max) {
+-      /* Last in, first out: the allocator whose memory is warm goes next. */
+-      dev->cmd_mem.idle_size[dev->cmd_mem.idle_count] = size;
+-      dev->cmd_mem.idle[dev->cmd_mem.idle_count++] = allocator;
+-      dev->cmd_mem.idle_bytes += size;
+-      allocator = NULL;
++   if (size > kk_alloc_stats.max_size)
++      kk_alloc_stats.max_size = size;
++   if (size > dev->cmd_mem.idle_bytes_max) {
++      /* Larger than the whole pool: not kept. */
++      evicted[evicted_count++] = allocator;
++      kk_alloc_stats.released++;
++      kk_alloc_stats.released_bytes += size;
++   } else {
++      /* Make room: the allocators given back the longest ago go first. */
++      while (dev->cmd_mem.idle_count > 0 &&
++             (dev->cmd_mem.idle_count >= KK_ALLOCATOR_POOL_SIZE ||
++              dev->cmd_mem.idle_bytes + size > dev->cmd_mem.idle_bytes_max) &&
++             evicted_count < ARRAY_SIZE(evicted) - 1) {   /* room for `allocator` */
++         uint32_t oldest = 0;
++         for (uint32_t i = 1; i < dev->cmd_mem.idle_count; i++) {
++            if (dev->cmd_mem.idle_tick[i] < dev->cmd_mem.idle_tick[oldest])
++               oldest = i;
++         }
++         kk_alloc_stats.released++;
++         kk_alloc_stats.released_bytes += dev->cmd_mem.idle_size[oldest];
++         evicted[evicted_count++] = dev->cmd_mem.idle[oldest];
++         dev->cmd_mem.idle_bytes -= dev->cmd_mem.idle_size[oldest];
++         const uint32_t last = --dev->cmd_mem.idle_count;
++         dev->cmd_mem.idle[oldest] = dev->cmd_mem.idle[last];
++         dev->cmd_mem.idle_size[oldest] = dev->cmd_mem.idle_size[last];
++         dev->cmd_mem.idle_tick[oldest] = dev->cmd_mem.idle_tick[last];
++      }
++      if (dev->cmd_mem.idle_count < KK_ALLOCATOR_POOL_SIZE &&
++          dev->cmd_mem.idle_bytes + size <= dev->cmd_mem.idle_bytes_max) {
++         const uint32_t i = dev->cmd_mem.idle_count++;
++         dev->cmd_mem.idle[i] = allocator;
++         dev->cmd_mem.idle_size[i] = size;
++         dev->cmd_mem.idle_tick[i] = ++dev->cmd_mem.tick;
++         dev->cmd_mem.idle_bytes += size;
++      } else {
++         evicted[evicted_count++] = allocator;
++         kk_alloc_stats.released++;
++         kk_alloc_stats.released_bytes += size;
++      }
+    }
+    simple_mtx_unlock(&dev->cmd_mem.lock);
+ 
+-   if (allocator)
+-      mtl_release(allocator);
++   for (uint32_t i = 0; i < evicted_count; i++)
++      mtl_release(evicted[i]);
+ }
+ 
+ /* An upload BO a finished commit gave back, or NULL. */
+--- a/src/kosmickrisp/vulkan/kk_device.h
++++ b/src/kosmickrisp/vulkan/kk_device.h
+@@ -29,7 +29,7 @@
+ #define KK_ALLOCATOR_POOL_SIZE 384
+ /* ... and at most this much memory in them (KK_ALLOCATOR_POOL_MB): an idle
+  * allocator keeps all it ever grew to, 2.3 MB at the least. */
+-#define KK_ALLOCATOR_POOL_MB 256
++#define KK_ALLOCATOR_POOL_MB 768
+ /* Upload BOs (KK_CMD_BO_SIZE, 128 KB) kept by the device once the GPU has
+  * finished the commit that used them: 32 MB. */
+ #define KK_UPLOAD_BO_POOL_SIZE 256
+@@ -159,6 +159,8 @@
+       simple_mtx_t lock;
+       mtl_command_allocator *idle[KK_ALLOCATOR_POOL_SIZE];
+       uint64_t idle_size[KK_ALLOCATOR_POOL_SIZE];
++      uint64_t idle_tick[KK_ALLOCATOR_POOL_SIZE];   /* when given back */
++      uint64_t tick;
+       uint32_t idle_count;
+       uint64_t idle_bytes, idle_bytes_max;
+       /* Upload BOs given back by finished commits (struct kk_bo *). */
+@@ -190,7 +192,8 @@
+    bool present_log;
+ };
+ 
+-mtl_command_allocator *kk_device_get_allocator(struct kk_device *dev);
++mtl_command_allocator *kk_device_get_allocator(struct kk_device *dev,
++                                              uint64_t size_hint);
+ void kk_device_put_allocator(struct kk_device *dev,
+                              mtl_command_allocator *allocator);
+ struct kk_retire_slot *kk_device_get_retire_slot(struct kk_device *dev);

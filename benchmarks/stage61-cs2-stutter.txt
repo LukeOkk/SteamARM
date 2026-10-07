@@ -103,4 +103,91 @@ isolation (scratch mtl4leak.m): 200,000 [[new] init] descriptors +19 MB of
 footprint, 200,000 [new] +128 KB. Patch kosmickrisp-23 initializes the
 five descriptor kinds once. With ~90 render passes a frame this was ~9 MB a
 minute of memory that is never given back while the game runs.
+6. Argument tables: one per VkCommandBuffer, 96 KB each
+------------------------------------------------------
+The same heap: 3,530 AGXG16GFamilyArgumentTable (one MTL4ArgumentTable per
+VkCommandBuffer, made at creation and kept until destruction; Metal keeps
+96 KB behind each whatever its three bindings): the game keeps thousands of
+command buffers allocated. Metal snapshots a table's contents when a draw,
+dispatch or execute command is encoded (MTL4RenderCommandEncoder.h), so a
+table is needed only while its command buffer records. Patch kosmickrisp-24:
+borrowed from a device pool at vkBeginCommandBuffer, returned at
+vkEndCommandBuffer / reset / destroy. Run 13: 14 tables alive (3,530),
+footprint 7.1 GB (7.6), peak 7.6 GB (8.5). The 96 KB untyped blocks are
+something else (4,375 of them, 410 MB): attribution next.
+
+runs 12-13 (agents' GPU tests running concurrently, numbers not comparable):
+12   + patch 23                       150 s   56.5     8.9     1.6       23        13.5 s
+13   + patch 24                       150 s   72.7     12.6    1.9       21        13.7 s
+
 Confirmed in run 12 (patch 23 installed): 2 MTLRenderPassColorAttachmentDescriptorArrayInternal alive at four minutes (2,247,105 before). The untyped malloc blocks stay (221,130, 925 MB, ~4 KB each): the next memory item.
+
+7. The rescan of pages noted by write faults (2026-10-07)
+---------------------------------------------------------
+A watchdog on the frame-time file, now written per present
+(LXRT_VK_FRAMETIMES_SYNC=1), `sample`s the game 200 ms into a stall. A 1.9 s
+gameplay stall: the game's first thread in lxrt_jit_set_write -> rescan ->
+lxrt_rewrite_range_code for every sample. Section 3b made each write scope
+scan its own range; the pages FEX writes outside its scopes (noted by write
+faults, one page each) still went into the region-wide lo..hi window shared
+by every thread, and two pages far apart made one rescan read most of the
+code buffer. They are now a list per thread (write mode is per thread),
+scanned page by page (runtime/jit.c rescan_written_pages).
+
+8. Command allocators made and destroyed (KosmicKrisp)
+------------------------------------------------------
+The other stalls: the render thread waiting on the GPU 1.3 s
+(kk_timeline_wait) while Metal's dispatch queue finalized IOGPU resources of
+deallocated MTL4CommandAllocators. KK_ALLOC_LOG=1, every 5 s of gameplay:
+made ~800, released ~800 (29 GB of allocator memory), idle 1-10 of a 256 MB
+pool, largest allocator given back 91 MB. Allocators never shrink and the
+pool handed them out last-in-first-out, so every one grew to the largest
+command buffer any had served.
+
+9. Why the allocators were that large: Metal command buffers
+------------------------------------------------------------
+Metal 4 directly (scratch mtl4alloc.m): one command buffer of 3000 draws
+2.4 MB of allocator memory; 3000 draws with every render state changed per
+draw 3.8 MB; 30 command buffers of 100 draws on one allocator 69.6 MB, and
++117 MB of process footprint once executed. A command buffer costs ~2.3 MB
+whatever it holds. KosmicKrisp made ~9,700 Metal command buffers a second in
+Counter-Strike 2 (~72 a frame): the render passes' shared command buffer was
+closed by `close_gfx_cmd_buf` ~53 times a frame, set at every barrier
+between passes in case work hoisted before a pass (predicates, unrolling,
+tessellation) would come after it -- work this game hardly records.
+Patch kosmickrisp-25: the dependency is noted and a draw that hoists work
+after one splits the pass there (before its encoder is used); allocators
+are asked for by the size their command buffer needed last time, the pool
+(768 MB) forgets the one unused longest. Patch kosmickrisp-24 also gave a
+replayed recording (second submit of a command buffer) an argument table
+(tests/elf/run_vk_arm64.sh vk_resubmit, 48 passed).
+
+10. Results (same settings: 1080p, MSAA off, textures low, FSR 4)
+-----------------------------------------------------------------
+run  build                                   avg fps 1% low 0.1% low p99     >50ms >100ms >150ms sys
+st1  stage 61 runtime (2411fc0)               84.3    8.3    1.5    35.4 ms  57    18     9      4:55
+st4  + per-thread pages, allocator pool       98.4   19.9    4.5    22.0 ms  21    14     7      3:09
+st6  + fewer Metal command buffers (KK 25)   132.8   53.8   14.2    12.5 ms   7     5     2      1:34
+(120 s windows; st6 Metal command buffers 3,900/s, allocators made 0 and
+released 0 per 5 s). A 20 s window with KK 25: 124.9 fps, 1% low 68.9, 0.1%
+low 41.9, no frame over 33 ms; the same with KK_EAGER_DEP_CLOSE=1: 110.6,
+43.1, 12.9. The remaining stalls are first-time shader compiles (Metal
+230-415 ms for a new fragment shader of 140-350 KB of MSL; NIR->MSL 10-27
+ms for CS2's largest shaders when its own pipeline cache was not saved --
+the benchmark kills the game, a normal quit saves it). The display is 60 Hz
+(max refresh of the panel): the Metal HUD's frame interval cannot go below
+16.67 ms on it; flat at 16.67 is the target.
+
+11. Game Mode
+-------------
+The game's window belongs to SteamARM-X11.app, whose Info.plist said
+public.app-category.utilities, and the server was started as X11.bin
+without CFProcessPath: it checked in with macOS as a foreground app with no
+bundle (lsappinfo: bundleID NULL). Game Mode follows the frontmost app's
+games category (or LSSupportsGameMode) in full screen. patches/
+xquartz-game-mode.patch (games, LSSupportsGameMode, GCSupportsGameMode) and
+scripts/run-x11-native.sh (CFProcessPath = the bundle's X11, as XQuartz's own
+stub does): lsappinfo now shows bundleID "org.steamarm.X11". Whether the
+game's full-screen window turns Game Mode on is for the user to see in the
+Metal HUD.
+

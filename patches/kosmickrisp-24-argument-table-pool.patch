@@ -11,6 +11,9 @@ table is only needed while its command buffer records: a command buffer now
 borrows one of the device's idle tables at vkBeginCommandBuffer and returns
 it at vkEndCommandBuffer, at a reset while recording, or when destroyed.
 The pool holds as many tables as command buffers ever recorded at once.
+A recording played again for a second submit (kk_queue.c rerecord_cmd_buffer)
+borrows a table too: without it the replay drew with none
+(tests/elf/run_vk_arm64.sh vk_resubmit: black on submission 2).
 
 --- a/src/kosmickrisp/vulkan/kk_cmd_buffer.c
 +++ b/src/kosmickrisp/vulkan/kk_cmd_buffer.c
@@ -23,7 +26,7 @@ The pool holds as many tables as command buffers ever recorded at once.
 +/* An argument table for this command buffer's recording: one of the
 + * device's idle tables, or a new one (root at 0, samplers at 1, per-draw
 + * data at 2). */
-+static void
++void
 +kk_cmd_buffer_borrow_argument_table(struct kk_cmd_buffer *cmd)
 +{
 +   struct kk_device *dev = kk_cmd_buffer_device(cmd);
@@ -47,7 +50,7 @@ The pool holds as many tables as command buffers ever recorded at once.
 +
 +/* Done recording (or reset, or destroyed while recording): the table goes
 + * back to the device. The commands encoded with it keep their snapshots. */
-+static void
++void
 +kk_cmd_buffer_return_argument_table(struct kk_cmd_buffer *cmd)
 +{
 +   struct kk_device *dev = kk_cmd_buffer_device(cmd);
@@ -122,28 +125,17 @@ The pool holds as many tables as command buffers ever recorded at once.
  
     return vk_command_buffer_end(&cmd->vk);
  }
---- a/src/kosmickrisp/vulkan/kk_device.h
-+++ b/src/kosmickrisp/vulkan/kk_device.h
-@@ -107,6 +107,19 @@
-    } ds_cache;
+--- a/src/kosmickrisp/vulkan/kk_cmd_buffer.h
++++ b/src/kosmickrisp/vulkan/kk_cmd_buffer.h
+@@ -363,6 +363,8 @@
+ void kk_cmd_buffer_close_mtl(struct kk_cmd_buffer *cmd);
+ void kk_cmd_buffer_dependency(struct kk_cmd_buffer *cmd, uint32_t count,
+                               const VkDependencyInfo *deps);
++void kk_cmd_buffer_borrow_argument_table(struct kk_cmd_buffer *cmd);
++void kk_cmd_buffer_return_argument_table(struct kk_cmd_buffer *cmd);
+ void kk_cmd_bind_root_to_argument_table(struct kk_cmd_buffer *cmd,
+                                         uint64_t addr);
  
-    struct kk_sampler_heap samplers;
-+
-+   /* Argument tables for command buffers (stage 61): Metal snapshots a
-+    * table's contents when a draw or dispatch is encoded, so a table is only
-+    * needed while a command buffer records. One table per VkCommandBuffer
-+    * cost 96 KB each of host memory for the thousands a game keeps
-+    * allocated and idle (3,530 in Counter-Strike 2: 330 MB); recording
-+    * command buffers borrow one here and return it at vkEndCommandBuffer. */
-+   struct {
-+      simple_mtx_t lock;
-+      mtl_argument_table **tables;
-+      uint32_t count, cap;
-+      uint32_t made;
-+   } arg_tables;
-    struct kk_query_table occlusion_queries;
-    /* The slot of every occlusion query that has none of its own yet
-     * (kk_query_pool.c). */
 --- a/src/kosmickrisp/vulkan/kk_device.c
 +++ b/src/kosmickrisp/vulkan/kk_device.c
 @@ -314,6 +314,7 @@
@@ -180,3 +172,45 @@ The pool holds as many tables as command buffers ever recorded at once.
     kk_device_finish_cmd_mem(dev);
  
     if (dev->has_queue) {
+--- a/src/kosmickrisp/vulkan/kk_device.h
++++ b/src/kosmickrisp/vulkan/kk_device.h
+@@ -107,6 +107,19 @@
+    } ds_cache;
+ 
+    struct kk_sampler_heap samplers;
++
++   /* Argument tables for command buffers (stage 61): Metal snapshots a
++    * table's contents when a draw or dispatch is encoded, so a table is only
++    * needed while a command buffer records. One table per VkCommandBuffer
++    * cost 96 KB each of host memory for the thousands a game keeps
++    * allocated and idle (3,530 in Counter-Strike 2: 330 MB); recording
++    * command buffers borrow one here and return it at vkEndCommandBuffer. */
++   struct {
++      simple_mtx_t lock;
++      mtl_argument_table **tables;
++      uint32_t count, cap;
++      uint32_t made;
++   } arg_tables;
+    struct kk_query_table occlusion_queries;
+    /* The slot of every occlusion query that has none of its own yet
+     * (kk_query_pool.c). */
+--- a/src/kosmickrisp/vulkan/kk_queue.c
++++ b/src/kosmickrisp/vulkan/kk_queue.c
+@@ -23,6 +23,9 @@
+ {
+    struct kk_device *dev = kk_cmd_buffer_device(cmd);
+    kk_reset_cmd_buffer_internal(cmd);
++   /* The recording is played again: it needs an argument table, as
++    * vkBeginCommandBuffer gives one (patches/kosmickrisp-24). */
++   kk_cmd_buffer_borrow_argument_table(cmd);
+ 
+    vk_cmd_queue_execute(&cmd->vk.cmd_queue, kk_cmd_buffer_to_handle(cmd),
+                         &dev->vk.dispatch_table);
+@@ -31,6 +34,7 @@
+    cs_end(cmd);
+    kk_mfxt_end(cmd);
+    kk_cmd_buffer_close_mtl(cmd);
++   kk_cmd_buffer_return_argument_table(cmd);
+ 
+    /* Need to ensure the new buffers allocated at record are resident. */
+    kk_device_make_resources_resident(dev);
