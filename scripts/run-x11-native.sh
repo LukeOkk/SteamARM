@@ -117,14 +117,8 @@ do_start() {
     # X11.bin with ":N" as argv[1] runs as a plain DDX: it registers the
     # $BUNDLE_ID Mach service, forks a helper that sends the argv over Mach IPC
     # and then runs the server + NSApplication itself (no launchd needed).
-    # CFProcessPath names the bundle's executable, as XQuartz's own X11 stub
-    # does: without it the process checked in with macOS as a foreground app
-    # with no bundle (lsappinfo: bundleID NULL), so macOS could not see the
-    # bundle's games category and never turned Game Mode on for a game in full
-    # screen (patches/xquartz-game-mode.patch). The server unsets it at once,
-    # so X clients do not inherit it.
     # shellcheck disable=SC2086
-    ( cd / && exec env -u DISPLAY CFProcessPath="$BUNDLE/Contents/MacOS/X11" XQUARTZ_LOG_FILE="$LOG" \
+    ( cd / && exec env -u DISPLAY XQUARTZ_LOG_FILE="$LOG" \
         nohup "$BIN" "$disp" -nolisten tcp +iglx ${X11_NATIVE_ARGS:-} \
         >>"$STDIO_LOG" 2>&1 </dev/null ) &
     disown || true

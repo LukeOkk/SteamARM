@@ -178,16 +178,38 @@ the benchmark kills the game, a normal quit saves it). The display is 60 Hz
 (max refresh of the panel): the Metal HUD's frame interval cannot go below
 16.67 ms on it; flat at 16.67 is the target.
 
-11. Game Mode
--------------
-The game's window belongs to SteamARM-X11.app, whose Info.plist said
-public.app-category.utilities, and the server was started as X11.bin
-without CFProcessPath: it checked in with macOS as a foreground app with no
-bundle (lsappinfo: bundleID NULL). Game Mode follows the frontmost app's
-games category (or LSSupportsGameMode) in full screen. patches/
-xquartz-game-mode.patch (games, LSSupportsGameMode, GCSupportsGameMode) and
-scripts/run-x11-native.sh (CFProcessPath = the bundle's X11, as XQuartz's own
-stub does): lsappinfo now shows bundleID "org.steamarm.X11". Whether the
-game's full-screen window turns Game Mode on is for the user to see in the
-Metal HUD.
-
+11. Game Mode: reachable, and harmful here (not enabled)
+--------------------------------------------------------
+The game's window belongs to SteamARM-X11.app. What it took for macOS to
+turn Game Mode on for it (each step MEASURED with gamepolicyd's log; a
+notifyutil/`log stream --predicate 'process == "gamepolicyd"'` check, no
+screen capture):
+- the bundle's games category / LSSupportsGameMode (it said utilities);
+- a process launched by Launch Services: exec'd directly X11.bin was
+  anon<X11.bin> to RunningBoard (and, without CFProcessPath, a foreground
+  app with no bundle to Launch Services), and gamepolicyd labels only app
+  identities; X11.bin as CFBundleExecutable with the bundle signed ad hoc;
+- a bundle at a new file node: gamepolicyd kept "not a game" for the node
+  that had said utilities (the same bundle copied anywhere else was labelled
+  at once: "Found game GameProcess(X11.bin, labelReason=LSSupportsGameMode)").
+Then, with Counter-Strike 2 in its full-screen window (the overlay above the
+menu bar, xquartz-ui-fullscreen-over-dock), "Full screen gaming session is
+now active", "Game mode enabled". And the game got slower:
+  Game Mode on, game launched outside the X server's coalition   39-42 fps, 1% low 3.5-4.9
+  on, Steam+game started by the X server (a spawn service in it)  73 fps (median 6.9 ms), 1% low 1.6
+  on, the same plus FEXServer, PulseAudio, PipeWire started by it 35 fps, 1% low 2.9
+  off, the same spawn-service setup, bundle labelled utilities   140 fps, 1% low 48.1
+Game Mode favours the frontmost game's coalition (a test app's own child
+got 47 % more CPU than an outside process: 802k against 545k loop counts)
+and gives the GPU and the display to the process that owns the full-screen
+window -- here the X server, which only hosts the picture; the game renders
+in its own lxrun process. With this architecture that is the wrong process,
+so SteamARM leaves Game Mode off: X11 stays public.app-category.utilities
+and is started as before. Kept for later in ~/SteamARM-build/gamemode-
+experiment (not in the repo): the spawn-service patch, tools/x11spawn and
+the script changes. What would make it right is the game's own process
+owning the full-screen window.
+The HUD's "Composited": the overlay is a window of the X server showing a
+layer of the game's process; macOS does not scan it out directly. The
+display here is 60 Hz (CGDisplayCopyAllDisplayModes: max 60.00 Hz): the
+HUD's frame interval cannot be below 16.67 ms on it.
