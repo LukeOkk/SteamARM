@@ -95,6 +95,7 @@ the Fedora VM that was deleted on 2026-09-27; they are history, and
 | 57 | `stage57-wine-arm64-native.txt` | 10-06 | Valve's Proton ARM64 natively under the runtime: KUSER_SHARED_DATA as a virtual page (runtime/lowpage.c), the TEB block limit and the bin dir fixed in a prototype; wineserver (aarch64) and the ARM64X ntdll/kernel32 load; stops at x18 reads in PE code. |
 | 57 | `stage57-depth-cache-and-frame-pacing.txt` | 10-05 | Optional bounded depth/stencil cache: 39.4% less recording time in a paired microbenchmark, pixels/FEX/Proton probes passed; default off. CS2 and native Metal traces still show hitches and no established stable 100 FPS. Current display link exposes fixed refresh rates only. |
 | 58 | `stage58-adaptive-sync-and-drawable-wait.txt` | 10-05 | bounded notification wait tested on ARM64/FEX; actual display/native fullscreen eligibility and fixed-refresh fallback; <10 ms CS2 and physical VRR remain unverified |
+| 61 | `stage61-cs2-stutter.txt` | 10-07 | CS2 stutter sampled inside stalls: JIT rescans (shared window), readlink per path prefix, KosmicKrisp leaks and ~72 Metal command buffers a frame (2.3 MB each); fixed: 84 -> 133 fps, 1% low 8 -> 54; Game Mode identity of the X server |
 
 ## After stage 21 (no stage file)
 
@@ -239,4 +240,3 @@ histogram, never the average alone: smoothness is a claim about the tail.
 Compare ZERO-VM against CrossOver and against a native macOS build where one
 exists; the VM baseline is history. No game has been measured this way yet
 (`docs/PERFORMANCE_BASELINE.md`, "Not measured").
-| 61 | `stage61-cs2-stutter.txt` | 10-06 | CS2 stutter at high fps: memory pressure (compressor 5-6 GB) plus two runtime overheads sampled in stalls (readlink per path prefix, the JIT-output rescan scanning 27 GB/run); prefix cache and exact-range rescan |
