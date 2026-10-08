@@ -36,6 +36,9 @@ final class LauncherModel: ObservableObject {
     @Published private(set) var runningArch: RunningArch?
     @Published private(set) var logPath: String?
     @Published var alert: String?
+    /// Bumped when a disk image the roots live on was attached: the cards
+    /// re-check their roots.
+    @Published private(set) var volumesRevision = 0
     /// The last launch was refused because other Linux programs are running.
     @Published var offerStop = false
     /// Display mode of the running app (the setting may change meanwhile).
@@ -78,7 +81,36 @@ final class LauncherModel: ObservableObject {
         unpackBundledSource()
         loadBuiltIns()
         adoptRunningApp()
+        attachRootImages()
         refreshCapabilities()
+    }
+
+    /// The Steam Frame root lives on a disk image (steamframe-root.sparsebundle
+    /// at /Volumes/SteamFrameRoot) that macOS does not attach again after a
+    /// restart. run-app.sh attaches it before a start, but the card refused
+    /// to start while the volume was missing, so Steam could not be opened at
+    /// all after a restart (2026-10-08). The launcher attaches it itself
+    /// when it opens, as run-app.sh would.
+    func attachRootImages() {
+        let bundle = Paths.state.appendingPathComponent("steamframe-root.sparsebundle")
+        guard FileManager.default.fileExists(atPath: bundle.path),
+              let target = try? FileManager.default.destinationOfSymbolicLink(
+                  atPath: Paths.state.appendingPathComponent("arm64root").path),
+              target.hasPrefix("/Volumes/") else { return }
+        let volume = "/Volumes/" + (target.dropFirst("/Volumes/".count).split(separator: "/").first.map(String.init) ?? "")
+        guard volume != "/Volumes/", !FileManager.default.fileExists(atPath: volume) else { return }
+        let script = projectDir.appendingPathComponent("scripts/image-volume.sh")
+        guard FileManager.default.isExecutableFile(atPath: script.path) else { return }
+        Task.detached {
+            let p = Process()
+            p.executableURL = script
+            p.arguments = ["ensure", bundle.path, volume]
+            p.standardOutput = FileHandle.nullDevice
+            p.standardError = FileHandle.nullDevice
+            try? p.run()
+            p.waitUntilExit()
+            await MainActor.run { self.volumesRevision += 1 }
+        }
     }
 
     /// Older source manifests cannot reintroduce retired Steam menu entries.
@@ -339,6 +371,10 @@ final class LauncherModel: ObservableObject {
         case .volumeNotAttached(let volume, let target):
             // The root exists on that volume: attaching it is all it takes.
             let bundle = Paths.state.appendingPathComponent("steamframe-root.sparsebundle")
+            // The Steam Frame root's own image: run-app.sh attaches it before
+            // the start (and attachRootImages() when the launcher opens), so
+            // the card stays open.
+            if volume == "SteamFrameRoot" && FileManager.default.fileExists(atPath: bundle.path) { return nil }
             let how = volume == "SteamFrameRoot" && FileManager.default.fileExists(atPath: bundle.path)
                 ? "conéctalo con hdiutil attach \((bundle.path as NSString).abbreviatingWithTildeInPath)"
                 : "conéctalo" + (app.root == LinuxBaseEnvironment.arm64.guestRoot ? " (docs/STEAM_FRAME_IMAGE.md)" : "")

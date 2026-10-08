@@ -10,6 +10,7 @@
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
+#include <sys/resource.h>
 #include <stdio.h>
 
 // Darwin page size on Apple Silicon. Everything mapped or protected has to be
@@ -521,6 +522,8 @@ long lxrt_membarrier(int cmd, unsigned flags);
 bool lxrt_hwcap_cpuid(void);
 bool lxrt_program_is_fex(void);
 uint64_t lxrt_subpage_lost_guard(uint64_t addr);
+void lxrt_raise_nofile(void);
+rlim_t lxrt_nofile_ceiling(void);
 void lxrt_subpage_note_reservation(uint64_t addr, uint64_t len, int prot);
 bool lxrt_pe_in_image_not_code(uint64_t start, uint64_t end);
 void lxrt_pe_forget(uint64_t addr, uint64_t len);

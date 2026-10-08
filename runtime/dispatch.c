@@ -2771,6 +2771,40 @@ static long do_fstatat(int dirfd, const char *path, uint64_t out, int flags)
 
 // Linux and Darwin agree on RLIMIT_CPU/FSIZE/DATA/STACK/CORE and diverge after
 // that, so the mapping is explicit rather than a pass-through.
+
+// The highest soft RLIMIT_NOFILE Darwin accepts: kern.maxfilesperproc (61440
+// here), or the hard limit when that is lower.
+rlim_t lxrt_nofile_ceiling(void)
+{
+    int perproc = 0;
+    size_t sz = sizeof perproc;
+    rlim_t ceil = sysctlbyname("kern.maxfilesperproc", &perproc, &sz, NULL, 0) == 0 && perproc > 0
+                      ? (rlim_t)perproc : 10240;
+    struct rlimit rl;
+    if (getrlimit(RLIMIT_NOFILE, &rl) == 0 && rl.rlim_max != RLIM_INFINITY && rl.rlim_max < ceil)
+        ceil = rl.rlim_max;
+    return ceil;
+}
+
+// Every process the launcher starts through Launch Services (the X server,
+// and since Game Mode Steam and its games through it) gets launchd's soft
+// open-files limit, 256: Steam's client died with 28679 "shared memfd open()
+// failed: Too many open files" and the runtime faults after them (MEASURED
+// 2026-10-08, after a restart reset launchctl's maxfiles). Linux gives a
+// process 1024 and Steam raises it further; the runtime starts every guest
+// at the ceiling instead.
+void lxrt_raise_nofile(void)
+{
+    struct rlimit rl;
+    if (getrlimit(RLIMIT_NOFILE, &rl) != 0)
+        return;
+    rlim_t want = lxrt_nofile_ceiling();
+    if (rl.rlim_cur < want) {
+        rl.rlim_cur = want;
+        setrlimit(RLIMIT_NOFILE, &rl);
+    }
+}
+
 static int rlimit_to_darwin(long linux_res)
 {
     switch (linux_res) {
@@ -2849,8 +2883,20 @@ static long do_prlimit64(long pid, long res, uint64_t newp, uint64_t oldp)
         if (o->rlim_cur == (uint64_t)RLIM_INFINITY) o->rlim_cur = ~0ull;
         if (o->rlim_max == (uint64_t)RLIM_INFINITY) o->rlim_max = ~0ull;
     }
-    if (newp && setrlimit(dres, &set) != 0)
-        return LERR(errno);
+    if (newp && setrlimit(dres, &set) != 0) {
+        // Darwin can refuse a soft open-files limit above
+        // kern.maxfilesperproc (EINVAL) where Linux grants anything up to
+        // the hard limit: raising the soft limit to the hard one
+        // ("unlimited" here) is what Chromium and Proton do, and it failed
+        // and left them at launchd's 256. The highest limit Darwin takes
+        // instead.
+        rlim_t ceil = dres == RLIMIT_NOFILE ? lxrt_nofile_ceiling() : 0;
+        if (errno != EINVAL || !ceil || set.rlim_cur <= ceil || set.rlim_cur > set.rlim_max)
+            return LERR(errno);
+        set.rlim_cur = ceil;
+        if (setrlimit(dres, &set) != 0)
+            return LERR(errno);
+    }
     // Linux sets the new limit first and reports the old one's EFAULT after.
     return old_fault ? LERR(EFAULT) : 0;
 }
