@@ -254,6 +254,13 @@ Metal HUD on, Game Mode recognised for the X server (spawn service):
   off 76.9 -- the whole machine slower, and Game Mode no longer a cost.
 This bench varies by run (the same setup gave 72.9 and 128.4 above); only
 the 30-53 fps of the HUD under Game Mode was repeated in every run.
+The installed 0.3.55 (SteamARM.app's setup: the X server from Launch
+Services, the spawn service, HUD on, Game Mode on; no one using the Mac):
+  91.1 / 92.3 fps, 1% low 51.4 / 40.6, frames over 100 ms 0 / 1 in 40 s,
+  lsappinfo: no lxrun
+  the same install with LXRT_HUD_APPKIT=1 (the HUD's AppKit calls as
+  before): 130, 100, 191 frames per 2 s, then 11, 8, 20, then none -- the
+  game stopped presenting 20 s into the match.
 The HUD's "Game Mode On/Off" is system-wide: FramePacing's
 FPMTLMetricsGameModeEnabled reads the com.apple.system.console_mode_changed
 notification's state, so the HUD in the game's process shows On while the
