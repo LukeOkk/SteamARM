@@ -12,7 +12,8 @@
 //    is never asked for what it cannot do. A program that really uses a
 //    geometry shader fails at pipeline creation instead of at start-up
 //    (HYPOTHESIS: most D3D11 games do not; the real fix is geometry-shader
-//    emulation in MoltenVK).
+//    emulation in the driver -- SteamARM's KosmicKrisp has it since patch
+//    27 and reports the feature itself, so nothing is spoofed there).
 //    fillModeNonSolid the same way, for KosmicKrisp (STEAMARM_VK_ICD), which
 //    reports it false (MoltenVK reports it true, so nothing changes there).
 //    DXVK refused the adapter, D3D11 and D3D12 (whose DXGI is DXVK's) alike:

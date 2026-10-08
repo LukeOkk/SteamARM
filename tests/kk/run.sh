@@ -5,7 +5,9 @@
 #                   with the output written directly and through the private
 #                   copy (KK_MFXT_SCRATCH=1);
 #   vk_mfxt_entry.c kk_steamarm_upscale_temporal in the built driver, called
-#                   as SteamARM's Vulkan shim calls it.
+#                   as SteamARM's Vulkan shim calls it;
+#   vk_geometry.c   geometry shaders (patches/kosmickrisp-27), the same
+#                   scenes drawn with llvmpipe and compared.
 #
 # Usage: tests/kk/run.sh
 #   STEAMARM_KK_SRC  patched Mesa tree (default
@@ -53,6 +55,17 @@ else
         grep -E '^  (ok|FAIL)' "$log" | sed 's/^/    /'
         result vk_mfxt_entry "$log" "vk_mfxt_entry KK_MFXT_SCRATCH=$scratch"
     done
+fi
+LVP="${STEAMARM_LVP:-$(ls /opt/homebrew/opt/mesa/lib/libvulkan_lvp.dylib 2>/dev/null)}"
+if ! clang -O2 -Wall -I/opt/homebrew/include tests/kk/vk_geometry.c -o "$OUT/vk_geometry"; then
+    echo "  FAIL  vk_geometry (build)"; fail=$((fail + 1))
+elif [ -z "$LVP" ]; then
+    echo "  skip  vk_geometry (no llvmpipe: brew install mesa, or STEAMARM_LVP)"
+else
+    log="$OUT/vk_geometry.log"
+    perl -e 'alarm 300; exec @ARGV' "$OUT/vk_geometry" "$OWN/libvulkan_kosmickrisp.dylib" "$LVP" > "$log" 2>&1
+    grep -E '^  (ok|FAIL|skip)' "$log" | sed 's/^/    /'
+    result vk_geometry "$log" "vk_geometry (geometry shaders against llvmpipe)"
 fi
 echo "== $pass passed, $fail failed"
 [ "$fail" = 0 ]
