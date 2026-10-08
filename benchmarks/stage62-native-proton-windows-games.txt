@@ -273,9 +273,14 @@ HKLM\HARDWARE\DESCRIPTION\System\CentralProcessor\N "CP xxxx".
     Then, on both paths, the game itself stops early inside its anti-tamper
     layer (obfuscated call/pop/xor [rsp]/ret code, 2469 deliberate illegal
     instructions handled by its own vectored handler, self-modifying code):
-    on the native path it exits silently after them, on the x86 path an
-    access violation at address 0 (Shipping.exe+0x8CD2D1A) ends it. Not
-    solved; the protection does not run under FEX as it is.
+    on the native path it exits silently after them -- +process shows
+    NtTerminateProcess(self, exit code 300) from one of its threads, before
+    any Direct3D DLL is loaded, and no imported exit function is called
+    with 300 (the call comes from the obfuscated code) -- on the x86 path
+    an access violation at address 0 (Shipping.exe+0x8CD2D1A) ends it. Not
+    solved; the protection does not run under FEX as it is. (It is a GDK
+    title: XGameRuntime referenced, libHttpClient.GDK/XCurl shipped; it
+    never got as far as loading them.)
 
 12. Other games on the native path
     -------------------------------
