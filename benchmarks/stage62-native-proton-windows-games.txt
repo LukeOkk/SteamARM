@@ -196,9 +196,118 @@ HKLM\HARDWARE\DESCRIPTION\System\CentralProcessor\N "CP xxxx".
 
 9. Geometry shaders in KosmicKrisp
    --------------------------------
-   In progress: emulation with Mesa's poly library as Honeykrisp does it --
-   the vertex shader and the geometry shader run as compute kernels before
-   the pass, and the geometry shader's "rasterization" vertex shader draws
-   their output (indexed when poly gives an index buffer). Check:
-   tests/kk/vk_geometry.c, which draws the same scenes with KosmicKrisp and
-   llvmpipe and compares the pictures.
+   patches/kosmickrisp-27: emulation with Mesa's poly library as Honeykrisp
+   does it. For a VS+GS+FS pipeline the vertex shader becomes a compute
+   kernel (as before tessellation), poly_nir_lower_gs splits the geometry
+   shader into a compute kernel that writes the emitted vertices and a
+   "rasterization" vertex shader that reads them, and that one is paired
+   with the fragment shader in the Metal render pipeline. Each draw uploads
+   poly's vertex and geometry parameters, dispatches the two kernels before
+   the pass and draws the rasterization shader, indexed by poly's static or
+   dynamic index buffer; indirect draws set their grids on the GPU
+   (libkk_gs_setup_indirect); primitive restart is unrolled first. Two
+   things the first version (written with codex) lacked: poly's shaders
+   carry local variables, which nothing lowered ("Unknown intrinsic
+   load_deref" in the MSL), and the rasterization shader's load_clip_z_coeff
+   appears after the descriptor pass had run. Not supported: tessellation
+   together with a geometry shader, transform feedback from one, geometry
+   pipeline statistics. KK_GEOMETRY_SHADER=0: no geometry shaders, as before.
+
+   Check: tests/kk/vk_geometry.c draws seven scenes with KosmicKrisp and with
+   llvmpipe and compares them pixel by pixel (64x64): pass-through, points
+   to quads, EndPrimitive with a varying count, gl_Layer from two
+   invocations into a 2-layer image, vkCmdDrawIndirect, an indexed strip
+   with restart, a strip with back faces culled. Six are identical; the
+   restart scene differs on 30 pixels where overlapping triangles meet
+   (coverage identical, also with culling: the winding is right; which
+   triangle ends on top differs).
+
+   Counter-Strike 2 (no geometry shaders) with and without the patch: see 12.
+
+   FINAL FANTASY VII REMAKE: the pipelines build, no error box, and the game
+   draws: "Got 4 swapchain images" 30 s after start, then 60 presents per
+   2 s (30 fps, the game's own limit on its opening screens) for minutes,
+   no errors, 55 % CPU, 1.1 GB.
+
+10. Steam's state after a killed game
+    ---------------------------------
+    One run hung after the game's first Direct3D 12 device (72 % CPU, no log
+    lines, no swapchain) with and without geometry shaders. Earlier test
+    runs had been killed (kill -9), and the game's Steam API start-up waited
+    on the client; with Steam restarted the same game reached its swapchain
+    in 30 s. Not a SteamARM fault; restart Steam after killing a game.
+
+11. Redistributables, continued: the Visual C++ version check
+    ---------------------------------------------------------
+    Minecraft Dungeons II (Unreal Engine 5) stopped at its bootstrap
+    launcher: "The following component(s) are required to run this program:
+    Microsoft Visual C++ 2015-2022 Redistributable (arm64). Would you like to
+    install them now?" (+msgbox). Its Dungeons.exe (disassembled) asks
+    IsWow64Process2 for the machine -- ARM64 here, as on a Windows ARM PC --
+    and accepts the runtime when either the game's own directory has
+    msvcp140_2.dll and vcruntime140_1.dll of version 14.42.34438 or later,
+    or HKLM\Software\Microsoft\VisualStudio\14.0\VC\Runtimes\arm64 says
+    so (Installed, Major/Minor/Bld) AND system32's msvcp140_2.dll and
+    vcruntime140_1.dll carry such a version. Proton replaces the
+    redistributable with Wine's builtins and reports 14.42.34433 for them,
+    five builds short; the installers the game offers (vc_redist.arm64.exe,
+    vc_redist.x64.exe) are 32-bit x86 programs, which the native path cannot
+    run. Valve raises the reported version when games start to need it; the
+    tool now does that itself: tools/steamarm-native-proton/vcrun_version.py
+    raises the builtins' version resources in the tool's copy and the
+    default prefix's registry to 14.44.35211 at install time (Proton then
+    copies the builtins into existing prefixes again: its prefix_info has the
+    default prefix's system.reg mtime), and an existing prefix's registry
+    before each start. Valve's own Proton is not touched.
+    After it the launcher started Dungeons-Win64-Shipping.exe.
+
+    The x86 tool shows the same box ("(x64)"). There the raise cannot be
+    made the same way: Wine reads a builtin's version resource from
+    Proton's lib/wine, not from the prefix's copy in system32 (traced: the
+    prefix's copies at 14.44, the check still failed), and that Proton is
+    Valve's, run in place. The launcher's own offer works on that path:
+    its vc_redist.x64.exe (a 32-bit installer, WoW64 under FEX) installed
+    Microsoft's 14.42.34438 runtime into the test prefix silently
+    (/install /quiet /norestart) and the check passed.
+
+    Then, on both paths, the game itself stops early inside its anti-tamper
+    layer (obfuscated call/pop/xor [rsp]/ret code, 2469 deliberate illegal
+    instructions handled by its own vectored handler, self-modifying code):
+    on the native path it exits silently after them, on the x86 path an
+    access violation at address 0 (Shipping.exe+0x8CD2D1A) ends it. Not
+    solved; the protection does not run under FEX as it is.
+
+12. Other games on the native path
+    -------------------------------
+    Schedule I (Unity, Direct3D 11 through DXVK ARM64X): runs; menu at 87 fps
+    with 80 % CPU, against 88 fps with 91 % CPU on "SteamARM: Proton x86 via
+    FEX" in the same menu (test prefix, nothing else changed).
+    Counter-Strike 2 (Linux, x86 path, no geometry shaders), KosmicKrisp
+    with patch 27 against the build before it, runs alternated: 117.1 /
+    117.8 fps, then 134.0 / 118.7 -- no cost (this benchmark's spread is
+    larger than either difference).
+
+13. A guard page FEX relies on (runtime)
+    ------------------------------------
+    The first failure of Minecraft Dungeons II on the native path: "Exception
+    frame is not in stack limits => unable to dispatch exception" after an
+    access violation at 0x7FFFFC72FFF0 on every x86 call instruction. FEX's
+    ARM64EC JIT keeps a call-return stack (VirtualAlloc: 4 MiB with a 4 KiB
+    no-access page on either side) and resets it when a fault lands in that
+    range -- an unbalanced call/ret stream like the game's obfuscated code
+    walks it off the bottom. With 4 KiB guest pages on 16 KiB host pages the
+    bottom guard shares its host page with 12 KiB of the stack, the host
+    page is read-write (the union, runtime/subpage.c), so the overflow went
+    through the guard and faulted 16 bytes below the reservation, outside
+    FEX's range ("Passing through exception"). The runtime now reports a
+    fault within 64 bytes below a host page whose bottom guest page is such
+    a lost guard inside that guard, where it happens with 4 KiB pages:
+    "Call-ret stack inbalance" in FEX's log, and the game went on.
+    tests/elf/lost_guard.c checks it (the same layout, three rounds).
+    The same test found that a guest handling SIGSEGV but not SIGBUS died
+    on a store into a PROT_NONE reservation: Darwin raises SIGBUS there,
+    the runtime turned only "withheld" protections into SIGSEGV, and a
+    host SIGBUS without a guest SIGBUS handler went to the fatal report.
+    Now PROT_NONE is SIGSEGV/SEGV_ACCERR as on Linux, and installing a
+    SIGSEGV handler routes the host's SIGBUS through the same conversion.
+    tests/elf: 114 passed.
