@@ -21,9 +21,19 @@ done
 [ -d "$LXRT_ROOT/usr/bin" ] || die "missing $LXRT_ROOT/usr/bin"
 [ -d "$STEAM_ROOT/usr/bin" ] || die "missing $STEAM_ROOT/usr/bin"
 [ -d "$STEAM_ROOT/usr/lib/lxrt-emu" ] || die "missing $STEAM_ROOT/usr/lib/lxrt-emu"
-if pgrep -f 'build/lxrun' >/dev/null 2>&1; then
-    die "an lxrun guest is active; close it with scripts/run-app.sh --stop before updating FEX"
-fi
+# A FEXServer with no guest left is not a guest: the setup's own tests start
+# one and it stays (the 0.3.56 setup, run again over 0.3.55, stopped here with
+# nothing else running). It is stopped, and the next guest starts the new one.
+active=""; idle_servers=""
+for p in $(pgrep -f 'build/lxrun'); do
+    case "$(ps -o command= -p "$p" 2>/dev/null)" in
+        "") ;;
+        *"/usr/bin/FEXServer "*) idle_servers="$idle_servers $p" ;;
+        *) active=1 ;;
+    esac
+done
+[ -z "$active" ] || die "an lxrun guest is active; close it with scripts/run-app.sh --stop before updating FEX"
+for p in $idle_servers; do kill "$p" 2>/dev/null && log "stopped an idle FEXServer (pid $p)"; done
 
 put() { # source destination backup label
     local src="$1" dst="$2" label="$3" old new
