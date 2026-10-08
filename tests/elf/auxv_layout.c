@@ -76,8 +76,10 @@ int main(int argc, char **argv, char **envp)
     check("/proc/self/auxv agrees with getauxval", proc_page == getauxval(AT_PAGESZ) &&
           proc_hwcap == getauxval(AT_HWCAP) && proc_page && proc_hwcap);
     unsigned long hw = vals[AT_HWCAP];
-    check("AT_HWCAP and HWCAP2", (hw & ((1UL << 0) | (1UL << 1) | (1UL << 8))) ==
-          ((1UL << 0) | (1UL << 1) | (1UL << 8)) && !(hw & (1UL << 11)) && vals[AT_HWCAP2] == 0);
+    // HWCAP_CPUID (bit 11) is set: ID register reads are rewritten or
+    // emulated from SIGILL (runtime/stack.c), and Wine ARM64 needs it.
+    check("AT_HWCAP and HWCAP2", (hw & ((1UL << 0) | (1UL << 1) | (1UL << 8) | (1UL << 11))) ==
+          ((1UL << 0) | (1UL << 1) | (1UL << 8) | (1UL << 11)) && vals[AT_HWCAP2] == 0);
     check("AT_CLKTCK and AT_SECURE", vals[AT_CLKTCK] == 100 &&
           sysconf(_SC_CLK_TCK) == 100 && vals[AT_SECURE] == 0);
     check("AT_UID/EUID/GID/EGID", vals[AT_UID] == getuid() && vals[AT_EUID] == geteuid() &&

@@ -406,6 +406,15 @@ fi
 if [ "${STEAMARM_METAL_HUD:-}" = 1 ]; then
     export MTL_HUD_ENABLED=1
 fi
+# Xalia, Proton's gamepad navigation of launchers (a Steam Deck feature),
+# stayed at 100 % CPU under the runtime and kept sessions alive after the game
+# (docs/FEX_GAME_BOUNDARY.md); it held wineserver busy for the game too.
+# PROTON_USE_XALIA=1 in the game's launch options turns it back on.
+export PROTON_USE_XALIA="${PROTON_USE_XALIA:-0}"
+# Direct3D 12 at feature level 12_0: KosmicKrisp has no tiled resources of
+# tier 2, vkd3d-proton reported 11_1, and games that ask for 12_0 refused to
+# start (FINAL FANTASY VII REMAKE). The tiers are still reported as they are.
+export VKD3D_FEATURE_LEVEL="${VKD3D_FEATURE_LEVEL:-12_0}"
 export FEX_GUESTBASE=1 FEX_SMCCHECKS="${FEX_SMCCHECKS:-mtrack}" FEX_SILENTLOG=0 FEX_OUTPUTLOG=stderr
 export OBJC_DISABLE_INITIALIZE_FORK_SAFETY=YES
 export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin

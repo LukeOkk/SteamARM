@@ -1,0 +1,204 @@
+Stage 62 -- Windows games on the native ARM64 Proton path (FINAL FANTASY VII REMAKE)
+====================================================================================
+
+Goal (the user, 2026-10-07): every Windows game through the architecture of the
+Steam Frame -- Wine, wineserver, DXVK / vkd3d-proton native ARM64 (ARM64EC),
+FEX translating only the game's x86-64 code inside Wine -- with Steam's own
+redistributable handling (its install scripts, Steamworks Common
+Redistributables, Proton's built-in replacements) working. Test title: FINAL
+FANTASY VII REMAKE INTERGRADE (app 1462040, Unreal Engine 4.18, Direct3D 12
+only, 95 GB), started through "SteamARM: Proton ARM64 nativo"
+(tools/steamarm-native-proton) the way the client starts a tool (its reaper,
+STEAM_COMPAT_* environment, the client's own LXRT_*/STEAMARM_* settings), with
+a test prefix (compatdata/1462040-native) so the player's saves are not
+touched. M4, 16 GB, macOS 27.
+
+Everything below was MEASURED unless marked otherwise. Fast checks kept for the
+future (scratch, not shipped -- they use the game's own DLL): a Windows x64
+program that round-trips 4 KiB to 3 MiB through the game's
+oo2core_7_win64.dll (Oodle Kraken/Mermaid/Selkie/Leviathan), an x86-64
+instruction-conformance probe (per-group checksums, compared with the x86
+Proton path as reference), and a reader of
+HKLM\HARDWARE\DESCRIPTION\System\CentralProcessor\N "CP xxxx".
+
+1. A prefix made by another tool: drive links pointing at host paths
+   ---------------------------------------------------------------------
+   The game's prefix had been created in October by a tool running in the
+   ARM64 root outside any container. There the runtime stores an absolute
+   symlink target as its host path (runtime/dispatch.c symlinkat), so
+   dosdevices/z: was "/tmp/lxrt-arm64root/" and s: a host path too. Inside the
+   x86 tool's container neither resolves, Wine found no drive for the game's
+   path, passed "\\?\unix\..." to the game's launcher, and the launcher said
+   "Couldn't start ... ff7remake_.exe ... CreateProcess() returned 2".
+   Removing the two links made Proton recreate them (inside the container,
+   as guest paths) and the game's real executable started. Not changed in
+   the tools yet: a prefix is made by one tool and should stay with it.
+
+2. The runtime rewrote words inside .NET assemblies (Wine Mono broke)
+   ------------------------------------------------------------------
+   Wine ARM64 marks the sections of every PE image executable as Windows
+   does, IL-only .NET assemblies included, and the runtime scanned them for
+   svc / TLS / system-register words when they became executable: it
+   "rewrote" two system-register reads inside wine-mono's mscorlib.dll -- its
+   metadata -- and Mono stopped at "Runtime critical type System.Int16 not
+   found". No .NET program ran, Proton's own prefix setup included.
+   runtime/rewrite.c now never rewrites a word of a PE image outside the
+   image's aarch64 code windows (pefile.c: the CHPE code map's ARM64 and
+   ARM64EC ranges, or the executable sections of a plain ARM64 image): the x64
+   side of ARM64X DLLs, pure x64 images and IL are left alone for every kind
+   of site. pefile.c also recognises PE32 images (mscorlib is one), parses an
+   image found at a 64 KiB boundary inside a scanned range, and forgets an
+   image a fixed mapping replaces (a view Wine released and reused).
+   After: Mono's programs exit 0 (CorExitProcess(0)).
+
+3. Wine read no CPU identity: HWCAP_CPUID
+   ---------------------------------------
+   FEX's ARM64EC JIT reads the host's ID registers from the registry values
+   Wine writes (CP 4000 MIDR, CP 4020 PFR0, CP 4030 ISAR0, CP 5801 CTR ...).
+   Wine writes them only when AT_HWCAP has HWCAP_CPUID ("the kernel emulates
+   mrs of the ID registers"), which the runtime left out because, before it
+   rewrote those reads into constants (sysreg.c), glibc's start-up took
+   SIGILL on them. Every value was missing (RegGetValue: 2), FEX took the M4
+   for an ARMv8.0 core without CRC32, and the x86 crc32 instruction raised
+   EXCEPTION_ILLEGAL_INSTRUCTION. Now:
+   - AT_HWCAP has HWCAP_CPUID, /proc/cpuinfo says "cpuid", /proc/self/auxv
+     agrees -- for every program except FEX itself (the x86 path's FEX on
+     Linux): told it may read the ID registers, it switched its x86
+     memory-order emulation to the RCpc/LSE2 forms, and in the first
+     Counter-Strike 2 runs the median frame went from 7.2 ms to 8.9-10.3 ms.
+     Alternating runs later put the installed 0.3.57 runtime at 91-138 fps
+     and this one at 95-125 on the same scene, so most of that was this
+     benchmark's spread, but FEX on Linux needs nothing from the bit and now
+     sees AT_HWCAP exactly as before. LXRT_NO_HWCAP_CPUID=1: the bit for
+     nobody; LXRT_HWCAP_CPUID=1: for everybody;
+   - an ID-register or CTR_EL0 read the rewriter never saw is emulated from
+     SIGILL with the same synthetic value (signal.c);
+   - /sys/devices/system/cpu/cpuN/regs/identification/midr_el1 exists
+     (sysfs.c), which Wine reads for CP 4000.
+   After: CP 4000 = 0x610f0301, CP 4020/4030/5801 present; the conformance
+   probe's 30 groups (BMI1/2, ADX, CRC32, SSE4, AVX2, x87-free FP, flags,
+   division ...) give the x86 path's checksums bit for bit.
+   With the real features FEX emits RCpc loads (LDAPR/LDAPUR) for x86 loads
+   under TSO; runtime/lowpage.c (the KUSER_SHARED_DATA page at 0x7ffe0000)
+   now carries those forms out too ("lowpage: cannot carry out 194000c6").
+
+4. The root cause of the Oodle crash: sigcontext.__reserved at 280
+   ---------------------------------------------------------------
+   Every Unreal Engine 4/5 game decompresses its data with Oodle. The game
+   died in oo2core_7_win64.dll ("page fault on read access to
+   FFFFFFFFFFFFFFFD" at oo2core+0x1C04), deterministically, with both FEX
+   builds Valve ships (Proton Experimental's and Proton 11.0's), and the
+   probe reproduced it in seconds: 4 KiB Kraken/Mermaid/Leviathan blocks
+   failed, larger ones passed. At the fault RAX, RDI and XMM2 held host
+   values (XMM2 = the stack pointer at the last signal). The chain: FEX's
+   TSO load of an unaligned value took an alignment fault, Wine ARM64
+   dispatched it to FEX (which emulates the access) and resumed through
+   NtContinue -- a SIGUSR2 to itself whose handler writes the full context
+   into the signal frame. Linux's struct sigcontext has
+   `__u8 __reserved[4096] __attribute__((__aligned__(16)))`, at offset 288;
+   the runtime's had it at 280. The runtime wrote and read its own frames
+   consistently, so native programs that ignore the FP/SIMD record never
+   noticed; Wine found no FPSIMD_MAGIC there and put garbage back into the
+   vector registers. Fixed in runtime/signal.c (pad + _Static_assert), and
+   the frame now carries Linux's esr_context record after the FP/SIMD one
+   for memory faults, so Wine can tell a store from a load (it reported a
+   store as "read access").
+   After: the Oodle probe passes all 16 cases; the game passes Oodle and
+   creates its Direct3D 12 device.
+
+5. membarrier answered "nothing supported"
+   ----------------------------------------
+   MEMBARRIER_CMD_QUERY returned 0, so Wine ARM64 logged "membarrier not
+   supported for NtFlushProcessWriteBuffers" and fell back to interrupting
+   every thread. Now QUERY returns GLOBAL | PRIVATE_EXPEDITED (+SYNC_CORE) and
+   their REGISTER commands, and the barrier is the one .NET uses on macOS:
+   thread_get_register_pointer_values on every thread of the task.
+
+6. Loading took forever: four costs in the runtime's memory calls
+   --------------------------------------------------------------
+   With 4 KiB guest pages (the client's setting, inherited by its games) a
+   game's 4 KiB mappings go through the sub-page table. While the game
+   loaded, its main thread lived in the runtime:
+   - the sub-page table was a list walked whole on every lookup and update
+     (record() restarted its merge loop after each merge); now a sorted
+     interval list with binary search (runtime/subpage.c);
+   - 1.37 million failing mmaps a minute: Wine looked for room below 4 GiB
+     before every allocation -- some 80 probes each -- and the runtime said
+     EEXIST ("busy, try the next address") for __PAGEZERO, which exists and
+     can never be mapped. ENOMEM now, below 4 GiB, which ends each such range
+     at its first probe (and the sub-page check is skipped there);
+   - Xalia, Proton's gamepad navigation of launchers (a Steam Deck feature),
+     mapped and unmapped a section in a loop and walked every window tree:
+     254000 map_view requests to wineserver while the game loaded, the game
+     waiting behind them. Both SteamARM tools now default to
+     PROTON_USE_XALIA=0 (the game's launch options can set 1);
+   - the x18 virtualisation itself: the kernel keeps x18 for a process lxrun
+     was exec'd as, and Wine expects exactly that (its Linux side may use x18
+     as a temporary, the TEB is restored on every return to Windows code). The
+     native tool now runs Wine with LXRT_NO_X18=1: no trampolines in Wine's PE
+     code or in FEX's JIT output. The game reached the same point in 5 s
+     instead of 3 min. STEAMARM_X18_VIRT=1 restores the old behaviour.
+   Also: a partial MAP_FIXED_NOREPLACE reservation now records its host
+   page's rest as a placeholder, a sub-page host page left with no record
+   goes to PROT_NONE, and a fixed mapping of whole host pages drops the
+   sub-page records under it -- so Wine's shared sections (reserved, then a
+   file view mapped over the reservation) are shared mappings more often
+   instead of private copies. Not finished: a view re-mapped at an address
+   whose host page still holds an older mapping's records is still a copy
+   (Wine re-maps its session shared memory there; each copy is a fresh
+   snapshot, so it works, slowly).
+
+7. Graphics
+   --------
+   - MoltenVK (the default of the ARM64 root's shim): vkd3d-proton created the
+     swapchain, then the first queue submission returned VK_ERROR_DEVICE_LOST.
+   - KosmicKrisp (the user's setting, STEAMARM_VK_ICD=kosmickrisp, which a
+     launch from the client inherits): the D3D12 and D3D11 probes run on the
+     native path; FINAL FANTASY VII REMAKE creates its device at feature level
+     12_0. KosmicKrisp has no tier-2 tiled resources, so vkd3d-proton reports
+     11_1 and the game refused ("Feature level 0xc000 is not supported"): both
+     tools now default to VKD3D_FEATURE_LEVEL=12_0 (the tiers stay as they
+     are, so a game that checks them does not use tiled resources).
+   - On MoltenVK the game's render thread then hung: "GameThread timed out
+     waiting for RenderThread after 30.01 secs" (UE4's crash report in the
+     prefix).
+   - On KosmicKrisp, vkCreateQueryPool failed for vkd3d-proton's timestamp
+     query heap ("Failed to create Vulkan query pool, vr -2", an error box):
+     a Metal 4 timestamp counter heap holds at most 4096 entries on the M4
+     ("Requested Heap size is too large (requested 8192 max is 4096)").
+     patches/kosmickrisp-26: a pool keeps as many heaps as it needs. The
+     game then made its swapchain ("Got 4 swapchain images") and its RHI
+     and render threads.
+   - Then the same 30 s render-thread timeout on KosmicKrisp. UE4's
+     minidump (Saved/Crashes, read with a small parser of the thread list,
+     the module list and the stacks) showed two task-graph threads inside
+     MessageBoxW(NULL, L"", L"FINAL FANTASY VII REMAKE", MB_OK), called
+     right after a failed ID3D12Device call, while the render thread waited
+     for their task and the game thread for the render thread (+msgbox:
+     MSGBOX_OnInit L""). The failed calls were the two pipelines with a
+     geometry shader ("Failed to create Vulkan graphics pipeline, vr
+     -1000012000"; Metal: "RasterizationEnabled is false but the vertex
+     shader's return type is not void"): KosmicKrisp has no geometry
+     shaders (upstream lists them for a later release), and Unreal Engine
+     4 uses one for one-pass point-light shadows. See 9.
+
+8. Redistributables (the user's question)
+   ---------------------------------------
+   Steam's install-script evaluator (legacycompat/iscriptevaluator.exe) is a
+   64-bit program and runs on the native path; Proton replaces the .NET 3.5
+   installer with its built-in support (its script), and Wine Mono (ARM64 in
+   Proton ARM64) covers .NET Framework programs -- working since item 2. What
+   cannot run on the native path on macOS is any 32-bit Windows program:
+   Wine's WoW64 needs the low 4 GiB, which macOS reserves (__PAGEZERO). That
+   includes 32-bit redistributable installers (vc_redist.x86, DirectX's
+   DXSETUP) and 32-bit games; those stay on "SteamARM: Proton x86 via FEX",
+   where FEX gives 32-bit code an address base of its own.
+
+9. Geometry shaders in KosmicKrisp
+   --------------------------------
+   In progress: emulation with Mesa's poly library as Honeykrisp does it --
+   the vertex shader and the geometry shader run as compute kernels before
+   the pass, and the geometry shader's "rasterization" vertex shader draws
+   their output (indexed when poly gives an index buffer). Check:
+   tests/kk/vk_geometry.c, which draws the same scenes with KosmicKrisp and
+   llvmpipe and compares the pictures.

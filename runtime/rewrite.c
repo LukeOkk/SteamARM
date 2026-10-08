@@ -379,6 +379,43 @@ static bool x18_jit_on(void)
 }
 static _Thread_local bool g_x18_synth;     // the window in hand is synthetic
 
+// The words of a PE image the guest mapped that are not its aarch64 code
+// (pefile.c): the x64 side of an ARM64X DLL, a pure x64 image, the IL and
+// metadata of a .NET assembly, data in an executable section. None of them
+// is ever decoded as aarch64, for any kind of site. Native Wine ARM64 marks
+// such sections executable as Windows does, and the runtime rewrote what
+// looked like system-register reads inside wine-mono's mscorlib.dll -- its
+// metadata, so Mono stopped at "Runtime critical type System.Int16 not
+// found" and no .NET program (nor Proton's own prefix setup) could run
+// (MEASURED, FINAL FANTASY VII REMAKE's prefix, 2026-10-07). Set for the
+// chunk in hand by pe_filter_begin, cleared by pe_filter_end.
+struct pe_filter { int nimg, nwin; struct lxrt_range img[8], win[32]; };
+static _Thread_local struct pe_filter g_pef;
+static _Thread_local bool g_pef_on;
+
+static void pe_filter_begin(uint64_t start, uint64_t end)
+{
+    g_pef.nimg = lxrt_pe_images(start, end, g_pef.img, 8);
+    g_pef.nwin = g_pef.nimg ? lxrt_pe_code_windows(start, end, g_pef.win, 32) : 0;
+    g_pef_on = g_pef.nimg > 0;
+}
+static void pe_filter_end(void) { g_pef_on = false; }
+
+static inline bool pe_foreign(uint64_t a)
+{
+    if (!g_pef_on)
+        return false;
+    bool in_img = false;
+    for (int i = 0; i < g_pef.nimg; i++)
+        if (a >= g_pef.img[i].start && a + 4 <= g_pef.img[i].end) { in_img = true; break; }
+    if (!in_img)
+        return false;
+    for (int i = 0; i < g_pef.nwin; i++)
+        if (a >= g_pef.win[i].start && a + 4 <= g_pef.win[i].end)
+            return false;
+    return true;
+}
+
 static bool x18_site(uint64_t addr, uint32_t insn, const struct lxrt_range *code, int ncode)
 {
     static int off = -1;                       // LXRT_NO_X18=1: diagnostic, no x18 pass
@@ -405,6 +442,8 @@ static size_t count_sites(uint64_t start, uint64_t end,
     rep->scanned_words += words;
     for (size_t i = 0; i < words; i++) {
         unsigned rt = 0;
+        if (pe_foreign((uint64_t)&w[i]))
+            continue;
         if (x18_site((uint64_t)&w[i], w[i], code, ncode)) {
             // Takes precedence over the TLS kinds: `mrs x18, TPIDR_EL0` is
             // planned as an x18 site that reads the TLS slot.
@@ -500,13 +539,25 @@ static void accumulate(const struct lxrt_rewrite_report *r)
 // no other thread can store into the page between the count and the seal.
 // Every site kind starts with 0xD4 (svc) or 0xD5 (mrs/msr): the top byte
 // filters almost every word before classify() looks at it.
+static size_t rewrite_count_inner(uint64_t start, uint64_t end);
+
 size_t lxrt_rewrite_count(uint64_t start, uint64_t end)
+{
+    pe_filter_begin(start, end);
+    size_t n = rewrite_count_inner(start, end);
+    pe_filter_end();
+    return n;
+}
+
+static size_t rewrite_count_inner(uint64_t start, uint64_t end)
 {
     const uint32_t *w = (const uint32_t *)(uintptr_t)(start & ~3ull);
     size_t words = (size_t)((end & ~3ull) - (start & ~3ull)) / 4, n = 0;
     for (size_t i = 0; i < words; i++) {
         uint32_t top = w[i] >> 24;
         if (top != 0xD4 && top != 0xD5)
+            continue;
+        if (pe_foreign((uint64_t)(uintptr_t)&w[i]))
             continue;
         unsigned rt = 0;
         enum site_kind k = classify(w[i], &rt);
@@ -530,7 +581,7 @@ size_t lxrt_rewrite_count(uint64_t start, uint64_t end)
     for (int k = 0; k < npe; k++) {
         uint64_t lo = LXRT_ALIGN_UP(pe[k].start, 4), hi = pe[k].end & ~3ull;
         for (uint64_t a = lo; a + 4 <= hi; a += 4)
-            if (x18_site(a, *(const uint32_t *)(uintptr_t)a, pe, npe))
+            if (!pe_foreign(a) && x18_site(a, *(const uint32_t *)(uintptr_t)a, pe, npe))
                 n++;
     }
     g_x18_synth = false;
@@ -543,9 +594,23 @@ int lxrt_rewrite_range(uint64_t start, uint64_t end,
     return lxrt_rewrite_range_code(start, end, NULL, 0, rep, err);
 }
 
+static int rewrite_chunk_code_inner(uint64_t start, uint64_t end,
+                                    const struct lxrt_range *code, int ncode,
+                                    struct lxrt_rewrite_report *rep, char **err);
+
 static int rewrite_chunk_code(uint64_t start, uint64_t end,
                               const struct lxrt_range *code, int ncode,
                               struct lxrt_rewrite_report *rep, char **err)
+{
+    pe_filter_begin(start, end);
+    int r = rewrite_chunk_code_inner(start, end, code, ncode, rep, err);
+    pe_filter_end();
+    return r;
+}
+
+static int rewrite_chunk_code_inner(uint64_t start, uint64_t end,
+                                    const struct lxrt_range *code, int ncode,
+                                    struct lxrt_rewrite_report *rep, char **err)
 {
     memset(rep, 0, sizeof(*rep));
     if (end <= start)
@@ -592,6 +657,8 @@ static int rewrite_chunk_code(uint64_t start, uint64_t end,
     for (size_t i = 0; i < words; i++) {
         unsigned rt = 0;
         uint64_t site = (uint64_t)&w[i];
+        if (pe_foreign(site))
+            continue;
         if (x18_site(site, w[i], code, ncode)) {
             uint32_t original = w[i];
             struct x18_plan plan;

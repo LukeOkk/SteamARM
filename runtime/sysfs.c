@@ -67,13 +67,26 @@ void lxrt_sysfs_init(void)
         ssize_t r = read(fd, have, sizeof have - 1);
         have[r > 0 ? r : 0] = '\0';
         close(fd);
-        if (strcmp(have, want) == 0)
+        snprintf(path, sizeof path, "%s/cpu0/regs/identification/midr_el1", dir);
+        if (strcmp(have, want) == 0 && access(path, F_OK) == 0)
             return;                 // already right: the usual case
     }
     mkdirs(dir);
+    // cpu<N>/regs/identification/midr_el1, as Linux's arm64 kernel exports
+    // it: Wine ARM64 reads it for HARDWARE\DESCRIPTION\System\
+    // CentralProcessor\<N> "CP 4000", which FEX's ARM64EC JIT reads back
+    // (the synthetic MIDR of sysreg.c, the one `mrs Xt, MIDR_EL1` returns).
+    char midr[32];
+    snprintf(midr, sizeof midr, "0x%016llx\n", (unsigned long long)lxrt_synthetic_sysreg(0xD5380000u));
     for (int i = 0; i < n; i++) {
         snprintf(path, sizeof path, "%s/cpu%d", dir, i);
         mkdir(path, 0755);
+        snprintf(path, sizeof path, "%s/cpu%d/regs", dir, i);
+        mkdir(path, 0755);
+        snprintf(path, sizeof path, "%s/cpu%d/regs/identification", dir, i);
+        mkdir(path, 0755);
+        snprintf(path, sizeof path, "%s/cpu%d/regs/identification/midr_el1", dir, i);
+        put(path, midr);
     }
     // Directories of CPUs a previous (larger) machine had: gone.
     for (int i = n; i < 1024; i++) {

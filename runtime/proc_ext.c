@@ -653,11 +653,11 @@ static size_t gen_cpuinfo(char *b, size_t cap)
         // the HWCAP bits stack.c puts in AT_HWCAP. glibc reads one and Steam's
         // hardware survey reads the other, and a capability named here but
         // absent from AT_HWCAP is how an ifunc gets selected for an
-        // instruction the runtime never agreed to support. In particular
-        // `cpuid` is absent on purpose -- see the comment in stack.c: claiming
-        // it made glibc execute `mrs x0, midr_el1` and take SIGILL.
-        sbf(&s, "Features\t: fp asimd aes pmull sha1 sha2 crc32 atomics"
-                " asimdrdm\n");
+        // instruction the runtime never agreed to support. `cpuid` follows
+        // HWCAP_CPUID (stack.c): ID register reads are answered, rewritten
+        // or emulated from SIGILL.
+        sbf(&s, "Features\t: fp asimd aes pmull sha1 sha2 crc32 atomics%s"
+                " asimdrdm\n", lxrt_hwcap_cpuid() ? " cpuid" : "");
         sbf(&s, "CPU implementer\t: 0x%02x\n", implementer);
         // Printed with no tab and always 8: the arm64 kernel hardcodes this
         // line, because MIDR's architecture field reads 0xf ("consult the ID
@@ -1069,7 +1069,7 @@ enum {
 // children -- the late, symptomless failure this codebase keeps meeting.
 #define LXRT_AUXV_HWCAP  ((1u << 0) | (1u << 1) | (1u << 3) | (1u << 4) | \
                           (1u << 5) | (1u << 6) | (1u << 7) | (1u << 8) | \
-                          (1u << 12))
+                          (1u << 12) | (lxrt_hwcap_cpuid() ? (1u << 11) : 0))
 
 // The real vector, if the integrator handed it over. 64 pairs is generous:
 // stack.c writes 17.

@@ -1,0 +1,121 @@
+KosmicKrisp: timestamp query pools larger than one Metal counter heap
+
+A Metal 4 timestamp counter heap holds at most 4096 entries on Apple GPUs
+("Requested Heap size is too large (requested 8192 max is 4096)", M4),
+and vkCreateQueryPool failed with VK_ERROR_OUT_OF_DEVICE_MEMORY for any
+larger pool: vkd3d-proton's timestamp query heap for FINAL FANTASY VII
+REMAKE stopped the game at start with an error dialog. A pool now keeps
+as many heaps as it needs; query q is entry q % 4096 of heap q / 4096,
+for the sample writes and the resolves alike.
+
+--- a/src/kosmickrisp/vulkan/kk_query_pool.c
++++ b/src/kosmickrisp/vulkan/kk_query_pool.c
+@@ -191,12 +191,21 @@
+    } else if (kk_pool_is_ts(pool)) {
+       /* Timestamps are sampled into a Metal counter heap (one entry per query)
+        * and resolved into `bo` after the GPU writes them. */
+-      pool->ts.heap =
+-         mtl_new_timestamp_counter_heap(dev->mtl_handle, pool->vk.query_count);
+-      if (pool->ts.heap == NULL) {
++      uint32_t nheaps = DIV_ROUND_UP(pool->vk.query_count, KK_TS_HEAP_MAX);
++      pool->ts.heaps = calloc(nheaps, sizeof(*pool->ts.heaps));
++      if (pool->ts.heaps == NULL) {
+          kk_DestroyQueryPool(device, kk_query_pool_to_handle(pool), pAllocator);
+-         return vk_error(dev, VK_ERROR_OUT_OF_DEVICE_MEMORY);
++         return vk_error(dev, VK_ERROR_OUT_OF_HOST_MEMORY);
+       }
++      pool->ts.heap_count = nheaps;
++      for (uint32_t h = 0; h < nheaps; h++) {
++         uint32_t n = MIN2(KK_TS_HEAP_MAX, pool->vk.query_count - h * KK_TS_HEAP_MAX);
++         pool->ts.heaps[h] = mtl_new_timestamp_counter_heap(dev->mtl_handle, n);
++         if (pool->ts.heaps[h] == NULL) {
++            kk_DestroyQueryPool(device, kk_query_pool_to_handle(pool), pAllocator);
++            return vk_error(dev, VK_ERROR_OUT_OF_DEVICE_MEMORY);
++         }
++      }
+       pool->ts.stage_map = UTIL_DYNARRAY_INIT;
+ 
+       /* set up default mapping for unique queries */
+@@ -228,8 +237,10 @@
+       if (pool->bo)
+          kk_oq_release_slots(dev, pool, 0, pool->oq.queries);
+    } else if (kk_pool_is_ts(pool)) {
+-      if (pool->ts.heap)
+-         mtl_release(pool->ts.heap);
++      for (uint32_t h = 0; pool->ts.heaps && h < pool->ts.heap_count; h++)
++         if (pool->ts.heaps[h])
++            mtl_release(pool->ts.heaps[h]);
++      free(pool->ts.heaps);
+       util_dynarray_fini(&pool->ts.stage_map);
+    }
+ 
+@@ -358,7 +369,7 @@
+    VK_FROM_HANDLE(kk_cmd_buffer, cmd, commandBuffer);
+    VK_FROM_HANDLE(kk_query_pool, pool, queryPool);
+    struct kk_device *dev = kk_cmd_buffer_device(cmd);
+-   assert(kk_pool_is_ts(pool) && pool->ts.heap);
++   assert(kk_pool_is_ts(pool) && pool->ts.heaps);
+ 
+    /* A timestamp after a render pass is not one inside it. */
+    if (cmd->state.gfx.pending_end)
+@@ -371,9 +382,11 @@
+    /* The sampled value lives in the counter heap; queue a resolve into the pool
+     * BO (overwriting the unavailable sentinel) so both the host and GPU result
+     * paths can read it. Flushed on the GPU timeline at cs_end. */
++   mtl_counter_heap *ts_heap = pool->ts.heaps[query / KK_TS_HEAP_MAX];
++   uint32_t ts_index = query % KK_TS_HEAP_MAX;
+    struct kk_ts_resolve resolve = {
+-      .heap = pool->ts.heap,
+-      .index = query,
++      .heap = ts_heap,
++      .index = ts_index,
+       .dst_addr = kk_query_report_addr(dev, pool, query),
+    };
+ 
+@@ -401,8 +414,8 @@
+                                         .index = query};
+       util_dynarray_append(&pool->ts.stage_map, entry);
+ 
+-      mtl_render_write_timestamp(cmd->gfx.encoder, mtl_stage, pool->ts.heap,
+-                                 query);
++      mtl_render_write_timestamp(cmd->gfx.encoder, mtl_stage, ts_heap,
++                                 ts_index);
+       util_dynarray_append(&cmd->gfx.ts_resolves, resolve);
+    } else {
+       bool top = true;
+@@ -423,7 +436,7 @@
+          addr += sizeof(uint32_t);
+       }
+ 
+-      mtl_compute_write_timestamp(es->encoder, pool->ts.heap, query);
++      mtl_compute_write_timestamp(es->encoder, ts_heap, ts_index);
+       util_dynarray_append(&es->ts_resolves, resolve);
+    }
+ }
+--- a/src/kosmickrisp/vulkan/kk_query_pool.h
++++ b/src/kosmickrisp/vulkan/kk_query_pool.h
+@@ -19,11 +19,20 @@
+    uint16_t index;
+ };
+ 
++/* SteamARM: a Metal timestamp counter heap holds at most 4096 entries on
++ * Apple GPUs ("Requested Heap size is too large (requested 8192 max is
++ * 4096)", M4), and a pool of more queries failed with
++ * VK_ERROR_OUT_OF_DEVICE_MEMORY: vkd3d-proton's query heaps for FINAL FANTASY
++ * VII REMAKE stopped the game at start. A pool now has as many heaps as it
++ * needs, query q in heap q / KK_TS_HEAP_MAX at q % KK_TS_HEAP_MAX. */
++#define KK_TS_HEAP_MAX 4096u
++
+ struct kk_ts_state {
+-   /* Metal 4 counter heap backing VK_QUERY_TYPE_TIMESTAMP pools. Timestamps are
+-    * sampled into this heap and later resolved into `bo` (see kk_query_pool.c).
+-    * NULL for non-timestamp pools. */
+-   mtl_counter_heap *heap;
++   /* Metal 4 counter heaps backing VK_QUERY_TYPE_TIMESTAMP pools. Timestamps
++    * are sampled into these heaps and later resolved into `bo` (see
++    * kk_query_pool.c). NULL for non-timestamp pools. */
++   mtl_counter_heap **heaps;
++   uint32_t heap_count;
+    struct util_dynarray stage_map;
+ };
+ 

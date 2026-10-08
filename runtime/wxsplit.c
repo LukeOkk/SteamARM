@@ -88,22 +88,27 @@ size_t lxrt_rewrite_count(uint64_t start, uint64_t end);
 
 static int g_enabled = -1;      // -1: not decided yet (treated as off)
 
+static bool g_program_is_fex;
+
 void lxrt_wx_set_program(const char *path)
 {
+    const char *base = path ? strrchr(path, '/') : NULL;
+    base = base ? base + 1 : path ? path : "";
+    // The emulator itself: /usr/lib/lxrt-emu/FEX, FEX-gb, FEXInterpreter,
+    // FEXLoader. FEXServer and the config tools are ordinary native programs.
+    g_program_is_fex = !strncmp(base, "FEX", 3) && strncmp(base, "FEXServer", 9) &&
+                       strncmp(base, "FEXGetConfig", 12) && strncmp(base, "FEXConfig", 9) &&
+                       strncmp(base, "FEXRootFSFetcher", 16);
     const char *e = getenv("LXRT_WX_SPLIT");
     if (e && *e) {
         g_enabled = *e != '0';
         return;
     }
-    const char *base = path ? strrchr(path, '/') : NULL;
-    base = base ? base + 1 : path ? path : "";
-    // The emulator itself: /usr/lib/lxrt-emu/FEX, FEX-gb, FEXInterpreter,
-    // FEXLoader. FEXServer and the config tools are ordinary native programs.
-    bool fex = !strncmp(base, "FEX", 3) && strncmp(base, "FEXServer", 9) &&
-               strncmp(base, "FEXGetConfig", 12) && strncmp(base, "FEXConfig", 9) &&
-               strncmp(base, "FEXRootFSFetcher", 16);
-    g_enabled = !fex;
+    g_enabled = !g_program_is_fex;
 }
+
+// Whether the main program is the emulator (stack.c: its AT_HWCAP).
+bool lxrt_program_is_fex(void) { return g_program_is_fex; }
 
 bool lxrt_wx_enabled(void) { return g_enabled > 0; }
 

@@ -237,6 +237,10 @@ static void remember(uint64_t lo, uint64_t hi)
     pthread_mutex_unlock(&g_lock);
 }
 
+#define NEG_CACHE 256
+static uint64_t g_neg[NEG_CACHE];
+static unsigned g_neg_n;
+
 void lxrt_pe_forget(uint64_t addr, uint64_t len)
 {
     if (!len) return;
@@ -253,6 +257,10 @@ void lxrt_pe_forget(uint64_t addr, uint64_t len)
         else
             i++;
     }
+    // What was found empty there may hold an image next (a reused view).
+    for (unsigned i = 0; i < g_neg_n && i < NEG_CACHE; i++)
+        if (g_neg[i] >= (addr & ~0xFFFFull) && g_neg[i] < addr + len)
+            g_neg[i] = 1;                       // never a 64 KiB-aligned start
     pthread_mutex_unlock(&g_lock);
 }
 
@@ -288,10 +296,8 @@ bool lxrt_pe_in_image_not_code(uint64_t start, uint64_t end)
     return lxrt_pe_code_windows(start, end, &r, 1) == 0;
 }
 
-// Negative cache: 64 KiB-aligned starts that were looked at and hold no image.
-#define NEG_CACHE 256
-static uint64_t g_neg[NEG_CACHE];
-static unsigned g_neg_n;
+// Negative cache (g_neg, above): 64 KiB-aligned starts that were looked at
+// and hold no image.
 
 // Parse the image at `base` (headers readable there) and remember its
 // aarch64 code windows. True when it was a PE image with such code.
@@ -306,6 +312,27 @@ static bool parse_in_memory(uint64_t base)
     uint16_t machine = rd16(hdr + 4);
     unsigned nsect = rd16(hdr + 6), optsz = rd16(hdr + 20);
     const uint8_t *opt = hdr + 24;
+    // PE32 (a .NET assembly built for any CPU, a 32-bit image): an image
+    // with no aarch64 code, remembered only so that nothing in it is ever
+    // rewritten (rewrite.c pe_foreign: wine-mono's mscorlib.dll).
+    if (optsz >= 96 && rd16(opt) == 0x10B) {
+        uint32_t soi = rd32(opt + 56);
+        if (!soi || soi > (512u << 20) || nsect == 0 || nsect > 96) return false;
+        if (lxrt_trace_on())
+            fprintf(lxrt_trace_stream(), "[lxrt] PE image in memory at 0x%llx: PE32, machine 0x%x, size 0x%x, no aarch64 code\n",
+                    (unsigned long long)base, machine, soi);
+        pthread_mutex_lock(&g_lock);
+        bool known = false;
+        for (int i = 0; i < g_nimg; i++)
+            if (g_img[i].base == base) { known = true; break; }
+        if (!known && g_nimg < PE_IMAGES) {
+            g_img[g_nimg].base = base;
+            g_img[g_nimg].end = base + soi;
+            g_nimg++;
+        }
+        pthread_mutex_unlock(&g_lock);
+        return false;
+    }
     if (optsz < 112 + 16 * 8 || rd16(opt) != 0x20B) return false;
     uint64_t image_base = rd64(opt + 24);
     uint32_t size_of_image = rd32(opt + 56);
@@ -401,11 +428,16 @@ static void discover(uint64_t addr)
             break;
         }
         if (w[0] == 'M' && w[1] == 'Z') {
-            if (parse_in_memory(at)) {
-                struct lxrt_range r;
-                if (lxrt_pe_code_windows(addr, addr + 4, &r, 1) > 0)
-                    return;                     // found: the image holding addr
-            }
+            parse_in_memory(at);
+            // Found: the image holding addr, with aarch64 code or not (a
+            // PE32 or pure x64 image is remembered with none).
+            bool holds = false;
+            pthread_mutex_lock(&g_lock);
+            for (int i = 0; i < g_nimg; i++)
+                if (g_img[i].base <= addr && g_img[i].end > addr) { holds = true; break; }
+            pthread_mutex_unlock(&g_lock);
+            if (holds)
+                return;
         }
     }
     pthread_mutex_lock(&g_lock);
@@ -423,6 +455,36 @@ int lxrt_pe_code_windows(uint64_t start, uint64_t end, struct lxrt_range *out, i
         uint64_t hi = g_win[i].end < end ? g_win[i].end : end;
         if (lo < hi) { out[n].start = lo; out[n].end = hi; n++; }
     }
+    pthread_mutex_unlock(&g_lock);
+    return n;
+}
+
+// The images (their whole extent, aarch64 code or not) that [start, end)
+// intersects, found first if need be: the one holding start, and any whose
+// headers sit at a 64 KiB boundary inside the range. Returns how many.
+int lxrt_pe_images(uint64_t start, uint64_t end, struct lxrt_range *out, int max)
+{
+    struct lxrt_range r;
+    if (lxrt_pe_code_windows(start, end, &r, 1) == 0)
+        discover(start);
+    for (uint64_t at = (start + 0xFFFF) & ~0xFFFFull; at < end; at += 0x10000) {
+        bool known = false;
+        pthread_mutex_lock(&g_lock);
+        for (int i = 0; i < g_nimg; i++)
+            if (g_img[i].base == at) { known = true; break; }
+        pthread_mutex_unlock(&g_lock);
+        uint8_t w[2];
+        if (!known && mem_read(at, w, 2) && w[0] == 'M' && w[1] == 'Z')
+            parse_in_memory(at);
+    }
+    int n = 0;
+    pthread_mutex_lock(&g_lock);
+    for (int i = 0; i < g_nimg && n < max; i++)
+        if (g_img[i].base < end && g_img[i].end > start) {
+            out[n].start = g_img[i].base;
+            out[n].end = g_img[i].end;
+            n++;
+        }
     pthread_mutex_unlock(&g_lock);
     return n;
 }

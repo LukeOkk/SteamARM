@@ -516,6 +516,11 @@ int lxrt_pe_exec_sections(int fd, uint64_t file_off, uint64_t len, uint64_t addr
                           struct lxrt_range *code, int max);
 int lxrt_pe_code_windows(uint64_t start, uint64_t end, struct lxrt_range *out, int max);
 bool lxrt_pe_intersects(uint64_t start, uint64_t end);
+int lxrt_pe_images(uint64_t start, uint64_t end, struct lxrt_range *out, int max);
+long lxrt_membarrier(int cmd, unsigned flags);
+bool lxrt_hwcap_cpuid(void);
+bool lxrt_program_is_fex(void);
+void lxrt_subpage_note_reservation(uint64_t addr, uint64_t len, int prot);
 bool lxrt_pe_in_image_not_code(uint64_t start, uint64_t end);
 void lxrt_pe_forget(uint64_t addr, uint64_t len);
 void lxrt_fn_register(uint64_t lo, uint64_t hi, struct lxrt_range *r, int n);

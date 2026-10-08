@@ -216,6 +216,19 @@ macOS 13 (VERIFIED IN SOURCE of xnu, `benchmarks/stage19-steamframe-base-and-arm
   lives in x18) for a process that does not fork; the `0x7ffe0000`
   low-address one stays (stage 19 §2).
 
+## Native Wine ARM64 (2026-10-08)
+
+The native Proton tool (tools/steamarm-native-proton) runs Wine with the
+virtualisation off (LXRT_NO_X18=1). There x18 is the TEB, in Wine's PE code
+and in FEX's ARM64EC JIT output; the kernel keeps it for the process lxrun was
+exec'd as (the SDK 12.3 link, above), Wine's processes are exec'd, and Wine
+already assumes that the Linux side may clobber x18 and puts the TEB back on
+every return to Windows code. With the virtualisation on, every x18 use in
+Wine's PE code and in the JIT's output was a trampoline: FINAL FANTASY VII
+REMAKE reached its engine in 3 minutes, 5 s without (MEASURED,
+benchmarks/stage62). STEAMARM_X18_VIRT=1 brings the virtualisation back for
+that path.
+
 ## JIT output
 
 The rewriter works on images as they are loaded, and code generated at run

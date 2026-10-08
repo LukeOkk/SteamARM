@@ -1221,6 +1221,10 @@ static long do_mmap_inner(uint64_t addr, uint64_t len, long prot, long lflags,
         lxrt_shmirror_forget(addr, len);
         lxrt_wx_forget(addr, len);     // a new mapping is not the old RWX range
         lxrt_mremap_forget_shared(addr, len);
+        // Nor the PE image that was there: Wine releases a view by mapping
+        // over it (PROT_NONE, MAP_FIXED), and a JIT buffer placed there later
+        // must not be taken for that image's non-code (rewrite.c pe_foreign).
+        lxrt_pe_forget(addr, len);
     }
     // Something placed into the host pages of a 4 KiB-offset file mapping
     // makes them no longer that mapping's alone (offmap.c).
@@ -1301,10 +1305,11 @@ static long do_mmap_inner(uint64_t addr, uint64_t len, long prot, long lflags,
         mach_vm_address_t at = addr;
         kern_return_t kr = mach_vm_allocate(mach_task_self(), &at,
                                             (mach_vm_size_t)len, VM_FLAGS_FIXED);
-        if (kr == KERN_NO_SPACE) {
+        if (kr == KERN_NO_SPACE && addr + len > (1ull << 32)) {
             // A host page in the range is mapped. The guest allocates in
             // 4 KiB units and a 16 KiB host page can be only partly in use;
             // if every guest page asked for is free, this is not a conflict.
+            // (Below 4 GiB the "mapping" is __PAGEZERO: ENOMEM, below.)
             long r = lxrt_subpage_mmap_noreplace(addr, len, (int)prot,
                                                  (lflags & LINUX_MAP_ANONYMOUS) != 0,
                                                  (int)fd, off);
@@ -1372,6 +1377,16 @@ static long do_mmap_inner(uint64_t addr, uint64_t len, long prot, long lflags,
             // for FEX's width probe itself, which is one inaccessible page.
             bool top_gap = addr >= MACH_VM_MAX_ADDRESS && addr + len <= (1ull << 47) &&
                            !(prot == PROT_NONE && len <= LXRT_HOST_PAGE);
+            // Below 4 GiB is __PAGEZERO: a region that exists (KERN_NO_SPACE,
+            // not KERN_INVALID_ADDRESS) and can never be mapped. "Busy"
+            // (EEXIST) there sent native Wine stepping through every free
+            // range it believes it has below 4 GiB, some 80 probes for every
+            // allocation of a game: FINAL FANTASY VII REMAKE made 1.37
+            // million failing mmaps a minute while loading (MEASURED,
+            // 2026-10-08). ENOMEM ends each such range at its first probe.
+            // The virtual pages lowpage.c provides there were handled above.
+            if (addr + len <= (1ull << 32))
+                return LERR(ENOMEM);
             return LERR(kr == KERN_INVALID_ADDRESS && !below_image && !top_gap ? ENOMEM : EEXIST);
         }
         if (mprotect((void *)at, (size_t)len, (int)prot) != 0) {
@@ -1391,6 +1406,15 @@ static long do_mmap_inner(uint64_t addr, uint64_t len, long prot, long lflags,
                 lxrt_mremap_note_shared((uint64_t)(uintptr_t)fp, len, (int)fd, (uint64_t)off, (int)prot);
             return (long)(uintptr_t)fp;
         }
+        // A reservation shorter than its host page: the page is the guest's
+        // only up to addr+len. Recorded so, with the rest as a placeholder:
+        // left untracked and read-write, the rest looked live to the next
+        // mapping, and Wine -- which reserves a range this way and then maps
+        // a file view over it -- got a private copy of every shared section
+        // it mapped (its session shared memory: wineserver's updates never
+        // reached the game, MEASURED with FINAL FANTASY VII REMAKE).
+        if (len % LXRT_HOST_PAGE)
+            lxrt_subpage_note_reservation(addr, len, (int)prot);
         return (long)at;
     }
 
@@ -1436,6 +1460,10 @@ static long do_mmap_inner(uint64_t addr, uint64_t len, long prot, long lflags,
             if (ri.protection != VM_PROT_NONE) tail_free = false;   // live memory
             q = ra + rs;
         }
+        if (g_trace)
+            fprintf(lxrt_trace_stream(), "[lxrt] shared tail 0x%llx+0x%llx: tail 0x%llx-0x%llx free %d tracked %d\n",
+                    (unsigned long long)addr, (unsigned long long)len, (unsigned long long)tail,
+                    (unsigned long long)tend, (int)tail_free, (int)tracked);
         if (tail_free) {
             partial_data = false;
             // Read-only shared: if the host page is later shared with another
@@ -1446,9 +1474,22 @@ static long do_mmap_inner(uint64_t addr, uint64_t len, long prot, long lflags,
             lxrt_subpage_forget(addr, tend - addr);
         }
     }
+    // A fixed mapping of whole host pages replaces everything in them, as on
+    // Linux: whatever the sub-page table recorded there is gone, and the
+    // mapping goes the ordinary way (a reservation recorded above must not
+    // turn a whole-page shared mapping over it into a private copy).
+    if ((lflags & LINUX_MAP_FIXED) && addr && addr % LXRT_HOST_PAGE == 0 &&
+        len % LXRT_HOST_PAGE == 0 && !lxrt_subpage_needed(addr, len, (lflags & LINUX_MAP_ANONYMOUS) ? 0 : off) &&
+        lxrt_subpage_tracked(addr, len))
+        lxrt_subpage_forget(addr, len);
     if ((lflags & LINUX_MAP_FIXED) && addr &&
         (lxrt_subpage_needed(addr, len, (lflags & LINUX_MAP_ANONYMOUS) ? 0 : off) ||
          partial_data || lxrt_subpage_tracked(addr, len))) {
+        if (g_trace && (flags & MAP_SHARED))
+            fprintf(lxrt_trace_stream(), "[lxrt] shared 0x%llx+0x%llx to sub-page: needed %d partial %d tracked %d fd %ld off 0x%llx\n",
+                    (unsigned long long)addr, (unsigned long long)len,
+                    (int)lxrt_subpage_needed(addr, len, (lflags & LINUX_MAP_ANONYMOUS) ? 0 : off),
+                    (int)partial_data, (int)lxrt_subpage_tracked(addr, len), fd, (unsigned long long)off);
         if (flags & MAP_SHARED) {
             // A sub-page placement is a private copy: writes stay in this
             // process. Say so -- it broke the Steam client's shared IPC object
@@ -2887,6 +2928,69 @@ static void abort_backtrace(const struct lxrt_regs *r)
         }
     }
     fprintf(stderr, "\n");
+}
+
+// membarrier(2). MEMBARRIER_CMD_QUERY answered 0 before -- "no command
+// supported" -- and every other command 0 as well, so Wine ARM64 logged
+// "membarrier not supported for NtFlushProcessWriteBuffers" and flushed
+// other threads' write buffers by interrupting each one with SIGUSR2 instead:
+// a signal in the middle of FEX's ARM64EC JIT code, whose context went
+// through NtGetContextThread and back. Oodle's Huffman decoder came out of
+// it with RAX, RDI and XMM2 replaced by host values, deterministically
+// (MEASURED: FINAL FANTASY VII REMAKE and a probe of the game's
+// oo2core_7_win64.dll, 2026-10-08). The barrier itself is the one .NET uses
+// on macOS: thread_get_register_pointer_values on every thread of the task
+// makes each one stop and come back through an exception return, which
+// drains its write buffer and is context-synchronising (the SYNC_CORE
+// variants too).
+#include <mach/thread_act.h>
+static _Atomic unsigned g_membarrier_registered;
+static void process_wide_barrier(void)
+{
+    __atomic_thread_fence(__ATOMIC_SEQ_CST);
+    thread_act_array_t th = NULL;
+    mach_msg_type_number_t n = 0;
+    if (task_threads(mach_task_self(), &th, &n) != KERN_SUCCESS)
+        return;
+    thread_act_t self = mach_thread_self();
+    for (mach_msg_type_number_t i = 0; i < n; i++) {
+        if (th[i] != self) {
+            uintptr_t sp = 0, regs[128];
+            size_t cnt = 128;
+            (void)thread_get_register_pointer_values(th[i], &sp, &cnt, regs);
+        }
+        mach_port_deallocate(mach_task_self(), th[i]);
+    }
+    mach_port_deallocate(mach_task_self(), self);
+    vm_deallocate(mach_task_self(), (vm_address_t)th, n * sizeof *th);
+    __atomic_thread_fence(__ATOMIC_SEQ_CST);
+}
+
+long lxrt_membarrier(int cmd, unsigned flags)
+{
+    enum { QUERY = 0, GLOBAL = 1, PRIV = 8, REG_PRIV = 16, PRIV_SYNC = 32, REG_PRIV_SYNC = 64 };
+    if (flags)
+        return LERR(EINVAL);
+    switch (cmd) {
+    case QUERY:
+        return GLOBAL | PRIV | REG_PRIV | PRIV_SYNC | REG_PRIV_SYNC;
+    case GLOBAL:
+        process_wide_barrier();        // every process: ours is what we can reach
+        return 0;
+    case REG_PRIV:
+    case REG_PRIV_SYNC:
+        atomic_fetch_or(&g_membarrier_registered, (unsigned)cmd);
+        return 0;
+    case PRIV:
+    case PRIV_SYNC:
+        // As Linux: a process must register for the expedited command first.
+        if (!(atomic_load(&g_membarrier_registered) & (unsigned)(cmd << 1)))
+            return LERR(EPERM);
+        process_wide_barrier();
+        return 0;
+    default:
+        return LERR(EINVAL);
+    }
 }
 
 void lxrt_dispatch(struct lxrt_regs *r)
@@ -4741,9 +4845,7 @@ restart:
         break;
     }
     case LNR_membarrier:
-        // The runtime shares one address space and Darwin's atomics already
-        // carry the needed ordering; a no-op is correct here, not a stub.
-        ret = 0;
+        ret = lxrt_membarrier((int)a0, (unsigned)a1);
         break;
     case LNR_tgkill:
         if (a2 == 6 && (int)a0 == lxrt_ids_pid())

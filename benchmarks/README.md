@@ -96,6 +96,7 @@ the Fedora VM that was deleted on 2026-09-27; they are history, and
 | 57 | `stage57-depth-cache-and-frame-pacing.txt` | 10-05 | Optional bounded depth/stencil cache: 39.4% less recording time in a paired microbenchmark, pixels/FEX/Proton probes passed; default off. CS2 and native Metal traces still show hitches and no established stable 100 FPS. Current display link exposes fixed refresh rates only. |
 | 58 | `stage58-adaptive-sync-and-drawable-wait.txt` | 10-05 | bounded notification wait tested on ARM64/FEX; actual display/native fullscreen eligibility and fixed-refresh fallback; <10 ms CS2 and physical VRR remain unverified |
 | 61 | `stage61-cs2-stutter.txt` | 10-07 | CS2 stutter sampled inside stalls: JIT rescans (shared window), readlink per path prefix, KosmicKrisp leaks and ~72 Metal command buffers a frame (2.3 MB each); fixed: 84 -> 133 fps, 1% low 8 -> 54; Game Mode identity of the X server |
+| 62 | `stage62-native-proton-windows-games.txt` | 10-08 | Native ARM64 Proton path with FINAL FANTASY VII REMAKE: sigcontext.__reserved at 288 (Oodle crash), HWCAP_CPUID + SIGILL ID-register emulation (FEX saw no CRC32), PE-image rewrite filter (Wine Mono), membarrier, sorted sub-page table, ENOMEM below 4 GiB, Xalia off, x18 kept by the kernel for Wine, VKD3D_FEATURE_LEVEL 12_0 |
 
 ## After stage 21 (no stage file)
 

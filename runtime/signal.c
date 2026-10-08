@@ -218,8 +218,19 @@ struct linux_sigcontext {
     uint64_t sp;              // 256
     uint64_t pc;              // 264
     uint64_t pstate;          // 272
-    uint8_t  reserved[4096];  // 280  extension records; all-zero = end marker
+    // Linux: `__u8 __reserved[4096] __attribute__((__aligned__(16)))` -- at
+    // 288, not right after pstate. Without this pad the records sat at 280
+    // and a handler that looks for its FP/SIMD state in them (Wine ARM64:
+    // NtGetContextThread, NtContinue, every exception; Java; Chromium's
+    // crash handler) read fpsr/fpcr as the record's magic and size, found no
+    // FP/SIMD record, and the vector registers it put back on return were
+    // garbage: FEX's ARM64EC JIT resumed from an alignment fixup with XMM2
+    // holding the old stack pointer and Oodle decompression failed (MEASURED,
+    // FINAL FANTASY VII REMAKE, 2026-10-08).
+    uint64_t pad;             // 280
+    uint8_t  reserved[4096] __attribute__((aligned(16)));   // 288  extension records; all-zero = end marker
 };
+_Static_assert(__builtin_offsetof(struct linux_sigcontext, reserved) == 288, "sigcontext.__reserved is at 288");
 
 // Linux's first extension record in sigcontext.__reserved: the FP/SIMD state.
 #define LINUX_FPSIMD_MAGIC 0x46508001u
@@ -575,6 +586,31 @@ bool lxrt_absorb_runtime_fault(int dsig, siginfo_t *dinfo, void *uap)
         if (to) {
             atomic_fetch_add(ts->__pc ? &g_x18br_restarts : &g_x18br_zero, 1);
             ts->__pc = to;
+            return true;
+        }
+    }
+    // An ID register read the rewriter never saw: Darwin traps every
+    // `mrs Xt, <ID_AA64*|MIDR_EL1>` and `mrs Xt, CTR_EL0` at EL0. Linux's
+    // kernel emulates them under HWCAP_CPUID, and so does this, with the
+    // values the rewriter would have put there (sysreg.c): Xt set, pc past
+    // the instruction. With it the runtime can advertise HWCAP_CPUID
+    // (stack.c), which Wine ARM64 needs before it reads the ID registers into
+    // HARDWARE\DESCRIPTION\System\CentralProcessor ("CP 4030" and the
+    // rest); without them FEX's ARM64EC JIT saw every register as zero, took
+    // the host for an ARMv8.0 core without CRC32 and raised #UD on the x86
+    // crc32 instruction (MEASURED, 2026-10-08).
+    if (dsig == SIGILL && uap) {
+        _STRUCT_ARM_THREAD_STATE64 *ts = &((ucontext_t *)uap)->uc_mcontext->__ss;
+        uint32_t w = ts->__pc ? *(const uint32_t *)(uintptr_t)ts->__pc : 0;
+        bool id = (w & 0xFFFFF000u) == 0xD5380000u;           // op0=3 op1=0 CRn=0
+        bool ctr = (w & 0xFFFFFFE0u) == 0xD53B0020u;          // CTR_EL0
+        if (id || ctr) {
+            uint64_t v = ctr ? (uint64_t)lxrt_synthetic_ctr_el0() : lxrt_synthetic_sysreg(w);
+            unsigned rt = w & 31;
+            if (rt == 29) ts->__fp = v;
+            else if (rt == 30) ts->__lr = v;
+            else if (rt != 31) ts->__x[rt] = v;
+            ts->__pc += 4;
             return true;
         }
     }
@@ -1283,6 +1319,18 @@ static void host_handler(int dsig, siginfo_t *dinfo, void *uap)
     fp->fpsr = saved_fpsr;
     fp->fpcr = saved_fpcr;
     memcpy(fp->vregs, saved_v, sizeof fp->vregs);
+    // Then esr_context, as Linux adds for a memory fault: the syndrome that
+    // says whether the access was a write (WnR). Wine reads it to tell a
+    // store from a load -- guard pages, write watches, FEX's detection of
+    // writes into code it translated -- and called every fault a read
+    // without it ("page fault on read access" for a store).
+    if ((lsig == 11 || lsig == 7) && dinfo) {
+        struct { uint32_t magic, size; uint64_t esr; } *er = (void *)(mc->reserved + sizeof *fp);
+        er->magic = 0x45535201u;                    // ESR_MAGIC
+        er->size = 16;
+        er->esr = duc->uc_mcontext->__es.__esr;
+        memset(mc->reserved + sizeof *fp + 16, 0, 8);   // the end-of-records marker
+    }
 
     // The guest handler runs translated code: it needs execute mode. Remember
     // whether the interrupted code had the write window open so it can be

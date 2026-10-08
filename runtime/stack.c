@@ -52,12 +52,32 @@ enum {
 #define HWCAP_SHA2   (1u << 6)
 #define HWCAP_CRC32  (1u << 7)
 #define HWCAP_ATOMICS (1u << 8)
-// HWCAP_CPUID (1u << 11) is deliberately ABSENT. On Linux it means "the kernel
-// emulates mrs reads of the ID_AA64* / MIDR_EL1 registers". Darwin does not,
-// and advertising it made glibc's start-up execute `mrs x0, midr_el1`
-// (0xd5380000) and take SIGILL before its first syscall. Claiming a capability
-// the runtime does not provide fails later and less clearly than not claiming
-// it.
+// HWCAP_CPUID: "the kernel emulates mrs reads of the ID_AA64* / MIDR_EL1
+// registers". Darwin traps them; the runtime answers them -- rewritten into
+// constants where it scans code (sysreg.c), emulated from SIGILL anywhere
+// else (signal.c lxrt_absorb_runtime_fault). It was left out while neither
+// existed (glibc's start-up took SIGILL on `mrs x0, midr_el1`), and Wine
+// ARM64 reads the registers only when it is set: without them FEX's ARM64EC
+// JIT took the host for an ARMv8.0 core without CRC32 (signal.c).
+// Not for FEX itself (the x86 path's FEX on Linux): told it may read the ID
+// registers it switches its x86 memory-order emulation to the RCpc/LSE2
+// forms. Counter-Strike 2's first runs with the bit looked slower (median
+// frame 8.9-10.3 ms against 7.2), alternating runs later were mostly this
+// benchmark's spread (stage 62, 3); FEX needs nothing from the bit, so it
+// sees AT_HWCAP exactly as before. Wine ARM64 and every other native
+// program get it. LXRT_NO_HWCAP_CPUID=1 leaves it out everywhere,
+// LXRT_HWCAP_CPUID=1 puts it in everywhere.
+#define HWCAP_CPUID  (1u << 11)
+bool lxrt_program_is_fex(void);      // wxsplit.c
+bool lxrt_hwcap_cpuid(void)
+{
+    const char *e = getenv("LXRT_HWCAP_CPUID");
+    if (e && *e)
+        return *e != '0';
+    if (getenv("LXRT_NO_HWCAP_CPUID"))
+        return false;
+    return !lxrt_program_is_fex();
+}
 #define HWCAP_ASIMDRDM (1u << 12)
 
 #define LXRT_STACK_SIZE (8ull << 20)
@@ -148,7 +168,7 @@ void *lxrt_build_stack(const struct lxrt_image *img, int argc, char **argv,
         { AT_EGID,   (uint64_t)getegid() },
         { AT_HWCAP,  HWCAP_FP | HWCAP_ASIMD | HWCAP_AES | HWCAP_PMULL |
                      HWCAP_SHA1 | HWCAP_SHA2 | HWCAP_CRC32 | HWCAP_ATOMICS |
-                     HWCAP_ASIMDRDM },
+                     HWCAP_ASIMDRDM | (lxrt_hwcap_cpuid() ? HWCAP_CPUID : 0) },
         { AT_HWCAP2, 0 },
         { AT_CLKTCK, 100 },
         { AT_SECURE, 0 },

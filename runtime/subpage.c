@@ -114,6 +114,66 @@ static bool subs_reserve(int extra)
     return true;
 }
 
+// The table is kept sorted by start, its ranges disjoint: a game under
+// native Wine maps and unmaps 4 KiB guest ranges by the thousand, and every
+// lookup and update was a walk of the whole table (record also restarted its
+// merge loop after each merge). FINAL FANTASY VII REMAKE's main thread spent
+// its time in record() and the walks of range_free_locked() while loading
+// (MEASURED with sample, 2026-10-08). Now a binary search finds the first
+// range that can overlap; the ends are sorted too, the ranges being disjoint.
+
+// First range whose end is above addr. Caller holds the lock.
+static int sub_lower(uint64_t addr)
+{
+    int lo = 0, hi = g_nsubs;
+    while (lo < hi) {
+        int mid = (lo + hi) / 2;
+        if (g_subs[mid].end <= addr) lo = mid + 1;
+        else hi = mid;
+    }
+    return lo;
+}
+#define FOR_OVERLAP(i, lo, hi) \
+    for (int i = sub_lower(lo); i < g_nsubs && g_subs[i].start < (hi); i++)
+
+static bool sub_insert_at(int at, uint64_t start, uint64_t end, int prot)
+{
+    if (!subs_reserve(1))
+        return false;
+    memmove(&g_subs[at + 1], &g_subs[at], (size_t)(g_nsubs - at) * sizeof *g_subs);
+    g_subs[at].start = start;
+    g_subs[at].end = end;
+    g_subs[at].prot = prot;
+    g_nsubs++;
+    return true;
+}
+
+// Take [start, end) out of the table: ranges inside go, ranges across an
+// edge are trimmed, one around it is split.
+static void sub_remove(uint64_t start, uint64_t end)
+{
+    int i = sub_lower(start);
+    if (i < g_nsubs && g_subs[i].start < start && g_subs[i].end > end) {
+        uint64_t tail_end = g_subs[i].end;
+        g_subs[i].end = start;
+        sub_insert_at(i + 1, end, tail_end, g_subs[i].prot);
+        return;
+    }
+    if (i < g_nsubs && g_subs[i].start < start && g_subs[i].end > start) {
+        g_subs[i].end = start;
+        i++;
+    }
+    int j = i;
+    while (j < g_nsubs && g_subs[j].end <= end)
+        j++;
+    if (j > i) {
+        memmove(&g_subs[i], &g_subs[j], (size_t)(g_nsubs - j) * sizeof *g_subs);
+        g_nsubs -= j - i;
+    }
+    if (i < g_nsubs && g_subs[i].start < end)
+        g_subs[i].start = end;
+}
+
 // Only the ADDRESS and the file OFFSET matter. A length that is not a multiple
 // of the host page is ordinary -- the kernel rounds it up -- and treating it as
 // a sub-page case routed every normal mapping through this bookkeeping and
@@ -131,82 +191,54 @@ bool lxrt_subpage_needed(uint64_t addr, uint64_t len, uint64_t off)
 // Drop the tracked guest ranges inside [addr, addr+len): the guest unmapped
 // them. The host pages stay mapped when a partial page still has neighbours;
 // see do_munmap in dispatch.c.
+static bool page_tracked(uint64_t hpage);
 void lxrt_subpage_forget(uint64_t addr, uint64_t len)
 {
     lxrt_shmirror_forget(addr, len);
     sigset_t old;
     lxrt_pageprot_lock(&old);
-    uint64_t end = addr + len;
-    for (int i = 0; i < g_nsubs; i++) {
-        if (g_subs[i].end <= addr || g_subs[i].start >= end)
-            continue;
-        if (g_subs[i].start < addr && g_subs[i].end > end) {
-            if (subs_reserve(1)) {
-                g_subs[g_nsubs].start = end;
-                g_subs[g_nsubs].end = g_subs[i].end;
-                g_subs[g_nsubs].prot = g_subs[i].prot;
-                g_nsubs++;
-            }
-            g_subs[i].end = addr;
-        } else if (g_subs[i].start < addr) {
-            g_subs[i].end = addr;
-        } else if (g_subs[i].end > end) {
-            g_subs[i].start = end;
-        } else {
-            g_subs[i] = g_subs[--g_nsubs];
-            i--;
-        }
+    // The partial host pages at the two ends: one this table tracked keeps
+    // every guest page in it recorded (adopt_untracked), so a page left with
+    // no record holds nothing the guest mapped -- only the backing this file
+    // put there. It goes to PROT_NONE: left read-write and untracked, it
+    // looked live to the next mapping into that host page, and a shared one
+    // there became a private copy every time (dispatch.c, Wine's session
+    // shared memory re-mapped at one address over and over).
+    uint64_t edges[2] = { LXRT_ALIGN_DOWN(addr, LXRT_HOST_PAGE),
+                          LXRT_ALIGN_DOWN(addr + len - 1, LXRT_HOST_PAGE) };
+    bool was[2] = { len && page_tracked(edges[0]), len && page_tracked(edges[1]) };
+    sub_remove(addr, addr + len);
+    for (int k = 0; k < 2; k++) {
+        if (k == 1 && edges[1] == edges[0])
+            break;
+        if (was[k] && !page_tracked(edges[k]))
+            mprotect((void *)(uintptr_t)edges[k], LXRT_HOST_PAGE, PROT_NONE);
     }
     lxrt_pageprot_unlock(&old);
 }
 
 static void record(uint64_t start, uint64_t end, int prot)
 {
-    // Trim anything the new mapping covers, then append. Overlapping guest
-    // mappings replace rather than merge, which is what mmap means.
-    for (int i = 0; i < g_nsubs; i++) {
-        if (g_subs[i].end <= start || g_subs[i].start >= end)
-            continue;
-        if (g_subs[i].start < start && g_subs[i].end > end) {
-            // Split: keep the head, append the tail.
-            if (subs_reserve(1)) {
-                g_subs[g_nsubs].start = end;
-                g_subs[g_nsubs].end = g_subs[i].end;
-                g_subs[g_nsubs].prot = g_subs[i].prot;
-                g_nsubs++;
-            }
-            g_subs[i].end = start;
-        } else if (g_subs[i].start < start) {
-            g_subs[i].end = start;
-        } else if (g_subs[i].end > end) {
-            g_subs[i].start = end;
-        } else {
-            g_subs[i] = g_subs[--g_nsubs];
-            i--;
+    // Overlapping guest mappings replace rather than merge, which is what
+    // mmap means. Then coalesce with neighbours of the same protection: FEX
+    // re-reserves freed memory one 4 KiB page at a time, and those runs would
+    // otherwise cost an entry each.
+    sub_remove(start, end);
+    int at = sub_lower(start);
+    if (at > 0 && g_subs[at - 1].end == start && g_subs[at - 1].prot == prot) {
+        g_subs[at - 1].end = end;
+        if (at < g_nsubs && g_subs[at].start == end && g_subs[at].prot == prot) {
+            g_subs[at - 1].end = g_subs[at].end;
+            memmove(&g_subs[at], &g_subs[at + 1], (size_t)(g_nsubs - at - 1) * sizeof *g_subs);
+            g_nsubs--;
         }
+        return;
     }
-    // Coalesce with neighbours of the same protection: FEX re-reserves freed
-    // memory one 4 KiB page at a time, and those runs would otherwise cost an
-    // entry each.
-    for (int i = 0; i < g_nsubs; i++) {
-        if (g_subs[i].prot != prot)
-            continue;
-        if (g_subs[i].end == start) {
-            start = g_subs[i].start;
-        } else if (g_subs[i].start == end) {
-            end = g_subs[i].end;
-        } else {
-            continue;
-        }
-        g_subs[i] = g_subs[--g_nsubs];
-        i = -1;                     // the grown range may now touch another
+    if (at < g_nsubs && g_subs[at].start == end && g_subs[at].prot == prot) {
+        g_subs[at].start = start;
+        return;
     }
-    if (subs_reserve(1)) {
-        g_subs[g_nsubs].start = start;
-        g_subs[g_nsubs].end = end;
-        g_subs[g_nsubs].prot = prot;
-        g_nsubs++;
-    }
+    sub_insert_at(at, start, end, prot);
 }
 
 // Which access the guest most recently asked for on a host page that cannot
@@ -235,9 +267,8 @@ static bool needs_wx_split(uint64_t hpage)
 static int union_prot(uint64_t hpage)
 {
     int p = 0;
-    for (int i = 0; i < g_nsubs; i++)
-        if (g_subs[i].start < hpage + LXRT_HOST_PAGE && g_subs[i].end > hpage)
-            p |= g_subs[i].prot;
+    FOR_OVERLAP(i, hpage, hpage + LXRT_HOST_PAGE)
+        p |= g_subs[i].prot;
     return p;
 }
 
@@ -599,9 +630,8 @@ static bool range_free_locked(uint64_t addr, uint64_t len)
             return false;               // a plain mapping: in use
         uint64_t lo = p > addr ? p : addr;
         uint64_t hi = p + LXRT_HOST_PAGE < addr + len ? p + LXRT_HOST_PAGE : addr + len;
-        for (int i = 0; i < g_nsubs; i++)
-            if (g_subs[i].end > lo && g_subs[i].start < hi)
-                return false;           // a guest page lives there
+        FOR_OVERLAP(i, lo, hi)
+            return false;               // a guest page lives there
     }
     return true;
 }
@@ -736,9 +766,8 @@ static long subpage_mmap_locked(uint64_t addr, uint64_t len, int prot, bool anon
 // Caller holds the lock.
 static bool page_tracked(uint64_t hpage)
 {
-    for (int i = 0; i < g_nsubs; i++)
-        if (g_subs[i].end > hpage && g_subs[i].start < hpage + LXRT_HOST_PAGE)
-            return true;
+    FOR_OVERLAP(i, hpage, hpage + LXRT_HOST_PAGE)
+        return true;
     return false;
 }
 
@@ -768,7 +797,7 @@ static void adopt_untracked(uint64_t hpage)
     bool wx = lxrt_wx_intersects_locked(hpage, LXRT_HOST_PAGE);
     for (uint64_t g = hpage; g < hpage + LXRT_HOST_PAGE; g += GUEST_PAGE) {
         bool covered = false;
-        for (int i = 0; i < g_nsubs && !covered; i++)
+        FOR_OVERLAP(i, g, g + GUEST_PAGE)
             if (g_subs[i].start <= g && g_subs[i].end >= g + GUEST_PAGE)
                 covered = true;
         // A page of a native guest's RWX range (wxsplit.c) is RWX to the
@@ -826,9 +855,8 @@ long lxrt_subpage_mprotect(uint64_t addr, uint64_t len, int prot)
 static int slot_prot(uint64_t g)
 {
     int p = 0;
-    for (int i = 0; i < g_nsubs; i++)
-        if (g_subs[i].start < g + GUEST_PAGE && g_subs[i].end > g)
-            p |= g_subs[i].prot;
+    FOR_OVERLAP(i, g, g + GUEST_PAGE)
+        p |= g_subs[i].prot;
     return p;
 }
 
@@ -1155,8 +1183,7 @@ bool lxrt_subpage_handle_fault(uint64_t pc, uint64_t fault_addr, void *uap)
                 "rescanned %d):", (int)getpid(), (unsigned long long)pc,
                 (unsigned long long)fault_addr, prefer == PROT_EXEC ? "exec" : "write", g_nsubs,
                 rescanned);
-        for (int i = 0; i < g_nsubs; i++)
-            if (g_subs[i].start < hpage + LXRT_HOST_PAGE && g_subs[i].end > hpage)
+        FOR_OVERLAP(i, hpage, hpage + LXRT_HOST_PAGE)
                 fprintf(lxrt_trace_stream(), " [0x%llx-0x%llx %d]", (unsigned long long)g_subs[i].start,
                         (unsigned long long)g_subs[i].end, g_subs[i].prot);
         fprintf(lxrt_trace_stream(), "\n");
@@ -1173,6 +1200,23 @@ bool lxrt_subpage_handle_fault(uint64_t pc, uint64_t fault_addr, void *uap)
     int rc = apply_prot(hpage, prefer);
     lxrt_pageprot_unlock(&old);
     return rc == 0;
+}
+
+// A reservation that took a whole host page for the guest's [addr, addr+len)
+// (dispatch.c, MAP_FIXED_NOREPLACE): the guest's range with its protection, the
+// rest of the host page a placeholder. Nothing was tracked there before (the
+// host page was free), so these are the page's only records.
+void lxrt_subpage_note_reservation(uint64_t addr, uint64_t len, int prot)
+{
+    uint64_t hs = LXRT_ALIGN_DOWN(addr, LXRT_HOST_PAGE), he = LXRT_ALIGN_UP(addr + len, LXRT_HOST_PAGE);
+    sigset_t old;
+    lxrt_pageprot_lock(&old);
+    if (hs < addr)
+        record(hs, addr, 0);
+    record(addr, addr + len, prot);
+    if (he > addr + len)
+        record(addr + len, he, 0);
+    lxrt_pageprot_unlock(&old);
 }
 
 // True if any sub-page mapping is being tracked in this range, meaning
@@ -1198,8 +1242,8 @@ bool lxrt_subpage_only_placeholders(uint64_t addr, uint64_t len)
     sigset_t old;
     lxrt_pageprot_lock(&old);
     bool ok = true;
-    for (int i = 0; i < g_nsubs && ok; i++)
-        if (g_subs[i].start < addr + len && g_subs[i].end > addr && g_subs[i].prot != 0)
+    FOR_OVERLAP(i, addr, addr + len)
+        if (g_subs[i].prot != 0)
             ok = false;
     lxrt_pageprot_unlock(&old);
     return ok;
@@ -1209,9 +1253,8 @@ bool lxrt_subpage_only_placeholders(uint64_t addr, uint64_t len)
 // rule).
 bool lxrt_subpage_tracked_locked(uint64_t addr, uint64_t len)
 {
-    for (int i = 0; i < g_nsubs; i++)
-        if (g_subs[i].start < addr + len && g_subs[i].end > addr)
-            return true;
+    FOR_OVERLAP(i, addr, addr + len)
+        return true;
     return false;
 }
 

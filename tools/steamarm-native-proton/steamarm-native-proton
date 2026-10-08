@@ -10,8 +10,8 @@
 # scripts/install-native-proton.sh into dist/ next to this script with two
 # changes macOS needs (the TEB block above 2 GiB, files/bin), run with the
 # runtime features the same stage brought: the KUSER_SHARED_DATA page at
-# 0x7ffe0000 as a virtual page (LXRT_LOWPAGES=1) and the x18 pass on PE
-# images and JIT output (LXRT_X18_JIT=1).
+# 0x7ffe0000 as a virtual page (LXRT_LOWPAGES=1); x18 stays the hardware
+# register (below).
 #
 #   steamarm-native-proton <verb> <game.exe> [args...]
 #
@@ -43,7 +43,39 @@ verb=${1:-}
 
 # The runtime features this path needs (off by default for everything else).
 export LXRT_LOWPAGES=1
-export LXRT_X18_JIT=1
+# x18 is the TEB in Wine's PE code and in FEX's ARM64EC JIT output. lxrun is
+# linked so that the kernel keeps x18 for a process it was exec'd as
+# (docs/X18_VIRTUALIZATION.md), and Wine expects exactly that: the Linux side
+# may use x18 as a temporary, Wine puts the TEB back on every return to
+# Windows code. So the runtime's x18 virtualisation stays off here -- no
+# trampoline in Wine's PE code or in the JIT's output (FINAL FANTASY VII
+# REMAKE reached its engine in 5 s instead of 3 min, MEASURED 2026-10-08).
+# STEAMARM_X18_VIRT=1: the virtualised x18 as before (LXRT_X18_JIT=1).
+if [ "${STEAMARM_X18_VIRT:-0}" = 1 ]; then
+    export LXRT_X18_JIT=1
+else
+    export LXRT_NO_X18=1
+fi
+# Xalia, Proton's gamepad navigation of launchers (a Steam Deck feature),
+# polls every window tree and maps and unmaps a section in a loop: under
+# the runtime it held wineserver busy (254000 map_view requests while FINAL
+# FANTASY VII REMAKE loaded) and the game waited behind it.
+# PROTON_USE_XALIA=1 in the game's launch options turns it back on.
+export PROTON_USE_XALIA="${PROTON_USE_XALIA:-0}"
+# Direct3D 12 at feature level 12_0: KosmicKrisp has no tiled resources of
+# tier 2, so vkd3d-proton reported 11_1 and games that ask for 12_0 refused
+# to start (FINAL FANTASY VII REMAKE: "Feature level 0xc000 is not
+# supported"). The tiers themselves are still reported as they are.
+export VKD3D_FEATURE_LEVEL="${VKD3D_FEATURE_LEVEL:-12_0}"
+# A fullscreen SDL window that starts without the focus minimizes itself
+# (benchmarks/stage51); the launcher's settings for the game only, as the
+# x86 tool applies them (tools/steamarm-fex-proton).
+export SDL_VIDEO_MINIMIZE_ON_FOCUS_LOSS="${SDL_VIDEO_MINIMIZE_ON_FOCUS_LOSS:-0}"
+[ -n "${STEAMARM_MFX_NATIVE:-}" ] && [ -z "${LXRT_VK_SCALER_NATIVE:-}" ] && export LXRT_VK_SCALER_NATIVE="$STEAMARM_MFX_NATIVE"
+[ -n "${STEAMARM_RENDER_SCALE:-}" ] && [ -z "${LXRT_VK_RENDER_SCALE:-}" ] && export LXRT_VK_RENDER_SCALE="$STEAMARM_RENDER_SCALE"
+[ -n "${STEAMARM_VK_FPS_LIMIT:-}" ] && [ -z "${LXRT_VK_FPS_LIMIT:-}" ] && export LXRT_VK_FPS_LIMIT="$STEAMARM_VK_FPS_LIMIT"
+[ -n "${STEAMARM_VK_ANISOTROPY:-}" ] && [ -z "${LXRT_VK_ANISOTROPY:-}" ] && export LXRT_VK_ANISOTROPY="$STEAMARM_VK_ANISOTROPY"
+[ "${STEAMARM_METAL_HUD:-}" = 1 ] && export MTL_HUD_ENABLED=1
 # Valve's script wants to know it is not inside its container.
 unset PRESSURE_VESSEL_RUNTIME PRESSURE_VESSEL_RUNTIME_BASE 2>/dev/null || true
 

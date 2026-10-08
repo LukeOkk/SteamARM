@@ -362,6 +362,28 @@ static bool emulate(ucontext_t *uc, uint64_t fa, uint32_t insn, const char **why
         __atomic_thread_fence(__ATOMIC_SEQ_CST);
         return true;
     }
+    // RCpc loads and stores (FEAT_LRCPC / FEAT_LRCPC2): LDAPR Rt, [Rn] and
+    // LDAPUR*/STLUR Rt, [Rn, #imm9]. FEX emits them for x86 loads and stores
+    // under TSO once the ID registers say the core has them (stack.c
+    // HWCAP_CPUID): an x64 game reading KUSER_SHARED_DATA did
+    // `ldapurb w6, [x6]` on this page, and it went to the guest as a fault.
+    if ((insn & 0x3FFFFC00) == 0x38BFC000) {                    // LDAPR{B,H,,}
+        unsigned bytes = 1u << size;
+        if (!do_access(uc, get_base(ss, rn), bytes, rt, true, false, 0)) { *why = "ldapr access"; return false; }
+        __atomic_thread_fence(__ATOMIC_SEQ_CST);
+        return true;
+    }
+    if ((insn & 0x3F200C00) == 0x19000000) {                    // STLUR / LDAPUR / LDAPURS
+        unsigned opc = (insn >> 22) & 3, bytes = 1u << size, sign = 0;
+        bool load = opc != 0;
+        if (opc == 2) { if (size == 3) { *why = "ldapurs size 3"; return false; } sign = 64; }
+        if (opc == 3) { if (size >= 2) { *why = "ldapurs size"; return false; } sign = 32; }
+        uint64_t addr = get_base(ss, rn) + (uint64_t)sext((insn >> 12) & 0x1FF, 9);
+        if (!load) __atomic_thread_fence(__ATOMIC_SEQ_CST);
+        if (!do_access(uc, addr, bytes, rt, load, false, sign)) { *why = "rcpc access"; return false; }
+        if (load) __atomic_thread_fence(__ATOMIC_SEQ_CST);
+        return true;
+    }
     *why = "instruction";
     return false;
 }
