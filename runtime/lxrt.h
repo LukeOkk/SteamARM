@@ -520,6 +520,7 @@ int lxrt_pe_images(uint64_t start, uint64_t end, struct lxrt_range *out, int max
 long lxrt_membarrier(int cmd, unsigned flags);
 bool lxrt_hwcap_cpuid(void);
 bool lxrt_program_is_fex(void);
+uint64_t lxrt_subpage_lost_guard(uint64_t addr);
 void lxrt_subpage_note_reservation(uint64_t addr, uint64_t len, int prot);
 bool lxrt_pe_in_image_not_code(uint64_t start, uint64_t end);
 void lxrt_pe_forget(uint64_t addr, uint64_t len);

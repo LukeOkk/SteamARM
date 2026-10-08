@@ -340,8 +340,9 @@ void lxrt_call_guest_handler(uint64_t handler, uint64_t sig, uint64_t info,
 //
 // So a SIGBUS whose address lies in a mapped region that COULD have permitted
 // the access (max_protection allows more than protection) is reported to the
-// guest as SIGSEGV/SEGV_ACCERR, which is what Linux would have reported. A
-// SIGBUS on unmapped or truly unbacked memory stays a SIGBUS.
+// guest as SIGSEGV/SEGV_ACCERR, which is what Linux would have reported, and
+// so is one in a PROT_NONE region. A SIGBUS on unmapped or truly unbacked
+// memory stays a SIGBUS.
 static bool protection_fault(uint64_t addr, int *out_lsig, int *out_code)
 {
     if (!addr)
@@ -356,7 +357,11 @@ static bool protection_fault(uint64_t addr, int *out_lsig, int *out_code)
         return false;
     if (addr < ra || addr >= ra + rs)
         return false;                       // the region found is past it
-    if (ri.max_protection == ri.protection)
+    // A PROT_NONE region is SIGSEGV on Linux whatever its maximum: the
+    // runtime's own reservations are mapped with nothing allowed at all
+    // (tests/elf/lost_guard.c: a stack growing down into its reservation's
+    // guard got SIGBUS, which the program does not handle).
+    if (ri.max_protection == ri.protection && ri.protection != VM_PROT_NONE)
         return false;                       // nothing was withheld
     *out_lsig = 11;                         // SIGSEGV
     *out_code = 2;                          // SEGV_ACCERR, same number on both
@@ -1189,6 +1194,8 @@ static void host_handler(int dsig, siginfo_t *dinfo, void *uap)
     memcpy(saved_v, ns->__v, sizeof saved_v);
     uint32_t saved_fpsr = ns->__fpsr, saved_fpcr = ns->__fpcr;
     uint64_t fault_addr = dinfo ? (uint64_t)(uintptr_t)dinfo->si_addr : 0;
+    if (lsig == 11 && fault_addr)
+        fault_addr = lxrt_subpage_lost_guard(fault_addr);
     int si_code = forced_code >= 0 ? forced_code
                 : dinfo ? si_code_to_linux(dsig, dinfo->si_code) : 0;
 
@@ -1805,6 +1812,17 @@ long lxrt_rt_sigaction(int lsig, const void *uact, void *uoldact, size_t sigsets
     if (dsig == SIGKILL || dsig == SIGSTOP)
         return 0;   // Linux refuses to let these be caught; so does Darwin
 
+    // Darwin raises SIGBUS for what Linux reports as SIGSEGV (protection
+    // faults: protection_fault), so a guest that handles SIGSEGV must have
+    // the host's SIGBUS come through host_handler too, which converts it --
+    // not main.c's fault_report, which kills (tests/elf/lost_guard.c: a
+    // stack growing into its PROT_NONE reservation, SIGSEGV handled, SIGBUS
+    // never touched).
+    if (lsig == 11 && g_actions[7].handler == 0) {
+        long r = apply_host_action(7, SIGBUS);
+        if (r)
+            return r;
+    }
     return apply_host_action(lsig, dsig);
 }
 

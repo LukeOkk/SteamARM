@@ -21,6 +21,8 @@
 #   2. files/bin -> bin-arm64: Wine execs its server as lib/wine/../../bin/
 #      wineserver, and Proton ARM64 ships bin-arm64 (its python script points
 #      at it; Wine's own loader does not).
+#   3. The Visual C++ runtime version the builtins report, 14.44
+#      (tools/steamarm-native-proton/vcrun_version.py).
 #
 # Writes only <root>/tmp/armhome/.local/share/Steam/compatibilitytools.d/
 # steamarm-native-proton. Idempotent. The client lists the tool after a
@@ -84,7 +86,7 @@ if [ "$have" != "$NTDLL_OLD" ] && [ "$have" != "$NTDLL_NEW" ]; then
 fi
 
 if [ "$DRY" = 1 ]; then
-    log "would clone $SRC to $DEST/dist, patch ntdll.so at $NTDLL_OFF, link files/bin -> bin-arm64, install the tool files"
+    log "would clone $SRC to $DEST/dist, patch ntdll.so at $NTDLL_OFF, link files/bin -> bin-arm64, raise the VC++ runtime version, install the tool files"
     exit 0
 fi
 
@@ -113,7 +115,10 @@ with open(path, "r+b") as f:
         sys.exit(1)
 PY
 ln -sfn bin-arm64 "$DEST/dist/files/bin"
-for f in steamarm-native-proton toolmanifest.vdf compatibilitytool.vdf; do
+# 3. The Visual C++ runtime the builtins stand for, raised to 14.44 (see the
+#    script): Unreal Engine's bootstrap launchers refused 14.42.34433.
+python3 tools/steamarm-native-proton/vcrun_version.py dist "$DEST/dist" | sed 's/^/[install-native-proton] /'
+for f in steamarm-native-proton vcrun_version.py toolmanifest.vdf compatibilitytool.vdf; do
     cp -f "tools/steamarm-native-proton/$f" "$DEST/$f"
 done
 chmod 755 "$DEST/steamarm-native-proton"

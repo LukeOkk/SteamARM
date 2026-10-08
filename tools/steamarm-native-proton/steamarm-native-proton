@@ -76,6 +76,13 @@ export SDL_VIDEO_MINIMIZE_ON_FOCUS_LOSS="${SDL_VIDEO_MINIMIZE_ON_FOCUS_LOSS:-0}"
 [ -n "${STEAMARM_VK_FPS_LIMIT:-}" ] && [ -z "${LXRT_VK_FPS_LIMIT:-}" ] && export LXRT_VK_FPS_LIMIT="$STEAMARM_VK_FPS_LIMIT"
 [ -n "${STEAMARM_VK_ANISOTROPY:-}" ] && [ -z "${LXRT_VK_ANISOTROPY:-}" ] && export LXRT_VK_ANISOTROPY="$STEAMARM_VK_ANISOTROPY"
 [ "${STEAMARM_METAL_HUD:-}" = 1 ] && export MTL_HUD_ENABLED=1
+# The Visual C++ runtime version an existing prefix's registry reports, as
+# the builtins now report it (vcrun_version.py; Proton takes the registry
+# from its default prefix only when it creates a prefix).
+if [ -n "${STEAM_COMPAT_DATA_PATH:-}" ] && [ -f "$STEAM_COMPAT_DATA_PATH/pfx/system.reg" ] &&
+   [ -f "$here/vcrun_version.py" ]; then
+    python3 "$here/vcrun_version.py" prefix "$STEAM_COMPAT_DATA_PATH/pfx" >&2 || true
+fi
 # Valve's script wants to know it is not inside its container.
 unset PRESSURE_VESSEL_RUNTIME PRESSURE_VESSEL_RUNTIME_BASE 2>/dev/null || true
 

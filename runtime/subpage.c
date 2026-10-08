@@ -873,6 +873,33 @@ int lxrt_subpage_prot_at(uint64_t addr)
     return p;
 }
 
+// A guard page lost to its host page (adopt_untracked: union(rw, none) is
+// rw) still has one observable job: a stack that grows down into it must
+// fault there. FEX's ARM64EC JIT keeps its call-return stack in a
+// VirtualAlloc'd 4 MiB with a 4 KiB guard page on either side and resets the
+// stack when a fault lands in that range (an unbalanced call/ret stream:
+// Minecraft Dungeons II's obfuscated start-up, call/pop/xor [rsp]/ret).
+// The bottom guard shares its host page with 12 KiB of the stack, so the
+// overflow went through it without a fault and faulted 16 bytes below the
+// reservation, outside FEX's range; the exception reached the game, which
+// died (benchmarks/stage62). A fault this close below a host page whose
+// bottom guest page is a lost guard is reported inside that guard, where it
+// would have happened with 4 KiB pages.
+uint64_t lxrt_subpage_lost_guard(uint64_t addr)
+{
+    if (GUEST_PAGE >= LXRT_HOST_PAGE || addr > UINT64_MAX - LXRT_HOST_PAGE)
+        return addr;
+    uint64_t above = LXRT_ALIGN_UP(addr + 1, LXRT_HOST_PAGE);
+    if (above - addr > 64)
+        return addr;
+    sigset_t old;
+    lxrt_pageprot_lock(&old);
+    bool lost = lxrt_subpage_tracked_locked(above, GUEST_PAGE) &&
+                slot_prot(above) == PROT_NONE && union_prot(above) != PROT_NONE;
+    lxrt_pageprot_unlock(&old);
+    return lost ? addr + GUEST_PAGE : addr;
+}
+
 // LXRT_SUBPAGE_LOG=<n>: report the first n split events of this process
 // (flips, emulated stores).
 static bool subpage_log_one(void)
