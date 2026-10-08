@@ -232,9 +232,19 @@ do_thunkgen() {
     log "== thunkgen (macOS arm64, libclang $("$LLVM_BIN/llvm-config" --version))"
     local g="$SRC/ThunkLibs/Generator" o="$OUT/thunkgen" f objs=()
     mkdir -p "$o"
+    local resdir; resdir=$("$LLVM_BIN/clang" -print-resource-dir)
     local cxx=("$LLVM_BIN/clang++" -std=c++20 -O2 -fno-rtti
         -isystem "$LLVM_PREFIX/include" -I "$SRC/External/fmt/include" -DFMT_HEADER_ONLY
-        -I "$OPENSSL/include" -DCLANG_RESOURCE_DIR="\"$("$LLVM_BIN/clang" -print-resource-dir)\"")
+        -I "$OPENSSL/include" -DCLANG_RESOURCE_DIR="\"$resdir\"")
+    # The objects carry clang's resource directory, a versioned Homebrew path
+    # (Cellar/llvm/23.1.2/lib/clang/23): after a Homebrew LLVM upgrade the old
+    # one is gone, and thunkgen found no stddef.h. A new LLVM compiles them
+    # again.
+    local stamp="$resdir $("$LLVM_BIN/llvm-config" --version)"
+    if [ "$(cat "$o/.llvm" 2>/dev/null)" != "$stamp" ]; then
+        rm -f "$o"/*.o
+        echo "$stamp" > "$o/.llvm"
+    fi
     for f in main analysis data_layout gen; do
         if [ ! -f "$o/$f.o" ] || [ "$g/$f.cpp" -nt "$o/$f.o" ]; then
             log "  cc      $f.cpp"

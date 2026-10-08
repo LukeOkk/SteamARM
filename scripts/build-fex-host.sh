@@ -260,7 +260,17 @@ do_build() {
         stamp="$( { cat "$SYSROOT/.lxrt-sysroot" "$TOOLCHAIN"
                     printf '%s\n' "$cflags" "$SOURCE_DATE_EPOCH" "${args[@]}"; } \
                   | shasum -a 256 | cut -d' ' -f1)"
-        if [ ! -f "$b/build.ninja" ] || [ "$(cat "$b/.lxrt-config" 2>/dev/null)" != "$stamp" ]; then
+        # A tool CMake found by its versioned path that is gone (Homebrew
+        # upgraded LLVM: /opt/homebrew/Cellar/llvm/23.1.2/bin/clang-scan-deps
+        # no longer existed and every C++ file failed, code 127) also means a
+        # fresh configure.
+        local gone=""
+        if [ -f "$b/CMakeCache.txt" ]; then
+            gone=$(sed -n 's|^[A-Za-z0-9_]*:FILEPATH=\(/.*\)$|\1|p' "$b/CMakeCache.txt" |
+                   while IFS= read -r p; do [ -e "$p" ] || { echo "$p"; break; }; done)
+        fi
+        [ -z "$gone" ] || log "$gone is gone (a Homebrew upgrade?): configuring $bt again"
+        if [ ! -f "$b/build.ninja" ] || [ "$(cat "$b/.lxrt-config" 2>/dev/null)" != "$stamp" ] || [ -n "$gone" ]; then
             rm -rf "$b"
             log "== configure $bt -> $b"
             CFLAGS="$cflags" CXXFLAGS="$cflags" cmake -S "$SRC" -B "$b" "${args[@]}"
