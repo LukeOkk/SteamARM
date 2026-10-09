@@ -50,6 +50,11 @@ export LXRT_LOWPAGES=1
 # Windows code. So the runtime's x18 virtualisation stays off here -- no
 # trampoline in Wine's PE code or in the JIT's output (FINAL FANTASY VII
 # REMAKE reached its engine in 5 s instead of 3 min, MEASURED 2026-10-08).
+# The runtime applies LXRT_NO_X18 to Wine's loaders only (wine,
+# wine-preloader): wineserver, python3 and the rest stay plain ELF programs
+# with the virtualised x18, which a program that forks without exec needs
+# (runtime/wxsplit.c lxrt_no_x18: wineserver's daemon died of "undefined
+# symbol: setsid" on every Steam launch before).
 # STEAMARM_X18_VIRT=1: the virtualised x18 as before (LXRT_X18_JIT=1).
 if [ "${STEAMARM_X18_VIRT:-0}" = 1 ]; then
     export LXRT_X18_JIT=1

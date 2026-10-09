@@ -316,3 +316,38 @@ HKLM\HARDWARE\DESCRIPTION\System\CentralProcessor\N "CP xxxx".
     Now PROT_NONE is SIGSEGV/SEGV_ACCERR as on Linux, and installing a
     SIGSEGV handler routes the host's SIGBUS through the same conversion.
     tests/elf: 114 passed.
+
+14. Every Steam launch on the native path: "undefined symbol: setsid"
+    -----------------------------------------------------------------
+    Launched from the Steam client (not from the test harness), every game on
+    "SteamARM: Proton ARM64 nativo" stopped at once: wineserver died with
+    "symbol lookup error: .../wineserver: undefined symbol: setsid, version
+    GLIBC_2.17" and the game said "Descriptor invalido". The root's libc
+    exports setsid@@GLIBC_2.17 and wineserver loaded that libc
+    (LD_DEBUG=libs,versions). Found with four subagents in parallel (the
+    reproduction without the Steam GUI, 5/5 and 50/50):
+    - the client preloads the Steam overlay for games, and the arm64 one
+      (<Steam>/ubuntu12_64/../steamrtarm64/gameoverlayrenderer.so) loads
+      silently; the harness had no loadable preload, which is why it never
+      failed;
+    - the tool runs everything with LXRT_NO_X18=1 (no x18 virtualisation,
+      for Wine's PE code and FEX's ARM64EC JIT, which keep the TEB there);
+    - wineserver daemonises with fork; a fork child loses the kernel's x18
+      preservation and its first page faults (every inherited page faults
+      once in the child on macOS 27) zero the register;
+    - the Steam Frame root's ld.so keeps the lookup scope length in w18 in
+      do_lookup_x (ldr w18,[x5,#8] ... cmp x18,x4): with x18 zeroed, the
+      child's first lazy binding, setsid, stopped after the overlay and never
+      reached libc (LD_DEBUG=symbols: "lookup in file=wineserver",
+      "lookup in file=.../gameoverlayrenderer.so", then the error).
+    Fix: the runtime applies LXRT_NO_X18 to Wine's loaders only (wine,
+    wine64, wine-preloader, wine64-preloader: the processes that run PE
+    code); wineserver, python3 and the other plain ELF programs under the
+    tool keep the virtualised x18 (runtime/wxsplit.c lxrt_no_x18).
+    Measured: the daemon loop 0/5 failures (5/5 with the old runtime); the
+    client's whole chain (steam-launch-wrapper, pw-audio-namespace, reaper,
+    the tool, proton, wine, wineserver) with the overlay preloaded runs;
+    FINAL FANTASY VII REMAKE with the client's three overlay preloads reaches
+    its swapchain in 35 s. tests/elf/fork_lazy_bind.c checks it against the
+    Steam Frame root's ld.so when that root is present (old runtime 0/20
+    children, new 20/20).

@@ -58,7 +58,7 @@ int lxrt_tls_init(void)
         return -1;
     }
     g_ready = true;
-    if (!getenv("LXRT_NO_X18") && pthread_key_create(&g_x18_key, NULL) == 0) {
+    if (!lxrt_no_x18() && pthread_key_create(&g_x18_key, NULL) == 0) {
         g_x18_offset = (unsigned long)g_x18_key * 8;
         if (g_x18_offset % 8 == 0 && g_x18_offset / 8 <= 4095)
             g_x18_ready = true;
@@ -66,7 +66,7 @@ int lxrt_tls_init(void)
     if (!g_x18_ready)
         fprintf(lxrt_trace_stream(), "[lxrt] x18 virtualisation OFF%s: guest code that keeps "
                         "values in x18 will lose them on the next context switch\n",
-                getenv("LXRT_NO_X18") ? " (LXRT_NO_X18)" : "");
+                lxrt_no_x18() ? " (LXRT_NO_X18)" : "");
     return 0;
 }
 

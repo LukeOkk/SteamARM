@@ -418,8 +418,8 @@ static inline bool pe_foreign(uint64_t a)
 
 static bool x18_site(uint64_t addr, uint32_t insn, const struct lxrt_range *code, int ncode)
 {
-    static int off = -1;                       // LXRT_NO_X18=1: diagnostic, no x18 pass
-    if (off < 0) off = getenv("LXRT_NO_X18") != NULL;
+    static int off = -1;                       // LXRT_NO_X18 (Wine's loaders): no x18 pass
+    if (off < 0) off = lxrt_no_x18();
     extern bool lxrt_elf_in_function(uint64_t addr);
     return !off && ncode > 0 && lxrt_x18_enabled() && in_code(addr, code, ncode) &&
            lxrt_x18_touches(insn) && (g_x18_synth || lxrt_elf_in_function(addr));

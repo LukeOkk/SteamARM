@@ -521,6 +521,7 @@ int lxrt_pe_images(uint64_t start, uint64_t end, struct lxrt_range *out, int max
 long lxrt_membarrier(int cmd, unsigned flags);
 bool lxrt_hwcap_cpuid(void);
 bool lxrt_program_is_fex(void);
+bool lxrt_no_x18(void);
 uint64_t lxrt_subpage_lost_guard(uint64_t addr);
 void lxrt_raise_nofile(void);
 rlim_t lxrt_nofile_ceiling(void);

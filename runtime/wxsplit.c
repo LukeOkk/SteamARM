@@ -89,11 +89,16 @@ size_t lxrt_rewrite_count(uint64_t start, uint64_t end);
 static int g_enabled = -1;      // -1: not decided yet (treated as off)
 
 static bool g_program_is_fex;
+static bool g_program_is_wine_loader;
 
 void lxrt_wx_set_program(const char *path)
 {
     const char *base = path ? strrchr(path, '/') : NULL;
     base = base ? base + 1 : path ? path : "";
+    // Wine's loaders are the processes that run PE code with the TEB in x18
+    // (lxrt_no_x18 below).
+    g_program_is_wine_loader = !strcmp(base, "wine") || !strcmp(base, "wine64") ||
+                               !strcmp(base, "wine-preloader") || !strcmp(base, "wine64-preloader");
     // The emulator itself: /usr/lib/lxrt-emu/FEX, FEX-gb, FEXInterpreter,
     // FEXLoader. FEXServer and the config tools are ordinary native programs.
     g_program_is_fex = !strncmp(base, "FEX", 3) && strncmp(base, "FEXServer", 9) &&
@@ -109,6 +114,27 @@ void lxrt_wx_set_program(const char *path)
 
 // Whether the main program is the emulator (stack.c: its AT_HWCAP).
 bool lxrt_program_is_fex(void) { return g_program_is_fex; }
+
+// LXRT_NO_X18 (set by tools/steamarm-native-proton): no x18 virtualisation,
+// so Wine's PE code and FEX's ARM64EC JIT output keep the hardware register,
+// the TEB, untouched. Only for Wine's loaders: every other program under the
+// tool is plain ELF code, and ELF code that forks without exec needs the
+// virtualisation -- a fork child loses the kernel's x18 preservation, its
+// first page faults zero the register, and glibc's ld.so keeps the length of
+// the symbol-lookup scope in x18 (do_lookup_x). wineserver daemonises with
+// fork and its first lazy binding, setsid, stopped at the Steam overlay that
+// the client preloads and never reached libc: "undefined symbol: setsid,
+// version GLIBC_2.17", the game "Descriptor invalido" (2026-10-08, every
+// Steam launch on the native path). LXRT_NO_X18=0 is off.
+bool lxrt_no_x18(void)
+{
+    static int v = -1;
+    if (v < 0) {
+        const char *e = getenv("LXRT_NO_X18");
+        v = e && *e && strcmp(e, "0") != 0 && g_program_is_wine_loader;
+    }
+    return v;
+}
 
 bool lxrt_wx_enabled(void) { return g_enabled > 0; }
 

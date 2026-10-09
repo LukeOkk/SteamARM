@@ -1252,6 +1252,29 @@ if [ -f "$STAGE/usr/lib64/libc.a" ] && [ -n "$GCCDIR" ] &&
                 ok "ARM64_AUXV_LAYOUT: auxv pairs, AT_PAGESZ 16384 and 4096 (LXRT_GUEST_PAGE), 4 KiB library refused at 16 KiB and loaded at 4 KiB"
             else bad "ARM64_AUXV_LAYOUT" "rc=$rc16/$rc4 $(grep FAIL <<<"$out16"; grep FAIL <<<"$out4")"; fi
         else bad "4 KiB DSO precondition" "$(grep LOAD <<<"$headers") counter=$counter"; fi
+        # FORK_LAZY_BIND: a fork child's first lazy binding under LXRT_NO_X18
+        # with a preloaded library (wineserver's daemon under a Steam launch).
+        if err=$(glibc_cc -O2 -o "$AUX_ROOT/tmp/fork_lazy_bind" tests/elf/fork_lazy_bind.c) &&
+           err=$(glibc_cc -shared -fPIC -O2 -o "$AUX_ROOT/tmp/libpreload_dummy.so" tests/elf/preload_dummy.c); then
+            # The Steam Frame root's ld.so is the one that keeps the scope
+            # length in x18 (Fedora's does not): a private root with its ld.so
+            # and libc when that root is on this Mac, the auxv root otherwise.
+            FLB_ROOT="$AUX_ROOT" FLB_WHICH="Fedora ld.so"
+            FRAME="${STEAMARM_STATE:-$HOME/SteamARM-roots}/arm64root"
+            if [ -f "$FRAME/usr/lib/libc.so.6" ] && [ -e "$FRAME/usr/lib/ld-linux-aarch64.so.1" ]; then
+                FLB_ROOT="$PWD/build/frame-ld-root"
+                mkdir -p "$FLB_ROOT/lib" "$FLB_ROOT/usr/lib" "$FLB_ROOT/tmp" &&
+                    cp -L "$FRAME/usr/lib/ld-linux-aarch64.so.1" "$FLB_ROOT/lib/" &&
+                    cp -L "$FRAME/usr/lib/libc.so.6" "$FLB_ROOT/usr/lib/" &&
+                    cp "$AUX_ROOT/tmp/fork_lazy_bind" "$AUX_ROOT/tmp/libpreload_dummy.so" "$FLB_ROOT/tmp/" &&
+                    FLB_WHICH="Steam Frame ld.so"
+            fi
+            out=$(LXRT_ROOT="$FLB_ROOT" LXRT_NO_X18=1 LD_PRELOAD=/tmp/libpreload_dummy.so \
+                  deadline 60 ./build/lxrun /tmp/fork_lazy_bind 50 2>&1); rc=$?
+            if [ "$rc" -eq 0 ] && grep -q '^PASS' <<<"$out"; then
+                ok "FORK_LAZY_BIND: 50 fork children bind setsid lazily under LXRT_NO_X18 with a preload ($FLB_WHICH)"
+            else bad "FORK_LAZY_BIND" "rc=$rc $(grep -E 'MAL|undefined symbol' <<<"$out" | head -2)"; fi
+        else bad "build fork_lazy_bind" "$err"; fi
         # A 4 KiB library whose code writes its own data from the host page
         # that holds both (the W/X livelock up to stage 22), dlopened at
         # LXRT_GUEST_PAGE=4096: plain stores, LL/SC loops as clang emits them
