@@ -23,6 +23,8 @@
 #      at it; Wine's own loader does not).
 #   3. The Visual C++ runtime version the builtins report, 14.44
 #      (tools/steamarm-native-proton/vcrun_version.py).
+#   4. SteamARM's vkd3d-proton (scripts/build-vkd3d-proton.sh) in place of the
+#      copy of Valve's, when it has been built.
 #
 # Writes only <root>/tmp/armhome/.local/share/Steam/compatibilitytools.d/
 # steamarm-native-proton. Idempotent. The client lists the tool after a
@@ -118,6 +120,17 @@ ln -sfn bin-arm64 "$DEST/dist/files/bin"
 # 3. The Visual C++ runtime the builtins stand for, raised to 14.44 (see the
 #    script): Unreal Engine's bootstrap launchers refused 14.42.34433.
 python3 tools/steamarm-native-proton/vcrun_version.py dist "$DEST/dist" | sed 's/^/[install-native-proton] /'
+# 4. SteamARM's vkd3d-proton, when built: it accepts a placed resource that
+#    Vulkan can bind where Valve's refuses it (scripts/build-vkd3d-proton.sh).
+VKD3D_OUT="${STEAMARM_BUILD:-$HOME/SteamARM-build}/vkd3d-proton/out"
+VKD3D_DIR="$DEST/dist/files/lib/wine/vkd3d-proton/aarch64-windows"
+if [ -f "$VKD3D_OUT/d3d12core.dll" ] && [ -f "$VKD3D_OUT/d3d12.dll" ] && [ -d "$VKD3D_DIR" ]; then
+    for f in d3d12.dll d3d12core.dll; do
+        rm -f "$VKD3D_DIR/$f"
+        cp "$VKD3D_OUT/$f" "$VKD3D_DIR/$f"
+    done
+    log "vkd3d-proton: SteamARM's build ($(cat "$VKD3D_OUT/.stamp" 2>/dev/null | cut -c1-12))"
+fi
 for f in steamarm-native-proton vcrun_version.py toolmanifest.vdf compatibilitytool.vdf; do
     cp -f "tools/steamarm-native-proton/$f" "$DEST/$f"
 done

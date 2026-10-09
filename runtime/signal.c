@@ -219,6 +219,27 @@ static _Thread_local struct guest_altstack g_altstack;
 // handler faulted on the ruined context (MEASURED, tests/win
 // suspend_storm; benchmarks/stage62, 15). A nested frame now goes below it.
 static _Thread_local uint64_t g_live_frame;
+
+// The mask every host handler runs under: all asynchronous signals. Linux
+// applies a handler's sa_mask atomically with the delivery; host_handler
+// used to run with nothing blocked and apply the guest's sa_mask only just
+// before calling the guest handler, and a signal in between ran nested.
+// Wine blocks SIGUSR1 for its fault handlers, so a suspension never lands in
+// one on Linux; here wineserver's SIGUSR1 (a SuspendThread/GetThreadContext)
+// landed inside the delivery of FEX's SIGILL for a trap that a vectored
+// handler was emulating, and the process died within a second (MEASURED,
+// tests/win/veh_suspend.c; Minecraft Dungeons II's protection does exactly
+// this to every thread of the game). Synchronous faults stay deliverable: a
+// fault inside a handler must reach it (see SYNC_BITS).
+static void host_handler_mask(sigset_t *m)
+{
+    sigfillset(m);
+    sigdelset(m, SIGSEGV);
+    sigdelset(m, SIGBUS);
+    sigdelset(m, SIGILL);
+    sigdelset(m, SIGFPE);
+    sigdelset(m, SIGTRAP);
+}
 // W^X window state at each pending signal delivery, innermost last. Pushed
 // when a guest handler is entered, popped by its sigreturn.
 
@@ -1149,7 +1170,7 @@ static void host_handler(int dsig, siginfo_t *dinfo, void *uap)
             memset(&ka, 0, sizeof ka);
             ka.sa_sigaction = host_handler;
             ka.sa_flags = SA_SIGINFO | SA_ONSTACK | SA_RESTART;
-            sigemptyset(&ka.sa_mask);
+            host_handler_mask(&ka.sa_mask);
             sigaction(dsig, &ka, NULL);
             return;
         }
@@ -1406,7 +1427,13 @@ static void host_handler(int dsig, siginfo_t *dinfo, void *uap)
         g_rt_blocked |= act.mask & RT_BITS;
         if (is_rt(lsig) && !(act.flags & LINUX_SA_NODEFER))
             g_rt_blocked |= 1ull << (lsig - 1);
-        pthread_sigmask(SIG_BLOCK, &during, &before);
+        // The interrupted mask plus the handler's: what Linux runs it under.
+        // (This handler itself runs with every asynchronous signal blocked.)
+        sigset_t want = duc->uc_sigmask;
+        for (int d = 1; d < NSIG; d++)
+            if (sigismember(&during, d))
+                sigaddset(&want, d);
+        pthread_sigmask(SIG_SETMASK, &want, &before);
         // A synchronous fault handed to the guest's own handler (a crash
         // reporter, usually): one line in /tmp/lxrt-faults.log naming where,
         // so a crash that the guest's reporter then swallows is not silent.
@@ -1831,7 +1858,7 @@ long lxrt_rt_sigaction(int lsig, const void *uact, void *uoldact, size_t sigsets
             memset(&ca, 0, sizeof ca);
             ca.sa_sigaction = host_handler;
             ca.sa_flags = SA_SIGINFO | SA_ONSTACK;
-            sigemptyset(&ca.sa_mask);
+            host_handler_mask(&ca.sa_mask);
             if (sigaction(LXRT_RT_CARRIER, &ca, NULL) != 0)
                 return LERR(errno);
         }
@@ -1930,7 +1957,10 @@ static long apply_host_action(int lsig, int dsig)
         if (dsig == SIGSEGV || dsig == SIGBUS || dsig == SIGILL || dsig == SIGFPE || dsig == SIGTRAP)
             sa.sa_flags |= SA_NODEFER;
     }
-    sigemptyset(&sa.sa_mask);
+    if (sa.sa_sigaction == host_handler)
+        host_handler_mask(&sa.sa_mask);
+    else
+        sigemptyset(&sa.sa_mask);
     return sigaction(dsig, &sa, NULL) != 0 ? LERR(errno) : 0;
 }
 
@@ -2234,7 +2264,7 @@ __attribute__((constructor(202))) static void xsig_init(void)
     memset(&ca, 0, sizeof ca);
     ca.sa_sigaction = host_handler;
     ca.sa_flags = SA_SIGINFO | SA_ONSTACK;
-    sigemptyset(&ca.sa_mask);
+    host_handler_mask(&ca.sa_mask);
     sigaction(LXRT_RT_CARRIER, &ca, NULL);
 }
 

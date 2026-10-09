@@ -286,7 +286,7 @@ static void granularity_floor(VkPhysicalDeviceProperties2Head *p)
     static long floor_ = -1;
     if (floor_ < 0) {
         const char *e = getenv("LXRT_VK_GRANULARITY");
-        floor_ = 16384;
+        floor_ = 0;                             // off unless asked (see image_align_on)
         if (e && *e) {                          // decimal only: no libc here
             floor_ = 0;
             for (; *e >= '0' && *e <= '9'; e++)
@@ -324,6 +324,19 @@ void lxrt_inner_vkGetPhysicalDeviceProperties2KHR(VkPhysicalDevice pd, VkPhysica
 // stricter alignment is always a valid answer. LXRT_VK_IMAGE_ALIGN=0 turns
 // this off.
 typedef struct { uint64_t size, alignment; uint32_t memoryTypeBits; } VkMemReq;
+// Off by default since SteamARM builds its own vkd3d-proton, which accepts a
+// placement that satisfies the Vulkan requirement and aligns the image up to
+// it: inflated, that requirement pushed images over their neighbours.
+// LXRT_VK_IMAGE_ALIGN=1 turns it on (another vkd3d-proton).
+static int image_align_on(void)
+{
+    static int on = -1;
+    if (on < 0) {
+        const char *e = getenv("LXRT_VK_IMAGE_ALIGN");
+        on = e && e[0] == '1' && !e[1];
+    }
+    return on;
+}
 typedef struct { int32_t sType; void *pNext; VkMemReq memoryRequirements; } VkMemReq2;
 void lxrt_mvk_vkGetImageMemoryRequirements(void *, uint64_t, VkMemReq *);
 void lxrt_mvk_vkGetImageMemoryRequirements2(void *, const void *, VkMemReq2 *);
@@ -332,12 +345,7 @@ void lxrt_mvk_vkGetDeviceImageMemoryRequirements(void *, const void *, VkMemReq2
 void lxrt_mvk_vkGetDeviceImageMemoryRequirementsKHR(void *, const void *, VkMemReq2 *);
 static void d3d12_alignment(VkMemReq *r)
 {
-    static int on = -1;
-    if (on < 0) {
-        const char *e = getenv("LXRT_VK_IMAGE_ALIGN");
-        on = !(e && e[0] == '0' && !e[1]);
-    }
-    if (!on)
+    if (!image_align_on())
         return;
     // KosmicKrisp asks only 128 bytes of most optimal images, even of a
     // 64 KiB texture, so no rule short of D3D12's own placement made what
@@ -390,7 +398,7 @@ static int never_small(const char *ci)
 }
 static void align_64k(VkMemReq *r)
 {
-    if (r->alignment < 65536) {
+    if (image_align_on() && r->alignment < 65536) {
         r->alignment = 65536;
         r->size = (r->size + 65535) & ~65535ull;
     }

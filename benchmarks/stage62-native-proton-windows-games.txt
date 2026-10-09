@@ -465,7 +465,43 @@ HKLM\HARDWARE\DESCRIPTION\System\CentralProcessor\N "CP xxxx".
        wants at 4 KiB. Refused placements went from every run to some runs --
        they depend on thread timing and never showed with LXRT_VK_DEBUG's
        logging on. FF7R (30 fps) and Schedule I (89 fps, DXVK) unchanged.
-    i. Still open: after one to three minutes the game dies of a stack
-       corruption in its audio thread (Wwise): a return into the bytes
-       "ginList" (the tail of "g_pAKPluginList", the symbol Wwise looks up in
-       its plugin DLLs) or the game's own stack cookie check (c0000409).
+    i. The refused placements, properly. An instrumented build of vkd3d-proton
+       (upstream 2230755, the code Proton's binary has) printed the refused
+       descriptions: UAV buffers of 16 bytes to 8 MiB and a 1920x1080 render
+       target and depth buffer, none tight-aligned, placed one after another
+       at 0x8000 + n * 64 KiB. vkd3d-proton also said why: "Requested
+       alignment of 10000, but got GPU VA of 1000b398000 for intended start
+       of heap" -- KosmicKrisp's heap address is 32 KiB aligned, and Unreal
+       Engine's transient allocator aligns GPU virtual addresses, not heap
+       offsets. D3D12's release runtime does not refuse such a placement;
+       vkd3d-proton does, although it aligns a texture up to its Vulkan
+       requirement right after. SteamARM now builds vkd3d-proton itself
+       (scripts/build-vkd3d-proton.sh: that commit, patches/vkd3d-proton/,
+       ARM64X with llvm-mingw) with patch 0001: a placement that Vulkan can
+       bind is accepted (FIXME once). scripts/install-native-proton.sh puts
+       it in the native tool, and setup now refreshes the tool -- before, an
+       update left the tool's launcher script as it was installed, so the
+       defaults a release added to it never ran. The shim's inflated image
+       alignment (h) would push textures over their neighbours once
+       vkd3d-proton aligns them up, so it is off by default
+       (LXRT_VK_IMAGE_ALIGN=1, LXRT_VK_GRANULARITY=<bytes>). FF7R 30 fps,
+       Schedule I 89 fps with this build.
+    j. Host handlers run with every asynchronous signal blocked (signal.c
+       host_handler_mask), and the guest handler under Linux's mask (the
+       interrupted one plus its sa_mask): a signal could land between the
+       delivery and the guest's sa_mask taking effect, where Linux applies
+       the mask atomically.
+    k. Still open: the game dies about 120-130 s of rendering in (around its
+       4070th frame, when the intro gives way to the menu): an x64 return
+       into the bytes "ginList" (the tail of "g_pAKPluginList", Wwise's plugin
+       symbol) in the audio thread, a garbage pointer in the protection's
+       decrypted code, a stack cookie failure, or a silent exit. A small x64
+       program (a vectored handler emulating ud2 traps -- inc, push, pop --
+       while another thread suspends, reads and resumes it, as the game's
+       protection and integrity scanner do) dies within a second the same
+       silent way; without the suspensions it emulates 414,930 traps with
+       no error, and the suspensions alone (tests/win/suspend_storm.c) are
+       fine. FEX ARM64EC suspends cooperatively (a doorbell checked at every
+       block, then brk #0xCAFE, "Suspending: RIP ... SP ..."), which is where
+       the trace ends. The protection also reads /proc/self/maps through Z:
+       and opens every mapped library and DLL to compare them.

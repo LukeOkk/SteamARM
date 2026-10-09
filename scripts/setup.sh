@@ -31,7 +31,7 @@ log() { printf '\n\033[1m[setup] %s\033[0m\n' "$*"; }
 die() { printf '[setup] error: %s\n' "$*" >&2; exit 1; }
 
 FORMULAE=(llvm lld cmake ninja zstd xz openssl@3 squashfs xxhash python
-          molten-vk vulkan-headers sdl2 sdl3 mingw-w64 pulseaudio)
+          molten-vk vulkan-headers sdl2 sdl3 mingw-w64 pulseaudio meson glslang)
 
 step_check() {
     [ "$(uname -s)" = Darwin ] && [ "$(uname -m)" = arm64 ] || die "needs macOS on Apple Silicon"
@@ -143,6 +143,15 @@ step_frameroot() {
         scripts/install-frameroot-vulkan.sh "$STATE/arm64root" || log "Steam Frame root: Vulkan not installed (setup goes on)"
         log "SteamOS's update client in the Steam Frame root (scripts/install-frameroot-atomupd.sh)"
         scripts/install-frameroot-atomupd.sh "$STATE/arm64root" || log "Steam Frame root: atomupd-manager left as it was (setup goes on)"
+    fi
+    # The native Proton tool, when the user installed it: its launcher script
+    # and SteamARM's vkd3d-proton follow this source. Before, an update left
+    # the tool as it was, and the settings a release put there never ran.
+    if [ -d "$STATE/arm64root/tmp/armhome/.local/share/Steam/compatibilitytools.d/steamarm-native-proton/dist" ]; then
+        log "vkd3d-proton with SteamARM's patches (scripts/build-vkd3d-proton.sh)"
+        scripts/build-vkd3d-proton.sh || log "WARNING: vkd3d-proton was not built; the tool keeps Valve's"
+        log "native Proton tool (scripts/install-native-proton.sh)"
+        scripts/install-native-proton.sh --root arm64root || log "native Proton tool left as it was (setup goes on)"
     fi
 }
 

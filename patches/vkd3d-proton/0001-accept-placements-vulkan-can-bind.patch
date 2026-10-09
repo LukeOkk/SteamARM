@@ -1,0 +1,37 @@
+diff --git a/libs/vkd3d/resource.c b/libs/vkd3d/resource.c
+index a8fc26b..1ac16af 100644
+--- a/libs/vkd3d/resource.c
++++ b/libs/vkd3d/resource.c
+@@ -4698,10 +4698,28 @@ HRESULT d3d12_resource_create_placed(struct d3d12_device *device, const D3D12_RE
+ 
+     if (heap_offset & (object->placed_alignment - 1u))
+     {
+-        WARN("Heap offset %#"PRIx64" not a multiple of resource alignment %#"PRIx64".\n",
+-                heap_offset, object->placed_alignment);
+-        hr = E_INVALIDARG;
+-        goto fail;
++        /* SteamARM: D3D12's release runtime does not refuse this, and Unreal
++         * Engine 5.6's transient allocator places resources at 32 KiB offsets
++         * that only satisfy the Vulkan requirement. Refuse only what Vulkan
++         * cannot bind: textures are aligned up to their Vulkan requirement
++         * below, and a buffer needs its own. */
++        VkMemoryRequirements buffer_requirements;
++        bool vk_ok = true;
++
++        if (!d3d12_resource_is_texture(object))
++        {
++            buffer_requirements.alignment = max(device->device_info.properties2.properties.limits.minStorageBufferOffsetAlignment,
++                    device->device_info.properties2.properties.limits.minUniformBufferOffsetAlignment);
++            vk_ok = !((heap->allocation.offset + heap_offset) & (buffer_requirements.alignment - 1u));
++        }
++
++        FIXME_ONCE("Heap offset %#"PRIx64" not a multiple of resource alignment %#"PRIx64"%s.\n",
++                heap_offset, object->placed_alignment, vk_ok ? ", accepted (SteamARM)" : "");
++        if (!vk_ok)
++        {
++            hr = E_INVALIDARG;
++            goto fail;
++        }
+     }
+ 
+     if (d3d12_resource_is_texture(object))
