@@ -616,3 +616,12 @@ HKLM\HARDWARE\DESCRIPTION\System\CentralProcessor\N "CP xxxx".
        Matrix (d2nolog, seconds after launch): neither 146-151; watchdogs
        only 201 (dies of SMC); SMC only 191 (dies of a watchdog); both 398
        and 335+ (alive at the end), 35-37 fps.
+    r. Launched from the real client the game never started: Steam first runs
+       its install script (Gaming Runtime installer, VC++ 2022 x86/x64,
+       DirectX Jun2010) through legacycompat/iscriptevaluator.exe, which
+       hands the steps to legacycompat/SteamService.exe -- 32-bit, so on the
+       native path Wine aborted it in build_wow64_parameters and the
+       evaluator waited forever. The native tool now marks every step's
+       has-run value instead (tools/steamarm-native-proton/installscript.py,
+       both registry views, imported with regedit) and the client launches
+       the game: alive past 7 min at ~42 fps (86 presents per 2 s).

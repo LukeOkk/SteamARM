@@ -113,5 +113,29 @@ fi
 # Valve's script wants to know it is not inside its container.
 unset PRESSURE_VESSEL_RUNTIME PRESSURE_VESSEL_RUNTIME_BASE 2>/dev/null || true
 
+# Steam's install-script evaluator (run before a game's first start) hands its
+# steps to legacycompat/SteamService.exe, a 32-bit program, which the native
+# path cannot run: it aborted and the evaluator, and the game's launch, waited
+# forever (Minecraft Dungeons II). Its steps are redistributable installers
+# (32-bit too, or runtimes Proton's builtins provide) and similar: instead of
+# running it, mark every step's "has run" registry value (installscript.py)
+# and import that into the prefix.
+case "${2:-}" in
+    *iscriptevaluator.exe)
+        vdf=""
+        for a in "$@"; do
+            case "$a" in *evaluatorscript_*.vdf) vdf="$a" ;; esac
+        done
+        vdf="${vdf//\\//}"
+        [ -f "$vdf" ] || vdf="${STEAM_COMPAT_CLIENT_INSTALL_PATH:-}/legacycompat/$(basename "$vdf")"
+        reg="${STEAM_COMPAT_DATA_PATH:-/tmp}/steamarm-installscript.reg"
+        if [ -f "$vdf" ] && python3 "$here/installscript.py" "$vdf" "$reg"; then
+            say "install script marked done instead of run ($(basename "$vdf"))"
+            exec python3 "$dist/proton" "$1" 'C:\windows\regedit.exe' /S "Z:${reg//\//\\}"
+        fi
+        say "install script: nothing to mark ($(basename "$vdf")); not run"
+        exit 0 ;;
+esac
+
 say "$verb ${2:-} via Proton ARM64 (native Wine, FEX ARM64EC in-process) from $dist"
 exec python3 "$dist/proton" "$@"

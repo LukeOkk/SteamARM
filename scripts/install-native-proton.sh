@@ -154,7 +154,7 @@ if [ -f "$NTDLL_OUT/ntdll.dll" ] && [ -f "$FEX_EC_DIR/ntdll.dll" ]; then
     cp "$NTDLL_OUT/ntdll.dll" "$FEX_EC_DIR/ntdll.dll"
     log "ntdll.dll: SteamARM's build ($(cat "$NTDLL_OUT/.stamp" 2>/dev/null | cut -c1-12))"
 fi
-for f in steamarm-native-proton vcrun_version.py toolmanifest.vdf compatibilitytool.vdf; do
+for f in steamarm-native-proton vcrun_version.py installscript.py toolmanifest.vdf compatibilitytool.vdf; do
     cp -f "tools/steamarm-native-proton/$f" "$DEST/$f"
 done
 chmod 755 "$DEST/steamarm-native-proton"
