@@ -312,8 +312,8 @@ void lxrt_inner_vkGetPhysicalDeviceProperties2KHR(VkPhysicalDevice pd, VkPhysica
     spoof_props(pd, (VkBase *)p->pNext);
 }
 
-// Image memory alignments as D3D12 places textures: 64 KiB for an image of
-// 64 KiB or more, 4 KiB below that. KosmicKrisp asks 16 KiB of an optimal
+// Image memory alignments as D3D12 places textures: 64 KiB, 4 KiB for the
+// smallest images. KosmicKrisp asks 16 KiB of an optimal
 // image (128 bytes of some), and vkd3d-proton hands that to a D3D12 app that
 // uses tight alignment (GetResourceAllocationInfo with
 // D3D12_RESOURCE_FLAG_USE_TIGHT_ALIGNMENT) while CreatePlacedResource still
@@ -339,35 +339,149 @@ static void d3d12_alignment(VkMemReq *r)
     }
     if (!on)
         return;
-    uint64_t want = r->size >= 65536 ? 65536 : 4096;
+    // KosmicKrisp asks only 128 bytes of most optimal images, even of a
+    // 64 KiB texture, so no rule short of D3D12's own placement made what
+    // the app was told and what CreatePlacedResource checks agree. 64 KiB
+    // for anything over 4 KiB, 4 KiB for the rest: a D3D12 "small resource"
+    // the app wants at 4 KiB is then padded by vkd3d-proton, as it is for
+    // drivers whose images need more than 4 KiB. Never below the driver's
+    // own alignment.
+    uint64_t want = r->size > 4096 ? 65536 : 4096;
     if (r->alignment < want)
         r->alignment = want;
     r->size = (r->size + r->alignment - 1) & ~(r->alignment - 1);
 }
+// The images D3D12 never treats as small (render targets, depth buffers,
+// multisampled), remembered at creation: vkd3d-proton may size a placed
+// resource from a temporary image, whose requirements carry no usage.
+#define BIG_SLOTS 65536                     // power of two
+static uint64_t g_big[BIG_SLOTS];           // image handle; 0 empty, 1 deleted
+static volatile int g_big_lock;
+static void big_lock(void) { while (__atomic_exchange_n(&g_big_lock, 1, __ATOMIC_ACQUIRE)) ; }
+static void big_unlock(void) { __atomic_store_n(&g_big_lock, 0, __ATOMIC_RELEASE); }
+static unsigned big_slot(uint64_t h) { return (unsigned)((h * 0x9E3779B97F4A7C15ull) >> 48) & (BIG_SLOTS - 1); }
+static void big_add(uint64_t h)
+{
+    big_lock();
+    for (unsigned i = big_slot(h), n = 0; n < BIG_SLOTS; i = (i + 1) & (BIG_SLOTS - 1), n++)
+        if (g_big[i] <= 1 || g_big[i] == h) { g_big[i] = h; break; }
+    big_unlock();
+}
+static void big_del(uint64_t h)
+{
+    big_lock();
+    for (unsigned i = big_slot(h), n = 0; n < BIG_SLOTS && g_big[i]; i = (i + 1) & (BIG_SLOTS - 1), n++)
+        if (g_big[i] == h) { g_big[i] = 1; break; }
+    big_unlock();
+}
+static int big_has(uint64_t h)
+{
+    int found = 0;
+    big_lock();
+    for (unsigned i = big_slot(h), n = 0; n < BIG_SLOTS && g_big[i]; i = (i + 1) & (BIG_SLOTS - 1), n++)
+        if (g_big[i] == h) { found = 1; break; }
+    big_unlock();
+    return found;
+}
+static int never_small(const char *ci)
+{
+    uint32_t samples = *(const uint32_t *)(ci + 48), usage = *(const uint32_t *)(ci + 56);
+    return (usage & (0x10 | 0x20)) || samples > 1;     // COLOR_ATTACHMENT, DEPTH_STENCIL_ATTACHMENT
+}
+static void align_64k(VkMemReq *r)
+{
+    if (r->alignment < 65536) {
+        r->alignment = 65536;
+        r->size = (r->size + 65535) & ~65535ull;
+    }
+}
+int32_t lxrt_mvk_vkCreateImage(void *, const void *, const void *, uint64_t *);
+void lxrt_mvk_vkDestroyImage(void *, uint64_t, const void *);
+int32_t lxrt_inner_vkCreateImage(void *dev, const void *ci, const void *alloc, uint64_t *img)
+{
+    int32_t r = lxrt_mvk_vkCreateImage(dev, ci, alloc, img);
+    if (r == 0 && img && ci && never_small((const char *)ci))
+        big_add(*img);
+    if (getenv("LXRT_VK_DEBUG") && ci) {
+        const char *c = ci;
+        dprintf(2, "[shim] create image: fmt %u %ux%ux%u mips %u layers %u samples %u tiling %u usage 0x%x flags 0x%x -> %d\n",
+                *(const uint32_t *)(c + 24), *(const uint32_t *)(c + 28), *(const uint32_t *)(c + 32),
+                *(const uint32_t *)(c + 36), *(const uint32_t *)(c + 40), *(const uint32_t *)(c + 44),
+                *(const uint32_t *)(c + 48), *(const uint32_t *)(c + 52), *(const uint32_t *)(c + 56),
+                *(const uint32_t *)(c + 16), r);
+    }
+    return r;
+}
+void lxrt_inner_vkDestroyImage(void *dev, uint64_t img, const void *alloc)
+{
+    if (img)
+        big_del(img);
+    lxrt_mvk_vkDestroyImage(dev, img, alloc);
+}
 void lxrt_inner_vkGetImageMemoryRequirements(void *dev, uint64_t img, VkMemReq *r)
 {
     lxrt_mvk_vkGetImageMemoryRequirements(dev, img, r);
+    uint64_t before = r->alignment;
     d3d12_alignment(r);
+    if (big_has(img))
+        align_64k(r);
+    if (getenv("LXRT_VK_DEBUG"))
+        dprintf(2, "[shim] image reqs: big %d size 0x%llx align 0x%llx -> 0x%llx\n", big_has(img),
+                (unsigned long long)r->size, (unsigned long long)before, (unsigned long long)r->alignment);
+}
+static void image2_alignment(const void *info, VkMemReq *r)
+{
+    uint64_t before = r->alignment;
+    d3d12_alignment(r);
+    uint64_t img = info ? *(const uint64_t *)((const char *)info + 16) : 0;     // VkImageMemoryRequirementsInfo2.image
+    if (img && big_has(img))
+        align_64k(r);
+    if (getenv("LXRT_VK_DEBUG"))
+        dprintf(2, "[shim] image reqs2: big %d size 0x%llx align 0x%llx -> 0x%llx\n", img ? big_has(img) : -1,
+                (unsigned long long)r->size, (unsigned long long)before, (unsigned long long)r->alignment);
 }
 void lxrt_inner_vkGetImageMemoryRequirements2(void *dev, const void *info, VkMemReq2 *r)
 {
     lxrt_mvk_vkGetImageMemoryRequirements2(dev, info, r);
-    d3d12_alignment(&r->memoryRequirements);
+    image2_alignment(info, &r->memoryRequirements);
 }
 void lxrt_inner_vkGetImageMemoryRequirements2KHR(void *dev, const void *info, VkMemReq2 *r)
 {
     lxrt_mvk_vkGetImageMemoryRequirements2KHR(dev, info, r);
-    d3d12_alignment(&r->memoryRequirements);
+    image2_alignment(info, &r->memoryRequirements);
+}
+// Before the image exists the create info is at hand: render targets, depth
+// buffers and multisampled images are never D3D12 "small resources", so
+// CreatePlacedResource places them at 64 KiB whatever their size; their
+// answer says so too (vkd3d-proton answers a tight-alignment
+// GetResourceAllocationInfo with this call, and the misplaced textures of
+// Unreal Engine 5.6 were small render targets).
+static void d3d12_alignment_for(const void *info, VkMemReq *r)
+{
+    uint64_t before = r->alignment;
+    d3d12_alignment(r);
+    const char *ci = info ? *(const char *const *)((const char *)info + 16) : 0;   // ->pCreateInfo
+    if (!ci || r->alignment >= 65536)
+        return;
+    if (never_small(ci))
+        align_64k(r);
+    if (getenv("LXRT_VK_DEBUG"))
+        dprintf(2, "[shim] device image reqs: fmt %u %ux%ux%u mips %u layers %u samples %u usage 0x%x flags 0x%x: "
+                "size 0x%llx align 0x%llx -> 0x%llx\n", *(const uint32_t *)(ci + 24), *(const uint32_t *)(ci + 28),
+                *(const uint32_t *)(ci + 32), *(const uint32_t *)(ci + 36), *(const uint32_t *)(ci + 40),
+                *(const uint32_t *)(ci + 44), *(const uint32_t *)(ci + 48), *(const uint32_t *)(ci + 56),
+                *(const uint32_t *)(ci + 16), (unsigned long long)r->size, (unsigned long long)before,
+                (unsigned long long)r->alignment);
 }
 void lxrt_inner_vkGetDeviceImageMemoryRequirements(void *dev, const void *info, VkMemReq2 *r)
 {
     lxrt_mvk_vkGetDeviceImageMemoryRequirements(dev, info, r);
-    d3d12_alignment(&r->memoryRequirements);
+    d3d12_alignment_for(info, &r->memoryRequirements);
 }
 void lxrt_inner_vkGetDeviceImageMemoryRequirementsKHR(void *dev, const void *info, VkMemReq2 *r)
 {
     lxrt_mvk_vkGetDeviceImageMemoryRequirementsKHR(dev, info, r);
-    d3d12_alignment(&r->memoryRequirements);
+    d3d12_alignment_for(info, &r->memoryRequirements);
 }
 
 // Transform-feedback commands: nothing to do without stream output, except

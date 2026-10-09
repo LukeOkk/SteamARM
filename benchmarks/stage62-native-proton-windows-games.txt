@@ -454,9 +454,18 @@ HKLM\HARDWARE\DESCRIPTION\System\CentralProcessor\N "CP xxxx".
        checked), but CreatePlacedResource keeps D3D12's 64 KiB unless the
        driver has VK_MESA_image_alignment_control. Unreal Engine 5.6 uses tight
        alignment when it is offered. A bufferImageGranularity of 16 KiB from the
-       Vulkan shim (vkd3d-proton's tier test) did not stop it. What did: the
-       shim answers image memory requirements with D3D12's placement
-       alignments -- 64 KiB for an image of 64 KiB or more, 4 KiB below
-       (shim/features.c; LXRT_VK_IMAGE_ALIGN=0 turns it off) --, a stricter
-       alignment being always a valid Vulkan answer, so what the app is told
-       and what CreatePlacedResource checks agree.
+       Vulkan shim (vkd3d-proton's tier test) did not stop it. Logging the
+       shim's answers showed why no D3D12-like rule did: KosmicKrisp asks only
+       128 bytes of most optimal images, a 64 KiB texture included. The shim
+       now answers 64 KiB for any image over 4 KiB and 4 KiB below
+       (shim/features.c; images created as render targets, depth or
+       multisampled are remembered for the queries that carry only a handle;
+       LXRT_VK_IMAGE_ALIGN=0 turns it off): a stricter alignment is always a
+       valid Vulkan answer, and vkd3d-proton pads a "small resource" the app
+       wants at 4 KiB. Refused placements went from every run to some runs --
+       they depend on thread timing and never showed with LXRT_VK_DEBUG's
+       logging on. FF7R (30 fps) and Schedule I (89 fps, DXVK) unchanged.
+    i. Still open: after one to three minutes the game dies of a stack
+       corruption in its audio thread (Wwise): a return into the bytes
+       "ginList" (the tail of "g_pAKPluginList", the symbol Wwise looks up in
+       its plugin DLLs) or the game's own stack cookie check (c0000409).

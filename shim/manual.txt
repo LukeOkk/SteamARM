@@ -27,6 +27,8 @@ vkGetImageMemoryRequirements2
 vkGetImageMemoryRequirements2KHR
 vkGetDeviceImageMemoryRequirements
 vkGetDeviceImageMemoryRequirementsKHR
+vkCreateImage
+vkDestroyImage
 vkCmdBindTransformFeedbackBuffersEXT
 vkCmdBeginTransformFeedbackEXT
 vkCmdEndTransformFeedbackEXT
