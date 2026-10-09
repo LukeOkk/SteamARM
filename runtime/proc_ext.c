@@ -56,6 +56,7 @@
 #include <fcntl.h>
 #include <mach/mach.h>
 #include <mach/mach_host.h>
+#include <mach/mach_time.h>
 #include <mach/mach_vm.h>
 #include <mach/processor_info.h>
 #include <mach/vm_page_size.h>
@@ -1008,6 +1009,71 @@ static size_t gen_self_stat(char *b, size_t cap)
         thread_count(), (unsigned long long)start_ticks(),
         (unsigned long long)virtual_size_linuxish(),
         (unsigned long long)(tb.resident_size / ps), rsslim,
+        (unsigned long long)lxrt_start_stack);
+    return sb_done(&s);
+}
+
+// /proc/self/task/<tid>/stat: the process's line with that thread's id, state
+// and CPU times. Wine's GetThreadTimes reads it for every thread but the
+// caller (and SystemProcessInformation for every thread); without it a thread
+// had used no CPU, ever. Minecraft Dungeons II's protection reads its worker
+// threads' times from a watchdog thread about two minutes in, and closed the
+// game -- or corrupted its own state -- when they had not moved (MEASURED;
+// benchmarks/stage62, 15 m). 0 when the thread is not (or no longer) there.
+//
+// It has to be cheap: the same protection asks several thousand times a
+// second. The process-wide fields (vsize walks every VM region -- tens of
+// thousands in a game -- threads, rss, start time) are refreshed at most once
+// a second; the per-thread CPU times are read every time (MEASURED: computing
+// vsize per read slowed the game's start fivefold and it never drew a frame).
+size_t lxrt_proc_gen_task_stat(int tid, char *b, size_t cap)
+{
+    uint64_t user_us = 0, sys_us = 0;
+    bool running = false;
+    if (!lxrt_thread_times(tid, &user_us, &sys_us, &running))
+        return 0;
+    static _Atomic uint64_t c_when, c_vsize, c_rss, c_start;
+    static _Atomic unsigned c_threads;
+    uint64_t now = mach_absolute_time();
+    mach_timebase_info_data_t tbi;
+    mach_timebase_info(&tbi);
+    uint64_t sec = (uint64_t)1000000000 * tbi.denom / tbi.numer;
+    uint64_t when = atomic_load(&c_when);
+    if (!when || now - when > sec) {
+        atomic_store(&c_when, now);
+        mach_task_basic_info_data_t tb;
+        if (!task_basic(&tb))
+            memset(&tb, 0, sizeof tb);
+        atomic_store(&c_rss, tb.resident_size / guest_page_bytes());
+        atomic_store(&c_vsize, virtual_size_linuxish());
+        atomic_store(&c_threads, thread_count());
+        if (!atomic_load(&c_start))
+            atomic_store(&c_start, start_ticks());
+    }
+    struct sb s = { b, cap, 0, false };
+    const char *nm = getprogname();
+    char comm[16];
+    snprintf(comm, sizeof comm, "%s", nm ? nm : "lxrt");
+    sbf(&s,
+        "%d (%s) %c %d %d %d 0 -1 0 "         // 1-9
+        "0 0 0 0 "                            // 10-13
+        "%llu %llu 0 0 "                      // 14-17 utime stime cutime cstime
+        "20 0 %u 0 %llu "                     // 18-22
+        "%llu %llu %llu "                     // 23-25
+        "0 0 %llu 0 0 "                       // 26-30
+        "0 0 0 0 0 "                          // 31-35
+        "0 0 17 0 0 0 "                       // 36-41
+        "0 0 0 "                              // 42-44
+        "0 0 0 0 0 0 0 0\n",                  // 45-52
+        tid, comm, running ? 'R' : 'S',
+        lxrt_ids_on() ? (lxrt_ids_to_guest(getppid(), 0) ?: 1) : (int)getppid(),
+        lxrt_ids_on() ? (lxrt_ids_to_guest(getpgrp(), 0) ?: 1) : (int)getpgrp(),
+        lxrt_ids_on() ? (lxrt_ids_to_guest(getsid(0), 0) ?: 1) : (int)getsid(0),
+        (unsigned long long)(user_us / (1000000 / LXRT_CLK_TCK)),
+        (unsigned long long)(sys_us / (1000000 / LXRT_CLK_TCK)),
+        atomic_load(&c_threads), (unsigned long long)atomic_load(&c_start),
+        (unsigned long long)atomic_load(&c_vsize),
+        (unsigned long long)atomic_load(&c_rss), ~0ull,
         (unsigned long long)lxrt_start_stack);
     return sb_done(&s);
 }

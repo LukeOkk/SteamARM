@@ -204,6 +204,7 @@ static void hide_emulator_fds(void)
     each_open_fd(hide_if_new);
 }
 static void regenerate_tasks(void);
+static void write_task_files(int tid, int nthreads);
 // (g_exe, declared above: the guest's name of its image)
 static char g_exe_link[1024];   // what <procfs>/exe points at (a host path)
 static bool g_ready;
@@ -610,24 +611,66 @@ static void regenerate_tasks(void)
         }
         lxrt_closedir_private(d);
     }
-    for (int i = 0; i < n; i++) {
-        char sub[700];
-        snprintf(sub, sizeof sub, "%s/%d", dir, tids[i]);
-        mkdir(sub, 0700);
-        char f[800], b[1024];
-        const char *nm = g_exe[0] ? (strrchr(g_exe, '/') ? strrchr(g_exe, '/') + 1 : g_exe) : "lxrt";
-        int bl = snprintf(b, sizeof b, "%s\n", nm);
-        snprintf(f, sizeof f, "%s/comm", sub);
-        path_write_if_changed(f, b, (size_t)bl);
-        uint32_t u[4], g[4];
-        lxrt_aids_status_ids(u, g, NULL, 0);   // Android ids: the virtual ones
-        bl = snprintf(b, sizeof b, "Name:\t%s\nState:\tS (sleeping)\nTgid:\t%d\nPid:\t%d\nPPid:\t%d\n"
-                      "Uid:\t%u\t%u\t%u\t%u\nGid:\t%u\t%u\t%u\t%u\nThreads:\t%d\n",
-                      strrchr(g_exe, '/') ? strrchr(g_exe, '/') + 1 : g_exe, lxrt_ids_pid(), tids[i],
-                      lxrt_ids_on() ? (lxrt_ids_to_guest(getppid(), 0) ?: 1) : getppid(),
-                      u[0], u[1], u[2], u[3], g[0], g[1], g[2], g[3], n);
-        snprintf(f, sizeof f, "%s/status", sub);
-        path_write_if_changed(f, b, (size_t)bl);
+    for (int i = 0; i < n; i++)
+        write_task_files(tids[i], n);
+}
+
+// The files of one thread's /proc/self/task/<tid>. stat is regenerated on
+// every lookup: its CPU times are what a reader is after.
+static void write_task_files(int tid, int nthreads)
+{
+    char sub[700];
+    snprintf(sub, sizeof sub, "%s/task/%d", g_dir, tid);
+    mkdir(sub, 0700);
+    char f[800], b[1024];
+    const char *nm = g_exe[0] ? (strrchr(g_exe, '/') ? strrchr(g_exe, '/') + 1 : g_exe) : "lxrt";
+    int bl = snprintf(b, sizeof b, "%s\n", nm);
+    snprintf(f, sizeof f, "%s/comm", sub);
+    path_write_if_changed(f, b, (size_t)bl);
+    uint32_t u[4], g[4];
+    lxrt_aids_status_ids(u, g, NULL, 0);   // Android ids: the virtual ones
+    bl = snprintf(b, sizeof b, "Name:\t%s\nState:\tS (sleeping)\nTgid:\t%d\nPid:\t%d\nPPid:\t%d\n"
+                  "Uid:\t%u\t%u\t%u\t%u\nGid:\t%u\t%u\t%u\t%u\nThreads:\t%d\n",
+                  strrchr(g_exe, '/') ? strrchr(g_exe, '/') + 1 : g_exe, lxrt_ids_pid(), tid,
+                  lxrt_ids_on() ? (lxrt_ids_to_guest(getppid(), 0) ?: 1) : getppid(),
+                  u[0], u[1], u[2], u[3], g[0], g[1], g[2], g[3], nthreads);
+    snprintf(f, sizeof f, "%s/status", sub);
+    path_write_if_changed(f, b, (size_t)bl);
+    size_t sl = lxrt_proc_gen_task_stat(tid, b, sizeof b);
+    if (sl) {
+        snprintf(f, sizeof f, "%s/stat", sub);
+        path_write_if_changed(f, b, sl);
+    }
+}
+
+// /proc/self/task/<tid>/...: that thread's directory only. Wine reads
+// task/<tid>/stat for every GetThreadTimes of another thread; rewriting every
+// thread's files each time took a sixth of a busy thread's time (MEASURED).
+static void regenerate_one_task(int tid)
+{
+    pthread_t th;
+    if (tid != lxrt_ids_pid() && !lxrt_thread_lookup(tid, &th)) {
+        lxrt_proc_thread_gone(tid);
+        return;
+    }
+    char dir[600];
+    snprintf(dir, sizeof dir, "%s/task", g_dir);
+    mkdir(dir, 0700);
+    // comm and status do not change; once the directory is there only stat
+    // is rewritten.
+    char f[800];
+    snprintf(f, sizeof f, "%s/%d/status", dir, tid);
+    if (access(f, F_OK) != 0) {
+        int tids[1];
+        int n = lxrt_thread_list(tids, 1);
+        write_task_files(tid, n > 0 ? n : 1);
+        return;
+    }
+    char b[1024];
+    size_t sl = lxrt_proc_gen_task_stat(tid, b, sizeof b);
+    if (sl) {
+        snprintf(f, sizeof f, "%s/%d/stat", dir, tid);
+        path_write_if_changed(f, b, sl);
     }
 }
 
@@ -870,7 +913,12 @@ const char *lxrt_proc_translate(const char *path)
             regenerate_fds();
     } else if (strncmp(rest, "task", 4) == 0 &&
                (rest[4] == '\0' || rest[4] == '/')) {
-        regenerate_tasks();
+        char *end = NULL;
+        long one = rest[4] == '/' && rest[5] >= '1' && rest[5] <= '9' ? strtol(rest + 5, &end, 10) : -1;
+        if (one > 0 && end && (*end == '\0' || *end == '/'))
+            regenerate_one_task((int)one);
+        else
+            regenerate_tasks();
     } else if (strncmp(rest, "attr/", 5) == 0 && strchr(rest + 5, '/') == NULL && rest[5]) {
         // The LSM's view of this process. There is no SELinux here, but
         // Android daemons ask for their own context first thing (keystore:

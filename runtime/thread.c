@@ -15,6 +15,7 @@
 #include "fileops2.h"
 
 #include <errno.h>
+#include <mach/mach.h>
 
 #define LERR(e) (-lxrt_errno_to_linux(e))
 #include <limits.h>
@@ -178,6 +179,40 @@ bool lxrt_thread_lookup(int tid, pthread_t *out)
         }
     threads_unlock();
     return found;
+}
+
+// A guest thread's CPU times in microseconds, for /proc/self/task/<tid>/stat.
+// Under the registry lock: the thread cannot unregister, and its pthread_t go
+// away, between the lookup and thread_info().
+bool lxrt_thread_times(int tid, uint64_t *user_us, uint64_t *sys_us, bool *running)
+{
+    bool ok = false, found = false;
+    pthread_t th = 0;
+    threads_lock();
+    for (int i = 0; i < MAX_GUEST_THREADS && !found; i++)
+        if (g_threads[i].used && g_threads[i].tid == tid) {
+            th = g_threads[i].th;
+            found = true;
+        }
+    if (!found && tid == lxrt_ids_pid() && g_main_guest_set) {
+        th = g_main_guest;
+        found = true;
+    }
+    if (found) {
+        mach_port_t port = pthread_mach_thread_np(th);
+        thread_basic_info_data_t info;
+        mach_msg_type_number_t count = THREAD_BASIC_INFO_COUNT;
+        if (port != MACH_PORT_NULL &&
+            thread_info(port, THREAD_BASIC_INFO, (thread_info_t)&info, &count) == KERN_SUCCESS) {
+            *user_us = (uint64_t)info.user_time.seconds * 1000000u + (uint64_t)info.user_time.microseconds;
+            *sys_us = (uint64_t)info.system_time.seconds * 1000000u + (uint64_t)info.system_time.microseconds;
+            if (running)
+                *running = info.run_state == TH_STATE_RUNNING;
+            ok = true;
+        }
+    }
+    threads_unlock();
+    return ok;
 }
 
 bool lxrt_main_guest_thread(pthread_t *out)

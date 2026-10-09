@@ -25,6 +25,8 @@
 #      (tools/steamarm-native-proton/vcrun_version.py).
 #   4. SteamARM's vkd3d-proton (scripts/build-vkd3d-proton.sh) in place of the
 #      copy of Valve's, when it has been built.
+#   5. SteamARM's FEX ARM64EC module (scripts/build-fex-arm64ec.sh), Valve's
+#      commit with SteamARM's patches, when it has been built.
 #
 # Writes only <root>/tmp/armhome/.local/share/Steam/compatibilitytools.d/
 # steamarm-native-proton. Idempotent. The client lists the tool after a
@@ -130,6 +132,15 @@ if [ -f "$VKD3D_OUT/d3d12core.dll" ] && [ -f "$VKD3D_OUT/d3d12.dll" ] && [ -d "$
         cp "$VKD3D_OUT/$f" "$VKD3D_DIR/$f"
     done
     log "vkd3d-proton: SteamARM's build ($(cat "$VKD3D_OUT/.stamp" 2>/dev/null | cut -c1-12))"
+fi
+# 5. SteamARM's FEX ARM64EC module, when built: Valve's commit with patches
+#    (scripts/build-fex-arm64ec.sh).
+FEX_EC_OUT="${STEAMARM_BUILD:-$HOME/SteamARM-build}/fex-arm64ec/out"
+FEX_EC_DIR="$DEST/dist/files/lib/wine/aarch64-windows"
+if [ -f "$FEX_EC_OUT/libarm64ecfex.dll" ] && [ -f "$FEX_EC_DIR/libarm64ecfex.dll" ]; then
+    rm -f "$FEX_EC_DIR/libarm64ecfex.dll"
+    cp "$FEX_EC_OUT/libarm64ecfex.dll" "$FEX_EC_DIR/libarm64ecfex.dll"
+    log "FEX ARM64EC: SteamARM's build ($(cat "$FEX_EC_OUT/.stamp" 2>/dev/null | cut -c1-12))"
 fi
 for f in steamarm-native-proton vcrun_version.py toolmanifest.vdf compatibilitytool.vdf; do
     cp -f "tools/steamarm-native-proton/$f" "$DEST/$f"

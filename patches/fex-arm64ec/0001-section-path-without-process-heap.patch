@@ -1,0 +1,52 @@
+diff --git a/Source/Windows/Common/Module.h b/Source/Windows/Common/Module.h
+index 2076e1f6f..b699821f7 100644
+--- a/Source/Windows/Common/Module.h
++++ b/Source/Windows/Common/Module.h
+@@ -6,6 +6,19 @@
+ #include <winternl.h>
+ 
+ namespace FEX::Windows {
++// Converted into a buffer on the stack, not one from the process heap: GetSectionFilePath runs with
++// ThreadCreationMutex held (NotifyMapViewOfSection), and a thread holding the process heap's lock takes
++// that mutex when the heap grows (NtAllocateVirtualMemory -> NotifyMemoryAlloc) or writes to a page the
++// SMC tracking write-protected. RtlUnicodeStringToAnsiString(..., TRUE) deadlocked the two threads.
++inline fextl::string UnicodeToAnsiPath(const UNICODE_STRING& PathW) {
++  std::array<char, PATH_MAX * 2 + 1> Buf;
++  STRING PathA {.Length = 0, .MaximumLength = static_cast<USHORT>(Buf.size()), .Buffer = Buf.data()};
++  if (RtlUnicodeStringToAnsiString(&PathA, &PathW, FALSE)) {
++    return {};
++  }
++  return fextl::string(PathA.Buffer, PathA.Length);
++}
++
+ inline fextl::string GetExecutableFilePath() {
+   std::array<WCHAR, PATH_MAX> Buf;
+   UNICODE_STRING PathW {.Length = 0, .MaximumLength = Buf.size() * sizeof(WCHAR), .Buffer = Buf.data()};
+@@ -14,12 +27,7 @@ inline fextl::string GetExecutableFilePath() {
+     return {};
+   }
+ 
+-  STRING PathA;
+-  RtlUnicodeStringToAnsiString(&PathA, &PathW, TRUE);
+-  fextl::string Path(PathA.Buffer);
+-  RtlFreeAnsiString(&PathA);
+-
+-  return Path;
++  return UnicodeToAnsiPath(PathW);
+ }
+ 
+ inline fextl::string GetSectionFilePath(uint64_t Address) {
+@@ -32,12 +40,7 @@ inline fextl::string GetSectionFilePath(uint64_t Address) {
+     return {};
+   }
+ 
+-  STRING PathA;
+-  RtlUnicodeStringToAnsiString(&PathA, &Buffer.Info.SectionFileName, TRUE);
+-  fextl::string Path(PathA.Buffer);
+-  RtlFreeAnsiString(&PathA);
+-
+-  return Path;
++  return UnicodeToAnsiPath(Buffer.Info.SectionFileName);
+ }
+ 
+ inline std::string_view BaseName(std::string_view Path) {

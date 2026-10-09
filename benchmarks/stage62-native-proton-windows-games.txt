@@ -505,3 +505,59 @@ HKLM\HARDWARE\DESCRIPTION\System\CentralProcessor\N "CP xxxx".
        block, then brk #0xCAFE, "Suspending: RIP ... SP ..."), which is where
        the trace ends. The protection also reads /proc/self/maps through Z:
        and opens every mapped library and DLL to compare them.
+    l. A hang at the intro (one run in four): every thread waiting on two
+       critical sections, each held by a thread waiting on the other. FEX's
+       thread lock (ThreadCreationMutex) was held by the main thread loading
+       a DLL, which converted the image's file name with
+       RtlUnicodeStringToAnsiString(..., TRUE) -- an allocation from the
+       process heap; the thread holding the heap's lock was growing the heap
+       (NtAllocateVirtualMemory -> FEX's NotifyMemoryAlloc) and wanted FEX's
+       lock. SteamARM now builds FEX's ARM64EC module itself at the commit of
+       Valve's Proton ARM64 (FEX-2609-137-g0df84d3,
+       scripts/build-fex-arm64ec.sh) with patches/fex-arm64ec/0001: the
+       name is converted on the stack.
+    m. /proc/self/task/<tid>/stat did not exist: the runtime generated comm
+       and status only. Wine's GetThreadTimes reads it for every thread but
+       the caller, so every other thread had used no CPU, ever. It is now
+       generated with the thread's own CPU times (thread_info of its Mach
+       thread), for the thread asked about only: rewriting every thread's
+       files on each lookup took a sixth of the protection thread's time,
+       which asks several thousand times a second (tests/elf/task_stat.c).
+       The process-wide fields are refreshed at most once a second: walking
+       every VM region per read slowed the game's start fivefold.
+    n. The ~125 s death, traced with FEX's log extended (the bytes of every
+       guest exception, its RSP, a ring of the last contexts per thread):
+       it is time, not frames (at 20 fps: 2029 frames, 123 s). The game's
+       code is encrypted on disk and decrypted in place; its protection runs
+       a virtual machine whose instructions are invalid opcodes (16, d5, 06,
+       27, 1f, 0e, 1e, 3f, 37, 60, ea, d4, 9a, 07, 17 -- about 5,000 traps a
+       second, ~250 us each here against a few us on Windows), dispatched by
+       a vectored handler. About two minutes in, two of its threads leave the
+       dispatcher (a trap at 0x148BF770B) for code that is still encrypted;
+       the handler declines it, Wine's unwinder takes a garbage PC to
+       RtlIsEcCode, which indexes the EC bitmap without a bound, faults, and
+       recurses to a stack overflow (1,672 nested faults); UE's crash handler
+       then suspends every thread for a minidump and the process dies with
+       a corrupted stack. The thread stacks do not leak (RSP stable over
+       530,000 traps), the clocks agree (rdtsc 1536 MHz = CPUID 15h =
+       ~MHz), and the window between decoding and write-protecting a code
+       page in FEX (FEXCore CompileBlock) is not hit (checked: 0 changed
+       blocks). Still open. The deadline is about 140 s after the process
+       starts, whatever the trap speed: a protection thread (entry
+       0x148B2B894) waits 139.94 s on an event of its own that nothing
+       signals, wakes on the timeout, and within a second or two the VM
+       threads leave the dispatcher for still-encrypted code. Either the
+       success path needs another protection thread to signal that event
+       first, or the thread re-keys the VM when it wakes -- microseconds on
+       Windows, seconds of traps here, a window the other VM threads run
+       into. FEX's experimental build that hides its SMC write protection
+       from NtQueryVirtualMemory (benchmarks/stage62 h, ~/SteamARM-build/
+       FEX-arm64ec) dies earlier of a fault loop inside FEX.
+    o. Every measurement above ran with PROTON_LOG (the bench launcher's
+       Steam had it, and launches inherit it): FEX then logs four lines per
+       guest exception through __wine_dbg_output, a third of a trap thread's
+       time. Without it -- as the launcher runs Steam -- the game draws ~680
+       frames and stops presenting at ~50 s, when it starts EpicWebHelper.exe
+       (CEF) for its interface; the protection still derails at ~133 s.
+       fsync (futex_waitv) and the emulated NTSYNC stop at the same frame;
+       NTSYNC also hangs tests/win sync_ntsync about one run in three.

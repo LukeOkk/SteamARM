@@ -150,6 +150,8 @@ step_frameroot() {
     if [ -d "$STATE/arm64root/tmp/armhome/.local/share/Steam/compatibilitytools.d/steamarm-native-proton/dist" ]; then
         log "vkd3d-proton with SteamARM's patches (scripts/build-vkd3d-proton.sh)"
         scripts/build-vkd3d-proton.sh || log "WARNING: vkd3d-proton was not built; the tool keeps Valve's"
+        log "FEX ARM64EC with SteamARM's patches (scripts/build-fex-arm64ec.sh)"
+        scripts/build-fex-arm64ec.sh || log "WARNING: FEX ARM64EC was not built; the tool keeps Valve's"
         log "native Proton tool (scripts/install-native-proton.sh)"
         scripts/install-native-proton.sh --root arm64root || log "native Proton tool left as it was (setup goes on)"
     fi

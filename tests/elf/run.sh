@@ -1299,6 +1299,14 @@ if [ -f "$STAGE/usr/lib64/libc.a" ] && [ -n "$GCCDIR" ] &&
                 ok "NETIF: $(grep '^getifaddrs' <<<"$out" | sed 's/^getifaddrs: //')"
             else bad "NETIF" "rc=$rc $(grep FAIL <<<"$out" | head -3 | tr '\n' ' ')"; fi
         else bad "build netif" "$err"; fi
+        # TASK_STAT: another thread's CPU time in /proc/self/task/<tid>/stat,
+        # which Wine's GetThreadTimes reads (zero for every thread without it).
+        if err=$(glibc_cc -O2 -pthread -o "$AUX_ROOT/tmp/task_stat" tests/elf/task_stat.c); then
+            out=$(LXRT_ROOT="$AUX_ROOT" deadline 30 ./build/lxrun /tmp/task_stat 2>&1); rc=$?
+            if [ "$rc" -eq 0 ] && grep -q '^PASS' <<<"$out"; then
+                ok "TASK_STAT: $(grep '^thread' <<<"$out")"
+            else bad "TASK_STAT" "rc=$rc $(grep -E 'FAIL|thread' <<<"$out" | head -3 | tr '\n' ' ')"; fi
+        else bad "build task_stat" "$err"; fi
         # A 4 KiB library whose code writes its own data from the host page
         # that holds both (the W/X livelock up to stage 22), dlopened at
         # LXRT_GUEST_PAGE=4096: plain stores, LL/SC loops as clang emits them

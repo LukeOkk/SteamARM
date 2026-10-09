@@ -477,6 +477,8 @@ void lxrt_thread_exit(int code) __attribute__((noreturn));
 // specific guest thread rather than at the process.
 bool lxrt_thread_lookup(int tid, pthread_t *out);
 int  lxrt_thread_list(int *tids, int max);
+bool lxrt_thread_times(int tid, uint64_t *user_us, uint64_t *sys_us, bool *running);
+size_t lxrt_proc_gen_task_stat(int tid, char *b, size_t cap);
 bool lxrt_main_guest_thread(pthread_t *out);
 // A process-directed signal that no guest thread accepted when it was posted
 // lands on the host main thread (XNU binds it to a thread then); signal.c
