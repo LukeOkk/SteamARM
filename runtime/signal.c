@@ -206,6 +206,19 @@ static bool default_ignores(int lsig)
 // Per-thread alternate signal stack, as the guest declared it.
 struct guest_altstack { uint64_t sp; uint64_t flags; uint64_t size; };
 static _Thread_local struct guest_altstack g_altstack;
+// The guest frame of the delivery in progress on this thread, 0 when none.
+// host_handler runs the guest handler synchronously, from the host alt stack
+// and with asynchronous signals deliverable; one that arrives in between --
+// Wine suspends threads with SIGUSR1, and Minecraft Dungeons II's integrity
+// scanner suspends every thread of the game over and over -- interrupts host
+// code, whose sp says nothing about the guest's. The nested delivery took
+// the guest as "not on its alt stack" and built its frame at the top of the
+// alt stack, over the outer frame: the outer handler ran with the inner
+// frame's context and its sigreturn resumed the thread at a host pc on the
+// host stack (pc 0x19621454c, __pthread_sigmask), and the runtime's own
+// handler faulted on the ruined context (MEASURED, tests/win
+// suspend_storm; benchmarks/stage62, 15). A nested frame now goes below it.
+static _Thread_local uint64_t g_live_frame;
 // W^X window state at each pending signal delivery, innermost last. Pushed
 // when a guest handler is entered, popped by its sigreturn.
 
@@ -1272,6 +1285,14 @@ static void host_handler(int dsig, siginfo_t *dinfo, void *uap)
             frame_addr = (lo - 256 - sizeof(struct rt_sigframe)) & ~15ull;
         }
     }
+    if (g_live_frame && use_alt && g_live_frame >= g_altstack.sp &&
+        g_live_frame < g_altstack.sp + g_altstack.size &&
+        frame_addr + sizeof(struct rt_sigframe) + 256 > g_live_frame) {
+        frame_addr = (g_live_frame - 512 - sizeof(struct rt_sigframe)) & ~15ull;
+        on_alt_now = true;
+    }
+    uint64_t outer_live_frame = g_live_frame;
+    g_live_frame = frame_addr;
     struct rt_sigframe *f = (struct rt_sigframe *)frame_addr;
     memset(f, 0, sizeof(*f));
 
@@ -1394,8 +1415,20 @@ static void host_handler(int dsig, siginfo_t *dinfo, void *uap)
         // purpose for unaligned atomics, hundreds per Steam start.
         if ((lsig == 4 || lsig == 7 || lsig == 8 || lsig == 11) && dinfo &&
             dinfo->si_code > 0 && !(lsig == 7 && dinfo->si_code == BUS_ADRALN)) {
-            static _Atomic int noted;
-            if (atomic_fetch_add(&noted, 1) < 8) {
+            // Up to 32 distinct pcs: FEX ARM64EC raises the same deliberate
+            // trap thousands of times, and a count of the first eight hid
+            // the one fault that mattered (Minecraft Dungeons II's video).
+            // Kept per signal, so the write faults of the W^X split do not use
+            // up the room before an illegal instruction arrives.
+            static _Atomic uint64_t noted_pc[4][16];
+            static _Atomic int noted[4];
+            int sk = lsig == 4 ? 0 : lsig == 7 ? 1 : lsig == 8 ? 2 : 3;
+            bool seen = false;
+            for (int k = 0; k < 16 && !seen; k++)
+                seen = atomic_load(&noted_pc[sk][k]) == saved_pc;
+            int slot = seen ? 16 : atomic_fetch_add(&noted[sk], 1);
+            if (slot < 16) {
+                atomic_store(&noted_pc[sk][slot], saved_pc);
                 char where[300] = "?";
                 mach_vm_address_t ra = saved_pc;
                 mach_vm_size_t rs = 0;
@@ -1410,8 +1443,12 @@ static void host_handler(int dsig, siginfo_t *dinfo, void *uap)
                     snprintf(where, sizeof where, "%s+0x%llx", b ? b + 1 : fname,
                              (unsigned long long)(saved_pc - ra + ri.offset));
                 }
-                lxrt_fault_note("guest signal %d (code %d) at pc 0x%llx [%s], address 0x%llx, lr 0x%llx",
-                                lsig, dinfo->si_code, (unsigned long long)saved_pc, where,
+                uint32_t insn = 0;
+                mach_vm_size_t got = 0;
+                if (mach_vm_read_overwrite(mach_task_self(), saved_pc, 4, (mach_vm_address_t)(uintptr_t)&insn, &got) != KERN_SUCCESS)
+                    insn = 0xffffffffu;
+                lxrt_fault_note("guest signal %d (code %d) at pc 0x%llx [%s] insn %08x, address 0x%llx, lr 0x%llx",
+                                lsig, dinfo->si_code, (unsigned long long)saved_pc, where, insn,
                                 (unsigned long long)(uintptr_t)dinfo->si_addr,
                                 (unsigned long long)saved_regs[30]);
             }
@@ -1673,6 +1710,7 @@ static void host_handler(int dsig, siginfo_t *dinfo, void *uap)
         ns->__fpsr = fpr->fpsr;
         ns->__fpcr = fpr->fpcr;
     }
+    g_live_frame = outer_live_frame;
     return;
 
 

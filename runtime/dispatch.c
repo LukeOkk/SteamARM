@@ -995,6 +995,7 @@ static long do_munmap(uint64_t addr, uint64_t len)
             return lr;
     }
     lxrt_pe_forget(addr, len);      // code windows of a PE image unmapped here
+    lxrt_subpage_tail_clear(addr, len);
     long r = do_munmap_inner(addr, len);
     if (r == 0)
         lxrt_arena_unmapped(addr, len);    // holes in the guest's arena get its reservation back
@@ -1172,7 +1173,32 @@ static long do_mmap(uint64_t addr, uint64_t len, long prot, long lflags,
     // mapping replaces the reservation.
     if (addr && !(lflags & LINUX_MAP_FIXED) && lxrt_arena_free(addr, len))
         lflags = (lflags & ~(long)LINUX_MAP_FIXED_NOREPLACE) | LINUX_MAP_FIXED;
-    long r = do_mmap_inner(addr, len, prot, lflags, fd, off);
+    // A read-execute view of a file that another, writable view fills in
+    // later: a JIT's dual mapping. GStreamer's ORC maps its code file twice,
+    // writes through PROT_READ|PROT_WRITE and runs from PROT_READ|PROT_EXEC
+    // (MAP_SHARED both). The executable view used to become a private copy
+    // (Darwin refuses mmap with PROT_EXEC on a shared file mapping, and the
+    // rewriter wants a writable copy), which kept the empty file it saw at
+    // mmap time: Minecraft Dungeons II called its intro video's first ORC
+    // function and ran zeros (SIGILL at a page start, MEASURED;
+    // benchmarks/stage62, 15). Darwin does let mprotect add execute to a
+    // shared file mapping: the view is mapped shared and readable, then made
+    // executable, and stays the file's. Not rewritten -- nothing is in it
+    // yet, and a JIT emits no syscalls.
+    long r;
+    bool dual = (prot & PROT_EXEC) && !(prot & PROT_WRITE) && (lflags & LINUX_MAP_SHARED) &&
+                !(lflags & LINUX_MAP_ANONYMOUS) && fd >= 0 && len % LXRT_HOST_PAGE == 0 &&
+                addr % LXRT_HOST_PAGE == 0 && !getenv("LXRT_NO_SHARED_EXEC");
+    if (dual) {
+        r = do_mmap_inner(addr, len, prot & ~PROT_EXEC, lflags, fd, off);
+        if (r >= 0 && (r % LXRT_HOST_PAGE != 0 ||
+                       mprotect((void *)(uintptr_t)r, (size_t)len, (int)(prot & (PROT_READ | PROT_EXEC))) != 0)) {
+            do_munmap_inner((uint64_t)r, len);
+            r = do_mmap_inner(addr, len, prot, lflags, fd, off);    // as before: a private copy
+        }
+    } else {
+        r = do_mmap_inner(addr, len, prot, lflags, fd, off);
+    }
     if (r >= 0)
         lxrt_arena_mapped((uint64_t)r, len);
     else if (addr >= 0x140000000ull && addr < 0x160000000ull && getenv("LXRT_ARENA_DEBUG"))
@@ -1217,6 +1243,7 @@ static long do_mmap_inner(uint64_t addr, uint64_t len, long prot, long lflags,
 
     // Whatever lands on a range ends its copy-on-write bookkeeping (privmap.c).
     if (flags & MAP_FIXED) {
+        lxrt_subpage_tail_clear(addr, len);
         lxrt_privmap_forget(addr, len);
         lxrt_shmirror_forget(addr, len);
         lxrt_wx_forget(addr, len);     // a new mapping is not the old RWX range
@@ -1466,6 +1493,7 @@ static long do_mmap_inner(uint64_t addr, uint64_t len, long prot, long lflags,
                     (unsigned long long)tend, (int)tail_free, (int)tracked);
         if (tail_free) {
             partial_data = false;
+            lxrt_subpage_note_tail(tail, tend);     // nobody's, whatever adopts this page later
             // Read-only shared: if the host page is later shared with another
             // guest mapping, shmirror.c keeps the copy current.
             shmirror_candidate = (flags & MAP_SHARED) && !(prot & PROT_WRITE);

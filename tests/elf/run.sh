@@ -1275,6 +1275,30 @@ if [ -f "$STAGE/usr/lib64/libc.a" ] && [ -n "$GCCDIR" ] &&
                 ok "FORK_LAZY_BIND: 50 fork children bind setsid lazily under LXRT_NO_X18 with a preload ($FLB_WHICH)"
             else bad "FORK_LAZY_BIND" "rc=$rc $(grep -E 'MAL|undefined symbol' <<<"$out" | head -2)"; fi
         else bad "build fork_lazy_bind" "$err"; fi
+        # DUAL_MAP_JIT: code written through a writable shared view of a file
+        # runs from its read-execute shared view (GStreamer's ORC).
+        if err=$(glibc_cc -O2 -o "$AUX_ROOT/tmp/dual_map_jit" tests/elf/dual_map_jit.c); then
+            out=$(LXRT_ROOT="$AUX_ROOT" deadline 30 ./build/lxrun /tmp/dual_map_jit 2>&1); rc=$?
+            if [ "$rc" -eq 0 ] && grep -q '^PASS' <<<"$out"; then
+                ok "DUAL_MAP_JIT: code written through a shared RW view runs from the shared RX view (4 rounds)"
+            else bad "DUAL_MAP_JIT" "rc=$rc $(grep -E 'round|FAIL|SIG' <<<"$out" | head -3 | tr '\n' ' ')"; fi
+        else bad "build dual_map_jit" "$err"; fi
+        # SHARED_VIEW_CYCLE: a section view shorter than a host page, released
+        # by a PROT_NONE mapping over its length and mapped again, stays shared.
+        if err=$(glibc_cc -O2 -o "$AUX_ROOT/tmp/shared_view_cycle" tests/elf/shared_view_cycle.c); then
+            out=$(LXRT_ROOT="$AUX_ROOT" LXRT_GUEST_PAGE=4096 deadline 30 ./build/lxrun /tmp/shared_view_cycle 2>&1); rc=$?
+            if [ "$rc" -eq 0 ] && grep -q '^PASS' <<<"$out"; then
+                ok "SHARED_VIEW_CYCLE: 50 views of an 8 KiB memfd at one address, each released with PROT_NONE, all shared"
+            else bad "SHARED_VIEW_CYCLE" "rc=$rc $(grep -E 'view|FAIL' <<<"$out" | head -3 | tr '\n' ' ')"; fi
+        else bad "build shared_view_cycle" "$err"; fi
+        # NETIF: getifaddrs(), if_nameindex() and the SIOCGIF* ioctls through
+        # the runtime's NETLINK_ROUTE answers (Wine's nsiproxy hung without them).
+        if err=$(glibc_cc -O2 -o "$AUX_ROOT/tmp/netif" tests/elf/netif.c); then
+            out=$(LXRT_ROOT="$AUX_ROOT" deadline 30 ./build/lxrun /tmp/netif 2>&1); rc=$?
+            if [ "$rc" -eq 0 ] && grep -q '^PASS' <<<"$out"; then
+                ok "NETIF: $(grep '^getifaddrs' <<<"$out" | sed 's/^getifaddrs: //')"
+            else bad "NETIF" "rc=$rc $(grep FAIL <<<"$out" | head -3 | tr '\n' ' ')"; fi
+        else bad "build netif" "$err"; fi
         # A 4 KiB library whose code writes its own data from the host page
         # that holds both (the W/X livelock up to stage 22), dlopened at
         # LXRT_GUEST_PAGE=4096: plain stores, LL/SC loops as clang emits them

@@ -72,6 +72,21 @@ export PROTON_USE_XALIA="${PROTON_USE_XALIA:-0}"
 # to start (FINAL FANTASY VII REMAKE: "Feature level 0xc000 is not
 # supported"). The tiers themselves are still reported as they are.
 export VKD3D_FEATURE_LEVEL="${VKD3D_FEATURE_LEVEL:-12_0}"
+# wined3d on Vulkan, not OpenGL. Games reach wined3d even under DXVK and
+# vkd3d-proton: DXCore's adapter list comes from it. Its OpenGL backend goes
+# through GLX on XQuartz, and there Minecraft Dungeons II's main thread
+# (dxcore -> wined3d -> opengl32.so) and vkd3d-proton's present thread
+# (winevulkan -> win32u -> libX11) each waited on a lock the other held: one
+# frame, then nothing (MEASURED; benchmarks/stage62, 15). On Vulkan it presents
+# at once. WINE_D3D_CONFIG in the game's launch options overrides it.
+export WINE_D3D_CONFIG="${WINE_D3D_CONFIG:-renderer=vulkan}"
+# FEX's statistics (ProfileStats in Proton ARM64's fex-emu/Config.json) feed
+# the Steam Frame's performance overlay, which is not here. They live in a
+# shared file FEX grows by mapping it again at the same address as threads
+# start; that is not atomic under the runtime, and Minecraft Dungeons II's
+# exception handling (FEX's ResetToConsistentState updates the counters) read
+# the stats page in between and crashed (MEASURED; benchmarks/stage62, 15).
+export FEX_PROFILESTATS="${FEX_PROFILESTATS:-0}"
 # A fullscreen SDL window that starts without the focus minimizes itself
 # (benchmarks/stage51); the launcher's settings for the game only, as the
 # x86 tool applies them (tools/steamarm-fex-proton).

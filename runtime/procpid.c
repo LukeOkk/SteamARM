@@ -276,6 +276,23 @@ const char *lxrt_procnet_translate(const char *sub, const char *dir)
     const size_t cap = 4 << 20;
     if (!buf)
         buf = malloc(cap);
+    // route, ipv6_route, arp, dev: the host's routes and interfaces (netif.c).
+    static const char *if_names[] = { "route", "ipv6_route", "arp", "dev" };
+    for (int w = 0; w < 4; w++) {
+        if (*file && strcmp(file, if_names[w]) != 0)
+            continue;
+        char p[1100];
+        snprintf(p, sizeof p, "%s/%s", nd, if_names[w]);
+        char *b = malloc(256 << 10);
+        long n = b ? lxrt_netif_procnet(if_names[w], b, 256 << 10) : -1;
+        if (n >= 0)
+            write_whole(p, b, (size_t)n);
+        free(b);
+        if (*file) {
+            snprintf(out, sizeof out, "%s", p);
+            return out;
+        }
+    }
     for (int w = 0; w < 4; w++) {
         if (*file && strcmp(file, net_names[w]) != 0)
             continue;

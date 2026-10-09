@@ -269,16 +269,105 @@ static void spoof_props(VkPhysicalDevice pd, VkBase *p)
         }
 }
 
+// bufferImageGranularity no finer than 16 KiB, the alignment KosmicKrisp
+// gives optimal images (Apple GPU pages). vkd3d-proton reports D3D12's tight
+// alignment (tier 1) whenever the granularity is 4 KiB or less: then
+// GetResourceAllocationInfo answers a texture with the driver's own 16 KiB,
+// but CreatePlacedResource still demands 64 KiB unless the driver has
+// VK_MESA_image_alignment_control, which neither KosmicKrisp nor MoltenVK
+// has. Unreal Engine 5.6 placed textures where it had been told it could,
+// vkd3d-proton refused ("Heap offset 0xfa8000 not a multiple of resource
+// alignment 0x10000", E_INVALIDARG) and Minecraft Dungeons II stopped on a
+// fatal D3D12 error (benchmarks/stage62, 15). LXRT_VK_GRANULARITY=<bytes>
+// picks another floor; 0 reports the driver's value.
+#define PROPS2_BUFFER_IMAGE_GRANULARITY 360     // offsetof(VkPhysicalDeviceProperties2, properties.limits.bufferImageGranularity)
+static void granularity_floor(VkPhysicalDeviceProperties2Head *p)
+{
+    static long floor_ = -1;
+    if (floor_ < 0) {
+        const char *e = getenv("LXRT_VK_GRANULARITY");
+        floor_ = 16384;
+        if (e && *e) {                          // decimal only: no libc here
+            floor_ = 0;
+            for (; *e >= '0' && *e <= '9'; e++)
+                floor_ = floor_ * 10 + (*e - '0');
+        }
+    }
+    uint64_t *g = (uint64_t *)((char *)p + PROPS2_BUFFER_IMAGE_GRANULARITY);
+    if (floor_ > 0 && *g < (uint64_t)floor_)
+        *g = (uint64_t)floor_;
+}
+
 void lxrt_inner_vkGetPhysicalDeviceProperties2(VkPhysicalDevice pd, VkPhysicalDeviceProperties2Head *p)
 {
     lxrt_mvk_vkGetPhysicalDeviceProperties2(pd, p);
+    granularity_floor(p);
     spoof_props(pd, (VkBase *)p->pNext);
 }
 
 void lxrt_inner_vkGetPhysicalDeviceProperties2KHR(VkPhysicalDevice pd, VkPhysicalDeviceProperties2Head *p)
 {
     lxrt_mvk_vkGetPhysicalDeviceProperties2KHR(pd, p);
+    granularity_floor(p);
     spoof_props(pd, (VkBase *)p->pNext);
+}
+
+// Image memory alignments as D3D12 places textures: 64 KiB for an image of
+// 64 KiB or more, 4 KiB below that. KosmicKrisp asks 16 KiB of an optimal
+// image (128 bytes of some), and vkd3d-proton hands that to a D3D12 app that
+// uses tight alignment (GetResourceAllocationInfo with
+// D3D12_RESOURCE_FLAG_USE_TIGHT_ALIGNMENT) while CreatePlacedResource still
+// wants 64 KiB -- 4 KiB for a small texture -- unless the driver has
+// VK_MESA_image_alignment_control. Unreal Engine 5.6 placed its textures at
+// the 16 KiB multiples it was given and vkd3d-proton refused them (E_INVALIDARG,
+// a fatal D3D12 error in Minecraft Dungeons II; benchmarks/stage62, 15). A
+// stricter alignment is always a valid answer. LXRT_VK_IMAGE_ALIGN=0 turns
+// this off.
+typedef struct { uint64_t size, alignment; uint32_t memoryTypeBits; } VkMemReq;
+typedef struct { int32_t sType; void *pNext; VkMemReq memoryRequirements; } VkMemReq2;
+void lxrt_mvk_vkGetImageMemoryRequirements(void *, uint64_t, VkMemReq *);
+void lxrt_mvk_vkGetImageMemoryRequirements2(void *, const void *, VkMemReq2 *);
+void lxrt_mvk_vkGetImageMemoryRequirements2KHR(void *, const void *, VkMemReq2 *);
+void lxrt_mvk_vkGetDeviceImageMemoryRequirements(void *, const void *, VkMemReq2 *);
+void lxrt_mvk_vkGetDeviceImageMemoryRequirementsKHR(void *, const void *, VkMemReq2 *);
+static void d3d12_alignment(VkMemReq *r)
+{
+    static int on = -1;
+    if (on < 0) {
+        const char *e = getenv("LXRT_VK_IMAGE_ALIGN");
+        on = !(e && e[0] == '0' && !e[1]);
+    }
+    if (!on)
+        return;
+    uint64_t want = r->size >= 65536 ? 65536 : 4096;
+    if (r->alignment < want)
+        r->alignment = want;
+    r->size = (r->size + r->alignment - 1) & ~(r->alignment - 1);
+}
+void lxrt_inner_vkGetImageMemoryRequirements(void *dev, uint64_t img, VkMemReq *r)
+{
+    lxrt_mvk_vkGetImageMemoryRequirements(dev, img, r);
+    d3d12_alignment(r);
+}
+void lxrt_inner_vkGetImageMemoryRequirements2(void *dev, const void *info, VkMemReq2 *r)
+{
+    lxrt_mvk_vkGetImageMemoryRequirements2(dev, info, r);
+    d3d12_alignment(&r->memoryRequirements);
+}
+void lxrt_inner_vkGetImageMemoryRequirements2KHR(void *dev, const void *info, VkMemReq2 *r)
+{
+    lxrt_mvk_vkGetImageMemoryRequirements2KHR(dev, info, r);
+    d3d12_alignment(&r->memoryRequirements);
+}
+void lxrt_inner_vkGetDeviceImageMemoryRequirements(void *dev, const void *info, VkMemReq2 *r)
+{
+    lxrt_mvk_vkGetDeviceImageMemoryRequirements(dev, info, r);
+    d3d12_alignment(&r->memoryRequirements);
+}
+void lxrt_inner_vkGetDeviceImageMemoryRequirementsKHR(void *dev, const void *info, VkMemReq2 *r)
+{
+    lxrt_mvk_vkGetDeviceImageMemoryRequirementsKHR(dev, info, r);
+    d3d12_alignment(&r->memoryRequirements);
 }
 
 // Transform-feedback commands: nothing to do without stream output, except

@@ -24,6 +24,9 @@
 // Off (the default) nothing here runs: FEX guests keep their guest base and
 // their ENOMEM probes (dispatch.c).
 #include "lxrt.h"
+#include <dlfcn.h>
+#include <mach-o/loader.h>
+#include <setjmp.h>
 #include <errno.h>
 #include <pthread.h>
 #include <signal.h>
@@ -388,6 +391,23 @@ static bool emulate(ucontext_t *uc, uint64_t fa, uint32_t insn, const char **why
     return false;
 }
 
+// libsystem_platform's text, where Darwin's signal trampoline lives.
+static uint64_t g_plat_lo, g_plat_hi;
+__attribute__((constructor)) static void find_platform_text(void)
+{
+    Dl_info di;
+    if (!dladdr((void *)(uintptr_t)longjmp, &di) || !di.dli_fbase || !di.dli_fname ||
+        !strstr(di.dli_fname, "libsystem_platform"))
+        return;
+    const struct mach_header_64 *mh = di.dli_fbase;
+    const struct load_command *lc = (const void *)(mh + 1);
+    for (uint32_t k = 0; k < mh->ncmds; k++, lc = (const void *)((const char *)lc + lc->cmdsize))
+        if (lc->cmd == LC_SEGMENT_64 && !strcmp(((const struct segment_command_64 *)lc)->segname, "__TEXT")) {
+            g_plat_lo = (uint64_t)(uintptr_t)mh;
+            g_plat_hi = g_plat_lo + ((const struct segment_command_64 *)lc)->vmsize;
+        }
+}
+
 bool lxrt_lowpage_fault(const siginfo_t *si, void *uap)
 {
     if (!lxrt_lowpage_on() || !si || !uap)
@@ -403,6 +423,23 @@ bool lxrt_lowpage_fault(const siginfo_t *si, void *uap)
     uint32_t insn;
     memcpy(&insn, (const void *)(uintptr_t)pc, 4);
     const char *why = "";
+    // The fault arrived with the thread already redirected into Darwin's
+    // signal trampoline: an asynchronous signal (Wine suspends threads with
+    // SIGUSR1, and Minecraft Dungeons II's integrity scanner suspends every
+    // thread of the game over and over) was set up first, and the context
+    // handed here is that frame's, not the faulting instruction's. Nothing
+    // to emulate at the trampoline: let it run; its sigreturn goes back to
+    // the access, which faults again with its own pc and is carried out
+    // then. Passed to the guest instead, the game died with a fault in no
+    // code of its own (MEASURED, once in a 7-minute run; benchmarks/stage62, 15).
+    {
+        // _sigtramp is not exported: the image is the test. Darwin's
+        // libsystem_platform holds the trampoline, and no guest load ever
+        // runs from it (range found at load time, below: dladdr is no call
+        // for a signal handler).
+        if (pc >= g_plat_lo && pc < g_plat_hi)
+            return true;
+    }
     if (!emulate(uc, fa, insn, &why)) {
         static _Atomic int said;
         if (atomic_fetch_add(&said, 1) < 8)

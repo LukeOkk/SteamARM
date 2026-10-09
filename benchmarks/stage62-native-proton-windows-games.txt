@@ -351,3 +351,112 @@ HKLM\HARDWARE\DESCRIPTION\System\CentralProcessor\N "CP xxxx".
     its swapchain in 35 s. tests/elf/fork_lazy_bind.c checks it against the
     Steam Frame root's ld.so when that root is present (old runtime 0/20
     children, new 20/20).
+
+15. Minecraft Dungeons II: from "exit code 300" to the menu
+    -------------------------------------------------------
+    The game closed itself 74 s after start with exit code 300, before any
+    GDK or Direct3D DLL. A panel of four subagents concluded "the protection's
+    watchdog fires because FEX ARM64EC runs its self-modifying code 20-50x too
+    slowly", and an AoE IV-style FEX build (FEX 7d3090f with that project's
+    patches 0004-0016, ~/SteamARM-build/FEX-arm64ec) changed nothing. Sampling
+    the process showed the opposite: 15 s of CPU, then 60 s with every thread
+    waiting. Five runtime problems, found one after the other with
+    WINEDEBUG=+server and LXRT_TRACE_MATCH:
+    a. NETLINK_ROUTE. The protection fingerprints the machine (MachineGuid,
+       DigitalProductId, the adapter list). Its GetAdaptersInfo-style NSI
+       enumeration never returned: glibc's if_nameindex() needs a
+       NETLINK_ROUTE socket, the runtime answered EAFNOSUPPORT, and Wine's
+       nsiproxy.sys (update_if_table) dereferences the NULL it gets -- a
+       SIGSEGV at address 0 inside winedevice, while holding its interface
+       list lock. Every later enumeration in the prefix waited on that lock
+       for good. The runtime now answers rtnetlink dumps (RTM_GETLINK,
+       RTM_GETADDR) from Darwin's getifaddrs, the SIOCGIF* ioctls, and
+       /proc/net/{route,ipv6_route,arp,dev} from the routing table
+       (runtime/netif.c; tests/elf/netif.c). The next NSI request, the IPv4
+       forward table, needed /proc/net/route: without it the answer was
+       STATUS_NOT_SUPPORTED and the game exited on the spot.
+    b. Shared section views. The main thread then maps an 8 KiB anonymous
+       section, writes through the view and maps it again until the write
+       shows -- 1.4 million times in 190 s. Wine releases a view with a
+       PROT_NONE mapping over exactly its length; the runtime adopted the
+       rest of the 16 KiB host page (the shared mapping's rounded-up tail)
+       as live memory, and from then on every view at that address was a
+       PRIVATE copy ("MAP_SHARED ... mapped as a PRIVATE copy"). The tail is
+       now noted as free (subpage.c g_tails; tests/elf/shared_view_cycle.c,
+       which the old runtime fails at the fourth view).
+    c. PE discovery. Every executable flip of anonymous memory asked
+       pefile.c's discover() whether the page lies in a PE image: a walk of
+       up to 1024 mach_vm_reads with a 256-entry negative cache. FEX
+       ARM64EC's code buffer is ordinary RWX memory to Wine, so that is
+       every block FEX compiles, with thousands of 64 KiB chunks: nearly
+       every flip missed, 2 ms each under the W^X lock. Now a 16384-entry
+       hash set, and the walk stops at a chunk already known to be empty.
+    d. ORC's dual mapping. Past the protection, the intro video starts
+       GStreamer; its ORC JIT maps its code file twice (read-write and
+       read-execute, MAP_SHARED) and runs from the second. The runtime made
+       the executable view a private snapshot of the still-empty file, and
+       the first ORC function was zeros (SIGILL, insn 00000000 at a page
+       start, lr in GStreamer). Darwin refuses mmap with PROT_EXEC on a
+       shared file mapping (EPERM) but lets mprotect add execute to one: the
+       view is mapped shared and readable, then made executable
+       (dispatch.c do_mmap; tests/elf/dual_map_jit.c).
+    e. wined3d's OpenGL backend. After its first frame the game stopped
+       presenting: the main thread (dxcore -> wined3d -> opengl32.so, DXCore
+       asks wined3d for the adapter list even under vkd3d-proton) and
+       vkd3d-proton's present thread (winevulkan -> win32u -> libX11) each
+       waited on a lock the other held. The native tool sets
+       WINE_D3D_CONFIG=renderer=vulkan by default: no GLX at all.
+    Also: a low-page fault (KUSER_SHARED_DATA, emulated) that arrived with
+    the thread already redirected into Darwin's signal trampoline -- the
+    game's integrity scanner suspends every thread over and over, and Wine
+    suspends with SIGUSR1 -- went to the guest, and the game died once in a
+    7-minute run. Such a fault is now let through: the trampoline runs, and
+    its sigreturn retries the access with its own pc (lowpage.c). The
+    runtime's fault report keeps 16 distinct pcs per signal, with the
+    instruction word (signal.c): the first eight were all FEX's own trap.
+    The community xgameruntime.dll/XCurl.dll stand-ins are not needed (the
+    game's MicrosoftGame.config does not require Xbox Live; 1.1.2.0 runs on
+    stock Proton on the Deck) and were taken out again. No Microsoft sign-in.
+    f. Nested signal frames. Past the menu the game still died after two to
+       five minutes, each time differently (D3D12 E_INVALIDARG, an x64 return
+       into ASCII bytes -- rip 0x7473694C6E6967, "ginList" --, a stack
+       overflow, a silent exit): memory corruption. Its integrity scanner
+       suspends, reads and resumes every thread of the game, over and over;
+       tests/win/suspend_storm.c does the same to computing threads, and
+       under FEX ARM64EC the process died within seconds (arm64: 467,757
+       suspensions, no fault). The runtime's trace: host_handler was
+       delivering a SIGSEGV (FEX's own traps), had written the guest frame at
+       the top of Wine's signal stack, and a SIGUSR1 (Wine's suspension)
+       arrived inside host_handler, in pthread_sigmask, before the guest
+       handler ran. That nested delivery judged "on the guest's alt stack" by
+       the interrupted sp -- the host alt stack's -- and wrote its frame at
+       the same address. Both sigreturns read that frame, the outer one
+       resumed the thread at the host pc on the host stack, and the runtime's
+       own handler faulted on what was left (x20 = 0xb in its copy-back). A
+       nested frame now goes below the frame of the delivery in progress
+       (signal.c g_live_frame). suspend_storm x64: 347,064 suspensions in 40 s,
+       no mismatch, twice.
+    g. FEX's statistics. The next crash was an access violation inside FEX's
+       ResetToConsistentState (exception dispatch of x64 code) reading
+       0x7efdf2da0600: FEX's ProfileStats file (/tmp/lxrt-shm-501/fex-<pid>-
+       stats), which Proton ARM64's fex-emu/Config.json turns on for the
+       Steam Frame's performance overlay. FEX grows it by mapping it again at
+       the same address (8 KiB, then 16 KiB) as threads start, and under the
+       runtime that is not atomic. The native tool sets FEX_PROFILESTATS=0:
+       no stats file at all, and no counter updates on every exception.
+    h. D3D12 tight alignment. The fatal "D3D12Resources.cpp:1042 ... E_INVALIDARG"
+       came with vkd3d-proton's "d3d12_resource_create_placed: Heap offset
+       0xfa8000 not a multiple of resource alignment 0x10000". vkd3d-proton
+       reports D3D12's tight alignment (tier 1) whenever bufferImageGranularity
+       is 4 KiB or less; GetResourceAllocationInfo then answers a texture with
+       the Vulkan alignment (KosmicKrisp: 16 KiB for optimal images, 128 bytes
+       for small ones -- before and after creation alike, 756 images
+       checked), but CreatePlacedResource keeps D3D12's 64 KiB unless the
+       driver has VK_MESA_image_alignment_control. Unreal Engine 5.6 uses tight
+       alignment when it is offered. A bufferImageGranularity of 16 KiB from the
+       Vulkan shim (vkd3d-proton's tier test) did not stop it. What did: the
+       shim answers image memory requirements with D3D12's placement
+       alignments -- 64 KiB for an image of 64 KiB or more, 4 KiB below
+       (shim/features.c; LXRT_VK_IMAGE_ALIGN=0 turns it off) --, a stricter
+       alignment being always a valid Vulkan answer, so what the app is told
+       and what CreatePlacedResource checks agree.

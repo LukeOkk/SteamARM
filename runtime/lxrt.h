@@ -522,6 +522,15 @@ long lxrt_membarrier(int cmd, unsigned flags);
 bool lxrt_hwcap_cpuid(void);
 bool lxrt_program_is_fex(void);
 bool lxrt_no_x18(void);
+// subpage.c: the free rest of a host page under a rounded-up partial file
+// mapping (dispatch.c), and the mappings that end it.
+void lxrt_subpage_note_tail(uint64_t tail, uint64_t tend);
+void lxrt_subpage_tail_clear(uint64_t addr, uint64_t len);
+// netif.c: rtnetlink answers written to an emulated NETLINK_ROUTE socket's
+// peer end, and the SIOCGIF* ioctls (true when the request was one of them).
+void lxrt_rtnl_request(int peer, const void *buf, size_t len);
+bool lxrt_netif_ioctl(int fd, unsigned long lreq, void *p, long *ret);
+long lxrt_netif_procnet(const char *name, char *buf, size_t cap);   // /proc/net/{route,ipv6_route,arp,dev}
 uint64_t lxrt_subpage_lost_guard(uint64_t addr);
 void lxrt_raise_nofile(void);
 rlim_t lxrt_nofile_ceiling(void);

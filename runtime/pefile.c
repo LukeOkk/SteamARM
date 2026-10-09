@@ -237,9 +237,60 @@ static void remember(uint64_t lo, uint64_t hi)
     pthread_mutex_unlock(&g_lock);
 }
 
-#define NEG_CACHE 256
-static uint64_t g_neg[NEG_CACHE];
-static unsigned g_neg_n;
+// The 64 KiB chunks known to lie in no image, as a set (open addressing,
+// linear probing; under g_lock). Every executable flip of anonymous memory
+// asks discover() about its address -- FEX ARM64EC's code buffer is ordinary
+// RWX memory to Wine, so that is every block FEX compiles -- and a miss walks
+// down up to 1024 chunks with a mach_vm_read each. With 256 remembered chunks
+// and a buffer of thousands, nearly every flip missed: Minecraft Dungeons II's
+// protection spent its start-up there, 2 ms per flip under the W^X lock, and
+// its 74 s deadline ran out (MEASURED, benchmarks/stage62, 15).
+#define NEG_SLOTS 16384                 // power of two
+#define NEG_TOMB 1ull                   // never a 64 KiB-aligned address
+static uint64_t g_negh[NEG_SLOTS];      // chunk address, 0 empty, NEG_TOMB deleted
+static unsigned g_neg_used;             // live + deleted slots
+
+static unsigned neg_slot(uint64_t chunk) { return (unsigned)((chunk >> 16) * 0x9E3779B97F4A7C15ull >> 50) & (NEG_SLOTS - 1); }
+
+static bool neg_has(uint64_t chunk)
+{
+    for (unsigned i = neg_slot(chunk), n = 0; n < NEG_SLOTS; i = (i + 1) & (NEG_SLOTS - 1), n++) {
+        if (g_negh[i] == chunk) return true;
+        if (g_negh[i] == 0) return false;
+    }
+    return false;
+}
+
+static void neg_add(uint64_t chunk)
+{
+    if (neg_has(chunk))
+        return;
+    if (g_neg_used >= NEG_SLOTS * 3 / 4) {      // full of entries or tombstones: start over
+        memset(g_negh, 0, sizeof g_negh);
+        g_neg_used = 0;
+    }
+    for (unsigned i = neg_slot(chunk);; i = (i + 1) & (NEG_SLOTS - 1))
+        if (g_negh[i] == 0 || g_negh[i] == NEG_TOMB) {
+            if (g_negh[i] == 0) g_neg_used++;
+            g_negh[i] = chunk;
+            return;
+        }
+}
+
+// Forget the chunks that [addr, addr+len) touches.
+static void neg_forget(uint64_t addr, uint64_t len)
+{
+    uint64_t lo = addr & ~0xFFFFull, hi = addr + len;
+    if ((hi - lo) >> 16 <= 64) {
+        for (uint64_t c = lo; c < hi; c += 0x10000)
+            for (unsigned i = neg_slot(c), n = 0; n < NEG_SLOTS && g_negh[i]; i = (i + 1) & (NEG_SLOTS - 1), n++)
+                if (g_negh[i] == c) { g_negh[i] = NEG_TOMB; break; }
+    } else {
+        for (unsigned i = 0; i < NEG_SLOTS; i++)
+            if (g_negh[i] > NEG_TOMB && g_negh[i] >= lo && g_negh[i] < hi)
+                g_negh[i] = NEG_TOMB;
+    }
+}
 
 void lxrt_pe_forget(uint64_t addr, uint64_t len)
 {
@@ -258,9 +309,7 @@ void lxrt_pe_forget(uint64_t addr, uint64_t len)
             i++;
     }
     // What was found empty there may hold an image next (a reused view).
-    for (unsigned i = 0; i < g_neg_n && i < NEG_CACHE; i++)
-        if (g_neg[i] >= (addr & ~0xFFFFull) && g_neg[i] < addr + len)
-            g_neg[i] = 1;                       // never a 64 KiB-aligned start
+    neg_forget(addr, len);
     pthread_mutex_unlock(&g_lock);
 }
 
@@ -296,8 +345,8 @@ bool lxrt_pe_in_image_not_code(uint64_t start, uint64_t end)
     return lxrt_pe_code_windows(start, end, &r, 1) == 0;
 }
 
-// Negative cache (g_neg, above): 64 KiB-aligned starts that were looked at
-// and hold no image.
+// Negative cache (g_negh, above): 64 KiB chunks that were looked at and lie
+// in no image.
 
 // Parse the image at `base` (headers readable there) and remember its
 // aarch64 code windows. True when it was a PE image with such code.
@@ -416,18 +465,31 @@ static void discover(uint64_t addr)
 {
     if (lxrt_jit_contains(addr))
         return;                                 // a JIT buffer, never an image
-    uint64_t at = addr & ~0xFFFFull;
+    uint64_t top = addr & ~0xFFFFull, at = top, bottom = top;
     pthread_mutex_lock(&g_lock);
-    for (unsigned i = 0; i < g_neg_n && i < NEG_CACHE; i++)
-        if (g_neg[i] == at) { pthread_mutex_unlock(&g_lock); return; }
+    bool known_empty = neg_has(top);
     pthread_mutex_unlock(&g_lock);
+    if (known_empty)
+        return;
+    bool saw_mz = false;
     for (unsigned step = 0; step < 1024 && at >= 0x10000; step++, at -= 0x10000) {
         uint8_t w[4];
+        if (at != top) {
+            // A chunk known to lie in no image: an image holding addr with
+            // its headers further down would hold that chunk too; stop.
+            pthread_mutex_lock(&g_lock);
+            known_empty = neg_has(at);
+            pthread_mutex_unlock(&g_lock);
+            if (known_empty)
+                break;
+        }
         if (!mem_read(at, w, 4)) {
             // Unmapped: no image spans it (images are contiguous); stop.
             break;
         }
+        bottom = at;
         if (w[0] == 'M' && w[1] == 'Z') {
+            saw_mz = true;
             parse_in_memory(at);
             // Found: the image holding addr, with aarch64 code or not (a
             // PE32 or pure x64 image is remembered with none).
@@ -440,9 +502,14 @@ static void discover(uint64_t addr)
                 return;
         }
     }
+    // Without headers anywhere on the way down, no chunk walked lies in an
+    // image either (one would hold the chunk where the walk stopped).
     pthread_mutex_lock(&g_lock);
-    g_neg[g_neg_n++ % NEG_CACHE] = addr & ~0xFFFFull;
-    if (g_neg_n > NEG_CACHE) g_neg_n = NEG_CACHE;
+    if (saw_mz)
+        neg_add(top);
+    else
+        for (uint64_t c = bottom; c <= top; c += 0x10000)
+            neg_add(c);
     pthread_mutex_unlock(&g_lock);
 }
 

@@ -432,7 +432,9 @@ static long seqpkt_before_recv(int fd, int lflags)
 // Its peer end is kept so uevents could be injected later.
 #define L_AF_NETLINK 16
 #define L_NETLINK_KOBJECT_UEVENT 15
+#define L_NETLINK_ROUTE 0
 static _Atomic int g_nl_peer[65536];        // peer fd + 1, 0 = not netlink
+static _Atomic uint8_t g_nl_route[65536];   // NETLINK_ROUTE: requests get answers (netif.c)
 static _Atomic uint32_t g_nl_groups[65536];
 static _Atomic uint64_t g_nl_ino[65536];
 // A number can outlive its socket here: close_range, dup2 over it, exec of
@@ -468,6 +470,55 @@ static void unix_dgram_buffers(int fd, int d, int ltype)
     setsockopt(fd, SOL_SOCKET, SO_RCVBUF, &sz, sizeof sz);
 }
 
+// The netlink socket: one end of a datagram pair, the other end kept to write
+// what "the kernel" sends.
+static long nl_socket(int ltype, bool route)
+{
+    int sv[2];
+    if (socketpair(AF_UNIX, SOCK_DGRAM, 0, sv) != 0)
+        return LERR(errno);
+    if (sv[0] >= 65536) {
+        close(sv[0]);
+        close(sv[1]);
+        return LERR(EMFILE);
+    }
+    fcntl(sv[1], F_SETFD, FD_CLOEXEC);
+    apply_type_flags(sv[0], ltype);
+    // A whole dump is queued before the request's send returns.
+    int sz = 212992;
+    setsockopt(sv[1], SOL_SOCKET, SO_SNDBUF, &sz, sizeof sz);
+    setsockopt(sv[0], SOL_SOCKET, SO_RCVBUF, &sz, sizeof sz);
+    struct stat st;
+    atomic_store(&g_nl_ino[sv[0]], fstat(sv[0], &st) == 0 ? (uint64_t)st.st_ino : 0);
+    atomic_store(&g_nl_groups[sv[0]], 0);
+    atomic_store(&g_nl_route[sv[0]], route);
+    atomic_store(&g_nl_peer[sv[0]], sv[1] + 1);
+    return sv[0];
+}
+
+// A request to an emulated NETLINK_ROUTE socket; false: fd is not one.
+static bool nl_route_send(int fd, const void *buf, size_t len)
+{
+    if (!is_netlink(fd) || !atomic_load(&g_nl_route[fd]))
+        return false;
+    int peer = atomic_load(&g_nl_peer[fd]) - 1;
+    if (peer >= 0 && buf)
+        lxrt_rtnl_request(peer, buf, len);
+    return true;
+}
+
+// What a netlink message's sender address reads: the kernel (port id 0).
+static void nl_kernel_addr(void *lsa, uint32_t *llen)
+{
+    if (!lsa || !llen)
+        return;
+    uint8_t nl[12] = {0};
+    uint16_t fam = L_AF_NETLINK;
+    memcpy(nl, &fam, 2);
+    memcpy(lsa, nl, *llen < sizeof nl ? *llen : sizeof nl);
+    *llen = sizeof nl;
+}
+
 long lxrt_socket(int ldomain, int ltype, int proto)
 {
     // Only inside a (fake) bwrap container -- where Proton's winebus and the
@@ -477,23 +528,13 @@ long lxrt_socket(int ldomain, int ltype, int proto)
     // in 5 minutes with it). LXRT_NO_NETLINK=1 refuses it everywhere.
     extern bool lxrt_mounts_active(void);
     int nl_off = getenv("LXRT_NO_NETLINK") != NULL || !lxrt_mounts_active();
-    if (ldomain == L_AF_NETLINK && proto == L_NETLINK_KOBJECT_UEVENT && nl_off == 0) {
-        int sv[2];
-        if (socketpair(AF_UNIX, SOCK_DGRAM, 0, sv) != 0)
-            return LERR(errno);
-        if (sv[0] >= 65536) {
-            close(sv[0]);
-            close(sv[1]);
-            return LERR(EMFILE);
-        }
-        fcntl(sv[1], F_SETFD, FD_CLOEXEC);
-        apply_type_flags(sv[0], ltype);
-        struct stat st;
-        atomic_store(&g_nl_ino[sv[0]], fstat(sv[0], &st) == 0 ? (uint64_t)st.st_ino : 0);
-        atomic_store(&g_nl_groups[sv[0]], 0);
-        atomic_store(&g_nl_peer[sv[0]], sv[1] + 1);
-        return sv[0];
-    }
+    if (ldomain == L_AF_NETLINK && proto == L_NETLINK_KOBJECT_UEVENT && nl_off == 0)
+        return nl_socket(ltype, false);
+    // NETLINK_ROUTE: the interface and address dumps behind glibc's
+    // getifaddrs() and if_nameindex() (netif.c), everywhere: they only answer
+    // what is asked, and no change notification ever arrives.
+    if (ldomain == L_AF_NETLINK && proto == L_NETLINK_ROUTE && !getenv("LXRT_NO_NETLINK"))
+        return nl_socket(ltype, true);
     int d = family_to_darwin(ldomain);
     if (d < 0)
         return LERR(EAFNOSUPPORT);
@@ -524,6 +565,8 @@ long lxrt_socketpair(int ldomain, int ltype, int proto, int *sv)
 
 long lxrt_connect(int fd, const void *lsa, unsigned llen)
 {
+    if (is_netlink(fd))
+        return 0;               // to the kernel: the only peer there is
     struct sockaddr_storage ss;
     int n = addr_to_darwin(lsa, llen, &ss);
     if (n < 0)
@@ -1003,6 +1046,8 @@ int lxrt_msgflags_to_linux(int df)
 
 long lxrt_sendto(int fd, const void *buf, size_t len, int lflags, const void *laddr, unsigned lalen)
 {
+    if (nl_route_send(fd, buf, len))
+        return (long)len;
     cred_note_send(fd);
     int df = lxrt_msgflags_to_darwin(lflags);
     if (!laddr) {
@@ -1052,7 +1097,9 @@ long lxrt_recvfrom(int fd, void *buf, size_t len, int lflags, void *laddr, uint3
         return 0;               // the peer is gone: end of file (see above)
     if (r < 0)
         return LERR(errno);
-    if (laddr && lalen)
+    if (laddr && lalen && is_netlink(fd))
+        nl_kernel_addr(laddr, lalen);
+    else if (laddr && lalen)
         addr_to_linux((struct sockaddr *)&ss, sl, laddr, lalen);
     return (long)r;
 }
@@ -1172,6 +1219,22 @@ long lxrt_sendmsg(int fd, const void *lmsg, int flags)
         return LERR(EFAULT);
     cred_note_send(fd);
     const struct linux_msghdr *lm = lmsg;
+    if (is_netlink(fd) && atomic_load(&g_nl_route[fd])) {
+        // The request, gathered from its pieces.
+        const struct iovec *iov = (const struct iovec *)(uintptr_t)lm->msg_iov;
+        size_t total = 0;
+        for (uint64_t i = 0; iov && i < lm->msg_iovlen; i++)
+            total += iov[i].iov_len;
+        uint8_t *req = total && total <= 65536 ? malloc(total) : NULL;
+        size_t at = 0;
+        for (uint64_t i = 0; req && i < lm->msg_iovlen; i++) {
+            memcpy(req + at, iov[i].iov_base, iov[i].iov_len);
+            at += iov[i].iov_len;
+        }
+        nl_route_send(fd, req, at);
+        free(req);
+        return (long)total;
+    }
 
     struct msghdr dm;
     memset(&dm, 0, sizeof dm);
@@ -1240,8 +1303,11 @@ long lxrt_recvmsg(int fd, void *lmsg, int flags)
 
     if (dm.msg_name && lm->msg_name) {
         uint32_t cap = lm->msg_namelen;
-        addr_to_linux((struct sockaddr *)&ss, dm.msg_namelen,
-                      (void *)(uintptr_t)lm->msg_name, &cap);
+        if (is_netlink(fd))
+            nl_kernel_addr((void *)(uintptr_t)lm->msg_name, &cap);
+        else
+            addr_to_linux((struct sockaddr *)&ss, dm.msg_namelen,
+                          (void *)(uintptr_t)lm->msg_name, &cap);
         lm->msg_namelen = cap;
     }
     if (dm.msg_control && dm.msg_controllen)

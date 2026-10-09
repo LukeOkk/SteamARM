@@ -373,7 +373,11 @@ long lxrt_ioctl(int fd, unsigned long lreq, uint64_t arg)
         int s = open(name, lxrt_open_flags_to_darwin((int)arg));
         return s >= 0 ? s : LERR(errno);
     }
-    default:
+    default: {
+        long r;
+        if (lxrt_netif_ioctl(fd, lreq, p, &r))
+            return r;
+    }
         if (lxrt_trace_on())
             fprintf(lxrt_trace_stream(), "[lxrt] ioctl: unknown request 0x%lx on fd %d -> ENOTTY\n",
                     lreq, fd);

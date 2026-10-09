@@ -771,6 +771,61 @@ static bool page_tracked(uint64_t hpage)
     return false;
 }
 
+// The rest of a host page past a partial-length file mapping that dispatch.c
+// placed over the whole page (its tail was free, so the mapping stays a real
+// one, shared when MAP_SHARED). Nobody mapped that tail: when the page is later
+// adopted (a 4 KiB mapping into the head, Wine releasing the view with a
+// PROT_NONE mapping over exactly its length), the tail is a placeholder, not
+// live memory with the page's protection. Adopted live, it made every later
+// shared view at that address a private copy: Minecraft Dungeons II's
+// protection writes a section through one view and maps it again until it
+// reads the change back, and spun there for good (MEASURED, 1.4 million views
+// in 190 s; benchmarks/stage62, 15). An entry lasts until it is used or a
+// mapping touches the tail itself. Under the page-protection lock.
+#define TAILS 512
+static struct { uint64_t start, end; } g_tails[TAILS];
+static int g_ntails;
+
+void lxrt_subpage_note_tail(uint64_t tail, uint64_t tend)
+{
+    if (tail >= tend)
+        return;
+    sigset_t old;
+    lxrt_pageprot_lock(&old);
+    int i = 0;
+    while (i < g_ntails && LXRT_ALIGN_DOWN(g_tails[i].start, LXRT_HOST_PAGE) != LXRT_ALIGN_DOWN(tail, LXRT_HOST_PAGE))
+        i++;
+    if (i == g_ntails) {
+        if (g_ntails == TAILS) {                // full: the oldest goes
+            memmove(g_tails, g_tails + 1, sizeof g_tails[0] * (TAILS - 1));
+            i = TAILS - 1;
+        } else {
+            g_ntails++;
+        }
+    }
+    g_tails[i].start = tail;
+    g_tails[i].end = tend;
+    lxrt_pageprot_unlock(&old);
+}
+
+static void tails_clear_locked(uint64_t addr, uint64_t len)
+{
+    for (int i = 0; i < g_ntails; )
+        if (g_tails[i].start < addr + len && g_tails[i].end > addr)
+            g_tails[i] = g_tails[--g_ntails];
+        else
+            i++;
+}
+
+// A mapping or unmapping of [addr, addr+len): a tail it touches is no longer free.
+void lxrt_subpage_tail_clear(uint64_t addr, uint64_t len)
+{
+    sigset_t old;
+    lxrt_pageprot_lock(&old);
+    tails_clear_locked(addr, len);
+    lxrt_pageprot_unlock(&old);
+}
+
 static void adopt_untracked(uint64_t hpage)
 {
     // A page the table already knows was adopted whole the first time it was
@@ -795,11 +850,27 @@ static void adopt_untracked(uint64_t hpage)
             | (ri.protection & VM_PROT_WRITE ? PROT_WRITE : 0)
             | (ri.protection & VM_PROT_EXECUTE ? PROT_EXEC : 0);
     bool wx = lxrt_wx_intersects_locked(hpage, LXRT_HOST_PAGE);
+    // A free tail noted for this page, while the page is still the file
+    // mapping that rounded up over it.
+    uint64_t ts = 0, te = 0;
+    for (int i = 0; i < g_ntails; i++)
+        if (LXRT_ALIGN_DOWN(g_tails[i].start, LXRT_HOST_PAGE) == hpage) {
+            if (page_file_state(hpage, NULL) > 0) {
+                ts = g_tails[i].start;
+                te = g_tails[i].end;
+            }
+            g_tails[i] = g_tails[--g_ntails];
+            break;
+        }
     for (uint64_t g = hpage; g < hpage + LXRT_HOST_PAGE; g += GUEST_PAGE) {
         bool covered = false;
         FOR_OVERLAP(i, g, g + GUEST_PAGE)
             if (g_subs[i].start <= g && g_subs[i].end >= g + GUEST_PAGE)
                 covered = true;
+        if (!covered && g >= ts && g + GUEST_PAGE <= te) {
+            record(g, g + GUEST_PAGE, 0);
+            continue;
+        }
         // A page of a native guest's RWX range (wxsplit.c) is RWX to the
         // guest whatever the host page carries at this moment.
         if (!covered)
