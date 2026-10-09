@@ -16,6 +16,27 @@
 #         or writes to a page FEX write-protected for self-modifying code.
 #         Minecraft Dungeons II hung at its intro (each thread waiting on the
 #         other's lock; benchmarks/stage62, 15 l).
+#   0002-0012  Dmage22/FEX-D2 (branch d2r/clean): the ARM64EC fixes that run
+#         Blizzard's Arxan-protected loaders -- executable views of non-image
+#         sections, the OS asked when an address has no executable interval,
+#         page faults raised as access violations at the real fetch address,
+#         stale NoExec stubs retried, EFlags PF/AF carried through exceptions
+#         (with patches/wine-ntdll), the compiler stopped at inaccessible pages,
+#         per-exception debug lines only with FEX_DEBUGLOG=1, 0x67 MOVS/STOS and
+#         MOV/POP FS/GS in 64-bit mode.
+#   0013  a thread_local of 0007 moved into the thread's FEX state (a TLS slot
+#         in this DLL is the guest's), NtDllRedirectionLUTSize 64-bit (Module.S
+#         loads it with a 64-bit ldr).
+#   0014  JIT-generated guest exceptions raised by a direct call instead of a
+#         host trap (STEAMARM_FEX_TRAP_HOOK=0 restores the trap).
+#   0015  SteamARM's own DiskCache format version: the cache is keyed on it
+#         and the host only, and Proton's FEX shares the Steam shader cache
+#         directory, so each would run the other's code.
+#   0016  self-modifying code tracked in 16 KiB blocks: a 16 KiB host page
+#         carries the union of its four 4 KiB guest pages' protections, so a
+#         translated page is only write-protected while all four are
+#         (Minecraft Dungeons II's protector ran stale stubs ~140 s in).
+#         STEAMARM_FEX_SMC_BLOCK=4096 restores FEX's own granularity.
 #
 # Needs cmake, ninja and python3, and llvm-mingw (downloaded into
 # $STEAMARM_BUILD/toolchains when missing; LLVM_MINGW=<dir> picks another).
@@ -27,7 +48,7 @@ REPO=$PWD
 B="${STEAMARM_BUILD:-$HOME/SteamARM-build}"
 FEX_EC_ROOT="${FEX_EC_ROOT:-$B/fex-arm64ec}"
 FEX_COMMIT=0df84d3844bcdb87bb7d3f5b8fb0959cd009c038
-FEX_VERSION=FEX-2609-137-g0df84d3   # what Valve's build reports; a shallow clone has no tags to describe
+FEX_VERSION=FEX-2609-137-g0df84d3-steamarm   # Valve's build plus ours; a shallow clone has no tags to describe
 MINGW_REL=20260922
 OUT="$FEX_EC_ROOT/out"
 log() { printf '[build-fex-arm64ec] %s\n' "$*"; }

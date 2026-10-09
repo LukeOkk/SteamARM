@@ -1,0 +1,17 @@
+From Dmage22/FEX-D2 (branch d2r/clean) commit e543814 (MIT, as FEX):
+Windows: set EXCEPTION_ACCESS_VIOLATION explicitly for guest page faults
+
+diff --git a/Source/Windows/Common/Exception.h b/Source/Windows/Common/Exception.h
+index 97124ac..6b85289 100644
+--- a/Source/Windows/Common/Exception.h
++++ b/Source/Windows/Common/Exception.h
+@@ -94,6 +94,9 @@ static inline EXCEPTION_RECORD HandleGuestException(FEXCore::Core::CpuStateFrame
+         FaultAddress = RipPage + FEXCore::Utils::FEX_PAGE_SIZE;
+       }
+ 
++      // Set the code explicitly like every other case: the host trap that got us here is not necessarily an
++      // access violation (on Windows the SIGSEGV trampoline raises it with hlt).
++      Dst.ExceptionCode = EXCEPTION_ACCESS_VIOLATION;
+       Dst.NumberParameters = 2;
+       Dst.ExceptionInformation[0] = EXCEPTION_EXECUTE_FAULT;
+       Dst.ExceptionInformation[1] = FaultAddress;

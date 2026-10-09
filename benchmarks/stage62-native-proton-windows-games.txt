@@ -556,8 +556,63 @@ HKLM\HARDWARE\DESCRIPTION\System\CentralProcessor\N "CP xxxx".
     o. Every measurement above ran with PROTON_LOG (the bench launcher's
        Steam had it, and launches inherit it): FEX then logs four lines per
        guest exception through __wine_dbg_output, a third of a trap thread's
-       time. Without it -- as the launcher runs Steam -- the game draws ~680
-       frames and stops presenting at ~50 s, when it starts EpicWebHelper.exe
-       (CEF) for its interface; the protection still derails at ~133 s.
-       fsync (futex_waitv) and the emulated NTSYNC stop at the same frame;
-       NTSYNC also hangs tests/win sync_ntsync about one run in three.
+       time. Without it -- as the launcher runs Steam -- the game seemed to
+       stop presenting at ~680 frames (~50 s): a measurement artifact, see p.
+       NTSYNC hangs tests/win sync_ntsync about one run in three.
+    p. The "stop at ~680 frames" was the harness: LXRT_VK_FRAMETIMES appends
+       in 4 KiB pieces (about 680 lines) and the watchdog called 20 s without
+       growth a stall, while the shim's present timing showed ~38 fps all
+       along (LXRT_VK_FRAMETIMES_SYNC=1 writes per present). Without
+       PROTON_LOG the game runs like with it and dies at the same ~140 s.
+       Found and fixed on the way, none of which moves the ~140 s death:
+       - EFlags PF and AF did not survive an exception: ARM64EC's context
+         has only NZCV, ntdll dropped the rest and FEX resumed with PF=AF=1
+         whatever the code had (tests/win/veh_flags.c: 4 of 4 wrong). Now
+         patches/wine-ntdll (from GameNative/proton-wine 47; built by
+         scripts/build-wine-ntdll.sh from the Wine source of this Proton
+         build) carries them in RES0 cpsr bits 26/27 and FEX's patch 0008
+         reads them back: 0 of 4 wrong.
+       - FEX patches 0002-0012, Dmage22/FEX-D2's ARM64EC fixes for Arxan-
+         protected Blizzard loaders, and 0014: a guest exception the JIT
+         raises calls the frontend directly instead of a host trap (+8 %
+         traps).
+       - FEX's call-return stack ran past its TOP guard page: the VEH's
+         emulated pushes and pops are an unbalanced call/ret stream, and the
+         guard plus the free pages after the reservation share the stack's
+         last 16 KiB host page, so the pop faulted a host page further,
+         outside FEX's range; the thread then retried that fault 10,000
+         times and died, or took the slow way out. runtime/subpage.c reports
+         such a fault in the guard (tests/elf/lost_guard.c, top case).
+         tests/win/veh_traps.c: 503,760 -> 1,292,695 traps in 40 s (3
+         threads; ~93 us a trap).
+       - FEX's DiskCache bucket is keyed on its format version and the host
+         only: builds with another CpuStateFrame layout ran each other's
+         cached code and crashed at once. Patch 0015 gives SteamARM's FEX a
+         format version of its own (Proton's FEX shares the Steam shader
+         cache directory).
+    q. The ~140 s death was two independent killers, each due at about the
+       same wall time (found by a second investigation; a 2x2 run matrix):
+       - Self-modifying code FEX did not see. The protector writes a fresh
+         stub into a 16 MiB ring (0x14DE00000-0x14EE07000) before each run
+         of it. FEX write-protects each 4 KiB guest page of code it has
+         translated, but a 16 KiB host page carries the union of its four
+         guest pages: a store into a protected page whose host page also
+         held a writable one went through without a fault, and once the
+         ring wrapped FEX ran last lap's translations until it jumped into
+         a slot not yet written (57 % of the SMC faults FEX did see were in
+         the last 4 KiB of a host page). Now FEX tracks SMC in 16 KiB blocks
+         (patch 0016; STEAMARM_FEX_SMC_BLOCK=4096 restores FEX's own), and
+         the runtime hands a store into a guest page the guest did not make
+         writable to the guest as a fault instead of flipping the split host
+         page to read-write (runtime/subpage.c).
+       - The anti-tamper's watchdogs: protection threads (entries 0x148B2B894,
+         0x148B3DDBC) wait on events of their own with timeouts of 90, 139.94,
+         162.7, 196 and 300 s, and each expiry starts the tear-down. Under
+         emulation whatever signals them in time does not finish. With only
+         the 140 s one neutralized the game died at 166 s (the next one).
+         patches/wine-ntdll 0002: with STEAMARM_NO_LONG_WAIT_TIMEOUTS=1 a
+         wait whose timeout is 60-400 s ahead never expires; the native tool
+         sets it for app 1912410 only.
+       Matrix (d2nolog, seconds after launch): neither 146-151; watchdogs
+       only 201 (dies of SMC); SMC only 191 (dies of a watchdog); both 398
+       and 335+ (alive at the end), 35-37 fps.

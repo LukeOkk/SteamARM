@@ -27,6 +27,8 @@
 #      copy of Valve's, when it has been built.
 #   5. SteamARM's FEX ARM64EC module (scripts/build-fex-arm64ec.sh), Valve's
 #      commit with SteamARM's patches, when it has been built.
+#   6. SteamARM's ntdll.dll (scripts/build-wine-ntdll.sh), built from the Wine
+#      source of KNOWN_VERSION with patches/wine-ntdll, when it has been built.
 #
 # Writes only <root>/tmp/armhome/.local/share/Steam/compatibilitytools.d/
 # steamarm-native-proton. Idempotent. The client lists the tool after a
@@ -141,6 +143,16 @@ if [ -f "$FEX_EC_OUT/libarm64ecfex.dll" ] && [ -f "$FEX_EC_DIR/libarm64ecfex.dll
     rm -f "$FEX_EC_DIR/libarm64ecfex.dll"
     cp "$FEX_EC_OUT/libarm64ecfex.dll" "$FEX_EC_DIR/libarm64ecfex.dll"
     log "FEX ARM64EC: SteamARM's build ($(cat "$FEX_EC_OUT/.stamp" 2>/dev/null | cut -c1-12))"
+fi
+# 6. SteamARM's ntdll.dll, when built: the PE half of Wine's ntdll from the
+#    source of this very Proton build (KNOWN_VERSION, checked above: it must
+#    match the ntdll.so it talks to) with patches/wine-ntdll, which carry EFlags
+#    PF/AF through ARM64EC exceptions (scripts/build-wine-ntdll.sh).
+NTDLL_OUT="${STEAMARM_BUILD:-$HOME/SteamARM-build}/wine-ntdll/out"
+if [ -f "$NTDLL_OUT/ntdll.dll" ] && [ -f "$FEX_EC_DIR/ntdll.dll" ]; then
+    rm -f "$FEX_EC_DIR/ntdll.dll"
+    cp "$NTDLL_OUT/ntdll.dll" "$FEX_EC_DIR/ntdll.dll"
+    log "ntdll.dll: SteamARM's build ($(cat "$NTDLL_OUT/.stamp" 2>/dev/null | cut -c1-12))"
 fi
 for f in steamarm-native-proton vcrun_version.py toolmanifest.vdf compatibilitytool.vdf; do
     cp -f "tools/steamarm-native-proton/$f" "$DEST/$f"

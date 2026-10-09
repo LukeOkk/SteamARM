@@ -91,6 +91,13 @@ export FEX_PROFILESTATS="${FEX_PROFILESTATS:-0}"
 # (benchmarks/stage51); the launcher's settings for the game only, as the
 # x86 tool applies them (tools/steamarm-fex-proton).
 export SDL_VIDEO_MINIMIZE_ON_FOCUS_LOSS="${SDL_VIDEO_MINIMIZE_ON_FOCUS_LOSS:-0}"
+# Minecraft Dungeons II's anti-tamper arms waits of 90 to 300 s on events of
+# its own and tears the game down when one expires; under emulation what
+# signals them does not finish in time (benchmarks/stage62, 15 q). SteamARM's
+# ntdll lets waits of 60-400 s never expire when this is set.
+case "${SteamAppId:-${STEAM_COMPAT_APP_ID:-}}" in
+    1912410) export STEAMARM_NO_LONG_WAIT_TIMEOUTS="${STEAMARM_NO_LONG_WAIT_TIMEOUTS:-1}" ;;
+esac
 [ -n "${STEAMARM_MFX_NATIVE:-}" ] && [ -z "${LXRT_VK_SCALER_NATIVE:-}" ] && export LXRT_VK_SCALER_NATIVE="$STEAMARM_MFX_NATIVE"
 [ -n "${STEAMARM_RENDER_SCALE:-}" ] && [ -z "${LXRT_VK_RENDER_SCALE:-}" ] && export LXRT_VK_RENDER_SCALE="$STEAMARM_RENDER_SCALE"
 [ -n "${STEAMARM_VK_FPS_LIMIT:-}" ] && [ -z "${LXRT_VK_FPS_LIMIT:-}" ] && export LXRT_VK_FPS_LIMIT="$STEAMARM_VK_FPS_LIMIT"

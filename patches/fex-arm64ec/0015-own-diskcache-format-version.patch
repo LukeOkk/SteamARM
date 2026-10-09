@@ -1,0 +1,18 @@
+SteamARM: own DiskCache format version. The cache bucket is keyed on it and the host
+features only, so Proton's FEX (same upstream version, same Steam shadercache dir) and
+this build would run each other's code; bump it whenever the patches change codegen.
+
+--- a/FEXCore/Source/Interface/Core/DiskCache.h
++++ b/FEXCore/Source/Interface/Core/DiskCache.h
+@@ -249,7 +249,10 @@
+   // The current version of the diskcache.
+   // This must be changed any time codegen changes occur!
+   // Be aware of the impact of changing this frequently!
+-  static constexpr uint16_t FormatVersion = 28;
++  // SteamARM: upstream 28 plus 0x5300, bumped whenever SteamARM's patches change generated code or the CpuStateFrame
++  // layout. The cache bucket is keyed on this and the host features only, not on the FEX build, so a cache filled by
++  // Proton's own FEX (same upstream version, same Steam shadercache directory) would otherwise be run by this one.
++  static constexpr uint16_t FormatVersion = 0x5300 + 28 + 1;
+ 
+   static constexpr uint32_t LOOKUP_KEY_MAX_BUCKET_DEPTH = 500;
+ 

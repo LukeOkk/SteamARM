@@ -1,0 +1,186 @@
+SteamARM: track self-modifying code in 16 KiB blocks (STEAMARM_FEX_SMC_BLOCK overrides).
+The runtime backs 4 KiB guest pages with 16 KiB host pages carrying the union of their
+protections, so a translated guest page stays write-protected only while every guest page
+of its host page is: FEX now protects, invalidates and unprotects whole blocks, and drops
+the protection of a block's other pages when one becomes writable. Minecraft Dungeons II's
+protector rewrites stubs in a 16 MiB ring; stores into pages sharing a host page with a
+writable one went unseen and it ran stale translations (benchmarks/stage62, 15 q).
+
+--- a/Source/Windows/Common/InvalidationTracker.h
++++ b/Source/Windows/Common/InvalidationTracker.h
+@@ -2,6 +2,7 @@
+ #pragma once
+ 
+ #include <FEXCore/Utils/IntervalList.h>
++#include <FEXCore/Utils/TypeDefines.h>
+ #include <FEXCore/HLE/SyscallHandler.h>
+ #include <mutex>
+ #include <shared_mutex>
+@@ -58,6 +59,24 @@
+   ULONG GetTrapProt(uint64_t Address) const;
+   ULONG GetUntrapProt(uint64_t Address) const;
+ 
++  // Self-modifying code is tracked in blocks of this many bytes, a multiple of FEX_PAGE_SIZE: SteamARM's runtime
++  // backs 4 KiB guest pages with 16 KiB host pages that carry the union of their guest pages' protections, so a
++  // guest page's write protection only holds while every guest page sharing its host page is protected as well.
++  uint64_t SMCBlockSize {FEXCore::Utils::FEX_PAGE_SIZE};
++  uint64_t SMCBlockBase(uint64_t Address) const {
++    return Address & ~(SMCBlockSize - 1);
++  }
++  uint64_t SMCBlockEnd(uint64_t Address, uint64_t Size) const {
++    return (Address + Size + SMCBlockSize - 1) & ~(SMCBlockSize - 1);
++  }
++  // After the guest made [Address, Address + Size) writable: the guest pages around it in the same blocks can no
++  // longer be write-protected, so their code is invalidated and their trap protection dropped.
++  void ReleaseBlockNeighbours(uint64_t Address, uint64_t Size);
++  // Invalidates the code of, then unprotects, the RWX intervals in the range; false when there are none.
++  // NOTE: CodeInvalidationMutex must be locked by the caller, IntervalsLock must not be.
++  bool InvalidateAndUntrapLocked(uint64_t Address, uint64_t Size);
++  bool Initialized {false};
++
+   FEXCore::IntervalList<uint64_t> XIntervals;
+   FEXCore::IntervalList<uint64_t> RWXIntervals;
+   std::shared_mutex IntervalsLock;
+--- a/Source/Windows/Common/InvalidationTracker.cpp
++++ b/Source/Windows/Common/InvalidationTracker.cpp
+@@ -11,6 +11,7 @@
+ #include <winternl.h>
+ 
+ #include <algorithm>
++#include <cstdlib>
+ #include <atomic>
+ 
+ namespace FEX::Windows {
+@@ -20,6 +21,17 @@
+   FEX_CONFIG_OPT(SMCChecks, SMCCHECKS);
+   SMCDetectionDisabled = (SMCChecks == FEXCore::Config::CONFIG_SMC_NONE);
+ 
++  // SteamARM: 16 KiB host pages under 4 KiB guest pages (see SMCBlockSize). STEAMARM_FEX_SMC_BLOCK=4096 restores
++  // FEX's own granularity. CRT getenv: kernel32's exports are x64 thunks here.
++  SMCBlockSize = 0x4000;
++  if (const char* Env = getenv("STEAMARM_FEX_SMC_BLOCK")) {
++    const uint64_t Value = strtoull(Env, nullptr, 0);
++    if (Value >= FEXCore::Utils::FEX_PAGE_SIZE && (Value & (Value - 1)) == 0) {
++      SMCBlockSize = Value;
++    }
++  }
++  LogMan::Msg::IFmt("SMC tracking in blocks of {:#x} bytes", SMCBlockSize);
++
+   MEMORY_BASIC_INFORMATION Info;
+   uint64_t Address = 0;
+ 
+@@ -31,6 +43,7 @@
+ 
+     Address = BaseAddress + Info.RegionSize;
+   }
++  Initialized = true;
+ }
+ 
+ static bool ProtHasExec(ULONG Prot) {
+@@ -84,7 +97,58 @@
+   if (NeedsInvalidate) {
+     // IntervalsLock cannot be held during invalidation
+     InvalidateIntervalInternal(AlignedBase, AlignedSize);
++  }
++
++  if (Initialized && ProtIsWritable(Prot) && SMCBlockSize > FEXCore::Utils::FEX_PAGE_SIZE) {
++    ReleaseBlockNeighbours(AlignedBase, AlignedSize);
++  }
++}
++
++void InvalidationTracker::ReleaseBlockNeighbours(uint64_t Address, uint64_t Size) {
++  // The host page now carries write for the whole block: a store into a neighbouring guest page that FEX
++  // write-protected after translating it would no longer fault. Drop that protection, and the code behind it.
++  const auto Begin = SMCBlockBase(Address);
++  const auto End = SMCBlockEnd(Address, Size);
++  if (Begin == Address && End == Address + Size) {
++    return;
++  }
++
++  std::scoped_lock CodeLock(CTX.GetCodeInvalidationMutex());
++  if (Begin < Address) {
++    InvalidateAndUntrapLocked(Begin, Address - Begin);
++  }
++  if (End > Address + Size) {
++    InvalidateAndUntrapLocked(Address + Size, End - (Address + Size));
++  }
++}
++
++bool InvalidationTracker::InvalidateAndUntrapLocked(uint64_t Address, uint64_t Size) {
++  // NOTE: This assumes CodeInvalidationMutex is locked by the caller: no block can be compiled (and trap a page)
++  // between the check, the invalidation and the unprotection. IntervalsLock is not held across the invalidation.
++  {
++    std::shared_lock Lock(IntervalsLock);
++    if (SMCDetectionDisabled || !RWXIntervals.Intersect({Address, Address + Size})) {
++      return false;
++    }
++  }
++
++  InvalidateIntervalInternalLocked(Address, Size);
++
++  const auto End = Address + Size;
++  std::shared_lock Lock(IntervalsLock);
++  while (Address < End) {
++    const auto Query = RWXIntervals.Query(Address);
++    if (Query.Enclosed) {
++      void* TmpAddress = reinterpret_cast<void*>(Address);
++      SIZE_T TmpSize = static_cast<SIZE_T>(std::min(End, Address + Query.Size) - Address);
++      ULONG TmpProt;
++      NtProtectVirtualMemory(NtCurrentProcess(), &TmpAddress, &TmpSize, GetUntrapProt(Address), &TmpProt);
++    } else if (!Query.Size) {
++      break;
++    }
++    Address += Query.Size;
+   }
++  return true;
+ }
+ 
+ void InvalidationTracker::HandleProcessExecuteFlagsChange(ULONG Flags) {
+@@ -216,7 +280,9 @@
+ }
+ 
+ void InvalidationTracker::ReprotectRWXIntervals(uint64_t Address, uint64_t Size) {
+-  ProtectRWXIntervalsInternal(Address, Size, false);
++  // Every RWX guest page of the blocks the code came from: one left writable keeps the whole host page writable.
++  const auto Begin = SMCBlockBase(Address);
++  ProtectRWXIntervalsInternal(Begin, SMCBlockEnd(Address, Size) - Begin, false);
+ }
+ 
+ bool InvalidationTracker::HandleRWXAccessViolation(FEXCore::Core::InternalThreadState* Thread, uint64_t HostPc, uint64_t FaultAddress) {
+@@ -233,13 +299,20 @@
+     {
+       std::scoped_lock Lock(CTX.GetCodeInvalidationMutex());
+ 
+-      InvalidateIntervalInternalLocked(FaultAddress & FEXCore::Utils::FEX_PAGE_MASK, FEXCore::Utils::FEX_PAGE_SIZE);
++      if (SMCBlockSize > FEXCore::Utils::FEX_PAGE_SIZE) {
++        // The whole block: unprotecting the faulting guest page makes its host page writable, so the code of the
++        // other guest pages in it can no longer be trusted, and they are unprotected with it (invalidated first,
++        // then unprotected, all under the compilation lock).
++        InvalidateAndUntrapLocked(SMCBlockBase(FaultAddress), SMCBlockSize);
++      } else {
++        InvalidateIntervalInternalLocked(FaultAddress & FEXCore::Utils::FEX_PAGE_MASK, FEXCore::Utils::FEX_PAGE_SIZE);
+ 
+-      // Invalidate, then unprotect the faulting page with the compilation lock held to ensure that any racing invalidations are not dropped.
+-      ULONG TmpProt;
+-      void* TmpAddress = reinterpret_cast<void*>(FaultAddress);
+-      SIZE_T TmpSize = 1;
+-      NtProtectVirtualMemory(NtCurrentProcess(), &TmpAddress, &TmpSize, UntrapProt, &TmpProt);
++        // Invalidate, then unprotect the faulting page with the compilation lock held to ensure that any racing invalidations are not dropped.
++        ULONG TmpProt;
++        void* TmpAddress = reinterpret_cast<void*>(FaultAddress);
++        SIZE_T TmpSize = 1;
++        NtProtectVirtualMemory(NtCurrentProcess(), &TmpAddress, &TmpSize, UntrapProt, &TmpProt);
++      }
+     }
+     DetectMonoBackpatcherBlock(Thread, HostPc);
+     return true;
+@@ -248,7 +321,8 @@
+ }
+ 
+ bool InvalidationTracker::BeginUntrackedWriteLocked(uint64_t Address, uint64_t Size) {
+-  return ProtectRWXIntervalsInternal(Address, Size, true);
++  const auto Begin = SMCBlockBase(Address);
++  return ProtectRWXIntervalsInternal(Begin, SMCBlockEnd(Address, Size) - Begin, true);
+ }
+ 
+ // Clamps an interval-list answer to the OS region containing Address. The interval lists describe what was

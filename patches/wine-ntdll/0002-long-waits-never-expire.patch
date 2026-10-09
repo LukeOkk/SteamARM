@@ -1,0 +1,82 @@
+SteamARM: STEAMARM_NO_LONG_WAIT_TIMEOUTS=1 makes waits whose timeout is 60-400 s ahead
+never expire (NtWaitForSingleObject, NtWaitForMultipleObjects). The native tool sets it
+for Minecraft Dungeons II, whose anti-tamper tears the game down when its long waits
+time out; under emulation what signals them does not finish in time.
+
+--- a/dlls/ntdll/signal_arm64ec.c
++++ b/dlls/ntdll/signal_arm64ec.c
+@@ -603,9 +603,9 @@
+ DEFINE_SYSCALL(NtWaitForAlertByThreadId, (const void *address, const LARGE_INTEGER *timeout))
+ DEFINE_SYSCALL(NtWaitForDebugEvent, (HANDLE handle, BOOLEAN alertable, LARGE_INTEGER *timeout, DBGUI_WAIT_STATE_CHANGE *state))
+ DEFINE_SYSCALL(NtWaitForKeyedEvent, (HANDLE handle, const void *key, BOOLEAN alertable, const LARGE_INTEGER *timeout))
+-DEFINE_SYSCALL(NtWaitForMultipleObjects, (DWORD count, const HANDLE *handles, WAIT_TYPE type, BOOLEAN alertable, const LARGE_INTEGER *timeout))
++DEFINE_WRAPPED_SYSCALL(NtWaitForMultipleObjects, (DWORD count, const HANDLE *handles, WAIT_TYPE type, BOOLEAN alertable, const LARGE_INTEGER *timeout))
+ DEFINE_SYSCALL(NtWaitForMultipleObjects32, (ULONG count, LONG *handles, WAIT_TYPE type, BOOLEAN alertable, const LARGE_INTEGER *timeout))
+-DEFINE_SYSCALL(NtWaitForSingleObject, (HANDLE handle, BOOLEAN alertable, const LARGE_INTEGER *timeout))
++DEFINE_WRAPPED_SYSCALL(NtWaitForSingleObject, (HANDLE handle, BOOLEAN alertable, const LARGE_INTEGER *timeout))
+ DEFINE_SYSCALL(NtWorkerFactoryWorkerReady, (HANDLE handle))
+ DEFINE_SYSCALL(NtWriteFile, (HANDLE handle, HANDLE event, PIO_APC_ROUTINE apc, void *apc_user, IO_STATUS_BLOCK *io, const void *buffer, ULONG length, LARGE_INTEGER *offset, ULONG *key))
+ DEFINE_SYSCALL(NtWriteFileGather, (HANDLE file, HANDLE event, PIO_APC_ROUTINE apc, void *apc_user, IO_STATUS_BLOCK *io, FILE_SEGMENT_ELEMENT *segments, ULONG length, LARGE_INTEGER *offset, ULONG *key))
+@@ -868,8 +868,62 @@
+         return status;
+     }
+     return syscall_NtTerminateThread( handle, exit_code );
++}
++
++/* SteamARM: STEAMARM_NO_LONG_WAIT_TIMEOUTS=1 (the native tool sets it for Minecraft Dungeons II): a wait
++ * whose timeout lies 60 to 400 s ahead never times out. That game's anti-tamper arms waits of 90, 140, 163,
++ * 196 and 300 s on events of its own and tears the game down when one expires; under emulation the work
++ * that signals them in time does not finish, and the game died ~140 s after start whatever its frame rate
++ * (benchmarks/stage62, 15 q). A wait that is signaled returns as before. */
++static int long_wait_mode = -1;
++
++static BOOL long_wait_never_expires( const LARGE_INTEGER *timeout )
++{
++    static LONG reported;
++    LONGLONG rel;
++
++    if (!timeout || timeout->QuadPart == 0) return FALSE;
++    if (timeout->QuadPart < 0) rel = -timeout->QuadPart;
++    else
++    {
++        LARGE_INTEGER now;
++        NtQuerySystemTime( &now );
++        rel = timeout->QuadPart - now.QuadPart;
++    }
++    if (rel < 600000000LL || rel >= 4000000000LL) return FALSE;
++    if (long_wait_mode < 0)
++    {
++        UNICODE_STRING name, value;
++        WCHAR buf[8];
++        RtlInitUnicodeString( &name, L"STEAMARM_NO_LONG_WAIT_TIMEOUTS" );
++        value.Buffer = buf;
++        value.Length = 0;
++        value.MaximumLength = sizeof(buf);
++        long_wait_mode = !RtlQueryEnvironmentVariable_U( NULL, &name, &value ) && value.Length && buf[0] != '0';
++    }
++    if (long_wait_mode && InterlockedIncrement( &reported ) <= 16)
++    {
++        void *entry = NULL;
++        NtQueryInformationThread( GetCurrentThread(), ThreadQuerySetWin32StartAddress, &entry, sizeof(entry), NULL );
++        MESSAGE( "steamarm: tid %04lx (entry %p): wait of %lld s made infinite\n",
++                 HandleToULong( NtCurrentTeb()->ClientId.UniqueThread ), entry, (long long)(rel / 10000000) );
++    }
++    return long_wait_mode;
+ }
+ 
++NTSTATUS SYSCALL_API NtWaitForSingleObject( HANDLE handle, BOOLEAN alertable, const LARGE_INTEGER *timeout )
++{
++    if (long_wait_never_expires( timeout )) timeout = NULL;
++    return syscall_NtWaitForSingleObject( handle, alertable, timeout );
++}
++
++NTSTATUS SYSCALL_API NtWaitForMultipleObjects( DWORD count, const HANDLE *handles, WAIT_TYPE type,
++                                               BOOLEAN alertable, const LARGE_INTEGER *timeout )
++{
++    if (long_wait_never_expires( timeout )) timeout = NULL;
++    return syscall_NtWaitForMultipleObjects( count, handles, type, alertable, timeout );
++}
++
+ NTSTATUS SYSCALL_API NtUnmapViewOfSection( HANDLE process, void *addr )
+ {
+     BOOL is_current = RtlIsCurrentProcess( process );

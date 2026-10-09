@@ -31,7 +31,7 @@ log() { printf '\n\033[1m[setup] %s\033[0m\n' "$*"; }
 die() { printf '[setup] error: %s\n' "$*" >&2; exit 1; }
 
 FORMULAE=(llvm lld cmake ninja zstd xz openssl@3 squashfs xxhash python
-          molten-vk vulkan-headers sdl2 sdl3 mingw-w64 pulseaudio meson glslang)
+          molten-vk vulkan-headers sdl2 sdl3 mingw-w64 pulseaudio meson glslang autoconf bison flex)
 
 step_check() {
     [ "$(uname -s)" = Darwin ] && [ "$(uname -m)" = arm64 ] || die "needs macOS on Apple Silicon"
@@ -152,6 +152,8 @@ step_frameroot() {
         scripts/build-vkd3d-proton.sh || log "WARNING: vkd3d-proton was not built; the tool keeps Valve's"
         log "FEX ARM64EC with SteamARM's patches (scripts/build-fex-arm64ec.sh)"
         scripts/build-fex-arm64ec.sh || log "WARNING: FEX ARM64EC was not built; the tool keeps Valve's"
+        log "Wine ntdll.dll with SteamARM's patches (scripts/build-wine-ntdll.sh)"
+        scripts/build-wine-ntdll.sh || log "WARNING: ntdll.dll was not built; the tool keeps Valve's"
         log "native Proton tool (scripts/install-native-proton.sh)"
         scripts/install-native-proton.sh --root arm64root || log "native Proton tool left as it was (setup goes on)"
     fi

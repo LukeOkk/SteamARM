@@ -1,0 +1,69 @@
+ARM64EC: carry EFlags PF/AF through context conversion (RES0 cpsr bits 26/27, advertised
+to the emulator by __wine_arm64ec_extended_eflags) and notify the emulator of views of
+non-image sections. From GameNative/proton-wine pull request 47 (LGPL, as Wine).
+Without the first, every exception a VEH continues hands the guest PF=AF=garbage.
+
+diff --git a/dlls/ntdll/ntdll.spec b/dlls/ntdll/ntdll.spec
+index 32b1d5e..0c3bc9a 100644
+--- a/dlls/ntdll/ntdll.spec
++++ b/dlls/ntdll/ntdll.spec
+@@ -1754,6 +1754,7 @@
+ @ extern -private __wine_syscall_dispatcher
+ @ extern -private __wine_unix_call_dispatcher
+ @ extern -private -arch=arm64ec __wine_unix_call_dispatcher_arm64ec
++@ extern -private -arch=arm64ec __wine_arm64ec_extended_eflags
+ @ extern -private __wine_unixlib_handle
+ @ stdcall __wine_get_unix_env(ptr ptr long)
+ @ stdcall __wine_set_unix_env(ptr ptr)
+diff --git a/dlls/ntdll/signal_arm64ec.c b/dlls/ntdll/signal_arm64ec.c
+index 712d7f4..b8f60ba 100644
+--- a/dlls/ntdll/signal_arm64ec.c
++++ b/dlls/ntdll/signal_arm64ec.c
+@@ -732,8 +732,11 @@ static void notify_map_view_of_section( HANDLE handle, void *addr, SIZE_T size,
+     NTSTATUS status;
+ 
+     if (!pNotifyMapViewOfSection) return;
+-    if (!NtCurrentTeb()->Tib.ArbitraryUserPointer) return;
+-    if (NtQuerySection( handle, SectionImageInformation, &info, sizeof(info), NULL )) return;
++    /* Non-image sections are notified too: protectors double-map one pagefile-backed section,
++     * executable at one address and writable at another, and the emulator must track it. */
++    status = NtQuerySection( handle, SectionImageInformation, &info, sizeof(info), NULL );
++    if (status && status != STATUS_SECTION_NOT_IMAGE) return;
++    if (!status && !NtCurrentTeb()->Tib.ArbitraryUserPointer) return;
+     status = pNotifyMapViewOfSection( NULL, addr, NULL, size, alloc, protect );
+     if (NT_SUCCESS(status)) return;
+     NtUnmapViewOfSection( GetCurrentProcess(), addr );
+@@ -1896,6 +1899,9 @@ NTSTATUS __attribute__((naked)) __wine_unix_call_arm64ec( unixlib_handle_t handl
+ 
+ NTSTATUS (WINAPI *__wine_unix_call_dispatcher_arm64ec)( unixlib_handle_t, unsigned int, void * ) = __wine_unix_call_arm64ec;
+ 
++/* Tells the emulator that EFlags PF/AF survive context conversion in cpsr bits 26/27 (see eflags_to_cpsr) */
++ULONG __wine_arm64ec_extended_eflags = 1;
++
+ static void __attribute__((naked)) arm64x_check_call_early(void)
+ {
+     asm( "mov x11, x9\n\t"
+diff --git a/dlls/ntdll/unwind.h b/dlls/ntdll/unwind.h
+index 6e8b716..8e2a088 100644
+--- a/dlls/ntdll/unwind.h
++++ b/dlls/ntdll/unwind.h
+@@ -64,6 +64,10 @@ static inline UINT eflags_to_cpsr( UINT eflags )
+     if (eflags & 0x0080) ret |= 0x80000000;  /* negative */
+     if (eflags & 0x0100) ret |= 0x00200000;  /* trap */
+     if (eflags & 0x0800) ret |= 0x10000000;  /* overflow */
++    /* parity and aux carry have no AArch64 equivalent; carry them in RES0 bits 26/27 so the
++     * emulator gets them back on continue (only NZCV ever reaches the hardware) */
++    if (eflags & 0x0004) ret |= 0x04000000;  /* parity */
++    if (eflags & 0x0010) ret |= 0x08000000;  /* aux carry */
+     return ret;
+ }
+ 
+@@ -76,6 +80,8 @@ static inline UINT cpsr_to_eflags( UINT cpsr )
+     if (cpsr & 0x20000000) ret |= 0x0001;  /* carry */
+     if (cpsr & 0x40000000) ret |= 0x0040;  /* zero */
+     if (cpsr & 0x80000000) ret |= 0x0080;  /* negative */
++    if (cpsr & 0x04000000) ret |= 0x0004;  /* parity */
++    if (cpsr & 0x08000000) ret |= 0x0010;  /* aux carry */
+     return ret;
+ }
+ 

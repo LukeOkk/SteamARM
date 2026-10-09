@@ -956,19 +956,42 @@ int lxrt_subpage_prot_at(uint64_t addr)
 // died (benchmarks/stage62). A fault this close below a host page whose
 // bottom guest page is a lost guard is reported inside that guard, where it
 // would have happened with 4 KiB pages.
+//
+// The top guard is lost the same way, and the call-return stack runs into it
+// too: an emulated `ret` stream without the matching calls (a protector's
+// VEH that rewrites RIP and RSP on every trap -- tests/win veh_nosusp, and
+// Minecraft Dungeons II's invalid-opcode VM) pops past the top. The guard
+// and the free 4 KiB after the reservation share the stack's last host page,
+// so the pop faulted at the next host page, outside FEX's range, and the
+// thread retried it forever (MEASURED: 10000 identical faults, then death).
+// A fault in the first bytes of a host page whose predecessor ends in guest
+// pages nobody may touch, above live ones, is reported in the first of them.
 uint64_t lxrt_subpage_lost_guard(uint64_t addr)
 {
     if (GUEST_PAGE >= LXRT_HOST_PAGE || addr > UINT64_MAX - LXRT_HOST_PAGE)
         return addr;
     uint64_t above = LXRT_ALIGN_UP(addr + 1, LXRT_HOST_PAGE);
-    if (above - addr > 64)
+    uint64_t here = LXRT_ALIGN_DOWN(addr, LXRT_HOST_PAGE);
+    if (above - addr <= 64) {
+        sigset_t old;
+        lxrt_pageprot_lock(&old);
+        bool lost = lxrt_subpage_tracked_locked(above, GUEST_PAGE) &&
+                    slot_prot(above) == PROT_NONE && union_prot(above) != PROT_NONE;
+        lxrt_pageprot_unlock(&old);
+        return lost ? addr + GUEST_PAGE : addr;
+    }
+    if (addr - here >= 64 || here < LXRT_HOST_PAGE)
         return addr;
+    uint64_t prev = here - LXRT_HOST_PAGE, g = here;
     sigset_t old;
     lxrt_pageprot_lock(&old);
-    bool lost = lxrt_subpage_tracked_locked(above, GUEST_PAGE) &&
-                slot_prot(above) == PROT_NONE && union_prot(above) != PROT_NONE;
+    if (lxrt_subpage_tracked_locked(prev, LXRT_HOST_PAGE) && union_prot(prev) != PROT_NONE)
+        while (g > prev && slot_prot(g - GUEST_PAGE) == PROT_NONE)
+            g -= GUEST_PAGE;
     lxrt_pageprot_unlock(&old);
-    return lost ? addr + GUEST_PAGE : addr;
+    // g == here: nothing lost; g == prev: the whole page is no-access, so the
+    // host page faults where Linux would.
+    return g < here && g > prev ? g + (addr - here) : addr;
 }
 
 // LXRT_SUBPAGE_LOG=<n>: report the first n split events of this process
@@ -1266,6 +1289,32 @@ bool lxrt_subpage_handle_fault(uint64_t pc, uint64_t fault_addr, void *uap)
     if (!needs_wx_split(hpage)) {
         lxrt_pageprot_unlock(&old);
         return false;               // nothing withheld here; a real fault
+    }
+    // A store into a guest page the guest did not make writable is the
+    // guest's own fault, even when a sibling in the same host page is both
+    // writable and executable (the split). Flipping the host page to
+    // read-write let it through silently. FEX write-protects every 4 KiB
+    // page of x86 code it has translated and learns of a store there from
+    // this fault (its self-modifying-code tracking, Wine's write watches
+    // work the same way): swallowed, the old translation kept running.
+    // Minecraft Dungeons II's protector writes a fresh stub into a 16 MiB
+    // ring before each run of it; after the ring wrapped, the stores into
+    // pages whose host page also held a writable stub page went unseen and
+    // the protector ran last lap's stubs until it jumped into a slot not yet
+    // written (~140 s in). MEASURED before this: 57 % of the self-modifying
+    // faults FEX saw there were in the last 4 KiB of a host page.
+    if (store && !(slot_prot(LXRT_ALIGN_DOWN(fault_addr, GUEST_PAGE)) & PROT_WRITE)) {
+        static int romax = -1;
+        static _Atomic unsigned ron;
+        if (romax < 0) { const char *e = getenv("LXRT_SUBPAGE_RO_LOG"); romax = e ? atoi(e) : 0; }
+        unsigned n = atomic_fetch_add(&ron, 1) + 1;
+        if (romax && (n <= (unsigned)romax || (n & (n - 1)) == 0))
+            fprintf(lxrt_trace_stream(), "[lxrt] subpage: store to read-only guest page 0x%llx (pc 0x%llx, "
+                    "slot prot %d, host union %d) delivered, #%u\n", (unsigned long long)fault_addr,
+                    (unsigned long long)pc, slot_prot(LXRT_ALIGN_DOWN(fault_addr, GUEST_PAGE)),
+                    union_prot(hpage), n);
+        lxrt_pageprot_unlock(&old);
+        return false;
     }
     int prefer = fetch ? PROT_EXEC : PROT_WRITE;
     // Going back to execute: the page was writable, so anything may have been

@@ -1,0 +1,40 @@
+SteamARM: keep the stale-NoExec retry state in the thread's FEX state (a thread_local
+in this DLL takes a TLS slot the guest owns, and lld refused its 64-bit ldr),
+and make NtDllRedirectionLUTSize 64-bit: Module.S loads it with a 64-bit ldr, so
+the upper half was whatever global the linker put next.
+
+--- a/Source/Windows/ARM64EC/Module.cpp
++++ b/Source/Windows/ARM64EC/Module.cpp
+@@ -81,7 +81,7 @@
+ 
+ // Exports on ARM64EC point to x64 fast forward sequences to allow for redirecting to the JIT if functions are hotpatched. This LUT is from their addresses to the relative addresses of the native code exports.
+ uint32_t* NtDllRedirectionLUT;
+-uint32_t NtDllRedirectionLUTSize;
++uint64_t NtDllRedirectionLUTSize; // Module.S loads it with a 64-bit ldr
+ 
+ // Wine doesn't support issuing direct system calls with SVC, and unlike Windows it doesn't have a 'stable' syscall number for NtContinue
+ void* WineSyscallDispatcher;
+@@ -561,8 +561,9 @@
+   const uint64_t Rip = Thread->CurrentFrame->State.rip;
+ 
+   // Bound the retries so a disagreement between the tracker and the compiler can never become a hang.
+-  static thread_local uint64_t LastRip {};
+-  static thread_local uint32_t Retries {};
++  // Per-thread state lives in the thread's FEX state: a thread_local in this DLL takes a TLS slot the guest owns.
++  auto& LastRip = Thread->StaleNoExecLastRip;
++  auto& Retries = Thread->StaleNoExecRetries;
+   Retries = (Rip == LastRip) ? Retries + 1 : 0;
+   LastRip = Rip;
+   if (Retries >= 16) {
+--- a/FEXCore/include/FEXCore/Debug/InternalThreadState.h
++++ b/FEXCore/include/FEXCore/Debug/InternalThreadState.h
+@@ -129,6 +129,9 @@
+   uint32_t CompileRestartCount {};
+   uint64_t CompileEntryRIP {};
+   uint64_t CompileFaultPage {};
++  // ARM64EC RetryStaleNoExecFault: last faulting RIP and how often it repeated.
++  uint64_t StaleNoExecLastRip {};
++  uint32_t StaleNoExecRetries {};
+   FEXCore::UncheckedLongJump::JumpBuf CompileRestartJump;
+ 
+   // BaseFrameState should always be at the end, directly before the interrupt fault page

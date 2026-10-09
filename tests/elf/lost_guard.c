@@ -5,8 +5,13 @@
 // FEX looks for the fault to reset the stack. The runtime cannot enforce a
 // 4 KiB guard on a 16 KiB host page (the union of the protections is read-
 // write); it reports a fault just below such a lost guard inside it
-// (runtime/subpage.c lxrt_subpage_lost_guard). Run with LXRT_GUEST_PAGE=4096.
-// Prints PASS when every fault address lands in the guard.
+// (runtime/subpage.c lxrt_subpage_lost_guard). The same for the top guard: an
+// unbalanced stream of pops (a protector's VEH rewriting RIP/RSP) walks up
+// past the stack's end, and the guard plus the free 4 KiB pages after the
+// reservation share the stack's last host page, so the fault comes at the
+// next host page and must be reported in the top guard.
+// Run with LXRT_GUEST_PAGE=4096. Prints PASS when every fault address lands
+// in the guard it ran into.
 #include <setjmp.h>
 #include <signal.h>
 #include <stdint.h>
@@ -58,6 +63,26 @@ int main(void)
             printf("  OK  round %d: fault at base-%#lx, in the bottom guard\n", round, (unsigned long)((uintptr_t)base - a));
         else {
             printf("  MAL round %d: fault at %#lx, guard is %p..%p\n", round, (unsigned long)a, (void *)alloc, (void *)base);
+            mal++;
+        }
+
+        // Pop up 16 bytes at a time from three quarters of the way up.
+        volatile uint64_t *up = (volatile uint64_t *)(base + stack / 4 * 3);
+        uint64_t sink = 0;
+        char *top = base + stack;
+        fault_at = 0;
+        if (sigsetjmp(back, 1) == 0) {
+            for (;;) {
+                sink += up[0] + up[1];
+                up += 2;
+            }
+        }
+        (void)sink;
+        a = fault_at;
+        if (a >= (uintptr_t)top && a < (uintptr_t)top + page)
+            printf("  OK  round %d: fault at top+%#lx, in the top guard\n", round, (unsigned long)(a - (uintptr_t)top));
+        else {
+            printf("  MAL round %d: fault at %#lx, top guard is %p..%p\n", round, (unsigned long)a, (void *)top, (void *)(top + page));
             mal++;
         }
         munmap(raw, stack + 2 * page + granule);
