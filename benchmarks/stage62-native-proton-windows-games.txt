@@ -625,3 +625,27 @@ HKLM\HARDWARE\DESCRIPTION\System\CentralProcessor\N "CP xxxx".
        has-run value instead (tools/steamarm-native-proton/installscript.py,
        both registry views, imported with regedit) and the client launches
        the game: alive past 7 min at ~42 fps (86 presents per 2 s).
+    s. Stutter. Frame times (LXRT_VK_FRAMETIMES_SYNC=1) after the first minute,
+       ~3.5 min of intro and menu: frames over 250 ms every ~8 s, 1 % low
+       ~5 fps, 14.5 s of 194 s in frames over 50 ms. Sampling the stalls
+       (a watchdog on the frame file; FEX's frames symbolized from the
+       DLL's symbol table and its +loaddll base) put the waiting threads in
+       FEXCore's CompileBlock: they wait on the code invalidation lock,
+       which the protector's self-modifying code takes exclusively ~3,000
+       times a second. Inside it FEXCore zeroes the call-return stack of
+       every thread that ran the invalidated code (decommit + commit,
+       ~3,300 a second): 456,061 zeroings took 69.6 s, 152 us each, because
+       the 4 MiB stack sat 4 KiB off a 16 KiB host page and every zeroing
+       went through the runtime's sub-page bookkeeping. FEX patch 0017 (16
+       KiB guards) makes them 16 us; 0018 drops the protection query. Now:
+       frames over 250 ms 6-13 per 3.5 min, 1 % low 7-11 fps, 5.6-10.6 s in
+       long frames; the stall samples show 98 compile waits where there
+       were 2,580. What remains: the protector's fault handling itself (host
+       signal per SMC fault), the KosmicKrisp submission threads, and an
+       occasional burst (run to run).
+       A rarer early death (2 of ~25 runs, ~60 s in): the protector thread
+       0x180 writes the page below 0x10bfc0000 at 0x148b0eeac (a downward
+       probe, rax-0x1000) and takes an access violation. Not reproduced in 8
+       runs with LXRT_FAULT_HISTORY=lo-hi (runtime: the page history of a
+       guest SIGSEGV in that range); LXRT_MMAPSTATS=1 counts mmaps (~4,000 a
+       second in this game, 7 % of a core).

@@ -37,6 +37,13 @@
 #         translated page is only write-protected while all four are
 #         (Minecraft Dungeons II's protector ran stale stubs ~140 s in).
 #         STEAMARM_FEX_SMC_BLOCK=4096 restores FEX's own granularity.
+#   0017  16 KiB guards around the call-return stack, which then starts and
+#         ends on a host page: FEXCore zeroes a thread's stack whenever code
+#         it may return into is invalidated, thousands of times a second
+#         under that protector, and each zeroing went through the runtime's
+#         sub-page bookkeeping (~150 us, under the exclusive code
+#         invalidation lock every compiling thread waits on: the stutter).
+#   0018  that zeroing without a protection query (one Wine call fewer).
 #
 # Needs cmake, ninja and python3, and llvm-mingw (downloaded into
 # $STEAMARM_BUILD/toolchains when missing; LLVM_MINGW=<dir> picks another).

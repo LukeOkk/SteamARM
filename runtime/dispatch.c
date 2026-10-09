@@ -1185,6 +1185,12 @@ static long do_mmap(uint64_t addr, uint64_t len, long prot, long lflags,
     // shared file mapping: the view is mapped shared and readable, then made
     // executable, and stays the file's. Not rewritten -- nothing is in it
     // yet, and a JIT emits no syscalls.
+    // DIAG LXRT_MMAPSTATS=1: every 10 s, how many mmaps, how many MAP_FIXED_NOREPLACE probes failed and why, and
+    // the time spent.
+    static int mstats = -1;
+    static _Atomic uint64_t m_n, m_nr, m_eexist, m_enomem, m_ns, m_last;
+    if (mstats < 0) mstats = getenv("LXRT_MMAPSTATS") ? 1 : 0;
+    uint64_t m_t0 = mstats ? clock_gettime_nsec_np(CLOCK_UPTIME_RAW) : 0;
     long r;
     bool dual = (prot & PROT_EXEC) && !(prot & PROT_WRITE) && (lflags & LINUX_MAP_SHARED) &&
                 !(lflags & LINUX_MAP_ANONYMOUS) && fd >= 0 && len % LXRT_HOST_PAGE == 0 &&
@@ -1198,6 +1204,23 @@ static long do_mmap(uint64_t addr, uint64_t len, long prot, long lflags,
         }
     } else {
         r = do_mmap_inner(addr, len, prot, lflags, fd, off);
+    }
+    if (mstats) {
+        uint64_t now = clock_gettime_nsec_np(CLOCK_UPTIME_RAW);
+        atomic_fetch_add(&m_n, 1);
+        atomic_fetch_add(&m_ns, now - m_t0);
+        if (lflags & LINUX_MAP_FIXED_NOREPLACE) {
+            atomic_fetch_add(&m_nr, 1);
+            if (r == LERR(EEXIST)) atomic_fetch_add(&m_eexist, 1);
+            if (r == LERR(ENOMEM)) atomic_fetch_add(&m_enomem, 1);
+        }
+        uint64_t last = atomic_load(&m_last);
+        if (!last) atomic_compare_exchange_strong(&m_last, &last, now);
+        else if (now - last > 10000000000ull && atomic_compare_exchange_strong(&m_last, &last, now))
+            fprintf(stderr, "[lxrt] mmapstats pid %d: %llu mmaps (%llu NOREPLACE: %llu EEXIST, %llu ENOMEM), %.1f ms\n",
+                    getpid(), (unsigned long long)atomic_exchange(&m_n, 0), (unsigned long long)atomic_exchange(&m_nr, 0),
+                    (unsigned long long)atomic_exchange(&m_eexist, 0), (unsigned long long)atomic_exchange(&m_enomem, 0),
+                    atomic_exchange(&m_ns, 0) / 1e6);
     }
     if (r >= 0)
         lxrt_arena_mapped((uint64_t)r, len);

@@ -1,0 +1,50 @@
+SteamARM: zero the call-return stacks without asking for their protection first (they are
+read-write): VirtualDontNeed's VirtualQuery was a third Wine call in every zeroing, and
+those run thousands of times a second under the exclusive code invalidation lock.
+
+--- a/FEXCore/include/FEXCore/Utils/AllocatorHooks.h
++++ b/FEXCore/include/FEXCore/Utils/AllocatorHooks.h
+@@ -80,6 +80,13 @@
+   }
+ }
+ 
++// Zero a page-aligned read-write region (the call-return stacks, zeroed thousands of times a second under a
++// protector that rewrites its code): VirtualDontNeed without the protection query.
++inline void VirtualZeroRW(void* Ptr, size_t Size) {
++  ::VirtualFree(Ptr, Size, MEM_DECOMMIT);
++  ::VirtualAlloc(Ptr, Size, MEM_COMMIT, PAGE_READWRITE);
++}
++
+ inline bool VirtualProtect(void* Ptr, size_t Size, ProtectOptions options) {
+   DWORD prot {PAGE_NOACCESS};
+ 
+@@ -127,6 +134,9 @@
+ inline void VirtualDontNeed(void* Ptr, size_t Size, bool Recommit = true) {
+   ::madvise(reinterpret_cast<void*>(Ptr), Size, MADV_DONTNEED);
+ }
++inline void VirtualZeroRW(void* Ptr, size_t Size) {
++  ::madvise(reinterpret_cast<void*>(Ptr), Size, MADV_DONTNEED);
++}
+ inline bool VirtualProtect(void* Ptr, size_t Size, ProtectOptions options) {
+   int prot {PROT_NONE};
+   if ((options & ProtectOptions::Read) == ProtectOptions::Read) {
+--- a/FEXCore/Source/Interface/Core/Core.cpp
++++ b/FEXCore/Source/Interface/Core/Core.cpp
+@@ -503,7 +503,7 @@
+     auto lk = Thread->LookupCache->AcquireWriteLock();
+     Thread->LookupCache->ClearCache(lk);
+   }
+-  Allocator::VirtualDontNeed(Thread->CallRetStackBase, FEXCore::Core::InternalThreadState::CALLRET_STACK_SIZE);
++  Allocator::VirtualZeroRW(Thread->CallRetStackBase, FEXCore::Core::InternalThreadState::CALLRET_STACK_SIZE);
+ }
+ 
+ static void IRDumper(FEXCore::Core::InternalThreadState* Thread, IR::IREmitter* IREmitter, uint64_t GuestRIP) {
+@@ -1106,7 +1106,7 @@
+     FEXCORE_PROFILE_SCOPED("InvalidateCallRet");
+ 
+     // This may cause access violations in the thread on Windows as zeroing is not atomic, this is handled by the frontend
+-    Allocator::VirtualDontNeed(Thread->CallRetStackBase, FEXCore::Core::InternalThreadState::CALLRET_STACK_SIZE);
++    Allocator::VirtualZeroRW(Thread->CallRetStackBase, FEXCore::Core::InternalThreadState::CALLRET_STACK_SIZE);
+   }
+ }
+ 

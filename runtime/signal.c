@@ -1230,6 +1230,28 @@ static void host_handler(int dsig, siginfo_t *dinfo, void *uap)
     uint64_t fault_addr = dinfo ? (uint64_t)(uintptr_t)dinfo->si_addr : 0;
     if (lsig == 11 && fault_addr)
         fault_addr = lxrt_subpage_lost_guard(fault_addr);
+    // DIAG LXRT_FAULT_HISTORY=lo-hi (hex): the page history of each guest SIGSEGV in that range, once per page.
+    if (lsig == 11 && fault_addr) {
+        static uint64_t fh_lo = 1, fh_hi;
+        if (fh_lo == 1) {
+            const char *e = getenv("LXRT_FAULT_HISTORY");
+            fh_lo = 0;
+            if (e) { fh_lo = strtoull(e, NULL, 16); const char *d = strchr(e, '-'); fh_hi = d ? strtoull(d + 1, NULL, 16) : 0; }
+        }
+        static uint64_t fh_seen[64];
+        static _Atomic int fh_n;
+        if (fh_hi && fault_addr >= fh_lo && fault_addr < fh_hi) {
+            uint64_t hp = fault_addr & ~(uint64_t)(LXRT_HOST_PAGE - 1);
+            bool seen = false;
+            for (int i = 0; i < fh_n && i < 64; i++) if (fh_seen[i] == hp) seen = true;
+            if (!seen && fh_n < 64) {
+                fh_seen[atomic_fetch_add(&fh_n, 1) % 64] = hp;
+                fprintf(stderr, "[lxrt] fault history: SIGSEGV at 0x%llx pc 0x%llx guest prot of its 4 KiB page %d\n",
+                        (unsigned long long)fault_addr, (unsigned long long)saved_pc, lxrt_subpage_prot_at(fault_addr));
+                lxrt_memlog_dump(fault_addr, "fault history");
+            }
+        }
+    }
     int si_code = forced_code >= 0 ? forced_code
                 : dinfo ? si_code_to_linux(dsig, dinfo->si_code) : 0;
 
