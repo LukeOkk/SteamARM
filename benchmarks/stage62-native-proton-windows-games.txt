@@ -745,3 +745,21 @@ HKLM\HARDWARE\DESCRIPTION\System\CentralProcessor\N "CP xxxx".
        KUSER_SHARED_DATA reads from x64 code (runtime/lowpage.c) cost 1.69 us
        each (scratchpad kuser.c), ~10,000 a second in the game: ~1.7 % of a
        core, not pursued.
+    w. Where the stalls went next: subpage.c. LXRT_SUBPAGE_STATS in the game:
+       8,000 records, 20,000 mprotects, 3.6 GB of memmove and 10,000 execute
+       scans per second -- FEX trapping and untrapping the protected image's
+       blocks, which are 4 KiB-tracked; each trap split a section's record,
+       each re-trap merged it back, and each scanned the page before execute,
+       under the page lock. In-place updates of exactly matching records
+       (memmove -> ~10 MB/s) and lazy execute for pages whose executable
+       guest pages are all FEX-trapped (scans -> 0). Getting there exposed a
+       pefile.c bug: in-memory parsing took the relocated CHPE pointer against
+       the header's ImageBase, so every relocated ARM64EC/ARM64X image had no
+       aarch64 code window and a scan after discovery left its svc sites
+       live (SIGSYS from FEX's own DLL). A reviewer's probes found and
+       verified four more defects (a fetch-grant storm across threads, a
+       misaligned branch spinning, an RW window, store-emulation re-grants).
+       Menu frame pacing did not move (two alternating runs each against
+       0.3.71: 1 % low 14.8/18.4 vs 17.2/17.7 fps, frames over 100 ms 5/1 vs
+       5/5). Lesson from the same day: tests/win plus a running Steam client
+       passes safeguard's 80-lxrun limit and it kills everything, Steam too.
