@@ -226,17 +226,24 @@ bool lxrt_jit_thread_writable(void);
 // wxsplit.c -- read-write-execute ranges of NATIVE aarch64 guests (V8's code
 // range), split W^X per host page by the fault handler: a store makes a page
 // read-write, a fetch scans it read-only and makes it read-execute. FEX keeps
-// the read-write grant (its guest's RWX pages hold x86 code).
+// the read-write grant (its guest's RWX pages hold x86 code). Lazy execute
+// (LXRT_LAZY_EXEC; Wine's loaders): an R-X range is read-only on the host
+// until its first fetch scans it, and a store into it is the guest's fault.
 void lxrt_wx_set_program(const char *path);
 bool lxrt_wx_enabled(void);
-int  lxrt_wx_protect(uint64_t addr, uint64_t len, long *ret);
+int  lxrt_wx_protect(uint64_t addr, uint64_t len, int prot, long *ret);
 void lxrt_wx_forget(uint64_t addr, uint64_t len);
 void lxrt_wx_moved(uint64_t old, uint64_t olen, uint64_t neu, uint64_t nlen);
+bool lxrt_wx_unify_prot(uint64_t addr, uint64_t len);   // mremap.c, before it moves a held range
 bool lxrt_wx_contains(uint64_t addr);
 bool lxrt_wx_covered(uint64_t addr, uint64_t len);
+bool lxrt_wx_covered_prot(uint64_t addr, uint64_t len, int prot);
 bool lxrt_wx_intersects(uint64_t addr, uint64_t len);
 int  lxrt_wx_count(void);
 bool lxrt_wx_handle_fault(uint64_t pc, uint64_t addr, uint32_t esr);
+// After lxrt_wx_handle_fault declined: was it a store into a page the guest
+// made read-execute (the guest's fault, no other handler's)? Clears it.
+bool lxrt_wx_take_guest_fault(void);
 void lxrt_wx_handover(bool begin);   // dispatch.c: a range is being handed back
 bool lxrt_wx_scan_for_exec(uint64_t hpage, const struct lxrt_range *r, int nr);
 void lxrt_wx_stats_flush(void);
