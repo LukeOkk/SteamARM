@@ -36,7 +36,10 @@
 // asked: the fault handler's flip, a store storemu.c performed, mmap,
 // mprotect, dispatch.c's reapply after it rewrote mapped code. Before that,
 // four of those paths granted execute with no scan at all (stage 23 review;
-// tests/elf/wx_owner.c).
+// tests/elf/wx_owner.c). Under lazy execute (Wine's loaders, wxsplit.c), a
+// page whose executable guest pages are all FEX's trapped x64 code gets
+// execute only at an instruction fetch, and that grant scans every
+// executable guest page of it: code the host never runs is never scanned.
 //
 // The records sit under wxsplit.c's lock (lxrt_pageprot_lock), which is held
 // with asynchronous signals blocked: a guest handler that the runtime ran
@@ -64,6 +67,7 @@
 #include <sys/ucontext.h>
 #include <libproc.h>
 #include <unistd.h>
+#include <time.h>
 
 #define LERR(e) (-lxrt_errno_to_linux(e))
 #define GUEST_PAGE 4096
@@ -72,6 +76,10 @@
 struct sub {
     uint64_t start, end;
     int prot;
+    // Read-execute that came from read-write-execute: FEX trapping a block of
+    // x64 code it translated (self-modifying-code tracking). Only such pages
+    // wait for their first native fetch under lazy execute (apply_prot_fresh).
+    bool trapped;
 };
 
 // Grown on demand. A fixed 4096-entry table overflowed under the Steam
@@ -139,14 +147,38 @@ static int sub_lower(uint64_t addr)
 #define FOR_OVERLAP(i, lo, hi) \
     for (int i = sub_lower(lo); i < g_nsubs && g_subs[i].start < (hi); i++)
 
-static bool sub_insert_at(int at, uint64_t start, uint64_t end, int prot)
+// DIAG LXRT_SUBPAGE_STATS=1: every 10 s, the table's size, the mprotects
+// through it, the bytes its inserts and removals moved, and the execute scans.
+// Counted under the lock.
+static uint64_t st_mprot, st_moved, st_scans, st_last;
+static int sub_stats_on(void)
+{
+    static int on = -1;
+    if (on < 0) on = getenv("LXRT_SUBPAGE_STATS") ? 1 : 0;
+    return on;
+}
+static void sub_stats_tick(void)
+{
+    uint64_t now = clock_gettime_nsec_np(CLOCK_UPTIME_RAW);
+    if (!st_last) st_last = now;
+    if (now - st_last < 10000000000ull) return;
+    st_last = now;
+    fprintf(lxrt_trace_stream(), "[lxrt] pid %d subpage: %d records, %llu mprotects, %llu MB moved, %llu exec scans (10 s)\n",
+            (int)getpid(), g_nsubs, (unsigned long long)st_mprot, (unsigned long long)(st_moved >> 20),
+            (unsigned long long)st_scans);
+    st_mprot = st_moved = st_scans = 0;
+}
+
+static bool sub_insert_at(int at, uint64_t start, uint64_t end, int prot, bool trapped)
 {
     if (!subs_reserve(1))
         return false;
+    st_moved += (uint64_t)(g_nsubs - at) * sizeof *g_subs;
     memmove(&g_subs[at + 1], &g_subs[at], (size_t)(g_nsubs - at) * sizeof *g_subs);
     g_subs[at].start = start;
     g_subs[at].end = end;
     g_subs[at].prot = prot;
+    g_subs[at].trapped = trapped;
     g_nsubs++;
     return true;
 }
@@ -159,7 +191,7 @@ static void sub_remove(uint64_t start, uint64_t end)
     if (i < g_nsubs && g_subs[i].start < start && g_subs[i].end > end) {
         uint64_t tail_end = g_subs[i].end;
         g_subs[i].end = start;
-        sub_insert_at(i + 1, end, tail_end, g_subs[i].prot);
+        sub_insert_at(i + 1, end, tail_end, g_subs[i].prot, g_subs[i].trapped);
         return;
     }
     if (i < g_nsubs && g_subs[i].start < start && g_subs[i].end > start) {
@@ -170,6 +202,7 @@ static void sub_remove(uint64_t start, uint64_t end)
     while (j < g_nsubs && g_subs[j].end <= end)
         j++;
     if (j > i) {
+        st_moved += (uint64_t)(g_nsubs - j) * sizeof *g_subs;
         memmove(&g_subs[i], &g_subs[j], (size_t)(g_nsubs - j) * sizeof *g_subs);
         g_nsubs -= j - i;
     }
@@ -222,26 +255,57 @@ void lxrt_subpage_forget(uint64_t addr, uint64_t len)
 
 static void record(uint64_t start, uint64_t end, int prot)
 {
+    // A range recorded exactly as asked: its protection changes in place, and
+    // stays a record of its own. FEX traps and untraps the same blocks of a
+    // protected image over and over (self-modifying code), and splitting a
+    // section's record on the way out and merging it back on the way in moved
+    // half the table twice each time: 8,000 records, 20,000 mprotects and
+    // 3.6 GB of memmove a second in Minecraft Dungeons II, all under the page
+    // lock every thread's memory call takes (MEASURED, LXRT_SUBPAGE_STATS).
+    // The neighbours it no longer merges with cost one record per block FEX
+    // ever untrapped.
+    // Trapped (above): read-execute over a range that was all
+    // read-write-execute, or trapped already.
+    bool trapped = false;
+    if (prot == (PROT_READ | PROT_EXEC)) {
+        uint64_t p = start;
+        FOR_OVERLAP(i, start, end) {
+            if (g_subs[i].start > p ||
+                !(g_subs[i].prot == (PROT_READ | PROT_WRITE | PROT_EXEC) || g_subs[i].trapped))
+                break;
+            p = g_subs[i].end;
+        }
+        trapped = p >= end;
+    }
+    {
+        int at = sub_lower(start);
+        if (at < g_nsubs && g_subs[at].start == start && g_subs[at].end == end) {
+            g_subs[at].prot = prot;
+            g_subs[at].trapped = trapped;
+            return;
+        }
+    }
     // Overlapping guest mappings replace rather than merge, which is what
     // mmap means. Then coalesce with neighbours of the same protection: FEX
     // re-reserves freed memory one 4 KiB page at a time, and those runs would
     // otherwise cost an entry each.
     sub_remove(start, end);
     int at = sub_lower(start);
-    if (at > 0 && g_subs[at - 1].end == start && g_subs[at - 1].prot == prot) {
+    if (at > 0 && g_subs[at - 1].end == start && g_subs[at - 1].prot == prot && g_subs[at - 1].trapped == trapped) {
         g_subs[at - 1].end = end;
-        if (at < g_nsubs && g_subs[at].start == end && g_subs[at].prot == prot) {
+        if (at < g_nsubs && g_subs[at].start == end && g_subs[at].prot == prot && g_subs[at].trapped == trapped) {
+            st_moved += (uint64_t)(g_nsubs - at - 1) * sizeof *g_subs;
             g_subs[at - 1].end = g_subs[at].end;
             memmove(&g_subs[at], &g_subs[at + 1], (size_t)(g_nsubs - at - 1) * sizeof *g_subs);
             g_nsubs--;
         }
         return;
     }
-    if (at < g_nsubs && g_subs[at].start == end && g_subs[at].prot == prot) {
+    if (at < g_nsubs && g_subs[at].start == end && g_subs[at].prot == prot && g_subs[at].trapped == trapped) {
         g_subs[at].start = start;
         return;
     }
-    sub_insert_at(at, start, end, prot);
+    sub_insert_at(at, start, end, prot, trapped);
 }
 
 // Which access the guest most recently asked for on a host page that cannot
@@ -892,6 +956,10 @@ long lxrt_subpage_mprotect(uint64_t addr, uint64_t len, int prot)
 
     sigset_t old;
     lxrt_pageprot_lock(&old);
+    if (sub_stats_on()) {
+        st_mprot++;
+        sub_stats_tick();
+    }
     for (uint64_t p = hstart; p < hend; p += LXRT_HOST_PAGE)
         adopt_untracked(p);
     record(addr, addr + len, prot);
@@ -1042,15 +1110,29 @@ static bool scan_before_exec(void)
 // were writable and never scanned since -- wxsplit.c leaves that to the first
 // fetch, which in a tracked page is this file's. As 4 KiB-granular runs;
 // returns how many. Caller holds the lock.
+bool lxrt_wx_lazy_subpage(void);
+// Set by the fault handler around the one apply_prot that answers an
+// instruction fetch (lxrt_subpage_handle_fault): with lazy execute, the only
+// moment a tracked page becomes executable.
+static _Thread_local bool t_fetch_grant;
+
 static int exec_scan_ranges(uint64_t hpage, unsigned fresh, struct lxrt_range *r)
 {
     int nr = 0;
     for (unsigned k = 0; k < LXRT_HOST_PAGE / GUEST_PAGE; k++) {
         uint64_t g = hpage + (uint64_t)k * GUEST_PAGE;
         int sp = slot_prot(g);
+        // And under lazy execute, at the fetch that grants it, every
+        // executable guest page: none of them was scanned when it was made
+        // so. Through this scan, which counts again after rewriting and
+        // withholds execute unless the count is clean -- the fetch handler's
+        // own rescan_exec_slots rewrites without counting, and a page of
+        // FEX's DLL ran a live svc after it (MEASURED: SIGSYS with x8 =
+        // 0x4C580020 in Minecraft Dungeons II).
         bool scan = ((sp & (PROT_WRITE | PROT_EXEC)) == (PROT_WRITE | PROT_EXEC)) ||
                     ((fresh >> k) & 1) ||
-                    ((sp & PROT_EXEC) && lxrt_wx_lazy_locked(g));
+                    ((sp & PROT_EXEC) && lxrt_wx_lazy_locked(g)) ||
+                    ((sp & PROT_EXEC) && t_fetch_grant && lxrt_wx_lazy_subpage());
         if (!scan)
             continue;
         if (nr && r[nr - 1].end == g) {
@@ -1073,10 +1155,37 @@ static int exec_scan_ranges(uint64_t hpage, unsigned fresh, struct lxrt_range *r
 // count and the execute protection, and no path -- flip, performed store,
 // mmap, mprotect, reapply -- can skip it.
 //
-// Returns 0 when applied; 1 when execute was withheld because the scan could
-// not finish (the page carries the rest of its union, and the next
+// Returns 0 when applied (execute withheld under lazy execute counts as
+// applied: the first fetch grants it); 1 when execute was withheld because
+// the scan could not finish (the page carries the rest of its union, and the next
 // instruction fetch faults and tries again); -1 with errno when mprotect
 // failed. Caller holds the lock.
+// Every executable guest page of hpage trapped by FEX (struct sub) or held
+// lazily by wxsplit.c: only then does execute wait for the first fetch. Code
+// the guest's loader maps read-execute -- Wine's ARM64/ARM64EC DLLs, FEX's
+// own -- is scanned and made executable when it is mapped, as always: a
+// fetch-time scan of it ran in fault context (pefile's discovery, malloc)
+// and took execute from running code whenever a neighbouring 4 KiB page was
+// re-protected (review of lazy execute: a toggle loop 530 -> 145 thousand
+// rounds a second). Caller holds the lock.
+static bool exec_all_trapped(uint64_t hpage)
+{
+    bool any = false;
+    FOR_OVERLAP(i, hpage, hpage + LXRT_HOST_PAGE) {
+        if (!(g_subs[i].prot & PROT_EXEC))
+            continue;
+        any = true;
+        if (!g_subs[i].trapped) {
+            uint64_t lo = g_subs[i].start > hpage ? g_subs[i].start : hpage;
+            uint64_t hi = g_subs[i].end < hpage + LXRT_HOST_PAGE ? g_subs[i].end : hpage + LXRT_HOST_PAGE;
+            for (uint64_t g = lo; g < hi; g += GUEST_PAGE)
+                if (!lxrt_wx_lazy_locked(g))
+                    return false;
+        }
+    }
+    return any;
+}
+
 static int apply_prot_fresh(uint64_t hpage, int prefer, unsigned fresh)
 {
     int u = union_prot(hpage);
@@ -1085,10 +1194,23 @@ static int apply_prot_fresh(uint64_t hpage, int prefer, unsigned fresh)
     int want = u;
     if ((want & PROT_WRITE) && (want & PROT_EXEC))
         want &= (prefer == PROT_WRITE) ? ~PROT_EXEC : ~PROT_WRITE;
+    // Lazy execute (wxsplit.c header), here for the 4 KiB-tracked pages: in
+    // Wine's loaders execute waits for the first native fetch, whose handler
+    // rescans every executable guest page of the host page before granting it
+    // (rescan_exec_slots, then this function under t_fetch_grant). FEX traps
+    // the x64 code of a protected image as read-execute at 4 KiB granularity,
+    // code the host never runs, and each trap was a 16 KiB scan, an icache
+    // invalidation and two mprotects under the page lock: ~10,000 a second in
+    // Minecraft Dungeons II (MEASURED, LXRT_SUBPAGE_STATS "exec scans").
+    if ((want & PROT_EXEC) && !t_fetch_grant && lxrt_wx_lazy_subpage() && exec_all_trapped(hpage)) {
+        int rest = want & ~PROT_EXEC;
+        return mprotect((void *)hpage, LXRT_HOST_PAGE, rest ? rest : PROT_READ);
+    }
     if ((want & PROT_EXEC) && scan_before_exec()) {
         struct lxrt_range r[LXRT_HOST_PAGE / GUEST_PAGE];
         int nr = exec_scan_ranges(hpage, fresh, r);
         if (nr) {
+            st_scans++;
             if (!lxrt_wx_scan_for_exec(hpage, r, nr)) {
                 int rest = u & ~PROT_EXEC;
                 if (mprotect((void *)hpage, LXRT_HOST_PAGE, rest ? rest : PROT_NONE) != 0)
@@ -1226,8 +1348,11 @@ static int emulate_store_locked(uint64_t pc, uint64_t ph, void *uap)
             rescan_exec_slots(lo, hi);
         sys_icache_invalidate((void *)(uintptr_t)lo, (size_t)(hi - lo));
     }
-    for (int i = 0; i < nopen; i++)
+    for (int i = 0; i < nopen; i++) {
+        t_fetch_grant = opened[i] == ph;        // ph was executing: keep it so, scanned
         apply_prot(opened[i], opened[i] == ph ? PROT_EXEC : PROT_WRITE);
+        t_fetch_grant = false;
+    }
 
     if (subpage_log_one())
         fprintf(lxrt_trace_stream(), "[lxrt] subpage emulate pid %d: pc 0x%llx insn %08x addr 0x%llx+%u%s\n",
@@ -1270,6 +1395,8 @@ bool lxrt_subpage_handle_fault(uint64_t pc, uint64_t fault_addr, void *uap)
                 return false;
             fetch = false;
             store = (esr >> 6) & 1;
+        } else {
+            fetch = false;          // PC/SP alignment and the rest: never a protection flip
         }
     }
 
@@ -1297,7 +1424,11 @@ bool lxrt_subpage_handle_fault(uint64_t pc, uint64_t fault_addr, void *uap)
         lxrt_pageprot_unlock(&old);
         return r;
     }
-    if (!needs_wx_split(hpage)) {
+    // Something withheld: write or execute of a page that wants both, or --
+    // lazy execute -- execute of a page the guest made executable, until this
+    // fetch.
+    bool lazy_fetch = fetch && (union_prot(hpage) & PROT_EXEC) && lxrt_wx_lazy_subpage();
+    if (!needs_wx_split(hpage) && !lazy_fetch) {
         lxrt_pageprot_unlock(&old);
         return false;               // nothing withheld here; a real fault
     }
@@ -1328,11 +1459,28 @@ bool lxrt_subpage_handle_fault(uint64_t pc, uint64_t fault_addr, void *uap)
         return false;
     }
     int prefer = fetch ? PROT_EXEC : PROT_WRITE;
+    // A fetch that another thread's grant already answered: the page is
+    // executable (so scanned, and not writable since). Re-granting would make
+    // it read-only again for its scan and knock every other thread running
+    // in it off, each of which then re-grants.
+    if (fetch) {
+        mach_vm_address_t ra = hpage;
+        mach_vm_size_t rs = 0;
+        vm_region_basic_info_data_64_t ri;
+        mach_msg_type_number_t rcnt = VM_REGION_BASIC_INFO_COUNT_64;
+        mach_port_t obj = MACH_PORT_NULL;
+        if (mach_vm_region(mach_task_self(), &ra, &rs, VM_REGION_BASIC_INFO_64,
+                           (vm_region_info_t)&ri, &rcnt, &obj) == KERN_SUCCESS && ra <= hpage &&
+            (ri.protection & VM_PROT_EXECUTE)) {
+            lxrt_pageprot_unlock(&old);
+            return true;
+        }
+    }
     // Going back to execute: the page was writable, so anything may have been
     // stored into its executable guest pages. Rescan them first (a scan of
     // unchanged code finds nothing and changes nothing).
     int rescanned = 0;
-    if (prefer == PROT_EXEC && rescan_enabled())
+    if (prefer == PROT_EXEC && rescan_enabled() && !lxrt_wx_lazy_subpage())
         rescanned = rescan_exec_slots(hpage, hpage + LXRT_HOST_PAGE);
     // LXRT_SUBPAGE_LOG=<n>: report the first n split flips of this process
     // with the guest ranges that make the host page want write and execute.
@@ -1355,7 +1503,9 @@ bool lxrt_subpage_handle_fault(uint64_t pc, uint64_t fault_addr, void *uap)
     // scanned (a data word that looks like svc is not an instruction, and
     // rewriting it would corrupt it). FEX's guest pages hold x86 code: no
     // read-only scan there.
+    t_fetch_grant = prefer == PROT_EXEC;
     int rc = apply_prot(hpage, prefer);
+    t_fetch_grant = false;
     lxrt_pageprot_unlock(&old);
     return rc == 0;
 }

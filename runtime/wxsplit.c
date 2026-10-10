@@ -80,9 +80,12 @@
 // ARM64 page into a fault taken wherever that code first runs -- inside a
 // nested guest handler too -- and the scan takes pefile.c's lock and
 // allocates; an RWX page's first fetch carries that exposure already, so 2
-// adds nothing new. mmap(PROT_EXEC), file and shared memory, unaligned and
-// 4 KiB-tracked ranges stay eager (rewrite_and_seal). /proc/self/maps shows
-// such a page r--p until its first fetch.
+// adds nothing new. mmap(PROT_EXEC), file and shared memory and unaligned
+// ranges stay eager (rewrite_and_seal). 4 KiB-tracked ranges follow the same
+// rule in subpage.c (apply_prot_fresh): a host page waits for its fetch only
+// when every executable guest page in it is one FEX trapped (R-X made from
+// RWX) or one this table holds lazily -- code the loader maps R-X is scanned
+// when mapped. /proc/self/maps shows such a page r--p until its first fetch.
 //
 // One deviation, stated. A first fetch whose scan finds a word to rewrite
 // opens the page read-write while it rewrites (lxrt_wx_scan_for_exec's
@@ -191,6 +194,14 @@ bool lxrt_no_x18(void)
 
 bool lxrt_wx_enabled(void) { return g_enabled > 0; }
 static bool lazy_exec(void) { return g_lazy > 0 && g_enabled > 0; }
+// For subpage.c: lazy execute is on (either mode). LXRT_LAZY_SUBPAGE=0 keeps
+// that file eager on its own.
+bool lxrt_wx_lazy_subpage(void)
+{
+    static int off = -1;
+    if (off < 0) { const char *e = getenv("LXRT_LAZY_SUBPAGE"); off = e && e[0] == '0'; }
+    return lazy_exec() && !off;
+}
 
 // ------------------------------------------------------------- the table
 //
@@ -1135,7 +1146,12 @@ bool lxrt_wx_handle_fault(uint64_t pc, uint64_t addr, uint32_t esr)
     // which had no filter: tests/elf/wx_owner.c, "misaligned stlr").
     if ((ec == 0x24 || ec == 0x25) && (esr & 0x3f) == 0x21)
         return false;
-    bool fetch = ec == 0x20 || ec == 0x21 || pc == addr;
+    // A fetch is an instruction abort. pc == addr says so only without a
+    // syndrome: a branch to a misaligned address has si_addr == pc too (a PC
+    // alignment fault, EC 0x22), and taken for a fetch it was "granted" and
+    // came back forever (review of lazy execute: a bad function pointer hung
+    // at 100 % instead of crashing).
+    bool fetch = ec == 0x20 || ec == 0x21 || (esr == 0 && pc == addr);
     bool write = !fetch && (ec == 0x24 || ec == 0x25) && (esr & (1u << 6));
     if (!fetch && !write)
         return false;

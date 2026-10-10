@@ -33,6 +33,7 @@
 #include <string.h>
 #include <sys/stat.h>
 #include <unistd.h>
+#include <time.h>
 
 bool lxrt_trace_on(void);
 void lxrt_fn_register(uint64_t lo, uint64_t hi, struct lxrt_range *r, int n);
@@ -214,9 +215,14 @@ bool lxrt_pe_is(int fd)
 
 // ------------------------------------------------- windows known by address
 
-#define PE_WINDOWS 512
-static struct lxrt_range g_win[PE_WINDOWS];
-static int g_nwin;
+// Grown on demand. A fixed 512 filled up in a game's Wine process (every
+// section mapping of every DLL is a window), and the windows remembered after
+// that were dropped without a word: FEX's DLL, loaded late, then had no code
+// window at all, each of its words counted as "not aarch64", and a scan
+// passed a page of it with live svc sites (MEASURED: SIGSYS with x8 =
+// 0x4C580020 in Minecraft Dungeons II, under lazy execute).
+static struct lxrt_range *g_win;
+static int g_nwin, g_capwin;
 // Images found in memory: their whole extent (code or not), so the JIT-output
 // x18 pass never takes the x64 side of an ARM64X DLL, or a pure x64 image,
 // for aarch64 code.
@@ -229,10 +235,24 @@ static void remember(uint64_t lo, uint64_t hi)
     pthread_mutex_lock(&g_lock);
     for (int i = 0; i < g_nwin; i++)
         if (g_win[i].start == lo && g_win[i].end == hi) { pthread_mutex_unlock(&g_lock); return; }
-    if (g_nwin < PE_WINDOWS) {
+    if (g_nwin == g_capwin) {
+        int nc = g_capwin ? g_capwin * 2 : 512;
+        struct lxrt_range *n = realloc(g_win, (size_t)nc * sizeof *n);
+        if (n) {
+            g_win = n;
+            g_capwin = nc;
+        }
+    }
+    if (g_nwin < g_capwin) {
         g_win[g_nwin].start = lo;
         g_win[g_nwin].end = hi;
         g_nwin++;
+    } else {
+        static bool said;
+        if (!said) {
+            said = true;
+            fprintf(lxrt_trace_stream(), "[lxrt] pefile: cannot remember more code windows (%d)\n", g_nwin);
+        }
     }
     pthread_mutex_unlock(&g_lock);
 }
@@ -350,6 +370,40 @@ bool lxrt_pe_in_image_not_code(uint64_t start, uint64_t end)
 
 // Parse the image at `base` (headers readable there) and remember its
 // aarch64 code windows. True when it was a PE image with such code.
+// Set by parse_in_memory when the image's metadata is not readable yet.
+static _Thread_local bool t_pe_unreadable;
+
+// Images whose metadata was unreadable, asked again at most every 20 ms: a
+// scan meanwhile treats the address as in no known image (nothing filtered,
+// which never hides an svc). Retried on every scan, an image whose .rdata
+// stays unreadable (a short raw mapping, a guard page) made each scan above
+// it walk down 1,024 chunks again, under the page lock (review).
+#define UNREAD_SLOTS 16
+static struct { uint64_t base, end, next; } g_unread[UNREAD_SLOTS];
+static void unread_note(uint64_t base, uint32_t size)
+{
+    uint64_t now = clock_gettime_nsec_np(CLOCK_UPTIME_RAW), next = now + 20000000ull;
+    pthread_mutex_lock(&g_lock);
+    int slot = 0;
+    for (int i = 0; i < UNREAD_SLOTS; i++) {
+        if (g_unread[i].base == base) { slot = i; break; }
+        if (g_unread[i].next < g_unread[slot].next) slot = i;
+    }
+    g_unread[slot].base = base;
+    g_unread[slot].end = base + size;
+    g_unread[slot].next = next;
+    pthread_mutex_unlock(&g_lock);
+}
+// Caller holds g_lock.
+static bool unread_wait(uint64_t addr)
+{
+    uint64_t now = clock_gettime_nsec_np(CLOCK_UPTIME_RAW);
+    for (int i = 0; i < UNREAD_SLOTS; i++)
+        if (g_unread[i].next > now && addr >= g_unread[i].base && addr < g_unread[i].end)
+            return true;
+    return false;
+}
+
 static bool parse_in_memory(uint64_t base)
 {
     uint8_t dos[0x40];
@@ -387,23 +441,60 @@ static bool parse_in_memory(uint64_t base)
     uint32_t size_of_image = rd32(opt + 56);
     unsigned ndirs = rd32(opt + 108);
     if (!size_of_image || size_of_image > (512u << 20) || nsect == 0 || nsect > 96) return false;
-    struct lxrt_range code[64];
-    int ncode = 0;
+    struct lxrt_range code_buf[64], *code = code_buf;
+    int ncode = 0, capcode = 64;
     bool chpe = false;
+    // The load config, the CHPE metadata and its code map live in .rdata,
+    // which Wine may not have mapped or made readable yet when the first
+    // scan in the image comes. Unreadable, the image is NOT remembered (nor
+    // the chunk taken for empty, discover): remembered without its code
+    // map, an ARM64EC image counted as pure x64, every word of it "not
+    // aarch64", and a scan that came after this -- lazy execute's, at the
+    // first fetch -- passed FEX's own DLL with live svc sites in it (MEASURED:
+    // SIGSYS with x8 = 0x4C580020 in Minecraft Dungeons II). The next scan
+    // asks again.
+    bool unreadable = false;
     if (ndirs > 10) {
         uint32_t lc_rva = rd32(opt + 112 + 10 * 8), lc_size = rd32(opt + 112 + 10 * 8 + 4);
         uint8_t lc[0xD0];
-        if (lc_rva && lc_size >= 0xD0 && lc_rva + 0xD0 <= size_of_image && mem_read(base + lc_rva, lc, 0xD0) && rd32(lc) >= 0xD0) {
-            uint64_t chpe_va = rd64(lc + 0xC8);
-            if (chpe_va > image_base && chpe_va - image_base + 12 <= size_of_image) {
+        bool lc_ok = lc_rva && lc_size >= 0xD0 && (uint64_t)lc_rva + 0xD0 <= size_of_image;
+        // Readable but zero: .rdata mapped and not yet filled in -- as good
+        // as unreadable.
+        if (lc_ok && (!mem_read(base + lc_rva, lc, 0xD0) || rd32(lc) == 0))
+            unreadable = true;
+        else if (lc_ok && rd32(lc) >= 0xD0) {
+            // CHPEMetadataPointer is a VA, and in memory Wine has relocated
+            // it to where the image is, while the header's ImageBase may still
+            // say where it was linked for: FEX's DLL at 0x7ffffdbf0000 linked
+            // for 0x180000000. Taken against ImageBase only, the pointer fell
+            // outside the image, the code map was never read and the DLL
+            // counted as pure x64 (MEASURED with a trace of this function: "0 aarch64 code
+            // range(s)"). Either base, whichever it lies in.
+            uint64_t chpe_va = rd64(lc + 0xC8), chpe_rva = UINT64_MAX;
+            if (chpe_va >= base && chpe_va - base + 12 <= size_of_image)
+                chpe_rva = chpe_va - base;
+            else if (chpe_va > image_base && chpe_va - image_base + 12 <= size_of_image)
+                chpe_rva = chpe_va - image_base;
+            if (chpe_rva != UINT64_MAX) {
                 uint8_t m[12];
-                if (mem_read(base + (chpe_va - image_base), m, 12)) {
+                if (!mem_read(base + chpe_rva, m, 12)) {
+                    unreadable = true;
+                } else {
                     uint32_t map_rva = rd32(m + 4), count = rd32(m + 8);
-                    if (count && count < 4096 && map_rva + (uint64_t)count * 8 <= size_of_image) {
-                        uint8_t *e = malloc((size_t)count * 8);
-                        if (e && mem_read(base + map_rva, e, (size_t)count * 8)) {
+                    // An image with a CHPE pointer always has a code map:
+                    // none, or one that cannot be read whole, is not ready
+                    // (or not sane) -- and never "pure x64", which would hide
+                    // its aarch64 code from the scans.
+                    uint8_t *e = count && count < 65536 && (uint64_t)map_rva + (uint64_t)count * 8 <= size_of_image
+                                 ? malloc((size_t)count * 8) : NULL;
+                    if (count > 64)
+                        code = malloc((size_t)count * sizeof *code), capcode = (int)count;
+                    if (!e || !code || !mem_read(base + map_rva, e, (size_t)count * 8)) {
+                        unreadable = true;
+                    } else {
+                        {
                             chpe = true;
-                            for (uint32_t i = 0; i < count && ncode < 64; i++) {
+                            for (uint32_t i = 0; i < count && ncode < capcode; i++) {
                                 uint32_t st = rd32(e + i * 8), len = rd32(e + i * 8 + 4);
                                 if ((st & 3) <= 1 && len) {
                                     code[ncode].start = base + (st & ~3u);
@@ -412,11 +503,21 @@ static bool parse_in_memory(uint64_t base)
                                 }
                             }
                         }
-                        free(e);
                     }
+                    free(e);
                 }
             }
         }
+    }
+    if (unreadable) {
+        if (code != code_buf)
+            free(code);
+        t_pe_unreadable = true;
+        unread_note(base, size_of_image);
+        if (lxrt_trace_on())
+            fprintf(lxrt_trace_stream(), "[lxrt] PE image in memory at 0x%llx: load config or code map not readable yet\n",
+                    (unsigned long long)base);
+        return false;
     }
     if (!chpe && machine == 0xAA64) {
         size_t slen = (size_t)nsect * 40;
@@ -456,6 +557,8 @@ static bool parse_in_memory(uint64_t base)
         if (fn) { fn->start = lo; fn->end = hi; lxrt_fn_register(lo, hi, fn, 1); }
         remember(lo, hi);
     }
+    if (code != code_buf)
+        free(code);
     return ncode > 0;
 }
 
@@ -467,7 +570,7 @@ static void discover(uint64_t addr)
         return;                                 // a JIT buffer, never an image
     uint64_t top = addr & ~0xFFFFull, at = top, bottom = top;
     pthread_mutex_lock(&g_lock);
-    bool known_empty = neg_has(top);
+    bool known_empty = neg_has(top) || unread_wait(addr);
     pthread_mutex_unlock(&g_lock);
     if (known_empty)
         return;
@@ -490,7 +593,10 @@ static void discover(uint64_t addr)
         bottom = at;
         if (w[0] == 'M' && w[1] == 'Z') {
             saw_mz = true;
+            t_pe_unreadable = false;
             parse_in_memory(at);
+            if (t_pe_unreadable)
+                return;                     // not readable yet: ask again next time, nothing cached
             // Found: the image holding addr, with aarch64 code or not (a
             // PE32 or pure x64 image is remembered with none).
             bool holds = false;
