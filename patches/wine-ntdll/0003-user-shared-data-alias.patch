@@ -1,0 +1,45 @@
+SteamARM: read KUSER_SHARED_DATA through a second view of its section. Under the runtime
+0x7ffe0000 is a virtual page and every load there is a host fault (runtime/lowpage.c);
+exception dispatch reads its XState configuration ~13 times per exception.
+
+diff --git a/dlls/ntdll/loader.c b/dlls/ntdll/loader.c
+index 52b6e70..795d9bc 100644
+--- a/dlls/ntdll/loader.c
++++ b/dlls/ntdll/loader.c
+@@ -4629,6 +4629,28 @@ static void release_address_space(void)
+  * Attach to all the loaded dlls.
+  * If this is the first time, perform the full process initialization.
+  */
++/* SteamARM: read KUSER_SHARED_DATA through a second view of its section, mapped wherever there is room.
++ * Under SteamARM's runtime on macOS the low 4 GiB cannot be mapped: 0x7ffe0000 is a virtual page whose every
++ * load is a host fault the runtime carries out (runtime/lowpage.c), microseconds each. Exception dispatch reads
++ * the XState configuration there about thirteen times per exception, and a protector that runs on exceptions
++ * (Minecraft Dungeons II, ~15,000 a second) spent most of its time in those faults. The section is shared with
++ * wineserver, so the clock fields stay live. */
++static void alias_user_shared_data(void)
++{
++    static const WCHAR nameW[] = {'\\','K','e','r','n','e','l','O','b','j','e','c','t','s','\\',
++                                  '_','_','w','i','n','e','_','u','s','e','r','_','s','h','a','r','e','d','_','d','a','t','a',0};
++    UNICODE_STRING name = { sizeof(nameW) - sizeof(WCHAR), sizeof(nameW), (WCHAR *)nameW };
++    OBJECT_ATTRIBUTES attr = { sizeof(attr), 0, &name };
++    HANDLE section;
++    void *addr = NULL;
++    SIZE_T size = 0;
++
++    if (NtOpenSection( &section, SECTION_MAP_READ, &attr )) return;
++    if (!NtMapViewOfSection( section, GetCurrentProcess(), &addr, 0, 0, NULL, &size, ViewShare, 0, PAGE_READONLY ))
++        user_shared_data = addr;
++    NtClose( section );
++}
++
+ void loader_init( CONTEXT *context, void **entry )
+ {
+     static int attach_done;
+@@ -4651,6 +4673,7 @@ void loader_init( CONTEXT *context, void **entry )
+         ULONG heap_flags = HEAP_GROWABLE;
+         unsigned int i;
+ 
++        alias_user_shared_data();
+         peb->LdrData            = &ldr;
+         peb->FastPebLock        = &peb_lock;
+         peb->TlsBitmap          = &tls_bitmap;

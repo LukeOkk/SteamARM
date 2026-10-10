@@ -649,3 +649,23 @@ HKLM\HARDWARE\DESCRIPTION\System\CentralProcessor\N "CP xxxx".
        runs with LXRT_FAULT_HISTORY=lo-hi (runtime: the page history of a
        guest SIGSEGV in that range); LXRT_MMAPSTATS=1 counts mmaps (~4,000 a
        second in this game, 7 % of a core).
+    t. Where a trap's time went after s: LXRT_SIGSTATS=1 on tests/win
+       veh_traps.c counted ~13 host SIGSEGVs per trap, every one a load from
+       0x7ffe03d8-0x7ffe0404 by ntdll: Wine's exception dispatch reads the
+       XState configuration in KUSER_SHARED_DATA again and again, and under
+       the runtime 0x7ffe0000 is a virtual page whose loads are carried out
+       by the fault handler (runtime/lowpage.c). patches/wine-ntdll 0003
+       maps a second view of the section (\KernelObjects\__wine_user_
+       shared_data, shared with wineserver, so the clock fields stay live)
+       and points ntdll's user_shared_data at it: veh_traps 1,415,260 ->
+       6,340,710 traps in 40 s, SIGSEGVs 2.3 million -> 49 per 5 s; the
+       clocks still agree (scratchpad clocks.c). What is left per trap: two
+       SIGUSR2 -- Wine's return to emulated code with a full context
+       (syscall_dispatcher_return_slowpath raises it) after NtRaiseException
+       and NtContinue. Dungeons II: 1 % low 12 fps, 15 frames over 100 ms
+       per 3 min after the first minute (was ~40).
+       Tried and left out: blocks rewritten 8 times switch from write
+       protection to FEX's inline checks (full SMC detection). Only 15
+       blocks qualified and frame pacing did not move; it needed two fixes
+       to be safe (no check for an undecodable instruction, no disk cache
+       for such blocks).
