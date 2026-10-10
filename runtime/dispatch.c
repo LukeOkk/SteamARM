@@ -1214,13 +1214,29 @@ static long do_mmap(uint64_t addr, uint64_t len, long prot, long lflags,
             if (r == LERR(EEXIST)) atomic_fetch_add(&m_eexist, 1);
             if (r == LERR(ENOMEM)) atomic_fetch_add(&m_enomem, 1);
         }
+        // By size (log2 bucket from 4 KiB) and kind: fixed PROT_NONE, fixed other, placed.
+        static _Atomic uint32_t m_hist[3][12];
+        int b = 0;
+        for (uint64_t l = len >> 12; l > 1 && b < 11; l >>= 1) b++;
+        int kind = (lflags & LINUX_MAP_FIXED) ? (prot == 0 ? 0 : 1) : 2;
+        atomic_fetch_add(&m_hist[kind][b], 1);
         uint64_t last = atomic_load(&m_last);
         if (!last) atomic_compare_exchange_strong(&m_last, &last, now);
-        else if (now - last > 10000000000ull && atomic_compare_exchange_strong(&m_last, &last, now))
+        else if (now - last > 10000000000ull && atomic_compare_exchange_strong(&m_last, &last, now)) {
             fprintf(stderr, "[lxrt] mmapstats pid %d: %llu mmaps (%llu NOREPLACE: %llu EEXIST, %llu ENOMEM), %.1f ms\n",
                     getpid(), (unsigned long long)atomic_exchange(&m_n, 0), (unsigned long long)atomic_exchange(&m_nr, 0),
                     (unsigned long long)atomic_exchange(&m_eexist, 0), (unsigned long long)atomic_exchange(&m_enomem, 0),
                     atomic_exchange(&m_ns, 0) / 1e6);
+            static const char *kn[3] = {"fixed none", "fixed", "placed"};
+            for (int k = 0; k < 3; k++) {
+                char line[400]; int n = 0;
+                for (int i = 0; i < 12; i++) {
+                    uint32_t c = atomic_exchange(&m_hist[k][i], 0);
+                    if (c) n += snprintf(line + n, sizeof line - (size_t)n, " %uK:%u", 4u << i, c);
+                }
+                if (n) fprintf(stderr, "[lxrt] mmapstats pid %d   %s:%s\n", getpid(), kn[k], line);
+            }
+        }
     }
     if (r >= 0)
         lxrt_arena_mapped((uint64_t)r, len);

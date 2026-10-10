@@ -50,6 +50,12 @@
 #         by Wine with mprotect, the runtime split it W^X page by page, and
 #         every compiled block cost two mprotects of a 16 KiB page under one
 #         process-wide lock (~13,000 a second in Minecraft Dungeons II).
+#   0020  call-return stacks zeroed only when a block the invalidation erased
+#         pushed entries into them (recorded by the JIT; read off cached code,
+#         which matches anonymous code with its immediates masked): a
+#         protector's stub rewrite no longer zeroes every thread's 4 MiB stack
+#         under the exclusive code lock. tests/win/smc_bench 14,200 -> 21,600
+#         rounds/s. STEAMARM_FEX_CALLRET_SKIP=0 always zeroes.
 #
 # Needs cmake, ninja and python3, and llvm-mingw (downloaded into
 # $STEAMARM_BUILD/toolchains when missing; LLVM_MINGW=<dir> picks another).
@@ -98,6 +104,7 @@ if [ ! -d "$SRC/.git" ] || [ "$(git -C "$SRC" rev-parse HEAD 2>/dev/null)" != "$
         External/drm-headers External/Catch2 Source/Common/cpp-optparse
 fi
 git -C "$SRC" checkout -q -- .
+git -C "$SRC" clean -fdq        # files a patch added last time (0019 adds a header): apply refuses to overwrite
 for p in "$REPO"/patches/fex-arm64ec/*.patch; do
     git -C "$SRC" apply "$p" || { log "patch $(basename "$p") does not apply"; exit 1; }
 done

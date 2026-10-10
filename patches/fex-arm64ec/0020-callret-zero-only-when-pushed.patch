@@ -1,0 +1,313 @@
+SteamARM: zero the call-return stacks only when a block the invalidation erased pushed entries into them.
+An entry's host return address lies in the multiblock that pushed it, and the return block is part of that
+multiblock, so an invalidation that erases no pushing block leaves no entry stale. The JIT records whether a
+block emitted a push with a real host return address (sticky over replacements; disk-cached code counts as
+pushing). Minecraft Dungeons II's protector rewrites stubs thousands of times a second, and each rewrite
+zeroed every affected thread's 4 MiB stack under the exclusive code invalidation lock.
+STEAMARM_FEX_CALLRET_SKIP=0 always zeroes.
+
+--- a/FEXCore/Source/Interface/Core/CPUBackend.h
++++ b/FEXCore/Source/Interface/Core/CPUBackend.h
+@@ -59,6 +59,9 @@
+       size_t Size;
+       // Offset of BlockBegin from the start of the CodeBuffer it lives in
+       uint64_t HostCodeOffset;
++      // SteamARM: the code pushes <GuestReturnRIP, HostReturnPC> pairs (a call with a known return block); only such
++      // code can be the target of a call-return stack entry. True unless the JIT knows better.
++      bool PushesCallRet {true};
+     };
+ 
+     // Header that can live at the start of a JIT block.
+--- a/FEXCore/Source/Interface/Core/JIT/JITClass.h
++++ b/FEXCore/Source/Interface/Core/JIT/JITClass.h
+@@ -87,6 +87,8 @@
+ 
+   ARMEmitter::BiDirectionalLabel* PendingTargetLabel {};
+   ARMEmitter::BiDirectionalLabel* PendingCallReturnTargetLabel {};
++  // SteamARM: this block emitted a call-return stack push with a real host return address.
++  bool EmittedCallRetPush {};
+   FEXCore::Context::ContextImpl* CTX {};
+   const FEXCore::IR::IRListView* IR {};
+   uint64_t Entry {};
+--- a/FEXCore/Source/Interface/Core/JIT/JIT.cpp
++++ b/FEXCore/Source/Interface/Core/JIT/JIT.cpp
+@@ -919,6 +919,7 @@
+   uint32_t SSACount = IR->GetSSACount();
+   JumpTargets.clear();
+   CallReturnTargets.clear();
++  EmittedCallRetPush = false;
+   PendingJumpThunks.clear();
+   JumpTargets.resize(IR->GetHeader()->BlockCount, {});
+   Relocations.resize(PrevNumAllocations, FEXCore::CPU::Relocation::Default()); // Discard any relocations generated from a previous attempt
+@@ -1142,6 +1143,7 @@
+ 
+   // Beginning of emission is guaranteed to be offset zero. So the code data size is just the current cursor offset.
+   CodeData.Size = GetCursorOffset();
++  CodeData.PushesCallRet = EmittedCallRetPush;
+ 
+   // Finalize and write block tail data
+   JITBlockTail.Size = CodeData.Size;
+@@ -1231,6 +1233,21 @@
+   Result.BlockBegin = Dest;
+   Result.Size = HostBytes.size();
+   Result.HostCodeOffset = Dest - CurrentCodeBuffer->GetBufferBase();
++  // SteamARM: whether the cached code pushes call-return stack entries, read off the code itself -- the
++  // `stp <ret rip>, TMP1, [REG_CALLRET_SP, #-16]!` the call sites emit (the cache does not record it, and anonymous
++  // code is matched with its immediates masked, so a protector's rewritten stubs come from here). A data word that
++  // happens to match only counts as a push.
++  {
++    const uint32_t Want = 0xA9800000u | (0x7Eu << 15) | (static_cast<uint32_t>(TMP1.Idx()) << 10) |
++                          (static_cast<uint32_t>(REG_CALLRET_SP.Idx()) << 5);
++    bool Pushes = false;
++    for (size_t i = 0; i + 4 <= HostBytes.size() && !Pushes; i += 4) {
++      uint32_t Word;
++      memcpy(&Word, HostBytes.data() + i, sizeof(Word));
++      Pushes = (Word & 0xFFFFFFE0u) == Want;
++    }
++    Result.PushesCallRet = Pushes;
++  }
+   return Result;
+ }
+ 
+--- a/FEXCore/Source/Interface/Core/JIT/BranchOps.cpp
++++ b/FEXCore/Source/Interface/Core/JIT/BranchOps.cpp
+@@ -171,6 +171,7 @@
+           PendingCallReturnTargetLabel = &CallReturnTargets.try_emplace(Op->CallReturnBlock.ID()).first->second;
+           (void)adr(TMP1, &l_CallReturn);
+           stp<ARMEmitter::IndexType::PRE>(CallReturnAddressReg, TMP1, REG_CALLRET_SP, -0x10);
++          EmittedCallRetPush = true;
+         } else {
+           stp<ARMEmitter::IndexType::PRE>(ARMEmitter::XReg::zr, ARMEmitter::XReg::zr, REG_CALLRET_SP, -0x10);
+         }
+@@ -226,6 +227,7 @@
+         PendingCallReturnTargetLabel = &CallReturnTargets.try_emplace(Op->CallReturnBlock.ID()).first->second;
+         (void)adr(TMP1, &l_CallReturn);
+         stp<ARMEmitter::IndexType::PRE>(CallReturnAddressReg, TMP1, REG_CALLRET_SP, -0x10);
++          EmittedCallRetPush = true;
+       } else {
+         stp<ARMEmitter::IndexType::PRE>(ARMEmitter::XReg::zr, ARMEmitter::XReg::zr, REG_CALLRET_SP, -0x10);
+       }
+--- a/FEXCore/Source/Interface/Core/LookupCache.h
++++ b/FEXCore/Source/Interface/Core/LookupCache.h
+@@ -85,6 +85,9 @@
+   struct BlockEntry {
+     uint64_t HostCode;
+     fextl::vector<uint64_t> CodePages;
++    // SteamARM: the block pushes call-return stack entries. Sticky over replacements: an older copy some thread
++    // ran may still be on a call-return stack.
++    bool PushesCallRet {true};
+   };
+ 
+   fextl::robin_map<uint64_t, BlockEntry> BlockList;
+@@ -94,14 +97,21 @@
+   GuestToHostMap();
+ 
+   // Adds to Guest -> Host code mapping
+-  const BlockEntry& AddBlockMapping(uint64_t Address, std::span<const uint64_t> CodePages, void* HostCode, const LookupCacheWriteLockToken&) {
++  const BlockEntry& AddBlockMapping(uint64_t Address, std::span<const uint64_t> CodePages, void* HostCode, bool PushesCallRet,
++                                    const LookupCacheWriteLockToken&) {
+     // This may replace an existing mapping
+     // NOTE: Generally no previous entry should exist, however there is one exception:
+     //       If the backend updates the active thread's CodeBuffer, the new associated LookupCache
+     //       may already contain the block address. Since is comparatively rare, we'll just leak
+     //       one of the two blocks in this case.
++    if (auto Old = BlockList.find(Address); Old != BlockList.end()) {
++      // The same compiled block again (a raced compile hands back the existing one, flag unknown): its own flag.
++      // A different block: sticky, an older copy some thread ran may still be on a call-return stack.
++      PushesCallRet = Old->second.HostCode == reinterpret_cast<uintptr_t>(HostCode) ? Old->second.PushesCallRet :
++                                                                                    (PushesCallRet || Old->second.PushesCallRet);
++    }
+     return BlockList
+-      .insert_or_assign(Address, BlockEntry {(uintptr_t)HostCode, fextl::vector<uint64_t>(CodePages.begin(), CodePages.end())})
++      .insert_or_assign(Address, BlockEntry {(uintptr_t)HostCode, fextl::vector<uint64_t>(CodePages.begin(), CodePages.end()), PushesCallRet})
+       .first->second;
+   }
+ 
+@@ -125,18 +135,25 @@
+     return BlockList.erase(Address) != 0;
+   }
+ 
+-  void InvalidateRange(uint64_t Start, uint64_t Length) {
++  // Returns whether any block erased could be the target of a call-return stack entry.
++  bool InvalidateRange(uint64_t Start, uint64_t Length) {
+     auto lk = AcquireWriteLock();
+ 
+     auto lower = CodePages.lower_bound(Start >> 12);
+     auto upper = CodePages.upper_bound((Start + Length - 1) >> 12);
+ 
++    bool PushesCallRet = false;
+     for (auto it = lower; it != upper; it++) {
+       for (const auto& Entry : it->second) {
++        // A listing whose block is gone was erased through another of its pages; a thread still running it then may
++        // have pushed since, so it counts as pushing (the zeroing upstream does here).
++        auto Block = BlockList.find(Entry);
++        PushesCallRet |= Block == BlockList.end() || Block->second.PushesCallRet;
+         Erase(Entry, lk);
+       }
+     }
+     CodePages.erase(lower, upper);
++    return PushesCallRet;
+   }
+ 
+   void AddBlockLink(uint64_t GuestDestination, FEXCore::Context::ExitFunctionLinkData* HostLink,
+@@ -294,13 +311,14 @@
+   }
+ 
+   // Adds to Guest -> Host code mapping
+-  void AddBlockMapping(FEXCore::Core::InternalThreadState* Thread, uint64_t Address, std::span<const uint64_t> CodePages, void* HostCode) {
++  void AddBlockMapping(FEXCore::Core::InternalThreadState* Thread, uint64_t Address, std::span<const uint64_t> CodePages, void* HostCode,
++                       bool PushesCallRet = true) {
+     std::optional<FEXCore::SHMStats::AccumulationBlock<uint64_t>> LockTime(
+       Thread->ThreadStats ? &Thread->ThreadStats->AccumulatedCacheWriteLockTime : nullptr);
+     auto lk = Shared->AcquireWriteLock();
+     LockTime.reset();
+ 
+-    const auto& Entry = Shared->AddBlockMapping(Address, CodePages, HostCode, lk);
++    const auto& Entry = Shared->AddBlockMapping(Address, CodePages, HostCode, PushesCallRet, lk);
+ 
+     // There is no need to update L1 or L2, they will get updated on first lookup
+     // However, adding to L1 here increases performance
+--- a/FEXCore/Source/Interface/Core/Core.cpp
++++ b/FEXCore/Source/Interface/Core/Core.cpp
+@@ -925,7 +925,7 @@
+         uintptr_t CachedHostCode = 0;
+         for (size_t i = 0; i < Hit->EntryPointRIPs.size(); i++) {
+           void* HostAddr = LoadedCode.BlockBegin + Hit->EntryPointHostOffsets[i];
+-          Thread->LookupCache->AddBlockMapping(Thread, Hit->EntryPointRIPs[i], Hit->GuestPages, HostAddr);
++          Thread->LookupCache->AddBlockMapping(Thread, Hit->EntryPointRIPs[i], Hit->GuestPages, HostAddr, LoadedCode.PushesCallRet);
+           if (Hit->EntryPointRIPs[i] == GuestRIP) {
+             CachedHostCode = reinterpret_cast<uintptr_t>(HostAddr);
+           }
+@@ -1037,7 +1037,7 @@
+ 
+   // Insert to lookup cache
+   for (auto [GuestAddr, HostAddr] : CompiledCode.EntryPoints) {
+-    Thread->LookupCache->AddBlockMapping(Thread, GuestAddr, CodePages, HostAddr);
++    Thread->LookupCache->AddBlockMapping(Thread, GuestAddr, CodePages, HostAddr, CompiledCode.PushesCallRet);
+   }
+ 
+   // Clear any relocations that might have been generated
+@@ -1079,30 +1079,35 @@
+   return (uintptr_t)CodePtr;
+ }
+ 
+-void ContextImpl::InvalidateCodeBuffersCodeRange(uint64_t Start, uint64_t Length) {
++bool ContextImpl::InvalidateCodeBuffersCodeRange(uint64_t Start, uint64_t Length) {
+   FEXCORE_PROFILE_SCOPED("InvalidateCodeBuffersCodeRange");
++  bool PushesCallRet = false;
+ 
+   LOGMAN_THROW_A_FMT(CodeInvalidationMutex.try_lock() == false, "CodeInvalidationMutex needs to be unique_locked here");
+   std::scoped_lock lk {CodeBufferListLock};
+   auto it = CodeBufferList.begin();
+   while (it != CodeBufferList.end()) {
+     if (auto Strong = it->lock()) {
+-      Strong->LookupCache->InvalidateRange(Start, Length);
++      PushesCallRet |= Strong->LookupCache->InvalidateRange(Start, Length);
+       it++;
+     } else {
+       it = CodeBufferList.erase(it);
+     }
+   }
++  return PushesCallRet;
+ }
+ 
+-void ContextImpl::InvalidateThreadCachedCodeRange(FEXCore::Core::InternalThreadState* Thread, uint64_t Start, uint64_t Length) {
++void ContextImpl::InvalidateThreadCachedCodeRange(FEXCore::Core::InternalThreadState* Thread, uint64_t Start, uint64_t Length,
++                                                  bool ZeroCallRet) {
+   LOGMAN_THROW_A_FMT(CodeInvalidationMutex.try_lock() == false, "CodeInvalidationMutex needs to be unique_locked here");
+ 
+   // Ensures now-modified mappings aren't cached as being in their previous non-executable state.
+   // Accessing FrontendDecoder is safe as the thread's code invalidation mutex must be locked here.
+   Thread->FrontendDecoder->ResetExecutableRangeCache();
+ 
+-  if (Thread->LookupCache->InvalidateCacheRange(Start, Length)) {
++  // SteamARM: a call-return stack entry can only point into a block that pushed one; when no block this
++  // invalidation erased did, the stacks hold nothing it made stale (InvalidateCacheRange still runs: it clears L1/L2).
++  if (Thread->LookupCache->InvalidateCacheRange(Start, Length) && ZeroCallRet) {
+     FEXCORE_PROFILE_SCOPED("InvalidateCallRet");
+ 
+     // This may cause access violations in the thread on Windows as zeroing is not atomic, this is handled by the frontend
+--- a/FEXCore/include/FEXCore/Core/Context.h
++++ b/FEXCore/include/FEXCore/Core/Context.h
+@@ -140,9 +140,10 @@
+   virtual void FlushAndCloseCodeMap() = 0;
+ 
+   FEX_DEFAULT_VISIBILITY virtual void ClearCodeCache(FEXCore::Core::InternalThreadState* Thread, bool NewCodeBuffer = true) = 0;
+-  FEX_DEFAULT_VISIBILITY virtual void InvalidateCodeBuffersCodeRange(uint64_t Start, uint64_t Length) = 0;
++  // Returns whether any block erased pushed call-return stack entries (SteamARM).
++  FEX_DEFAULT_VISIBILITY virtual bool InvalidateCodeBuffersCodeRange(uint64_t Start, uint64_t Length) = 0;
+   FEX_DEFAULT_VISIBILITY virtual void
+-  InvalidateThreadCachedCodeRange(FEXCore::Core::InternalThreadState* Thread, uint64_t Start, uint64_t Length) = 0;
++  InvalidateThreadCachedCodeRange(FEXCore::Core::InternalThreadState* Thread, uint64_t Start, uint64_t Length, bool ZeroCallRet = true) = 0;
+   FEX_DEFAULT_VISIBILITY virtual FEXCore::Utils::WritePriorityMutex::Mutex& GetCodeInvalidationMutex() = 0;
+ 
+   FEX_DEFAULT_VISIBILITY virtual void
+--- a/FEXCore/Source/Interface/Context/Context.h
++++ b/FEXCore/Source/Interface/Context/Context.h
+@@ -224,8 +224,9 @@
+ 
+   void OnCodeBufferAllocated(const std::shared_ptr<CPU::CodeBuffer>&) override;
+   void ClearCodeCache(FEXCore::Core::InternalThreadState* Thread, bool NewCodeBuffer = true) override;
+-  void InvalidateCodeBuffersCodeRange(uint64_t Start, uint64_t Length) override;
+-  void InvalidateThreadCachedCodeRange(FEXCore::Core::InternalThreadState* Thread, uint64_t Start, uint64_t Length) override;
++  bool InvalidateCodeBuffersCodeRange(uint64_t Start, uint64_t Length) override;
++  void InvalidateThreadCachedCodeRange(FEXCore::Core::InternalThreadState* Thread, uint64_t Start, uint64_t Length,
++                                       bool ZeroCallRet = true) override;
+   FEXCore::Utils::WritePriorityMutex::Mutex& GetCodeInvalidationMutex() override {
+     return CodeInvalidationMutex;
+   }
+--- a/Source/Windows/Common/InvalidationTracker.cpp
++++ b/Source/Windows/Common/InvalidationTracker.cpp
+@@ -1,5 +1,6 @@
+ // SPDX-License-Identifier: MIT
+ 
++#include <cstring>
+ #include <FEXCore/Utils/LogManager.h>
+ #include <FEXCore/Utils/TypeDefines.h>
+ #include <FEXCore/Utils/SignalScopeGuards.h>
+@@ -31,6 +32,10 @@
+     }
+   }
+   LogMan::Msg::IFmt("SMC tracking in blocks of {:#x} bytes", SMCBlockSize);
++  // SteamARM: call-return stacks are zeroed only when an erased block pushed entries (FEXCore). =0 always zeroes.
++  if (const char* Env = getenv("STEAMARM_FEX_CALLRET_SKIP")) {
++    SkipUnpushedCallRet = strcmp(Env, "0") != 0;
++  }
+ 
+   MEMORY_BASIC_INFORMATION Info;
+   uint64_t Address = 0;
+@@ -507,9 +512,9 @@
+ 
+ void InvalidationTracker::InvalidateIntervalInternalLocked(uint64_t Address, uint64_t Size) {
+   // NOTE: This assumes CodeInvalidationMutex is locked by the caller
+-  CTX.InvalidateCodeBuffersCodeRange(Address, Size);
++  const bool ZeroCallRet = CTX.InvalidateCodeBuffersCodeRange(Address, Size) || !SkipUnpushedCallRet;
+   for (auto Thread : Threads) {
+-    CTX.InvalidateThreadCachedCodeRange(Thread.second, Address, Size);
++    CTX.InvalidateThreadCachedCodeRange(Thread.second, Address, Size, ZeroCallRet);
+   }
+ }
+ 
+--- a/Source/Windows/Common/InvalidationTracker.h
++++ b/Source/Windows/Common/InvalidationTracker.h
+@@ -63,6 +63,8 @@
+   // backs 4 KiB guest pages with 16 KiB host pages that carry the union of their guest pages' protections, so a
+   // guest page's write protection only holds while every guest page sharing its host page is protected as well.
+   uint64_t SMCBlockSize {FEXCore::Utils::FEX_PAGE_SIZE};
++  // Skip zeroing the call-return stacks when no erased block pushed entries (STEAMARM_FEX_CALLRET_SKIP=0: never skip).
++  bool SkipUnpushedCallRet {true};
+   uint64_t SMCBlockBase(uint64_t Address) const {
+     return Address & ~(SMCBlockSize - 1);
+   }
+--- a/FEXCore/Source/Interface/Core/CodeCache.cpp
++++ b/FEXCore/Source/Interface/Core/CodeCache.cpp
+@@ -818,7 +818,8 @@
+       LOGMAN_THROW_A_FMT(Block.HostCode < Code.CodeBuffer.size_bytes(), "Host offset {:#x} out of range ({:#x})", Block.HostCode,
+                          Code.CodeBuffer.size_bytes());
+       auto HostCode = &Code.CodeBuffer[Block.HostCode];
+-      LookupCache.AddBlockMapping(Guest + BinarySection.FileStartVA, std::move(Block.CodePages), HostCode, WriteLock);
++      LookupCache.AddBlockMapping(Guest + BinarySection.FileStartVA, std::move(Block.CodePages), HostCode, true /* SteamARM: may push */,
++                                  WriteLock);
+     }
+ 
+     // Guest code pages
