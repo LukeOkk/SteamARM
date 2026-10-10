@@ -713,3 +713,35 @@ HKLM\HARDWARE\DESCRIPTION\System\CentralProcessor\N "CP xxxx".
          frames > 50 ms   20 / 22         33 / 34
        Long spikes are fewer and shorter; frames of 50-100 ms are more
        frequent. FINAL FANTASY VII REMAKE 30 fps, Schedule I 88.9 fps.
+    v. The self-modifying-code path, measured on its own. tests/win/
+       smc_bench.c rewrites and runs x64 stubs in a 16 MiB read-write-execute
+       ring the way the protector does (two write faults, invalidations and
+       recompiles per round), with a thread running ordinary code beside it.
+       0.3.70: 14,200 rounds/s with one writer, 10,300 with three -- the path
+       serialized. Where the writer's time went: ~20 % signal machinery, the
+       call-return stack zeroing (28,700 decommits of 4 MiB a second, each two
+       Wine calls, an mmap and an mprotect, under FEX's exclusive code lock),
+       and the W^X split handing every re-trapped page back (scan, icache,
+       three mprotects) inside FEX's shared code lock. Three designs were
+       drawn up and checked against the code by a separate reviewer:
+       - FEX 0020: stacks are zeroed only when an erased block pushed entries
+         into them. The JIT records pushes; FEX's cache, which matches
+         anonymous code with its immediates masked (so a ring's rewritten
+         stubs come back from it on the next lap), is read for the push
+         instruction; a raced compile keeps the block's own flag. 21,600 and
+         14,500 rounds/s; decommits ~0. Dungeons II: 8,800 zeroings a second
+         -> ~130.
+       - Lazy execute (runtime, Wine's loaders, LXRT_LAZY_EXEC=2): an R-X
+         request on a range the W^X table holds RWX stays read-only on the
+         host until a native fetch, which scans it then; FEX's trap is one
+         mprotect. It also stops the scan from "rewriting" x64 bytes that
+         look like aarch64 words. Review found eight defects in the first
+         version (one a race that hit every ELF guest), all fixed with tests
+         (tests/elf/wx_lazy_exec.c). 35,100 and 36,800 rounds/s: three
+         writers now scale.
+       - An exact resume without a signal after FEX handles an SMC fault
+         (the carrier, ~10 % of the writer) was left for later: none of the
+         runtime-only options covers the hot case.
+       KUSER_SHARED_DATA reads from x64 code (runtime/lowpage.c) cost 1.69 us
+       each (scratchpad kuser.c), ~10,000 a second in the game: ~1.7 % of a
+       core, not pursued.
