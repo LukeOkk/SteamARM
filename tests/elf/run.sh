@@ -1536,6 +1536,83 @@ else
     echo "  skip  WX_MPROTECT_RACE (no $STAGE)"
 fi
 
+# WX_LAZY_EXEC: lazy execute (runtime/wxsplit.c; LXRT_LAZY_EXEC, 2 by default
+# in Wine's loaders only): an R-X mprotect the W^X table takes is read-only on
+# the host until its first instruction fetch scans it, and a store into it is
+# the guest's SIGSEGV, never flipped writable (tests/elf/wx_lazy_exec.c: R-X
+# code runs and refuses stores, RWX/R-X cycles, svc rewritten before it runs,
+# FEX's trap and untrap from a SIGSEGV handler, subpage.c adopting a lazy page,
+# a lazy range moved by mremap, a shared memfd moved by MREMAP_FIXED and an
+# lxrt_alias over a held range never flipped or scanned, callers racing RWX ->
+# R-X, in one process and in six at once; and the review's cases: an RWX
+# request the table declines over a lazy page, heap pages brk gave back and
+# took again, jit_adopt refusing a lazy range, mremap of held ranges whose
+# pages differ on the host, a 4 KiB slot freed inside a held host page, R-X
+# leaving scanned code executable). Modes 1 (also at 4 KiB guest pages) and
+# 2, and the default for an ELF program (off: the same checks through the
+# eager path; six races at once there are what caught an RWX entry added
+# after its host change, runtime/wxsplit.c lxrt_wx_protect). LXRT_WX_STATS
+# has to count lazy grants, first fetches and stores handed to the guest with
+# lazy execute on, and none of them with it off.
+if [ -f "$STAGE/usr/lib64/libc.a" ] && [ -n "$GCCDIR" ]; then
+    if err=$(glibc_cc -static-pie -O2 -pthread -o build/wx_lazy_exec tests/elf/wx_lazy_exec.c); then
+        lz_bad=""; lz_counts=""
+        for run in 1:16 1:4 2:16 0:16; do
+            mode=${run%%:*}; kb=${run#*:}
+            st="$PWD/build/wx_lazy_exec.$mode.$kb.stats"
+            rm -f "$st"
+            if [ "$mode" = 0 ]; then
+                out=$(unset LXRT_LAZY_EXEC; LXRT_WX_STATS="$st" deadline 120 ./build/lxrun "$PWD/build/wx_lazy_exec" 0 2>&1); rc=$?
+            elif [ "$kb" = 4 ]; then
+                out=$(LXRT_LAZY_EXEC=$mode LXRT_GUEST_PAGE=4096 LXRT_WX_STATS="$st" deadline 120 ./build/lxrun "$PWD/build/wx_lazy_exec" "$mode" 2>&1); rc=$?
+            else
+                out=$(LXRT_LAZY_EXEC=$mode LXRT_WX_STATS="$st" deadline 120 ./build/lxrun "$PWD/build/wx_lazy_exec" "$mode" 2>&1); rc=$?
+            fi
+            line=$(grep 'wxsplit at exit' "$st" 2>/dev/null | tail -1)
+            g=-1; f=-1; s=-1
+            [[ "$line" =~ lazy\ execute:\ ([0-9]+)\ grants,\ ([0-9]+)\ first\ fetches,\ ([0-9]+)\ stores ]] &&
+                { g=${BASH_REMATCH[1]}; f=${BASH_REMATCH[2]}; s=${BASH_REMATCH[3]}; }
+            if [ "$mode" = 0 ]; then counted=$([ "$g" -eq 0 ] && [ "$f" -eq 0 ] && [ "$s" -eq 0 ] && echo y)
+            else counted=$([ "$g" -gt 0 ] && [ "$f" -gt 0 ] && [ "$s" -gt 0 ] && echo y); fi
+            if [ "$rc" -ne 0 ] || ! grep -q '== wx_lazy_exec: ok' <<<"$out" || [ "$counted" != y ]; then
+                lz_bad="$lz_bad [mode $mode, ${kb} KiB: rc=$rc grants/fetches/stores $g/$f/$s $(grep -E 'MAL|unexpected' <<<"$out" | head -3 | tr '\n' ' ')]"
+            fi
+            [ "$mode$kb" = 216 ] && lz_counts="$g grants, $f first fetches, $s stores to the guest"
+        done
+        if [ -z "$lz_bad" ]; then
+            ok "WX_LAZY_EXEC: $(grep -o '[0-9]* ok, 0 mal' <<<"$out") in modes 1 (16 and 4 KiB pages), 2 and off; mode 2: $lz_counts"
+        else bad "WX_LAZY_EXEC" "$lz_bad"; fi
+    else bad "build wx_lazy_exec" "$err"; fi
+else
+    echo "  skip  WX_LAZY_EXEC (no $STAGE)"
+fi
+
+# WX_LAZY_EXEC_SUITES: the W^X suites above again with lazy execute in modes
+# 1 and 2: jit_rwx, wx_owner and wx_mprotect_race (A, C, D) at 16 and 4 KiB
+# guest pages, and wx_mprotect_race's stress mode, which must take no fault
+# at all (an R-X request there is a table change under the page lock, with no
+# hand-over left to fault across).
+if [ -x build/jit_rwx ] && [ -x build/wx_owner ] && [ -x build/wx_mprotect_race ]; then
+    lz_bad=""
+    for mode in 1 2; do
+        for t in jit_rwx wx_owner wx_mprotect_race; do
+            out16=$(LXRT_LAZY_EXEC=$mode deadline 180 ./build/lxrun "$PWD/build/$t" 2>&1); rc16=$?
+            out4=$(LXRT_LAZY_EXEC=$mode LXRT_GUEST_PAGE=4096 deadline 180 ./build/lxrun "$PWD/build/$t" 2>&1); rc4=$?
+            if [ "$rc16" -ne 0 ] || [ "$rc4" -ne 0 ] ||
+               ! grep -q "== $t: ok" <<<"$out16" || ! grep -q "== $t: ok" <<<"$out4"; then
+                lz_bad="$lz_bad [$t mode $mode: rc=$rc16/$rc4 $(grep -E 'MAL|unexpected' <<<"$out16$out4" | head -3 | tr '\n' ' ')]"
+            fi
+        done
+        st=$(LXRT_LAZY_EXEC=$mode deadline 180 ./build/lxrun "$PWD/build/wx_mprotect_race" stress 2>&1); src=$?
+        [ "$src" -eq 0 ] || lz_bad="$lz_bad [stress mode $mode: rc=$src $(grep -o 'S1 [0-9]* faults, S2 [0-9]* faults' <<<"$st")]"
+    done
+    if [ -z "$lz_bad" ]; then
+        ok "WX_LAZY_EXEC_SUITES: jit_rwx, wx_owner, wx_mprotect_race at 16 and 4 KiB pages and its stress mode (S1/S2 0 faults) with LXRT_LAZY_EXEC=1 and 2"
+    else bad "WX_LAZY_EXEC_SUITES" "$lz_bad"; fi
+else
+    echo "  skip  WX_LAZY_EXEC_SUITES (jit_rwx, wx_owner or wx_mprotect_race not built)"
+fi
+
 # ELECTRON_RUNTIME: what Heroic's Electron needed (benchmarks/stage24-heroic.txt):
 # prlimit64 EFAULT on a read-only page, mprotect of a partial last page, SysV
 # IPC_RMID deferred while attached, execve ENOENT before the exec, a dup of an

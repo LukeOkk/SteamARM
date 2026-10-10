@@ -50,12 +50,59 @@
 // data to the host, and executing it would be wrong. The main program's name
 // decides (lxrt_wx_set_program); LXRT_WX_SPLIT=0/1 overrides.
 //
+// Lazy execute. A read-execute request can be recorded here too, as R-X
+// beside the RWX ranges: its host pages become READ-ONLY, and executable at
+// their first instruction fetch, through the same flip as an RWX page (made
+// read-only, scanned, rewritten until clean, then read-execute). A store into
+// such a page is the guest's own fault and is delivered, never flipped. It is
+// for Wine under FEX's ARM64EC JIT, which write-protects the x64 code it has
+// translated with VirtualProtect(PAGE_EXECUTE_READ) and lifts that again with
+// PAGE_EXECUTE_READWRITE on the first store (its self-modifying-code trap):
+// that code is data to the host, never fetched natively, and every trap was
+// a hand-over (dispatch.c wx_leave_whole) that scanned 16 KiB, invalidated
+// the icache and made three mach_vm_region and three mprotect calls -- inside
+// FEX's shared CodeInvalidationMutex hold, which its invalidations wait
+// behind (MEASURED, tests/win smc_bench under `sample`, 2026-10-10: 99-125 of
+// each writer thread's 2,631 samples in wx_leave_whole, and another 105-166
+// in the untrap's region walk, lxrt_wx_protect). A trap is now one
+// mprotect(PROT_READ) and a table update: the same trap and untrap from a
+// native guest, nothing fetched in between, went from 90-95 to 200-207
+// thousand rounds a second; with a call into the page after each R-X, from
+// 82-88 to 77-83 thousand, the first fetch's fault (MEASURED, 2026-10-10,
+// tests/elf/wx_lazy_exec.c "smc", eight runs each). The scan also matched x64
+// bytes as aarch64 sites (an ID-register read fixes only 20 bits) and could
+// rewrite them under FEX's feet.
+//
+// LXRT_LAZY_EXEC=2, the default in Wine's loaders: only ranges this table
+// already holds (RWX made R-X, FEX's trap). =1: every host-page aligned R-X
+// mprotect of private anonymous memory (tests/elf/wx_lazy_exec.c). =0 or any
+// other program: off. Not 1 by default: it would move the scan of every PE
+// ARM64 page into a fault taken wherever that code first runs -- inside a
+// nested guest handler too -- and the scan takes pefile.c's lock and
+// allocates; an RWX page's first fetch carries that exposure already, so 2
+// adds nothing new. mmap(PROT_EXEC), file and shared memory, unaligned and
+// 4 KiB-tracked ranges stay eager (rewrite_and_seal). /proc/self/maps shows
+// such a page r--p until its first fetch.
+//
+// One deviation, stated. A first fetch whose scan finds a word to rewrite
+// opens the page read-write while it rewrites (lxrt_wx_scan_for_exec's
+// second round), and a store another thread makes into that R-X page in that
+// moment lands instead of faulting -- a store the guest must see refused
+// (FEX's trap, a write watch) goes through once, unseen. The svc rule still
+// holds: the page goes back to read-only and is counted clean again before
+// it becomes executable. Nothing measured meets it: FEX's x64 pages are
+// never fetched natively, and of 1,083,296 execute flips in a Minecraft
+// Dungeons II session, 2 found anything to rewrite (MEASURED, LXRT_WX_STATS,
+// 2026-10-09). Closing it means rewriting through a second, private view of
+// the page instead of opening the guest's; not done.
+//
 // One owner per host page. A 16 KiB host page can hold pages of this table
 // AND 4 KiB guest pages subpage.c records (a 4 KiB mprotect or MAP_FIXED
 // inside an RWX range, or an RWX commit that is not 16 KiB aligned). Such a
 // page is subpage.c's: when it first sees the page it records every slot of
-// this table as RWX (adopt_untracked), its flips scan every RWX guest page of
-// the page, and the fault handler here leaves the page alone. A page it does
+// this table with the guest's protection, RWX or R-X (adopt_untracked), its
+// flips scan every RWX and every lazily executable guest page of the page,
+// and the fault handler here leaves the page alone. A page it does
 // not track is this file's. Both tables, and every protection change of a
 // page either of them owns, sit under ONE lock (lxrt_pageprot_lock): with a
 // lock each, a write flip here and an execute flip there changed one page at
@@ -87,6 +134,7 @@ size_t lxrt_rewrite_count(uint64_t start, uint64_t end);
 // ------------------------------------------------------------- the decision
 
 static int g_enabled = -1;      // -1: not decided yet (treated as off)
+static int g_lazy;              // LXRT_LAZY_EXEC (header): 0 off, 1 every R-X request, 2 held ranges
 
 static bool g_program_is_fex;
 static bool g_program_is_wine_loader;
@@ -104,6 +152,11 @@ void lxrt_wx_set_program(const char *path)
     g_program_is_fex = !strncmp(base, "FEX", 3) && strncmp(base, "FEXServer", 9) &&
                        strncmp(base, "FEXGetConfig", 12) && strncmp(base, "FEXConfig", 9) &&
                        strncmp(base, "FEXRootFSFetcher", 16);
+    // Lazy execute (header): FEX's trap in Wine's loaders; anything more
+    // only when asked.
+    const char *lz = getenv("LXRT_LAZY_EXEC");
+    int lv = lz && *lz ? atoi(lz) : g_program_is_wine_loader ? 2 : 0;
+    g_lazy = lv == 1 || lv == 2 ? lv : 0;
     const char *e = getenv("LXRT_WX_SPLIT");
     if (e && *e) {
         g_enabled = *e != '0';
@@ -137,14 +190,27 @@ bool lxrt_no_x18(void)
 }
 
 bool lxrt_wx_enabled(void) { return g_enabled > 0; }
+static bool lazy_exec(void) { return g_lazy > 0 && g_enabled > 0; }
 
 // ------------------------------------------------------------- the table
 //
-// Guest ranges the guest asked to be read-write-execute, sorted, disjoint,
-// adjacent ones merged: V8's single 256 MiB mprotect is one entry, and a JIT
-// that commits thousands of separate chunks costs one entry per run of chunks.
-
-struct wxr { uint64_t start, end; };
+// Guest ranges the guest asked to be read-write-execute (or, lazy execute,
+// read-execute), sorted, disjoint, adjacent ones of the same protection
+// merged: V8's single 256 MiB mprotect is one entry, and a JIT that commits
+// thousands of separate chunks costs one entry per run of chunks. Every
+// entry is private anonymous memory the guest owns: whatever replaces that
+// (munmap, MAP_FIXED, brk, mremap's destination, lxrt_alias, jit_adopt)
+// takes the entries out, and lxrt_wx_protect relies on it.
+//
+// prot: what the guest asked for, WX_RWX (the split) or WX_RX (lazy execute;
+// --X is recorded as R-X -- the scan has to read the page anyway).
+// x: a host page of it may be read-execute -- a fetch flipped one, or an R-X
+// grant left one so (lazy_host_locked). A hint for that grant, never for
+// safety: wrongly false, the grant takes execute from a scanned page, which
+// refaults and is scanned again; wrongly true, it asks the kernel first.
+struct wxr { uint64_t start, end; int prot; bool x; };
+#define WX_RWX (PROT_READ | PROT_WRITE | PROT_EXEC)
+#define WX_RX  (PROT_READ | PROT_EXEC)
 static struct wxr *g_r;
 static int g_cap;
 static _Atomic int g_n;
@@ -240,18 +306,25 @@ static bool reserve(int extra)
     return true;
 }
 
-// Remove [start, end) from the table. Caller holds g_lock.
+// Remove [start, end) from the table. Caller holds g_lock. Afterwards nothing
+// in [start, end) is held, whatever happens: lxrt_wx_protect takes a held
+// range for private anonymous memory without asking the kernel.
 static void remove_locked(uint64_t start, uint64_t end)
 {
     int n = atomic_load(&g_n);
     int i = lower(start);
     while (i < n && g_r[i].start < end) {
         if (g_r[i].start < start && g_r[i].end > end) {       // split in two
-            if (!reserve(1))
+            if (!reserve(1)) {
+                // No room for the tail: it goes too. Its pages keep their
+                // host protection (read-write, read-only or scanned
+                // read-execute, all safe); the guest faults there unclaimed.
+                g_r[i].end = start;
                 return;
+            }
             memmove(&g_r[i + 2], &g_r[i + 1], (size_t)(n - i - 1) * sizeof *g_r);
+            g_r[i + 1] = g_r[i];
             g_r[i + 1].start = end;
-            g_r[i + 1].end = g_r[i].end;
             g_r[i].end = start;
             atomic_store(&g_n, n + 1);
             return;
@@ -269,40 +342,80 @@ static void remove_locked(uint64_t start, uint64_t end)
     }
 }
 
-// Add [start, end), merging with whatever it touches. Caller holds g_lock.
-static bool add_locked(uint64_t start, uint64_t end)
+// Add [start, end) with protection prot (WX_RWX or WX_RX) and hint x: it
+// replaces what it overlaps and merges with neighbours of the same
+// protection (their hints joined). Caller holds g_lock and has run
+// reserve(2) -- a split by the remove and an insert -- so nothing in here
+// can fail half-way.
+// Bumped by every add_locked: stale_fault_retry looks the page up again only
+// when something was added since the handler found it missing.
+static _Atomic unsigned g_add_gen;
+
+static void add_locked(uint64_t start, uint64_t end, int prot, bool x)
+{
+    atomic_fetch_add(&g_add_gen, 1);
+    remove_locked(start, end);
+    int n = atomic_load(&g_n);
+    int i = lower(start);       // nothing overlaps now: [i-1].end <= start, [i].start >= end
+    bool left = i > 0 && g_r[i - 1].end == start && g_r[i - 1].prot == prot;
+    bool right = i < n && g_r[i].start == end && g_r[i].prot == prot;
+    if (left && right) {
+        g_r[i - 1].end = g_r[i].end;
+        g_r[i - 1].x |= g_r[i].x | x;
+        memmove(&g_r[i], &g_r[i + 1], (size_t)(n - i - 1) * sizeof *g_r);
+        atomic_store(&g_n, n - 1);
+    } else if (left) {
+        g_r[i - 1].end = end;
+        g_r[i - 1].x |= x;
+    } else if (right) {
+        g_r[i].start = start;
+        g_r[i].x |= x;
+    } else {
+        memmove(&g_r[i + 1], &g_r[i], (size_t)(n - i) * sizeof *g_r);
+        g_r[i] = (struct wxr){ start, end, prot, x };
+        atomic_store(&g_n, n + 1);
+    }
+    atomic_store(&g_used, true);
+}
+
+// Is every byte of [addr, addr+len) held, with protection prot throughout (0:
+// either)? Caller holds g_lock.
+static bool covered_locked(uint64_t addr, uint64_t len, int prot)
 {
     int n = atomic_load(&g_n);
-    int i = lower(start);
-    if (i > 0 && g_r[i - 1].end == start)       // touches the one below
-        i--;
-    int j = i;
-    while (j < n && g_r[j].start <= end) {      // everything it overlaps or touches
-        if (g_r[j].start < start) start = g_r[j].start;
-        if (g_r[j].end > end) end = g_r[j].end;
-        j++;
-    }
-    if (j > i) {                                // replace [i, j) by one entry
-        g_r[i].start = start;
-        g_r[i].end = end;
-        memmove(&g_r[i + 1], &g_r[j], (size_t)(n - j) * sizeof *g_r);
-        atomic_store(&g_n, n - (j - i - 1));
-        return true;
-    }
-    if (!reserve(1))
+    uint64_t p = addr, end = addr + len;
+    if (!len || end < addr)
         return false;
-    memmove(&g_r[i + 1], &g_r[i], (size_t)(n - i) * sizeof *g_r);
-    g_r[i].start = start;
-    g_r[i].end = end;
-    atomic_store(&g_n, n + 1);
-    atomic_store(&g_used, true);
+    for (int i = lower(addr); p < end; i++) {
+        if (i >= n || g_r[i].start > p || (prot && g_r[i].prot != prot))
+            return false;
+        p = g_r[i].end;
+    }
     return true;
 }
 
 // The queries below for a caller that already holds g_lock (subpage.c).
-bool lxrt_wx_contains_locked(uint64_t addr)
+
+// The protection the guest gave the page at addr (WX_RWX or WX_RX), 0 when
+// the table does not hold it.
+int lxrt_wx_prot_locked(uint64_t addr)
 {
-    return atomic_load(&g_n) && find_locked(addr);
+    int i = lower(addr);
+    return i < atomic_load(&g_n) && g_r[i].start <= addr ? g_r[i].prot : 0;
+}
+
+// Does the guest's protection of the page at addr allow the access (a fetch,
+// or a store)? A store into an R-X page is the guest's fault, not a flip.
+bool lxrt_wx_allows_locked(uint64_t addr, bool fetch)
+{
+    return (lxrt_wx_prot_locked(addr) & (fetch ? PROT_EXEC : PROT_WRITE)) != 0;
+}
+
+// Is the page at addr lazily executable -- read-execute to the guest, its
+// bytes scanned only by the fetch flip that makes its host page executable?
+bool lxrt_wx_lazy_locked(uint64_t addr)
+{
+    return lxrt_wx_prot_locked(addr) == WX_RX;
 }
 
 bool lxrt_wx_intersects_locked(uint64_t addr, uint64_t len)
@@ -324,17 +437,33 @@ bool lxrt_wx_contains(uint64_t addr)
     return r;
 }
 
-// Is every byte of [addr, addr+len) in the table?
-bool lxrt_wx_covered(uint64_t addr, uint64_t len)
+// Is every byte of [addr, addr+len) in the table (with protection prot
+// throughout, for the second)?
+bool lxrt_wx_covered_prot(uint64_t addr, uint64_t len, int prot)
 {
     if (!atomic_load(&g_n) || !len)
         return false;
     sigset_t old;
     lock_nosig(&old);
-    int i = lower(addr);
-    bool r = i < atomic_load(&g_n) && g_r[i].start <= addr && g_r[i].end >= addr + len;
+    bool r = covered_locked(addr, len, prot);
     unlock_nosig(&old);
     return r;
+}
+
+bool lxrt_wx_covered(uint64_t addr, uint64_t len) { return lxrt_wx_covered_prot(addr, len, 0); }
+
+// The same two for dispatch.c's jit_adopt, which holds g_lock
+// (lxrt_pageprot_lock) while it replaces the range: asked again there, and
+// the range out of the table before anyone can fault on it as MAP_JIT.
+bool lxrt_wx_covered_prot_locked(uint64_t addr, uint64_t len, int prot)
+{
+    return atomic_load(&g_n) && covered_locked(addr, len, prot);
+}
+
+void lxrt_wx_forget_locked(uint64_t addr, uint64_t len)
+{
+    if (atomic_load(&g_n) && len)
+        remove_locked(addr, addr + len);
 }
 
 // Does any byte of [addr, addr+len) lie in the table?
@@ -368,6 +497,9 @@ void lxrt_wx_forget(uint64_t addr, uint64_t len)
 // appends them to that file instead: a webhelper renderer's stderr goes
 // nowhere anyone reads.
 static _Atomic uint64_t st_write, st_exec, st_scan_sites, st_rewritten, st_x18w;
+// Lazy execute: R-X requests recorded, first fetches that made such a page
+// executable, stores into one handed to the guest.
+static _Atomic uint64_t st_lazy, st_lazy_fetch, st_lazy_store;
 static _Atomic uint64_t st_last;
 static int stats_on(void)
 {
@@ -377,13 +509,19 @@ static int stats_on(void)
 }
 static void stats_print(const char *when)
 {
-    char line[320];
+    char line[512];
     int n = snprintf(line, sizeof line, "[lxrt] pid %d wxsplit%s: %d ranges, %llu write flips, %llu exec flips, "
-                     "%llu scans with sites, %llu words rewritten, %llu x18-naming words seen\n",
+                     "%llu scans with sites, %llu words rewritten, %llu x18-naming words seen; "
+                     "lazy execute: %llu grants, %llu first fetches, %llu stores to the guest\n",
                      (int)getpid(), when, atomic_load(&g_n),
                      (unsigned long long)atomic_load(&st_write), (unsigned long long)atomic_load(&st_exec),
                      (unsigned long long)atomic_load(&st_scan_sites), (unsigned long long)atomic_load(&st_rewritten),
-                     (unsigned long long)atomic_load(&st_x18w));
+                     (unsigned long long)atomic_load(&st_x18w), (unsigned long long)atomic_load(&st_lazy),
+                     (unsigned long long)atomic_load(&st_lazy_fetch), (unsigned long long)atomic_load(&st_lazy_store));
+    if (n < 0)
+        return;
+    if (n >= (int)sizeof line)
+        n = (int)sizeof line - 1;
     const char *e = getenv("LXRT_WX_STATS");
     int fd = e && *e == '/' ? open(e, O_WRONLY | O_CREAT | O_APPEND | O_CLOEXEC, 0644) : -1;
     if (fd >= 0) {
@@ -430,7 +568,8 @@ static void stats_tick(void)
 }
 void lxrt_wx_stats_flush(void)
 {
-    if (stats_on() && (atomic_load(&st_write) || atomic_load(&st_exec) || atomic_load(&g_n)))
+    if (stats_on() && (atomic_load(&st_write) || atomic_load(&st_exec) || atomic_load(&g_n) ||
+                       atomic_load(&st_lazy) || atomic_load(&st_lazy_fetch) || atomic_load(&st_lazy_store)))
         stats_print(" at exit");
 }
 
@@ -540,61 +679,283 @@ static bool anon_private(uint64_t addr, uint64_t len)
 
 // ------------------------------------------------------------- mprotect
 
-// The guest asked for read-write-execute on [addr, addr+len), host-page
-// aligned. Returns 1 when handled here (*ret set), 0 when the caller should
-// fall back to its old behaviour (not private anonymous memory, or a host
-// page subpage.c owns: dispatch.c then sends the request there).
-int lxrt_wx_protect(uint64_t addr, uint64_t len, long *ret)
+// An RWX request lxrt_wx_protect declines goes the ordinary way (dispatch.c):
+// its host pages become read-write, or subpage.c takes the range. What the
+// table holds there as R-X becomes RWX first -- what the guest asked for, and
+// a kind those pages may carry. Left R-X over a read-write host page, the
+// table and the host disagreed: the first fetch made the page read-execute
+// and every store after it was refused as the guest's fault, and an R-X
+// request found the range "already so" and left it writable (review of lazy
+// execute: an RWX mprotect over a lazy page and a shared memfd page beside
+// it, then R-X again -- a store into the guest's R-X page landed;
+// tests/elf/wx_lazy_exec.c, "decline"). Caller holds g_lock.
+static void rwx_declined_locked(uint64_t addr, uint64_t end)
 {
-    if (!lxrt_wx_enabled() || !len || !anon_private(addr, len))
+    for (uint64_t p = addr;;) {
+        int n = atomic_load(&g_n), i = lower(p);
+        while (i < n && g_r[i].start < end && g_r[i].prot != WX_RX)
+            i++;
+        if (i >= n || g_r[i].start >= end)
+            return;
+        uint64_t s = g_r[i].start > p ? g_r[i].start : p;
+        uint64_t e = g_r[i].end < end ? g_r[i].end : end;
+        bool x = g_r[i].x;
+        if (reserve(2))
+            add_locked(s, e, WX_RWX, x);
+        else
+            remove_locked(s, e);    // no room: out of the table, which is never wrong
+        p = e;
+    }
+}
+
+// The host half of a lazy R-X grant on [addr, end), table entry already in
+// place, g_lock held: read-only where a page can be written (or cannot be
+// read). A page read-only or read-execute already stays as it is --
+// read-execute was scanned when it became so and has not been writable
+// since, which holds for every executable page of guest memory, whoever made
+// it so. Read-only over all of it took execute from code that had run since
+// the range was last made writable, and each such page refaulted and was
+// scanned again with nothing changed (review; tests/elf/wx_lazy_exec.c,
+// "keeprx": the page that ran stays r-xp). Called only where a page may be
+// read-execute (the entries' x hint, or memory the table did not hold):
+// FEX's trap, an R-X over pages nothing has fetched natively, stays one
+// mprotect -- this walk's mach_vm_region on every trap took smc's no-call
+// rounds from 200-202 to 157-183 thousand a second, and with the hint they
+// are 200-207 again (MEASURED, tests/elf/wx_lazy_exec.c "smc", four and
+// eight runs, 2026-10-10).
+static bool lazy_host_locked(uint64_t addr, uint64_t end)
+{
+    for (uint64_t p = addr; p < end;) {
+        mach_vm_address_t ra = p;
+        mach_vm_size_t rs = 0;
+        vm_region_basic_info_data_64_t ri;
+        mach_msg_type_number_t rc = VM_REGION_BASIC_INFO_COUNT_64;
+        mach_port_t obj = MACH_PORT_NULL;
+        if (mach_vm_region(mach_task_self(), &ra, &rs, VM_REGION_BASIC_INFO_64,
+                           (vm_region_info_t)&ri, &rc, &obj) != KERN_SUCCESS || ra > p)
+            // A hole: the kernel's own answer for it.
+            return mprotect((void *)(uintptr_t)p, (size_t)(end - p), PROT_READ) == 0;
+        uint64_t next = ra + rs < end ? ra + rs : end;
+        if (((ri.protection & VM_PROT_WRITE) || !(ri.protection & VM_PROT_READ)) &&
+            mprotect((void *)(uintptr_t)p, (size_t)(next - p), PROT_READ) != 0)
+            return false;
+        p = next;
+    }
+    return true;
+}
+
+// The guest asked for an executable protection prot on [addr, addr+len),
+// host-page aligned: read-write-execute (the split), or read-execute without
+// write (lazy execute, header). Returns 1 when handled here (*ret set), 0
+// when the caller should fall back to its old behaviour (lazy execute off,
+// not private anonymous memory, mode 2 and a range the table does not hold,
+// or a host page subpage.c owns: dispatch.c then sends the request there --
+// for RWX, with what the table holds there made RWX, rwx_declined_locked).
+int lxrt_wx_protect(uint64_t addr, uint64_t len, int prot, long *ret)
+{
+    if (!lxrt_wx_enabled() || !len || !(prot & PROT_EXEC))
         return 0;
+    bool lazy = !(prot & PROT_WRITE);
+    if (lazy && !lazy_exec())
+        return 0;
+    int want = lazy ? WX_RX : WX_RWX;
+    uint64_t end = addr + len;
+    // A range that wraps the address space: Linux says ENOMEM, and an entry
+    // ending below its start broke lower()'s binary search for every lookup
+    // after it (review: an RWX or R-X mprotect wrapping the top made every
+    // later fetch in a held range a guest SIGSEGV).
+    if (end <= addr) {
+        *ret = -12;                 // ENOMEM
+        return 1;
+    }
     sigset_t old;
     lock_nosig(&old);
-    // dispatch.c asked subpage.c before calling here, but without this lock:
-    // a page it began tracking since is its, and stays its.
+    // A page subpage.c tracks is its, and stays its: asked under the lock its
+    // records are kept under.
     if (lxrt_subpage_tracked_locked(addr, len)) {
+        if (!lazy)
+            rwx_declined_locked(addr, end);
         unlock_nosig(&old);
         return 0;
     }
-    if (!add_locked(addr, addr + len)) {
+    // Already so: every host page of it is in a state this protection allows
+    // (RWX: read-write, read-only, or read-execute scanned; R-X: read-only, or
+    // read-execute scanned). FEX traps pages it has trapped before.
+    if (covered_locked(addr, len, want)) {
+        unlock_nosig(&old);
+        *ret = 0;
+        return 1;
+    }
+    // A range the table holds is private anonymous memory (the table's
+    // header): no region walk. FEX's untrap (RWX over its own trap) paid one
+    // every time -- anon_private's mach_vm_region was 105-166 of each smc_bench
+    // writer thread's 2,631 samples, nearly all of lxrt_wx_protect's
+    // (MEASURED, 2026-10-10).
+    bool held = covered_locked(addr, len, 0);
+    if (!held && ((lazy && g_lazy == 2) || !anon_private(addr, len))) {
+        if (lazy) {
+            unlock_nosig(&old);
+            return 0;
+        }
+        // RWX declined: what dispatch.c would grant -- read-write -- granted
+        // here under the lock, so that the table's R-X pieces become RWX only
+        // if the host really changed. Converted first, a read-only shared
+        // view earlier in the range made the mprotect fail and change nothing
+        // (Darwin and Linux both), the guest's page stayed R-X, and the
+        // table's RWX let the next store into it land (review: RWX over [a
+        // read-only shared file][a lazy page], EACCES, then a store landed).
+        int r = mprotect((void *)(uintptr_t)addr, (size_t)len, PROT_READ | PROT_WRITE);
+        int e = errno;
+        if (r == 0)
+            rwx_declined_locked(addr, end);
+        unlock_nosig(&old);
+        *ret = r == 0 ? 0 : -lxrt_errno_to_linux(e);
+        return 1;
+    }
+    // What the table holds there now, to put back as it was if the host
+    // refuses the change; and room first, so that nothing changes unless all
+    // of it does.
+    struct wxr was_buf[16], *was = was_buf;
+    int nwas = 0;
+    int n = atomic_load(&g_n), first = lower(addr), last = first;
+    while (last < n && g_r[last].start < end)
+        last++;
+    if (last - first > (int)(sizeof was_buf / sizeof was_buf[0]))
+        was = malloc((size_t)(last - first) * sizeof *was);
+    if (!was || !reserve(2)) {
+        if (was != was_buf)
+            free(was);
         unlock_nosig(&old);
         *ret = -12;                 // ENOMEM
         return 1;
     }
-    // Read-write first: a guest that asks for write is about to write, and a
-    // page nobody executes never has to be scanned. Execute comes on the
-    // first instruction fetch, through lxrt_wx_handle_fault.
-    if (mprotect((void *)(uintptr_t)addr, (size_t)len, PROT_READ | PROT_WRITE) != 0) {
+    // A page of it may be read-execute on the host: one an entry's hint names,
+    // or any where the table holds nothing (who knows).
+    bool anyx = !held;
+    for (int i = first; i < last; i++) {
+        was[nwas++] = (struct wxr){ g_r[i].start > addr ? g_r[i].start : addr,
+                                    g_r[i].end < end ? g_r[i].end : end, g_r[i].prot, g_r[i].x };
+        anyx |= g_r[i].x;
+    }
+    // Table first, host second, both under the lock. The fault handler looks
+    // at the table's size before it takes the lock: with the table empty --
+    // an ELF program's, mode 0, after every R-X made the range leave it -- a
+    // fetch that faulted on a page this call had already made read-write
+    // found nothing to wait for and reached the guest as SIGSEGV (MEASURED:
+    // tests/elf/wx_lazy_exec.c "race" in mode 0, six runs at a time, 29 of
+    // 192 runs with the host first). With the entry in first, that handler
+    // waits for the lock and finds the page held; a handler that sees the
+    // entry while the host still has the old protection is behind this lock
+    // too.
+    //
+    // RWX: read-write first -- a guest that asks for write is about to write,
+    // and a page nobody executes never has to be scanned. R-X: read-only
+    // where the page could be written (lazy_host_locked, when a page may be
+    // read-execute; read-only throughout otherwise). Execute comes on the
+    // first instruction fetch either way, through lxrt_wx_handle_fault, which
+    // scans then; a store into an R-X page faults and is the guest's.
+    add_locked(addr, end, want, lazy && anyx);
+    bool ok = lazy && anyx ? lazy_host_locked(addr, end)
+                           : mprotect((void *)(uintptr_t)addr, (size_t)len,
+                                      lazy ? PROT_READ : PROT_READ | PROT_WRITE) == 0;
+    if (!ok) {
         int e = errno;
-        remove_locked(addr, addr + len);
+        // Back as it was: the pieces it held merge again with what they
+        // were cut from (the table never holds two touching entries of one
+        // protection). Only lazy_host_locked can stop half-way, and what it
+        // leaves is read-only, which either kind allows; the RWX change is
+        // one mprotect, all or nothing, so its R-X pieces are still R-X.
+        remove_locked(addr, end);
+        for (int i = 0; i < nwas; i++)
+            if (reserve(2))
+                add_locked(was[i].start, was[i].end, was[i].prot, was[i].x);
+        if (was != was_buf)
+            free(was);
         unlock_nosig(&old);
         *ret = -lxrt_errno_to_linux(e);
         return 1;
     }
+    if (was != was_buf)
+        free(was);
+    if (lazy)
+        atomic_fetch_add(&st_lazy, 1);
     unlock_nosig(&old);
     if (lxrt_trace_on())
-        fprintf(lxrt_trace_stream(), "[lxrt] mprotect 0x%llx+0x%llx RWX: W^X split (%d ranges)\n",
-                (unsigned long long)addr, (unsigned long long)len, atomic_load(&g_n));
+        fprintf(lxrt_trace_stream(), "[lxrt] mprotect 0x%llx+0x%llx %s (%d ranges)\n",
+                (unsigned long long)addr, (unsigned long long)len,
+                lazy ? "R-X: read-only until its first fetch" : "RWX: W^X split", atomic_load(&g_n));
     *ret = 0;
     return 1;
 }
 
-// mremap moved [old, old+olen) to [neu, neu+nlen): the new range keeps the
-// guest's RWX, the pages keep their host protection.
+// mremap.c is about to move [addr, addr+len), host-page aligned, and moves
+// one protection, as Linux moves one VMA. A range this table holds whole,
+// all with one guest protection, can show several on the host: read-only
+// pages not fetched yet beside read-execute ones (lazy execute), read-write
+// beside read-execute (the split) -- and mremap.c refused that with EFAULT
+// (review: a lazy range with one of its pages run; tests/elf/wx_lazy_exec.c,
+// "fetched"). Each page goes to its entry's base state, read-only for R-X
+// and read-write for RWX: one protection, which the destination takes and
+// the table carries there (lxrt_wx_moved); execute comes back on the next
+// fetch, scanned where the page is then. A range of mixed guest protections
+// is left as it is, and refused, as Linux refuses two VMAs. Returns whether
+// it changed anything.
+bool lxrt_wx_unify_prot(uint64_t addr, uint64_t len)
+{
+    if (!atomic_load(&g_n) || !len)
+        return false;
+    sigset_t old;
+    lock_nosig(&old);
+    int kind = covered_locked(addr, len, WX_RX) ? WX_RX : covered_locked(addr, len, WX_RWX) ? WX_RWX : 0;
+    bool done = kind && !lxrt_subpage_tracked_locked(addr, len) &&
+                mprotect((void *)(uintptr_t)addr, (size_t)len,
+                         kind == WX_RX ? PROT_READ : PROT_READ | PROT_WRITE) == 0;
+    unlock_nosig(&old);
+    return done;
+}
+
+// mremap moved [old, old+olen) to [neu, neu+nlen): the new range keeps what
+// the guest gave the old one, piece by piece (a grown tail takes the last
+// piece's), and the pages keep their host protection -- a read-execute one
+// was scanned where it was and holds the same bytes now. Whatever the table
+// held at the destination goes first, whether the source was held or not:
+// the move replaced it (MREMAP_FIXED), and a shared or file mapping moved
+// over a held range was left in the table, where a fetch flipped, scanned and
+// rewrote it like the guest's own private memory (MEASURED before this: a
+// memfd's svc came back as a branch, 15800ffe, through its other view --
+// tests/elf/wx_lazy_exec.c, "fixed").
 void lxrt_wx_moved(uint64_t old, uint64_t olen, uint64_t neu, uint64_t nlen)
 {
     if (!atomic_load(&g_n))
         return;
-    bool was = lxrt_wx_covered(old, olen);
-    lxrt_wx_forget(old, olen);
-    if (!was || !nlen)
-        return;
-    // The moved pages carry their host protections with them: a read-execute
-    // one was scanned where it was, and holds the same bytes now.
     sigset_t o;
     lock_nosig(&o);
-    add_locked(neu, neu + nlen);
+    struct wxr *pc = NULL;
+    int np = 0;
+    if (nlen && covered_locked(old, olen, 0)) {
+        int n = atomic_load(&g_n), first = lower(old), last = first;
+        while (last < n && g_r[last].start < old + olen)
+            last++;
+        pc = malloc((size_t)(last - first) * sizeof *pc);
+        for (int i = first; pc && i < last; i++) {
+            uint64_t so = (g_r[i].start > old ? g_r[i].start : old) - old;
+            uint64_t eo = (g_r[i].end < old + olen ? g_r[i].end : old + olen) - old;
+            if (so >= nlen)
+                break;
+            if (i == last - 1 && nlen > olen)
+                eo = nlen;          // grown: the tail takes this piece's protection
+            else if (eo > nlen)
+                eo = nlen;
+            pc[np++] = (struct wxr){ neu + so, neu + eo, g_r[i].prot, g_r[i].x };
+        }
+    }
+    remove_locked(old, old + olen);
+    remove_locked(neu, neu + nlen);
+    for (int i = 0; i < np; i++)
+        if (reserve(2))
+            add_locked(pc[i].start, pc[i].end, pc[i].prot, pc[i].x);
     unlock_nosig(&o);
+    free(pc);
 }
 
 // ------------------------------------------------------------- faults
@@ -610,18 +971,26 @@ static _Thread_local unsigned t_pingpong;
 bool lxrt_wx_flip_locked(uint64_t hp, bool fetch)
 {
     int cur = host_prot(hp);
+    int n = atomic_load(&g_n);
     bool ok = true;
     if (fetch) {
         if (cur < 0 || !(cur & PROT_EXEC)) {
-            // Only the part of the host page the guest made RWX is scanned;
-            // the table's ranges are host-page aligned where they came from
-            // an aligned mprotect, but a partial munmap can trim them. The
-            // rest of the page holds no guest page (subpage.c would track
-            // it), so this is every byte the fetch can reach.
+            // The whole host page is scanned: all of it becomes executable.
+            // The table's ranges are host-page aligned where they came from
+            // an aligned mprotect, but a 4 KiB munmap trims them and leaves
+            // the freed bytes in the page (dispatch.c do_munmap); scanning
+            // only the held part made that slot executable unscanned, and a
+            // svc in it ran live (review: tests/elf/wx_lazy_exec.c, "freed";
+            // RWX alone did it too). Those bytes are no guest page of anyone
+            // -- a mapping there would make the page subpage.c's -- so
+            // rewriting them is harmless. A page subpage.c tracks never comes
+            // here (both callers ask); if one did, only its held part, the
+            // rest being other mappings.
             struct lxrt_range r[LXRT_HOST_PAGE / 4096];
             int nr = 0;
-            int n = atomic_load(&g_n);
+            bool lazy = false;
             for (int i = lower(hp); i < n && g_r[i].start < hp + LXRT_HOST_PAGE; i++) {
+                lazy |= !(g_r[i].prot & PROT_WRITE);
                 uint64_t s = g_r[i].start > hp ? g_r[i].start : hp;
                 uint64_t e = g_r[i].end < hp + LXRT_HOST_PAGE ? g_r[i].end : hp + LXRT_HOST_PAGE;
                 if (nr == (int)(sizeof r / sizeof r[0])) {
@@ -632,14 +1001,35 @@ bool lxrt_wx_flip_locked(uint64_t hp, bool fetch)
                 r[nr].end = e;
                 nr++;
             }
+            if (!lxrt_subpage_tracked_locked(hp, LXRT_HOST_PAGE)) {
+                r[0] = (struct lxrt_range){ hp, hp + LXRT_HOST_PAGE };
+                nr = 1;
+            }
             ok = lxrt_wx_scan_for_exec(hp, r, nr) &&
                  mprotect((void *)(uintptr_t)hp, LXRT_HOST_PAGE, PROT_READ | PROT_EXEC) == 0;
             if (ok) {
                 sys_icache_invalidate((void *)(uintptr_t)hp, LXRT_HOST_PAGE);
                 atomic_fetch_add(&st_exec, 1);
+                if (lazy)
+                    atomic_fetch_add(&st_lazy_fetch, 1);
             }
         }
+        // Read-execute now: an R-X request over it looks before it takes
+        // execute away (struct wxr's hint).
+        if (ok)
+            for (int i = lower(hp); i < n && g_r[i].start < hp + LXRT_HOST_PAGE; i++)
+                g_r[i].x = true;
     } else if (cur < 0 || !(cur & PROT_WRITE)) {
+        // Never a host page holding a page the guest did not make writable
+        // (lazy execute): the callers ask about the faulting address
+        // (lxrt_wx_allows_locked); this is the backstop for the rest of the
+        // page. Writable, its R-X neighbour would take stores the guest must
+        // see fault -- FEX's self-modifying-code trap.
+        for (int i = lower(hp); i < n && g_r[i].start < hp + LXRT_HOST_PAGE; i++)
+            if (!(g_r[i].prot & PROT_WRITE)) {
+                errno = EACCES;
+                return false;
+            }
         ok = mprotect((void *)(uintptr_t)hp, LXRT_HOST_PAGE, PROT_READ | PROT_WRITE) == 0;
         if (ok)
             atomic_fetch_add(&st_write, 1);
@@ -675,9 +1065,20 @@ static bool access_now_allowed(uint64_t addr, bool fetch)
 // once no hand-over runs and the page still forbids the access (a real fault).
 // At most 64 retries in a row for the same pc and address: a fault that keeps
 // coming back with the access allowed is not about protection.
+//
+// Retry it too when the table holds the page again by then: a request since
+// put it back (its entry goes in before the host change, lxrt_wx_protect),
+// and the fault, retried, comes back to the table and is flipped. Declined,
+// it went on to subpage.c's fallback, which flips a page of the table --
+// unless, the thread preempted in between, the next hand-over had already
+// taken the page out again: then the guest took SIGSEGV for a fetch that
+// every protection it had asked for allowed (MEASURED: tests/elf/
+// wx_lazy_exec.c "race" in mode 0, six runs at a time: 10 of 2,880 runs,
+// each one such a fetch, the page back in the table when this declined;
+// none of 2,880 with the retry).
 static _Thread_local uint64_t t_stale_pc, t_stale_addr;
 static _Thread_local unsigned t_stale_n;
-static bool stale_fault_retry(uint64_t pc, uint64_t addr, bool fetch)
+static bool stale_fault_retry(uint64_t pc, uint64_t addr, bool fetch, unsigned gen)
 {
     if (!atomic_load(&g_used))
         return false;
@@ -693,8 +1094,14 @@ static bool stale_fault_retry(uint64_t pc, uint64_t addr, bool fetch)
         unsigned s1 = atomic_load(&g_handover_seq);
         bool allowed = access_now_allowed(addr, fetch);
         int active = atomic_load(&g_handover_active);
+        // Back in the table since the handler looked: a fetch flip waits for
+        // it there. Asked only when something was added since -- the lookup is
+        // a lock round trip, and every fault the table never held (Wine's write
+        // watches, guard pages, copy-on-write) paid it: ~5 % on a store-fault
+        // loop (review, 296-299 -> 280-285 thousand faults a second).
+        bool held = !allowed && active == 0 && atomic_load(&g_add_gen) != gen && lxrt_wx_contains(addr);
         unsigned s2 = atomic_load(&g_handover_seq);
-        if (allowed)
+        if (allowed || held)
             return true;
         if (active == 0 && s1 == s2)
             return false;
@@ -704,8 +1111,20 @@ static bool stale_fault_retry(uint64_t pc, uint64_t addr, bool fetch)
     return false;
 }
 
+// Set when lxrt_wx_handle_fault declined a store into a page the guest made
+// read-execute: the guest's own fault, which no later handler of the chain
+// can own either (signal.c delivers it at once).
+static _Thread_local bool t_guest_fault;
+bool lxrt_wx_take_guest_fault(void)
+{
+    bool r = t_guest_fault;
+    t_guest_fault = false;
+    return r;
+}
+
 bool lxrt_wx_handle_fault(uint64_t pc, uint64_t addr, uint32_t esr)
 {
+    t_guest_fault = false;
     if (!addr || !atomic_load(&g_used))
         return false;
     uint32_t ec = esr >> 26;
@@ -725,8 +1144,9 @@ bool lxrt_wx_handle_fault(uint64_t pc, uint64_t addr, uint32_t esr)
     if (t_held)
         return false;
     uint64_t hp = LXRT_ALIGN_DOWN(addr, LXRT_HOST_PAGE);
+    unsigned gen = atomic_load(&g_add_gen);
     if (!atomic_load(&g_n))
-        return stale_fault_retry(pc, addr, fetch);
+        return stale_fault_retry(pc, addr, fetch, gen);
 
     sigset_t old;
     lock_nosig(&old);
@@ -736,9 +1156,25 @@ bool lxrt_wx_handle_fault(uint64_t pc, uint64_t addr, uint32_t esr)
         unlock_nosig(&old);
         return false;
     }
-    if (!find_locked(addr)) {
+    int gp = lxrt_wx_prot_locked(addr);
+    if (!gp) {
+        gen = atomic_load(&g_add_gen);          // as of this lookup, under the lock
         unlock_nosig(&old);
-        return stale_fault_retry(pc, addr, fetch);
+        return stale_fault_retry(pc, addr, fetch, gen);
+    }
+    if (!(gp & (fetch ? PROT_EXEC : PROT_WRITE))) {
+        // A store into a page the guest made read-execute (lazy execute):
+        // its own fault -- FEX's self-modifying-code trap, a Wine write
+        // watch -- delivered, never flipped. Every entry allows a fetch.
+        // (pc 0: dispatch.c's hand-over bringing the page to a state a
+        // writable protection allows; this one never allowed a store.)
+        unlock_nosig(&old);
+        if (pc) {
+            atomic_fetch_add(&st_lazy_store, 1);
+            t_guest_fault = true;
+            stats_tick();
+        }
+        return false;
     }
     bool ok = lxrt_wx_flip_locked(hp, fetch);
     unlock_nosig(&old);

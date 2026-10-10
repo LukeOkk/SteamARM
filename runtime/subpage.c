@@ -30,12 +30,13 @@
 //
 // A host page this file tracks becomes executable in ONE place, apply_prot.
 // For a native guest it first makes the page read-only and scans every RWX
-// guest page in it, and every guest page the caller just made executable
-// (an mprotect to PROT_EXEC), rewriting until a read-only count is clean
-// (lxrt_wx_scan_for_exec) -- whichever path asked: the fault handler's flip,
-// a store storemu.c performed, mmap, mprotect, dispatch.c's reapply after it
-// rewrote mapped code. Before that, four of those paths granted execute with
-// no scan at all (stage 23 review; tests/elf/wx_owner.c).
+// guest page in it, every lazily executable one (wxsplit.c), and every guest
+// page the caller just made executable (an mprotect to PROT_EXEC), rewriting
+// until a read-only count is clean (lxrt_wx_scan_for_exec) -- whichever path
+// asked: the fault handler's flip, a store storemu.c performed, mmap,
+// mprotect, dispatch.c's reapply after it rewrote mapped code. Before that,
+// four of those paths granted execute with no scan at all (stage 23 review;
+// tests/elf/wx_owner.c).
 //
 // The records sit under wxsplit.c's lock (lxrt_pageprot_lock), which is held
 // with asynchronous signals blocked: a guest handler that the runtime ran
@@ -87,8 +88,10 @@ static int g_nsubs, g_cap;
 void lxrt_pageprot_lock(sigset_t *old);
 void lxrt_pageprot_unlock(const sigset_t *old);
 bool lxrt_pageprot_held(void);
-bool lxrt_wx_contains_locked(uint64_t addr);
 bool lxrt_wx_intersects_locked(uint64_t addr, uint64_t len);
+int lxrt_wx_prot_locked(uint64_t addr);
+bool lxrt_wx_allows_locked(uint64_t addr, bool fetch);
+bool lxrt_wx_lazy_locked(uint64_t addr);
 bool lxrt_wx_flip_locked(uint64_t hpage, bool fetch);
 
 // Room for `extra` more records. Caller holds the lock.
@@ -871,11 +874,14 @@ static void adopt_untracked(uint64_t hpage)
             record(g, g + GUEST_PAGE, 0);
             continue;
         }
-        // A page of a native guest's RWX range (wxsplit.c) is RWX to the
-        // guest whatever the host page carries at this moment.
-        if (!covered)
-            record(g, g + GUEST_PAGE,
-                   wx && lxrt_wx_contains_locked(g) ? PROT_READ | PROT_WRITE | PROT_EXEC : cur);
+        // A page of wxsplit.c's table is what the guest made it -- RWX, or
+        // R-X (lazy execute) -- whatever the host page carries at this
+        // moment. RWX for an R-X page would let a store into it flip the
+        // host page writable, and FEX would never see its trap fire.
+        if (!covered) {
+            int wp = wx ? lxrt_wx_prot_locked(g) : 0;
+            record(g, g + GUEST_PAGE, wp ? wp : cur);
+        }
     }
 }
 
@@ -1030,9 +1036,12 @@ static bool scan_before_exec(void)
 
 // The guest pages of hpage the scan before execute covers: every page the
 // guest made read-write-execute (writable, so anything may have been stored
-// there since it last ran), and the `fresh` ones (bit k: the k-th 4 KiB page,
-// just made executable by mprotect). As 4 KiB-granular runs; returns how
-// many. Caller holds the lock.
+// there since it last ran), the `fresh` ones (bit k: the k-th 4 KiB page,
+// just made executable by mprotect), and the lazily executable pages adopted
+// from wxsplit.c's table: read-execute to the guest, but written while they
+// were writable and never scanned since -- wxsplit.c leaves that to the first
+// fetch, which in a tracked page is this file's. As 4 KiB-granular runs;
+// returns how many. Caller holds the lock.
 static int exec_scan_ranges(uint64_t hpage, unsigned fresh, struct lxrt_range *r)
 {
     int nr = 0;
@@ -1040,7 +1049,8 @@ static int exec_scan_ranges(uint64_t hpage, unsigned fresh, struct lxrt_range *r
         uint64_t g = hpage + (uint64_t)k * GUEST_PAGE;
         int sp = slot_prot(g);
         bool scan = ((sp & (PROT_WRITE | PROT_EXEC)) == (PROT_WRITE | PROT_EXEC)) ||
-                    ((fresh >> k) & 1);
+                    ((fresh >> k) & 1) ||
+                    ((sp & PROT_EXEC) && lxrt_wx_lazy_locked(g));
         if (!scan)
             continue;
         if (nr && r[nr - 1].end == g) {
@@ -1280,8 +1290,9 @@ bool lxrt_subpage_handle_fault(uint64_t pc, uint64_t fault_addr, void *uap)
         // chain, passes on a page of its table while this file tracks it; if
         // that stopped between the two handlers, the flip is its, made here
         // under the same lock rather than reported as a fault the guest
-        // never made.
-        bool r = (fetch || store) && lxrt_wx_contains_locked(fault_addr) &&
+        // never made -- when the guest's protection there allows the access:
+        // a store into a lazily executable page is the guest's fault.
+        bool r = (fetch || store) && lxrt_wx_allows_locked(fault_addr, fetch) &&
                  lxrt_wx_flip_locked(hpage, fetch);
         lxrt_pageprot_unlock(&old);
         return r;

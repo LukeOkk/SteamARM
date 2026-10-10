@@ -161,6 +161,11 @@ static long remap_shared_file(uint64_t old_addr, uint64_t old_len, uint64_t new_
         close(fd);
         return LERR(ENOMEM);
     }
+    // A W^X range there is replaced (Linux unmaps the destination first):
+    // out of the table before the file is, or a fetch in between flips,
+    // scans and rewrites the file's page as the guest's private code.
+    if (lflags & L_FIXED)
+        lxrt_wx_forget(new_addr, new_len);
     void *dest = (lflags & L_FIXED)
         ? mmap((void *)new_addr, new_len, mprot, MAP_SHARED | MAP_FIXED, fd, (off_t)off)
         : mmap(NULL, new_len, mprot, MAP_SHARED, fd, (off_t)off);
@@ -288,6 +293,11 @@ long lxrt_mremap(uint64_t old_addr, uint64_t old_len,
         return LERR(ENOMEM);
     }
 
+    // A range the W^X table holds whole has one protection to the guest but
+    // per-page states on the host (read-only, read-write, read-execute):
+    // one host protection first, which the check below wants and the
+    // destination takes (wxsplit.c, lxrt_wx_unify_prot).
+    lxrt_wx_unify_prot(old_addr, old_len);
     vm_region_basic_info_data_64_t first, info;
     uint64_t end;
     if (!region(old_addr, &end, &first))
@@ -388,7 +398,10 @@ long lxrt_mremap(uint64_t old_addr, uint64_t old_len,
     }
     if (lflags & L_FIXED) {
         // Publish only after allocation/copy/protection succeed. Mach replaces
-        // the destination just as MAP_FIXED does, with no unreserved gap.
+        // the destination just as MAP_FIXED does, with no unreserved gap --
+        // and a W^X range there with it, so out of the table first
+        // (dispatch.c's lxrt_wx_moved gives the source's pieces back).
+        lxrt_wx_forget(new_addr, new_len);
         mach_vm_address_t target = new_addr;
         kr = mach_vm_remap(mach_task_self(), &target, new_len, 0,
             VM_FLAGS_FIXED | VM_FLAGS_OVERWRITE, mach_task_self(),

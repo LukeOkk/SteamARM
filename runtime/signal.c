@@ -742,6 +742,14 @@ bool lxrt_absorb_runtime_fault(int dsig, siginfo_t *dinfo, void *uap)
         // A native guest's RWX page (V8's code range): the W^X flip.
         if (lxrt_wx_handle_fault(fpc, faddr, u->uc_mcontext->__es.__esr))
             return true;
+        // A store into a page the guest made read-execute (wxsplit.c, lazy
+        // execute): the guest's own -- FEX's self-modifying-code trap, every
+        // one of them -- and none of the handlers below can own it: the page
+        // is private anonymous memory (not privmap.c's file pages), not in
+        // the low window (lowptr), not 4 KiB-tracked (wxsplit.c declined
+        // those before it looked), and jit_report_freed only reports.
+        if (lxrt_wx_take_guest_fault())
+            return false;
         lxrt_jit_report_freed(fpc, faddr, uap);
         // A store into a copy-on-write page of a private shared-memory
         // mapping (privmap.c). WnR, ESR bit 6, on a data abort.

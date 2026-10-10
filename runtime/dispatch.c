@@ -1982,24 +1982,29 @@ static long do_mprotect_inner(uint64_t addr, uint64_t len, long prot)
         return 0;
 
     // A native aarch64 guest's read-write-execute range is split W^X page by
-    // page (wxsplit.c): V8 makes its whole code range RWX with one call. Any
-    // other protection ends the split for that range (wx_leave: the pages are
-    // handed over without a moment in which an access both protections allow
-    // faults unclaimed); what the table does not hold goes the ordinary way
-    // below. Sub-page ranges go through subpage.c, whose union flips scan the
-    // RWX guest pages the same way.
+    // page (wxsplit.c): V8 makes its whole code range RWX with one call. With
+    // lazy execute (Wine's loaders: FEX's write-protected x64 code), a
+    // read-execute request goes into the same table: read-only on the host
+    // until its first instruction fetch scans it -- code nobody runs natively
+    // is never scanned. lxrt_wx_protect asks subpage.c itself, under the page
+    // lock, and declines what is not its to take. Any other protection (and a
+    // declined R-X, eager as before) ends the split for that range (wx_leave:
+    // the pages are handed over without a moment in which an access both
+    // protections allow faults unclaimed); what the table does not hold goes
+    // the ordinary way below. Sub-page ranges go through subpage.c, whose
+    // union flips scan the RWX and lazily executable guest pages the same way.
     bool rwx = (prot & PROT_WRITE) && (prot & PROT_EXEC);
     if (lxrt_wx_enabled()) {
+        bool aligned = (addr % LXRT_HOST_PAGE) == 0 && (len % LXRT_HOST_PAGE) == 0;
+        if (aligned && (prot & PROT_EXEC)) {
+            long wret;
+            if (lxrt_wx_protect(addr, len, (int)prot, &wret))
+                return wret;
+        }
         if (!rwx) {
-            if ((addr % LXRT_HOST_PAGE) == 0 && (len % LXRT_HOST_PAGE) == 0 &&
-                lxrt_wx_intersects(addr, len) && !lxrt_subpage_tracked(addr, len))
+            if (aligned && lxrt_wx_intersects(addr, len) && !lxrt_subpage_tracked(addr, len))
                 return wx_leave(addr, len, (int)prot);
             lxrt_wx_forget(addr, len);
-        } else if ((addr % LXRT_HOST_PAGE) == 0 && (len % LXRT_HOST_PAGE) == 0 &&
-                 !lxrt_subpage_tracked(addr, len)) {
-            long wret;
-            if (lxrt_wx_protect(addr, len, &wret))
-                return wret;
         }
     }
 
@@ -2093,6 +2098,28 @@ void lxrt_dispatch_init_brk(uint64_t fallback)
     g_brk_base = g_brk_cur = LXRT_ALIGN_UP(fallback, LXRT_HOST_PAGE);
 }
 
+// What the runtime recorded about guest memory in heap pages brk gives back,
+// or is about to map afresh: do_munmap_inner's forgets. The heap's pages
+// were never forgotten here, and a W^X entry outlived a shrink: the regrown
+// heap -- fresh read-write memory -- was flipped executable at a fetch, and
+// an R-X mprotect of it found the range "already so" and left it writable
+// (review of lazy execute; tests/elf/wx_lazy_exec.c, "brk"). Before the new
+// pages get their protection: subpage.c takes a page it stops tracking to
+// PROT_NONE.
+static void brk_forget(uint64_t addr, uint64_t len)
+{
+    lxrt_pe_forget(addr, len);
+    lxrt_subpage_tail_clear(addr, len);
+    lxrt_subpage_forget(addr, len);
+    lxrt_jit_forget(addr, len);
+    lxrt_wx_forget(addr, len);
+    lxrt_privmap_forget(addr, len);
+    lxrt_elf_forget(addr, len);
+    lxrt_memlog_file_forget(addr, len);
+    lxrt_mremap_forget_shared(addr, len);
+    lxrt_offmap_disown(addr, len);
+}
+
 static long do_brk(uint64_t want)
 {
     if (!g_brk_base)
@@ -2106,9 +2133,13 @@ static long do_brk(uint64_t want)
     uint64_t want_page = LXRT_ALIGN_UP(want, LXRT_HOST_PAGE);
 
     if (want_page > cur_page) {
+        // Growing over pages the kernel (or the arena) says are free: nothing
+        // recorded there can be right, and nothing is forgotten unless they
+        // are free.
         mach_vm_address_t at = cur_page;
         if (lxrt_arena_free(cur_page, want_page - cur_page)) {
             // In the guest's hole: the new pages take the reservation's place.
+            brk_forget(cur_page, want_page - cur_page);
             if (mmap((void *)(uintptr_t)cur_page, (size_t)(want_page - cur_page), PROT_READ | PROT_WRITE,
                      MAP_PRIVATE | MAP_ANON | MAP_FIXED, -1, 0) == MAP_FAILED)
                 return (long)g_brk_cur;
@@ -2120,6 +2151,7 @@ static long do_brk(uint64_t want)
                              (mach_vm_size_t)(want_page - cur_page),
                              VM_FLAGS_FIXED) != KERN_SUCCESS)
             return (long)g_brk_cur;
+        brk_forget(cur_page, want_page - cur_page);
         if (mprotect((void *)at, (size_t)(want_page - cur_page),
                      PROT_READ | PROT_WRITE) != 0) {
             mach_vm_deallocate(mach_task_self(), at,
@@ -2127,6 +2159,7 @@ static long do_brk(uint64_t want)
             return (long)g_brk_cur;
         }
     } else if (want_page < cur_page) {
+        brk_forget(want_page, cur_page - want_page);
         mach_vm_deallocate(mach_task_self(), (mach_vm_address_t)want_page,
                            (mach_vm_size_t)(cur_page - want_page));
         lxrt_arena_unmapped(want_page, cur_page - want_page);
@@ -3123,6 +3156,9 @@ long lxrt_membarrier(int cmd, unsigned flags)
 // The contents are not kept: the guest asks before writing anything.
 void lxrt_pageprot_lock(sigset_t *old);
 void lxrt_pageprot_unlock(const sigset_t *old);
+bool lxrt_wx_covered_prot_locked(uint64_t addr, uint64_t len, int prot);
+void lxrt_wx_forget_locked(uint64_t addr, uint64_t len);
+bool lxrt_subpage_tracked_locked(uint64_t addr, uint64_t len);
 
 static long jit_adopt(uint64_t addr, uint64_t len)
 {
@@ -3131,11 +3167,24 @@ static long jit_adopt(uint64_t addr, uint64_t len)
     if (lxrt_jit_contains(addr))
         return 0;
     // Only read-write-execute memory of the split, all of it, nothing
-    // 4 KiB-tracked in it: memory the guest owns, plain anonymous pages.
-    if (!lxrt_wx_covered(addr, len) || lxrt_subpage_tracked(addr, len))
+    // 4 KiB-tracked in it: memory the guest owns, plain anonymous pages. Not
+    // a lazily executable range (wxsplit.c): the guest made that read-execute,
+    // and a writable MAP_JIT region would swallow the stores it must see fault.
+    if (!lxrt_wx_covered_prot(addr, len, PROT_READ | PROT_WRITE | PROT_EXEC) ||
+        lxrt_subpage_tracked(addr, len))
         return LERR(EINVAL);
     sigset_t old;
     lxrt_pageprot_lock(&old);
+    // Asked again under the lock that the munmap below runs under: between
+    // the two, another thread's R-X mprotect (lazy execute), munmap or 4 KiB
+    // mapping may have changed what is there, and replacing it would undo
+    // that -- a lazy range made writable, a freed range mapped again, a new
+    // mapping thrown away (review).
+    if (!lxrt_wx_covered_prot_locked(addr, len, PROT_READ | PROT_WRITE | PROT_EXEC) ||
+        lxrt_subpage_tracked_locked(addr, len)) {
+        lxrt_pageprot_unlock(&old);
+        return LERR(EINVAL);
+    }
     munmap((void *)(uintptr_t)addr, (size_t)len);
     void *jp = mmap((void *)(uintptr_t)addr, (size_t)len, PROT_READ | PROT_WRITE | PROT_EXEC,
                     MAP_PRIVATE | MAP_ANON | MAP_JIT, -1, 0);
@@ -3157,8 +3206,10 @@ static long jit_adopt(uint64_t addr, uint64_t len)
                     back == MAP_FAILED ? "; the range could not be restored" : "");
         return LERR(EBUSY);
     }
+    // jit.c's now: out of the table before the lock goes, so that no fault
+    // in the new region is taken for a W^X flip.
+    lxrt_wx_forget_locked(addr, len);
     lxrt_pageprot_unlock(&old);
-    lxrt_wx_forget(addr, len);
     if (g_trace)
         fprintf(lxrt_trace_stream(), "[lxrt] jit adopt 0x%llx+0x%llx: MAP_JIT\n",
                 (unsigned long long)addr, (unsigned long long)len);
@@ -3355,6 +3406,11 @@ restart:
         }
         lxrt_subpage_forget(dst, len);
         lxrt_privmap_forget(dst, len);
+        // Nor the W^X table's any more: shared now, not the guest's private
+        // memory, which is all the table may hold (wxsplit.c). Left there, a
+        // fetch at dst flipped the alias and rewrote the source's code
+        // (MEASURED, tests/elf/wx_lazy_exec.c, "alias").
+        lxrt_wx_forget(dst, len);
         mach_vm_address_t at = dst;
         vm_prot_t cur = 0, max = 0;
         kern_return_t kr = mach_vm_remap(mach_task_self(), &at, len, 0,
@@ -4634,7 +4690,7 @@ restart:
     case LNR_inotify_rm_watch:
         ret = lxrt_inotify_rm_watch((int)a0, (int)a1);
         break;
-    case LNR_mremap:
+    case LNR_mremap: {
         // (old_addr, old_len, new_len, flags, new_addr). Darwin has no mremap;
         // mremap.c grows in place when the next pages are free and moves
         // otherwise.
@@ -4645,13 +4701,21 @@ restart:
         }
         lxrt_privmap_forget(a0, a1);
         // 4 KiB guest pages that do not fill a host page: do_mremap_subpage.
-        if ((a0 % LXRT_HOST_PAGE) || ((a3 & 2) && (a4 % LXRT_HOST_PAGE)) ||
-            lxrt_subpage_tracked(a0, a1) || ((a3 & 2) && lxrt_subpage_tracked(a4, a2)))
+        bool sub = (a0 % LXRT_HOST_PAGE) || ((a3 & 2) && (a4 % LXRT_HOST_PAGE)) ||
+                   lxrt_subpage_tracked(a0, a1) || ((a3 & 2) && lxrt_subpage_tracked(a4, a2));
+        if (sub)
             ret = do_mremap_subpage(a0, a1, a2, (long)a3, a4);
         else
             ret = lxrt_mremap(a0, a1, a2, (int)a3, a4);
         if (ret >= 0) {
-            lxrt_wx_moved(a0, a1, (uint64_t)ret, a2);
+            // The W^X table follows what lxrt_mremap moved, at its host-page
+            // rounded lengths (wxsplit.c also drops whatever it held at the
+            // destination). do_mremap_subpage went through do_mmap,
+            // do_mprotect and do_munmap, which keep the table themselves: an
+            // RWX range it recorded at the destination is right as it is.
+            if (!sub)
+                lxrt_wx_moved(a0, LXRT_ALIGN_UP(a1, LXRT_HOST_PAGE), (uint64_t)ret,
+                              LXRT_ALIGN_UP(a2, LXRT_HOST_PAGE));
             // The host pages moved, shrank or were replaced: none of them is
             // a 4 KiB-offset mapping's alone any more (offmap.c).
             lxrt_offmap_disown(a0, a1);
@@ -4661,6 +4725,7 @@ restart:
         if (ret >= 0)
             lxrt_memlog('r', (uint64_t)ret, a2, (long)a2, (long)a3, ret);
         break;
+    }
 
     /* ---------------- System V IPC ---------------- */
     case LNR_semget:
