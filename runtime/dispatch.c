@@ -3149,6 +3149,54 @@ static long jit_adopt(uint64_t addr, uint64_t len)
     return 0;
 }
 
+// DIAG LXRT_READSTATS=1: every 10 s, the descriptors read most (read, readv,
+// pread64, preadv) by time spent: calls, bytes, milliseconds, and the path.
+static int g_readstats = -1;
+static void readstats_note(int fd, long ret, uint64_t ns)
+{
+    struct rs { uint64_t calls, bytes, ns; unsigned gen; char path[160]; };
+    static struct rs tab[1024];
+    static _Atomic unsigned gen = 1;
+    static _Atomic uint64_t last;
+    static pthread_mutex_t lk = PTHREAD_MUTEX_INITIALIZER;
+    if (fd < 0 || fd >= 1024)
+        return;
+    pthread_mutex_lock(&lk);
+    struct rs *e = &tab[fd];
+    if (e->gen != gen) {
+        memset(e, 0, sizeof *e);
+        e->gen = gen;
+        if (fcntl(fd, F_GETPATH, e->path) != 0)
+            snprintf(e->path, sizeof e->path, "(fd %d, no path)", fd);
+    }
+    e->calls++;
+    if (ret > 0) e->bytes += (uint64_t)ret;
+    e->ns += ns;
+    uint64_t now = clock_gettime_nsec_np(CLOCK_UPTIME_RAW);
+    if (!last) last = now;
+    if (now - last > 10000000000ull) {
+        last = now;
+        int idx[8]; int k = 0;
+        for (int pass = 0; pass < 8; pass++) {
+            int best = -1;
+            for (int i = 0; i < 1024; i++) {
+                if (tab[i].gen != gen || !tab[i].calls) continue;
+                bool used = false;
+                for (int j = 0; j < k; j++) used |= idx[j] == i;
+                if (!used && (best < 0 || tab[i].ns > tab[best].ns)) best = i;
+            }
+            if (best < 0) break;
+            idx[k++] = best;
+        }
+        for (int j = 0; j < k; j++)
+            fprintf(lxrt_trace_stream(), "[lxrt] pid %d readstats: %llu calls %llu KB %.1f ms fd %d %s\n", (int)getpid(),
+                    (unsigned long long)tab[idx[j]].calls, (unsigned long long)tab[idx[j]].bytes / 1024,
+                    (double)tab[idx[j]].ns / 1e6, idx[j], tab[idx[j]].path);
+        gen++;
+    }
+    pthread_mutex_unlock(&lk);
+}
+
 void lxrt_sync_pending_flush(void);
 
 void lxrt_dispatch(struct lxrt_regs *r)
@@ -3171,6 +3219,10 @@ void lxrt_dispatch(struct lxrt_regs *r)
     uint64_t a0 = av[0], a1 = av[1], a2 = av[2];
     uint64_t a3 = av[3], a4 = av[4], a5 = av[5];
     long ret;
+    if (__builtin_expect(g_readstats, 0) < 0)
+        g_readstats = getenv("LXRT_READSTATS") ? 1 : 0;
+    const uint64_t rs_t0 = (g_readstats && (nr == 63 || nr == 65 || nr == 67 || nr == 69))
+                               ? clock_gettime_nsec_np(CLOCK_UPTIME_RAW) : 0;
 
     // Entry trace. Without it a syscall that never returns leaves no record at
     // all, and "the last line is the one before the problem" is a guess.
@@ -5181,6 +5233,8 @@ restart:
     }
 
 aids_done:
+    if (rs_t0)
+        readstats_note((int)a0, ret, clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - rs_t0);
     if (g_trace && nr != LNR_clock_gettime)
         fprintf(lxrt_trace_stream(), "[lxrt] %d/%d syscall %ld -> %ld\n", (int)getpid(), lxrt_gettid(), nr, ret);
 
