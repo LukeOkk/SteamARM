@@ -289,6 +289,13 @@ static void rescan(int idx)
 // loop died intermittently (8 forks: crash; 16: fine; 24: crash) until this.
 bool lxrt_jit_thread_writable(void) { return g_writable; }
 
+// Write scopes this thread has open. FEX as a Linux ELF tracks its own
+// nesting (enable=2 for an inner scope); as an ARM64EC DLL it cannot keep a
+// thread_local (it would take the game's TLS slot), so every scope there opens
+// with 0 and closes with 1, and only the outermost close returns the thread to
+// execute mode.
+static _Thread_local int g_write_depth;
+
 long lxrt_jit_set_write(int enable, uint64_t addr, uint64_t len)
 {
     if (enable) {
@@ -320,13 +327,29 @@ long lxrt_jit_set_write(int enable, uint64_t addr, uint64_t len)
         }
         if (enable == 2)
             return 0;           // inner scope: scanned, still writable
+        if (g_write_depth > 0 && --g_write_depth > 0)
+            return 0;           // an outer scope is still open
         lxrt_jit_protect(1);
         g_writable = false;
     } else {
+        if (g_write_depth++ > 0 && g_writable)
+            return 0;           // nested: already writable
         lxrt_jit_protect(0);
         g_writable = true;
     }
     return 0;
+}
+
+// The runtime's own switch around a guest signal handler (signal.c): the mode
+// is put back as it was, and the guest's write scopes (g_write_depth) are not
+// the runtime's to count. Through lxrt_jit_set_write, the switches before and
+// after a handler moved the count; it drifted, scopes closed without returning
+// the thread to execute mode, and the next instruction in JIT code faulted:
+// ~25,000 faults a second in Minecraft Dungeons II (MEASURED, gone with this).
+void lxrt_jit_mode(bool writable)
+{
+    lxrt_jit_protect(writable ? 0 : 1);
+    g_writable = writable;
 }
 
 // pthread_jit_write_protect_np writes the thread's JIT permission register

@@ -868,8 +868,9 @@ fi
 # keeps the runtime's settings and /proc; pseudo-terminals the Linux way
 # (Termux's terminal).
 if [ -f "$STAGE/usr/lib64/libc.a" ] && [ -n "$GCCDIR" ]; then
-    for t in memfd_seal_xproc readonly_efault lost_guard exec_env pty unlink_dir fd_scan_threads futex_waitv futex_long futex_long_spin eventfd_scm ntsync; do
+    for t in memfd_seal_xproc readonly_efault lost_guard exec_env pty unlink_dir fd_scan_threads futex_waitv futex_long futex_long_spin eventfd_scm ntsync self_signal self_signal_kernel; do
         src=$t; [ "$t" = futex_long_spin ] && src=futex_long     # the same program with the runtime's spin on
+        [ "$t" = self_signal_kernel ] && src=self_signal         # and with Darwin delivering the self-signal
         if err=$(glibc_cc -static-pie -O2 -o build/$t tests/elf/$src.c 2>&1); then
             env=""
             if [ "$t" = futex_long_spin ]; then
@@ -878,6 +879,9 @@ if [ -f "$STAGE/usr/lib64/libc.a" ] && [ -n "$GCCDIR" ]; then
             elif [ "$t" = readonly_efault ] || [ "$t" = lost_guard ]; then
                 env="LXRT_GUEST_PAGE=4096"
                 out=$(LXRT_GUEST_PAGE=4096 deadline 30 ./build/lxrun "$PWD/build/$t" 2>&1); rc=$?
+            elif [ "$t" = self_signal_kernel ]; then
+                env="LXRT_SYNC_SELF_SIGNAL=0"
+                out=$(LXRT_SYNC_SELF_SIGNAL=0 deadline 30 ./build/lxrun "$PWD/build/$t" 2>&1); rc=$?
             elif [ "$t" = exec_env ]; then
                 out=$(LXRT_TEST_EXEC_ENV=kept deadline 30 ./build/lxrun "$PWD/build/$t" 2>&1); rc=$?
             elif [ "$t" = ntsync ]; then

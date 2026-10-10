@@ -879,8 +879,65 @@ void lxrt_signal_rescue_stranded(void)
     pthread_sigmask(SIG_BLOCK, &take, NULL);
 }
 
+// The resume state of a synchronously delivered self-signal that needs every
+// register exactly (lxrt_sync_self_signal): the next carrier this thread takes
+// only installs it.
+static _Thread_local struct __darwin_mcontext64 *g_exact_resume_mc;
+static _Thread_local sigset_t g_exact_resume_mask;
+extern _Thread_local int lxrt_sync_pending;
+void lxrt_sync_pending_flush(void);
+static void sync_self_deliver(int lsig, uint64_t x0);
+static bool sync_self_eligible(int lsig);
+
+extern char lxrt_probe_u32_insn[], lxrt_probe_u32_fail[];
+extern char lxrt_restore_regs_end[], lxrt_restore_regs_x0_end[];
+void lxrt_restore_regs_x0(const uint64_t *ctx) __attribute__((noreturn));
+// The block the thread's lxrt_restore_regs(_x0) is loading (set just before
+// the call). Those routines unblock nothing themselves, but run after the
+// mask is back: a signal can land mid-way, with half the registers loaded.
+static _Thread_local const uint64_t *lxrt_restore_ctx;
+
+// A signal interrupting a restore: report it as interrupting the restored
+// state, which is where the thread resumes after the handler.
+static void restore_window_fixup(ucontext_t *uc)
+{
+    _STRUCT_ARM_THREAD_STATE64 *ss = &uc->uc_mcontext->__ss;
+    uint64_t pc = ss->__pc;
+    if (!((pc >= (uint64_t)(uintptr_t)&lxrt_restore_regs && pc < (uint64_t)(uintptr_t)lxrt_restore_regs_end) ||
+          (pc >= (uint64_t)(uintptr_t)&lxrt_restore_regs_x0 && pc < (uint64_t)(uintptr_t)lxrt_restore_regs_x0_end)))
+        return;
+    const uint64_t *c = lxrt_restore_ctx;
+    if (!c)
+        return;
+    for (int i = 0; i < 29; i++)
+        ss->__x[i] = c[i];
+    ss->__fp = c[29];
+    ss->__lr = c[30];
+    ss->__sp = c[31];
+    ss->__pc = c[32];
+    ss->__cpsr = (uint32_t)((ss->__cpsr & ~0xF0000000u) | (c[33] & 0xF0000000u));
+    uc->uc_mcontext->__ns.__fpsr = (uint32_t)c[34];
+    uc->uc_mcontext->__ns.__fpcr = (uint32_t)c[35];
+    memcpy(uc->uc_mcontext->__ns.__v, c + 36, sizeof uc->uc_mcontext->__ns.__v);
+}
+
 static void host_handler(int dsig, siginfo_t *dinfo, void *uap)
 {
+    if ((dsig == SIGSEGV || dsig == SIGBUS) && uap &&
+        ((ucontext_t *)uap)->uc_mcontext->__ss.__pc == (uint64_t)(uintptr_t)lxrt_probe_u32_insn) {
+        ((ucontext_t *)uap)->uc_mcontext->__ss.__pc = (uint64_t)(uintptr_t)lxrt_probe_u32_fail;
+        return;                                 // lxrt_probe_u32: not readable
+    }
+    if (uap && lxrt_restore_ctx)
+        restore_window_fixup((ucontext_t *)uap);
+    if (g_exact_resume_mc && dsig == LXRT_RT_CARRIER && uap) {
+        ucontext_t *ruc = (ucontext_t *)uap;
+        ruc->uc_mcontext->__ss = g_exact_resume_mc->__ss;
+        ruc->uc_mcontext->__ns = g_exact_resume_mc->__ns;
+        ruc->uc_sigmask = g_exact_resume_mask;
+        g_exact_resume_mc = NULL;
+        return;
+    }
     // The JIT execute-mode stub's brk (jit.c) is the runtime's own.
     if (dsig == SIGTRAP && lxrt_jit_stub_trap(uap))
         return;
@@ -895,8 +952,13 @@ static void host_handler(int dsig, siginfo_t *dinfo, void *uap)
     // and what became of it -- which code takes a storm of faults.
     static _Atomic unsigned long g_sigsample;
     bool sample_this = false;
+    static unsigned long g_sigsample_every;
+    if (!g_sigsample_every) {
+        const char *e = getenv("LXRT_SIGSTATS_EVERY");   // default: every 100000th
+        g_sigsample_every = e && atol(e) > 0 ? (unsigned long)atol(e) : 100000;
+    }
     if (uap && (dsig == SIGSEGV || dsig == SIGBUS) && sigstats_on() >= 2 &&
-        atomic_fetch_add(&g_sigsample, 1) % 100000 == 0) {
+        atomic_fetch_add(&g_sigsample, 1) % g_sigsample_every == 0) {
         sample_this = true;
         char where[300] = "?";
         uint64_t spc = ((ucontext_t *)uap)->uc_mcontext->__ss.__pc;
@@ -1408,7 +1470,7 @@ static void host_handler(int dsig, siginfo_t *dinfo, void *uap)
     // reopened before the interrupted store resumes.
     bool was_writable = lxrt_jit_thread_writable();
     if (was_writable)
-        lxrt_jit_set_write(1, 0, 0);
+        lxrt_jit_mode(false);
 
     // RUN THE GUEST HANDLER NOW, nested inside this host handler, on the frame
     // just built, and return through the kernel's own sigreturn afterwards.
@@ -1720,6 +1782,8 @@ static void host_handler(int dsig, siginfo_t *dinfo, void *uap)
         sigset_t dm;
         linux_mask_to_darwin(after, &dm);
         duc->uc_sigmask = dm;           // Darwin's sigreturn installs this
+        if (lxrt_sync_pending)
+            lxrt_sync_pending_flush();  // pending in the kernel now, under that mask
         g_rt_blocked = after & RT_BITS;
         g_sync_blocked = after & SYNC_BITS;
         lxrt_thread_note_mask(after);
@@ -1736,7 +1800,7 @@ static void host_handler(int dsig, siginfo_t *dinfo, void *uap)
     }
     // Put the W^X window back the way the interrupted code had it.
     if (was_writable != lxrt_jit_thread_writable())
-        lxrt_jit_set_write(was_writable ? 0 : 1, 0, 0);
+        lxrt_jit_mode(was_writable);
     // Frame -> Darwin context. The handler may have changed any of it.
     lxrt_x18_set(mc->regs[18]);
     for (int i = 0; i < 29; i++)
@@ -1829,6 +1893,7 @@ void lxrt_do_sigreturn(uint64_t sp)
             "stp q24, q25, [%0, #384]\n stp q26, q27, [%0, #416]\n stp q28, q29, [%0, #448]\n stp q30, q31, [%0, #480]\n"
             :: "r"(v) : "memory");
     }
+    lxrt_restore_ctx = ctx;
     lxrt_restore_regs(ctx);
 }
 
@@ -2076,6 +2141,16 @@ long lxrt_rt_sigprocmask(int how, const uint64_t *uset, uint64_t *uoldset,
     sigset_t set, old;
     if (uset)
         linux_mask_to_darwin(*uset, &set);
+    // A self-sent signal held blocked (sync_self_signal) that this call lets
+    // through: delivered on its return.
+    int deliver_now = 0;
+    if (lxrt_sync_pending && uset && dhow != SIG_BLOCK) {
+        int ds = lxrt_signo_to_darwin(lxrt_sync_pending);
+        if (dhow == SIG_UNBLOCK ? sigismember(&set, ds) : !sigismember(&set, ds)) {
+            deliver_now = lxrt_sync_pending;
+            lxrt_sync_pending = 0;
+        }
+    }
     uint64_t rt_old = g_rt_blocked;
     if (pthread_sigmask(uset ? dhow : SIG_BLOCK, uset ? &set : NULL, &old) != 0)
         return LERR(errno);
@@ -2099,6 +2174,10 @@ long lxrt_rt_sigprocmask(int how, const uint64_t *uset, uint64_t *uoldset,
         *uoldset = old_l;
     if (uset)
         rt_kick_if_pending();
+    if (deliver_now && sync_self_eligible(deliver_now))
+        sync_self_deliver(deliver_now, 0);
+    else if (deliver_now)
+        pthread_kill(pthread_self(), lxrt_signo_to_darwin(deliver_now));
     return 0;
 }
 // Signals a signalfd's shared queue holds (timerfd_signalfd.c) that this
@@ -2363,6 +2442,222 @@ long lxrt_sigqueueinfo(int tgid, int tid, int lsig, const void *linfo)
     return tid > 0 ? lxrt_tgkill(tgid, tid, lsig) : lxrt_kill(tgid, lsig);
 }
 
+// A signal a thread sends itself, delivered synchronously: the state the
+// thread has on return from the syscall is built from the syscall's saved
+// registers (trampoline.S's block) as a Darwin context, host_handler runs on it
+// exactly as it would on the real signal -- building the guest's frame and
+// running the guest's handler -- and the thread resumes where the handler left
+// the context, without the kernel's signal delivery and sigreturn. Wine raises
+// SIGUSR2 at itself to return from a syscall into a full context (an exception
+// or NtContinue into x64 code under its ARM64EC emulator: twice per exception);
+// those deliveries were ~90 % of the cost of every exception a protector's VEH
+// handles (MEASURED, tests/win/veh_traps.c, Minecraft Dungeons II).
+//
+// glibc's raise() blocks every signal around its tgkill, so the signal is
+// noted as pending here (lxrt_sync_pending) and delivered by the
+// rt_sigprocmask that lets it through. Any other syscall first, or a guest
+// handler's return, hands it to the kernel as a pending signal instead
+// (lxrt_sync_pending_flush), which is what it would have been all along.
+//
+// lxrt_restore_regs arrives with x16 holding the resume pc. That is exact
+// where the handler left x16 equal to the pc (Wine's own convention for a
+// syscall return); lxrt_restore_regs_x0 branches through x0 instead, exact
+// where the code at the resume pc overwrites x0 first (see x0_dead_at). Any
+// other context resumes through one real signal that only installs it.
+// LXRT_SYNC_SELF_SIGNAL=0: the kernel delivers, as before.
+_Thread_local struct lxrt_regs *lxrt_cur_regs;     // set by lxrt_dispatch
+_Thread_local struct lxrt_regs *lxrt_cur_outer_regs;
+_Thread_local int lxrt_cur_outer_sig;              // dispatch.c's outer_sig_during_syscall
+_Thread_local int lxrt_sync_pending;               // a self-sent signal held blocked
+void lxrt_restore_regs(const uint64_t *ctx) __attribute__((noreturn));
+
+// Whether a self-sent lsig can be delivered here: a handler with SA_SIGINFO,
+// and the syscall's saved registers at hand.
+static bool sync_self_eligible(int lsig)
+{
+    static int on = -1;
+    if (on < 0) { const char *e = getenv("LXRT_SYNC_SELF_SIGNAL"); on = !(e && e[0] == '0'); }
+    if (!on || !lxrt_cur_regs || lsig != 12 || !lxrt_signo_to_darwin(lsig))
+        return false;
+    pthread_mutex_lock(&g_actions_lock);
+    struct guest_sigaction act = g_actions[lsig];
+    pthread_mutex_unlock(&g_actions_lock);
+    return act.handler > 1 && (act.flags & LINUX_SA_SIGINFO);
+}
+
+int lxrt_probe_u32(uint64_t addr, uint32_t *out);
+void lxrt_restore_regs_x0(const uint64_t *ctx) __attribute__((noreturn));
+
+// Whether the code at pc overwrites x0 before anything reads it, so that the
+// resume can branch through x0 and restore every other register exactly
+// (lxrt_restore_regs_x0). Wine's KiUserEmulationDispatcher, where its
+// usr2_handler sends a thread back to emulated x64 code, starts with
+// `mov x0, sp`; it does need x16 as the context left it -- with x16 holding
+// the resume address there the thread ran its next x64 instruction as ARM64
+// code one exception later (MEASURED, tests/win/veh_traps.c).
+static bool x0_dead_at(uint64_t pc)
+{
+    for (int k = 0; k < 2; k++) {
+        uint32_t insn;
+        if (!lxrt_probe_u32(pc + 4u * k, &insn))
+            return false;
+        if ((insn & 0xfffff01fu) == 0xd503201fu)
+            continue;                                           // hint: nop, bti, pac*
+        if ((insn & 0x1f) != 0)
+            return false;                                       // must write x0/w0
+        unsigned rn = (insn >> 5) & 31, rm = (insn >> 16) & 31;
+        if ((insn & 0x1f800000u) == 0x11000000u)
+            return rn != 0;                                     // add/sub imm (mov x0, sp)
+        if ((insn & 0x7fe0ffe0u) == 0x2a0003e0u)
+            return rm != 0;                                     // mov x0/w0, reg
+        if ((insn & 0x7f800000u) == 0x52800000u || (insn & 0x7f800000u) == 0x12800000u)
+            return true;                                        // movz, movn
+        if ((insn & 0x1f000000u) == 0x10000000u)
+            return true;                                        // adr, adrp
+        if ((insn & 0xffc00000u) == 0xf9400000u)
+            return rn != 0;                                     // ldr x0, [xn, #imm]
+        if ((insn & 0xffc00000u) == 0xa9400000u)
+            return rn != 0 && ((insn >> 10) & 31) != 0;         // ldp x0, xt2, [xn, #imm]
+        return false;
+    }
+    return false;
+}
+
+void lxrt_sync_pending_flush(void)
+{
+    int lsig = lxrt_sync_pending;
+    lxrt_sync_pending = 0;
+    if (lsig)
+        pthread_kill(pthread_self(), lxrt_signo_to_darwin(lsig));
+}
+
+// Deliver lsig now, on return from the current syscall with result x0, and
+// resume in whatever context the handler leaves. Returns only when the
+// handler left the context as it was: the syscall then returns as usual.
+static void sync_self_deliver(int lsig, uint64_t x0);
+static void sync_self_deliver(int lsig, uint64_t x0)
+{
+    struct lxrt_regs *r = lxrt_cur_regs;
+    int dsig = lxrt_signo_to_darwin(lsig);
+    sigset_t cur, hm;                           // hm: what the kernel blocks while host_handler runs
+    host_handler_mask(&hm);
+    sigaddset(&hm, dsig);
+    pthread_sigmask(SIG_BLOCK, &hm, &cur);
+
+    struct __darwin_mcontext64 mc;              // on this stack: a nested delivery has its own
+    memset(&mc, 0, sizeof mc);
+    for (int i = 0; i < 29; i++)
+        mc.__ss.__x[i] = r->x[i];
+    mc.__ss.__x[0] = x0;                        // the syscall's result
+    mc.__ss.__fp = r->x[29];
+    mc.__ss.__lr = r->x[30];
+    mc.__ss.__sp = (uint64_t)(uintptr_t)r + 784;
+    mc.__ss.__pc = r->pc_after;
+    const uint8_t *blk = (const uint8_t *)r;
+    uint64_t fpsr, nzcv, fpcr;
+    memcpy(&fpsr, blk + 768, 8);
+    memcpy(&nzcv, blk + 776, 8);
+    __asm__ volatile("mrs %0, fpcr" : "=r"(fpcr));
+    mc.__ss.__cpsr = (uint32_t)nzcv;
+    memcpy(mc.__ns.__v, blk + 256, sizeof mc.__ns.__v);
+    mc.__ns.__fpsr = (uint32_t)fpsr;
+    mc.__ns.__fpcr = (uint32_t)fpcr;
+    mc.__es.__esr = 0x15u << 26;                // as after an svc
+    ucontext_t uc;
+    memset(&uc, 0, sizeof uc);
+    uc.uc_mcontext = (mcontext_t)&mc;
+    uc.uc_mcsize = sizeof mc;
+    uc.uc_sigmask = cur;
+    siginfo_t si;
+    memset(&si, 0, sizeof si);
+    si.si_signo = dsig;
+    si.si_code = SI_USER;
+    si.si_pid = getpid();
+    si.si_uid = getuid();
+
+    // This syscall never returns through the dispatcher: what its exit would
+    // put back, put back now.
+    extern _Thread_local int lxrt_sig_during_syscall;
+    lxrt_sig_during_syscall = lxrt_cur_outer_sig;
+    lxrt_cur_regs = lxrt_cur_outer_regs;
+
+    host_handler(dsig, &si, &uc);
+    lxrt_sig_during_syscall = lxrt_cur_outer_sig;
+    static int slog = -1;
+    if (slog < 0) slog = getenv("LXRT_SYNC_SELF_LOG") ? atoi(getenv("LXRT_SYNC_SELF_LOG")) : 0;
+    if (slog > 0) {
+        slog--;
+        fprintf(lxrt_trace_stream(), "[lxrt] sync sig %d tid %d: after 0x%llx sp 0x%llx -> pc 0x%llx sp 0x%llx x16 0x%llx x17 0x%llx x0 0x%llx %s\n",
+                lsig, lxrt_gettid(), (unsigned long long)r->pc_after, (unsigned long long)(uintptr_t)r + 784,
+                (unsigned long long)mc.__ss.__pc, (unsigned long long)mc.__ss.__sp,
+                (unsigned long long)mc.__ss.__x[16], (unsigned long long)mc.__ss.__x[17], (unsigned long long)mc.__ss.__x[0],
+                mc.__ss.__pc == r->pc_after ? "return?" : mc.__ss.__x[16] == mc.__ss.__pc ? "x16" :
+                x0_dead_at(mc.__ss.__pc) ? "x0" : "carrier");
+    }
+
+    // Left as it was: the syscall's own return restores exactly that.
+    bool same = mc.__ss.__fp == r->x[29] && mc.__ss.__lr == r->x[30] &&
+                mc.__ss.__sp == (uint64_t)(uintptr_t)r + 784 && mc.__ss.__pc == r->pc_after &&
+                mc.__ss.__x[0] == x0 && ((mc.__ss.__cpsr ^ (uint32_t)nzcv) & 0xF0000000u) == 0 &&
+                mc.__ns.__fpsr == (uint32_t)fpsr && mc.__ns.__fpcr == (uint32_t)fpcr &&
+                !memcmp(mc.__ns.__v, blk + 256, sizeof mc.__ns.__v);
+    for (int i = 1; same && i < 29; i++)
+        same = mc.__ss.__x[i] == r->x[i];
+    if (same) {
+        pthread_sigmask(SIG_SETMASK, &uc.uc_sigmask, NULL);
+        rt_kick_if_pending();
+        return;
+    }
+
+    bool via_x16 = mc.__ss.__x[16] == mc.__ss.__pc;
+    if (via_x16 || x0_dead_at(mc.__ss.__pc)) {
+        static _Thread_local _Alignas(16) uint64_t ctx[36 + 64];
+        for (int i = 0; i < 29; i++)
+            ctx[i] = mc.__ss.__x[i];
+        ctx[29] = mc.__ss.__fp;
+        ctx[30] = mc.__ss.__lr;
+        ctx[31] = mc.__ss.__sp;
+        ctx[32] = mc.__ss.__pc;
+        ctx[33] = mc.__ss.__cpsr;
+        ctx[34] = mc.__ns.__fpsr;
+        ctx[35] = mc.__ns.__fpcr;
+        memcpy(ctx + 36, mc.__ns.__v, sizeof mc.__ns.__v);
+        pthread_sigmask(SIG_SETMASK, &uc.uc_sigmask, NULL);
+        rt_kick_if_pending();
+        lxrt_restore_ctx = ctx;
+        if (via_x16)
+            lxrt_restore_regs(ctx);
+        lxrt_restore_regs_x0(ctx);
+    }
+    g_exact_resume_mask = uc.uc_sigmask;
+    g_exact_resume_mc = &mc;
+    sigset_t only;
+    sigfillset(&only);
+    sigdelset(&only, LXRT_RT_CARRIER);
+    pthread_sigmask(SIG_SETMASK, &only, NULL);
+    pthread_kill(pthread_self(), LXRT_RT_CARRIER);
+    // The carrier's handler installs mc; nothing returns here.
+    abort();
+}
+
+// tgkill to itself: delivered at once, or held until the mask lets it through.
+static bool sync_self_signal(int lsig)
+{
+    if (!sync_self_eligible(lsig))
+        return false;
+    sigset_t cur;
+    pthread_sigmask(SIG_BLOCK, NULL, &cur);
+    if (sigismember(&cur, lxrt_signo_to_darwin(lsig))) {
+        if (lxrt_sync_pending && lxrt_sync_pending != lsig)
+            lxrt_sync_pending_flush();
+        lxrt_sync_pending = lsig;
+        return true;
+    }
+    lxrt_sync_pending_flush();
+    sync_self_deliver(lsig, 0);
+    return true;
+}
+
 long lxrt_tgkill(int tgid, int tid, int lsig)
 {
     if (lxrt_ids_on() && tgid > 0) {
@@ -2402,6 +2697,8 @@ long lxrt_tgkill(int tgid, int tid, int lsig)
     int d = lxrt_signo_to_darwin(lsig);
     if (!d)
         return LERR(EINVAL);
+    if (pthread_equal(target, pthread_self()) && sync_self_signal(lsig))
+        return 0;                         // delivered, or held while blocked
     int rc = pthread_kill(target, d);
     if (rc == 0)
         lxrt_signalfd_notify(lsig);       // kqueue cannot see pthread_kill

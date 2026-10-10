@@ -44,6 +44,12 @@
 #         sub-page bookkeeping (~150 us, under the exclusive code
 #         invalidation lock every compiling thread waits on: the stutter).
 #   0018  that zeroing without a protection query (one Wine call fewer).
+#   0019  the code buffer as a Darwin MAP_JIT region (adopted right after
+#         VirtualAlloc) with per-thread write scopes around every store into
+#         it, as the Linux ELF build of FEX runs under the runtime: committed
+#         by Wine with mprotect, the runtime split it W^X page by page, and
+#         every compiled block cost two mprotects of a 16 KiB page under one
+#         process-wide lock (~13,000 a second in Minecraft Dungeons II).
 #
 # Needs cmake, ninja and python3, and llvm-mingw (downloaded into
 # $STEAMARM_BUILD/toolchains when missing; LLVM_MINGW=<dir> picks another).

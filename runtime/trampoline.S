@@ -344,6 +344,10 @@ _lxrt_sigreturn_entry:
 // intra-procedure scratch that no call preserves, so the exposure is a signal
 // arriving inside a PLT veneer. The kernel does not have this problem because
 // it finishes with `eret`.
+//
+// A signal landing inside this routine (or lxrt_restore_regs_x0) is taken as
+// landing at the resume pc with the whole block in place: host_handler swaps
+// the interrupted state for the block named by lxrt_restore_ctx.
     .globl _lxrt_restore_regs
     .balign 4
 _lxrt_restore_regs:
@@ -393,6 +397,81 @@ _lxrt_restore_regs:
     ldr     x30,      [x0, #240]
     ldr     x0,       [x0, #0]      // x0 last: it is the block pointer
     br      x16
+    .globl _lxrt_restore_regs_end
+_lxrt_restore_regs_end:
+
+// void lxrt_restore_regs_x0(const uint64_t ctx[36 + 64])
+//
+// lxrt_restore_regs for a resume address whose first instruction writes x0
+// without reading it (signal.c x0_dead_at): x16 is restored exactly and the
+// branch goes through x0 instead.
+    .globl _lxrt_restore_regs_x0
+    .balign 4
+_lxrt_restore_regs_x0:
+    ldr     x17, [x0, #264]
+    msr     nzcv, x17
+    ldr     x17, [x0, #272]
+    msr     fpsr, x17
+    ldr     x17, [x0, #280]
+    msr     fpcr, x17
+    add     x17, x0, #288
+    ldp     q0,  q1,  [x17], #32
+    ldp     q2,  q3,  [x17], #32
+    ldp     q4,  q5,  [x17], #32
+    ldp     q6,  q7,  [x17], #32
+    ldp     q8,  q9,  [x17], #32
+    ldp     q10, q11, [x17], #32
+    ldp     q12, q13, [x17], #32
+    ldp     q14, q15, [x17], #32
+    ldp     q16, q17, [x17], #32
+    ldp     q18, q19, [x17], #32
+    ldp     q20, q21, [x17], #32
+    ldp     q22, q23, [x17], #32
+    ldp     q24, q25, [x17], #32
+    ldp     q26, q27, [x17], #32
+    ldp     q28, q29, [x17], #32
+    ldp     q30, q31, [x17], #32
+    ldr     x17, [x0, #248]         // guest sp
+    mov     sp,  x17
+    ldp     x16, x17, [x0, #128]    // guest x16, x17
+    ldp     x1,  x2,  [x0, #8]
+    ldp     x3,  x4,  [x0, #24]
+    ldp     x5,  x6,  [x0, #40]
+    ldp     x7,  x8,  [x0, #56]
+    ldp     x9,  x10, [x0, #72]
+    ldp     x11, x12, [x0, #88]
+    ldp     x13, x14, [x0, #104]
+    ldr     x15,      [x0, #120]
+    ldp     x18, x19, [x0, #144]
+    ldp     x20, x21, [x0, #160]
+    ldp     x22, x23, [x0, #176]
+    ldp     x24, x25, [x0, #192]
+    ldp     x26, x27, [x0, #208]
+    ldp     x28, x29, [x0, #224]
+    ldr     x30,      [x0, #240]
+    ldr     x0,       [x0, #256]    // pc: the first thing there overwrites x0
+    br      x0
+    .globl _lxrt_restore_regs_x0_end
+_lxrt_restore_regs_x0_end:
+
+// int lxrt_probe_u32(uint64_t addr, uint32_t *out)
+//
+// A 32-bit load that may fault: 1 and *out on success, 0 if the address is
+// not readable. host_handler resumes a SIGSEGV/SIGBUS at the load at the
+// fail label.
+    .globl _lxrt_probe_u32
+    .globl _lxrt_probe_u32_insn
+    .globl _lxrt_probe_u32_fail
+    .balign 4
+_lxrt_probe_u32:
+_lxrt_probe_u32_insn:
+    ldr     w2, [x0]
+    str     w2, [x1]
+    mov     w0, #1
+    ret
+_lxrt_probe_u32_fail:
+    mov     w0, #0
+    ret
 
 // ---------------------------------------------------------------- CTR_EL0
 //

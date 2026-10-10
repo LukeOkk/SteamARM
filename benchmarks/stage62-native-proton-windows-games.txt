@@ -669,3 +669,47 @@ HKLM\HARDWARE\DESCRIPTION\System\CentralProcessor\N "CP xxxx".
        blocks qualified and frame pacing did not move; it needed two fixes
        to be safe (no check for an undecodable instruction, no disk cache
        for such blocks).
+    u. The two SIGUSR2 per trap, and FEX's code buffer.
+       - Wine's return into a full context is a raise(SIGUSR2) at itself.
+         The runtime now delivers a thread's own SIGUSR2 inside the tgkill
+         (runtime/signal.c sync_self_deliver): host_handler runs on a
+         context built from the syscall's saved registers, and the thread
+         resumes where the guest handler left the context -- through
+         lxrt_restore_regs when x16 == pc (Wine's own syscall-return
+         convention), through lxrt_restore_regs_x0 when the code at the new
+         pc overwrites x0 before reading it (KiUserEmulationDispatcher:
+         `mov x0, sp`), through the syscall's normal return when nothing
+         changed, and through one real signal otherwise. KiUserEmulation-
+         Dispatcher does need the real x16: resumed with x16 = pc, the next
+         x64 ud2 ran as ARM64 code (found by poisoning x16 on the exact
+         path). veh_traps 6.3 -> 26.4 million traps in 40 s; with three
+         threads suspended and read every 100 ms 5.9 -> 20.8 million.
+         tests/elf/self_signal.c checks every resume path, with and without
+         LXRT_SYNC_SELF_SIGNAL=0.
+       - Dungeons II took ~26,000 SIGBUS a second. LXRT_WX_STATS: FEX's
+         code buffer, which Wine commits from VirtualAlloc(PAGE_EXECUTE_
+         READWRITE) with mprotect, was split W^X page by page by the
+         runtime -- ~6,500 write flips and ~6,500 execute flips a second,
+         two mprotects of a 16 KiB page each under the split's one lock;
+         a million execute-flip scans found no word to rewrite. FEX patch
+         0019 adopts the buffer as a MAP_JIT region (private syscall
+         0x4C580020, enable=3) and brackets every store into it with the
+         per-thread write scopes the Linux build of FEX already carries.
+         Found on the way: the runtime's own JIT switch around a guest
+         signal handler went through the scopes' entry and moved their
+         nesting count, so threads stayed writable after a scope and their
+         next JIT instruction faulted (~25,000 a second): lxrt_jit_mode()
+         now. Wine releasing a view by mapping over it now ends a JIT
+         region. After: no write flips at all, SIGBUS 125,000 -> 40,000 per
+         5 s (left: the protector's stores into write-protected x64 code);
+         ~10,000 SIGSEGV a second remain, x64 loads from KUSER_SHARED_DATA
+         emulated by runtime/lowpage.c.
+       Frame times after the first minute, ~2.7 min of intro and menu, two
+       runs each, alternating:
+                          0.3.69          now
+         1 % low          10.9 / 11.0     12.3 / 14.7 fps
+         frames > 100 ms  15 / 13         9 / 8
+         frames > 250 ms  4 / 5           2 / 1
+         frames > 50 ms   20 / 22         33 / 34
+       Long spikes are fewer and shorter; frames of 50-100 ms are more
+       frequent. FINAL FANTASY VII REMAKE 30 fps, Schedule I 88.9 fps.

@@ -219,6 +219,7 @@ bool lxrt_jit_handle_fault(uint64_t pc, uint64_t fault_addr, void *uap);
 // brk from the execute-mode stub: restore the parked context (jit.c).
 bool lxrt_jit_stub_trap(void *uap);
 long lxrt_jit_set_write(int enable, uint64_t addr, uint64_t len);
+void lxrt_jit_mode(bool writable);   // the runtime's own switch, outside the guest's scopes
 void lxrt_jit_protect(int enable);   // pthread_jit_write_protect_np with signals blocked
 bool lxrt_jit_thread_writable(void);
 

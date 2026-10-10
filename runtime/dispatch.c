@@ -1270,6 +1270,10 @@ static long do_mmap_inner(uint64_t addr, uint64_t len, long prot, long lflags,
         lxrt_privmap_forget(addr, len);
         lxrt_shmirror_forget(addr, len);
         lxrt_wx_forget(addr, len);     // a new mapping is not the old RWX range
+        // Nor a JIT region: Wine releases a VirtualAlloc'd code buffer by
+        // mapping PROT_NONE over it, and the next allocation there is plain
+        // memory (jit_adopt below).
+        lxrt_jit_forget(addr, len);
         lxrt_mremap_forget_shared(addr, len);
         // Nor the PE image that was there: Wine releases a view by mapping
         // over it (PROT_NONE, MAP_FIXED), and a JIT buffer placed there later
@@ -3090,6 +3094,63 @@ long lxrt_membarrier(int cmd, unsigned flags)
     }
 }
 
+// lxrt_jit_wx with enable=3, (addr, len): make a code buffer the guest got
+// read-write-execute some other way into a JIT region (jit.c), at the same
+// address. FEX as an ARM64EC DLL takes its buffer from VirtualAlloc
+// (PAGE_EXECUTE_READWRITE), which Wine commits with mprotect inside a range
+// it reserved -- so the W^X split takes it (wxsplit.c), and every compiled
+// block cost a write flip and an execute flip of a 16 KiB page, each an
+// mprotect under the split's process-wide lock: ~6,500 of each per second in
+// Minecraft Dungeons II, whose protection keeps FEX recompiling (MEASURED,
+// LXRT_WX_STATS). As MAP_JIT the switch is per thread, asked for by FEX's
+// write scopes (patches/fex-arm64ec 0019), and costs no fault at all.
+// The contents are not kept: the guest asks before writing anything.
+void lxrt_pageprot_lock(sigset_t *old);
+void lxrt_pageprot_unlock(const sigset_t *old);
+
+static long jit_adopt(uint64_t addr, uint64_t len)
+{
+    if (!addr || !len || (addr | len) % LXRT_HOST_PAGE)
+        return LERR(EINVAL);
+    if (lxrt_jit_contains(addr))
+        return 0;
+    // Only read-write-execute memory of the split, all of it, nothing
+    // 4 KiB-tracked in it: memory the guest owns, plain anonymous pages.
+    if (!lxrt_wx_covered(addr, len) || lxrt_subpage_tracked(addr, len))
+        return LERR(EINVAL);
+    sigset_t old;
+    lxrt_pageprot_lock(&old);
+    munmap((void *)(uintptr_t)addr, (size_t)len);
+    void *jp = mmap((void *)(uintptr_t)addr, (size_t)len, PROT_READ | PROT_WRITE | PROT_EXEC,
+                    MAP_PRIVATE | MAP_ANON | MAP_JIT, -1, 0);
+    bool ok = jp == (void *)(uintptr_t)addr;
+    if (jp != MAP_FAILED && !ok)
+        munmap(jp, (size_t)len);
+    if (ok && !lxrt_jit_register(addr, len)) {
+        munmap(jp, (size_t)len);
+        ok = false;
+    }
+    if (!ok) {
+        // Put back what the split had there: read-write, still in its table.
+        void *back = mmap((void *)(uintptr_t)addr, (size_t)len, PROT_READ | PROT_WRITE,
+                          MAP_PRIVATE | MAP_ANON | MAP_FIXED, -1, 0);
+        lxrt_pageprot_unlock(&old);
+        if (g_trace || back == MAP_FAILED)
+            fprintf(lxrt_trace_stream(), "[lxrt] jit adopt 0x%llx+0x%llx: MAP_JIT landed at %p%s\n",
+                    (unsigned long long)addr, (unsigned long long)len, jp,
+                    back == MAP_FAILED ? "; the range could not be restored" : "");
+        return LERR(EBUSY);
+    }
+    lxrt_pageprot_unlock(&old);
+    lxrt_wx_forget(addr, len);
+    if (g_trace)
+        fprintf(lxrt_trace_stream(), "[lxrt] jit adopt 0x%llx+0x%llx: MAP_JIT\n",
+                (unsigned long long)addr, (unsigned long long)len);
+    return 0;
+}
+
+void lxrt_sync_pending_flush(void);
+
 void lxrt_dispatch(struct lxrt_regs *r)
 {
     long nr = (long)r->x[8];
@@ -3127,6 +3188,17 @@ void lxrt_dispatch(struct lxrt_regs *r)
     // (tests/elf binder_ipc.c's pool test: a handler that closes a
     // descriptor during a blocked BINDER_WRITE_READ).
     const int outer_sig_during_syscall = lxrt_sig_during_syscall;
+    // For a signal the thread sends itself, delivered right here (signal.c sync_self_signal).
+    extern _Thread_local struct lxrt_regs *lxrt_cur_regs, *lxrt_cur_outer_regs;
+    extern _Thread_local int lxrt_cur_outer_sig, lxrt_sync_pending;
+    struct lxrt_regs *const outer_regs = lxrt_cur_regs;
+    lxrt_cur_outer_regs = outer_regs;
+    lxrt_cur_regs = r;
+    lxrt_cur_outer_sig = outer_sig_during_syscall;
+    // A self-sent signal held for the rt_sigprocmask that unblocks it: any
+    // other call first, and it becomes an ordinary pending signal.
+    if (__builtin_expect(lxrt_sync_pending, 0) && nr != 135)
+        lxrt_sync_pending_flush();
     // Android ids (runtime/android_ids.h): the credential, capability and
     // namespace calls of a guest started with LXRT_ANDROID_IDS.
     if (lxrt_aids_on() && lxrt_aids_syscall(nr, a0, a1, a2, a3, a4, &ret))
@@ -3226,7 +3298,7 @@ restart:
         // A JIT asking for the W^X flip on its own stack. Doing it from the
         // fault handler instead does not survive the handler's return
         // (benchmarks/stage5-jit.txt), which is why this syscall exists.
-        ret = lxrt_jit_set_write((int)a0, a1, a2);
+        ret = a0 == 3 ? jit_adopt(a1, a2) : lxrt_jit_set_write((int)a0, a1, a2);
         break;
     case LNR_clock_gettime:
         ret = do_clock_gettime((long)a0, a1);
@@ -5106,5 +5178,6 @@ aids_done:
         fprintf(lxrt_trace_stream(), "[lxrt] %d/%d syscall %ld -> %ld\n", (int)getpid(), lxrt_gettid(), nr, ret);
 
     lxrt_sig_during_syscall = outer_sig_during_syscall;
+    lxrt_cur_regs = outer_regs;
     r->x[0] = (uint64_t)ret;
 }

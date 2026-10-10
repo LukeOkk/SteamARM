@@ -1,0 +1,265 @@
+SteamARM: FEX's code buffer as a Darwin MAP_JIT region with per-thread write scopes, the way the
+Linux ELF build of FEX runs under the runtime (patches/fex-lxrt-wx.patch, same scope sites). Wine
+commits the PAGE_EXECUTE_READWRITE buffer with mprotect, which the runtime splits W^X page by page:
+every compiled block cost a write flip and an execute flip of a 16 KiB page, ~6,500 of each per
+second in Minecraft Dungeons II. The buffer is adopted as MAP_JIT right after allocation (private
+syscall 0x4C580020, enable=3); without thread_local, the runtime counts nested scopes.
+
+--- a/FEXCore/Source/Interface/Core/Dispatcher/Dispatcher.cpp
++++ b/FEXCore/Source/Interface/Core/Dispatcher/Dispatcher.cpp
+@@ -3,6 +3,7 @@
+ #include "Common/VectorRegType.h"
+ #include "Interface/Context/Context.h"
+ #include "Interface/Core/CPUBackend.h"
++#include <FEXCore/Utils/LxrtJit.h>
+ #include "Interface/Core/Dispatcher/Dispatcher.h"
+ #include "Interface/Core/LookupCache.h"
+ #include "Utils/MemberFunctionToPointer.h"
+@@ -39,7 +40,10 @@
+ Dispatcher::Dispatcher(FEXCore::Context::ContextImpl* ctx)
+   : Arm64Emitter(ctx, FEXCore::Allocator::VirtualAlloc(MAX_DISPATCHER_CODE_SIZE, true), MAX_DISPATCHER_CODE_SIZE)
+   , CTX {ctx} {
+-  EmitDispatcher();
++  {
++    FEXCore::LxrtJit::WriteScope Scope(GetBufferBase(), MAX_DISPATCHER_CODE_SIZE);
++    EmitDispatcher();
++  }
+ 
+   FEXCore::Allocator::VirtualName("FEXMem_Misc", reinterpret_cast<void*>(GetBufferBase()), MAX_DISPATCHER_CODE_SIZE);
+ }
+--- a/FEXCore/Source/Interface/Core/JIT/JIT.cpp
++++ b/FEXCore/Source/Interface/Core/JIT/JIT.cpp
+@@ -14,6 +14,7 @@
+ #include "Interface/Context/Context.h"
+ #include "Interface/Core/LookupCache.h"
+ #include "Interface/Core/Dispatcher/Dispatcher.h"
++#include <FEXCore/Utils/LxrtJit.h>
+ #include "Interface/Core/Interpreter/InterpreterOps.h"
+ #include "Interface/Core/JIT/DebugData.h"
+ #include "Interface/Core/JIT/JITClass.h"
+@@ -546,7 +547,10 @@
+     BranchEmit.b(BranchOffset);
+   }
+ 
+-  std::atomic_ref<uint32_t>(*reinterpret_cast<uint32_t*>(CallerAddress)).store(BranchInst, std::memory_order::relaxed);
++  {
++    FEXCore::LxrtJit::WriteScope Scope(reinterpret_cast<void*>(CallerAddress), 4);
++    std::atomic_ref<uint32_t>(*reinterpret_cast<uint32_t*>(CallerAddress)).store(BranchInst, std::memory_order::relaxed);
++  }
+   ARMEmitter::Emitter::ClearICache(reinterpret_cast<void*>(CallerAddress), 4);
+ }
+ 
+@@ -557,7 +561,10 @@
+   // Restore branch +2 instructions to jump to the linker block
+   BranchEmit.b(0x2);
+ 
+-  std::atomic_ref<uint32_t>(*reinterpret_cast<uint32_t*>(JumpThunkStartAddress)).store(BranchInst, std::memory_order::relaxed);
++  {
++    FEXCore::LxrtJit::WriteScope Scope(reinterpret_cast<void*>(JumpThunkStartAddress), 4);
++    std::atomic_ref<uint32_t>(*reinterpret_cast<uint32_t*>(JumpThunkStartAddress)).store(BranchInst, std::memory_order::relaxed);
++  }
+   ARMEmitter::Emitter::ClearICache(reinterpret_cast<void*>(JumpThunkStartAddress), 4);
+ 
+   // No need to reset HostCode here as the exit linker pointer is stored separately, and if the block is relinked it will be updated.
+@@ -624,7 +631,10 @@
+         GuestRip, Record, [](FEXCore::Context::ExitFunctionLinkData* Record) { DirectBlockDelinker(Record, false); }, lk);
+     }
+ 
+-    std::atomic_ref<uint32_t>(*reinterpret_cast<uint32_t*>(CallerAddress)).store(BranchInst, std::memory_order::relaxed);
++    {
++      FEXCore::LxrtJit::WriteScope Scope(reinterpret_cast<void*>(CallerAddress), 4);
++      std::atomic_ref<uint32_t>(*reinterpret_cast<uint32_t*>(CallerAddress)).store(BranchInst, std::memory_order::relaxed);
++    }
+     ARMEmitter::Emitter::ClearICache(reinterpret_cast<void*>(CallerAddress), 4);
+   } else {
+     // This case is common between calls and jumps as the thunk callsite can be left untouched.
+@@ -637,7 +647,10 @@
+     uint32_t LdrInst = 0;
+     ARMEmitter::Emitter LdrEmit(reinterpret_cast<uint8_t*>(&LdrInst), 4);
+     LdrEmit.ldr(TMP1, reinterpret_cast<uint64_t>(&Record->HostCode) - JumpThunkStartAddress);
+-    std::atomic_ref<uint32_t>(*reinterpret_cast<uint32_t*>(JumpThunkStartAddress)).store(LdrInst, std::memory_order::relaxed);
++    {
++      FEXCore::LxrtJit::WriteScope Scope(reinterpret_cast<void*>(JumpThunkStartAddress), 4);
++      std::atomic_ref<uint32_t>(*reinterpret_cast<uint32_t*>(JumpThunkStartAddress)).store(LdrInst, std::memory_order::relaxed);
++    }
+     ARMEmitter::Emitter::ClearICache(reinterpret_cast<void*>(JumpThunkStartAddress), 4);
+ 
+     Thread->LookupCache->AddBlockLink(GuestRip, Record, IndirectBlockDelinker, lk);
+@@ -1160,7 +1173,10 @@
+     CodeData.HostCodeOffset = CodeData.BlockBegin - CurrentCodeBuffer->GetBufferBase();
+ 
+     // Copy over CodeBuffer contents
+-    memcpy(AllocatedInfo.BufferAllocationOffset, TempCodeBuffer, CodeData.Size);
++    {
++      FEXCore::LxrtJit::WriteScope Scope(AllocatedInfo.BufferAllocationOffset, CodeData.Size);
++      memcpy(AllocatedInfo.BufferAllocationOffset, TempCodeBuffer, CodeData.Size);
++    }
+   }
+ 
+   TempCodeBufferAllocator.DelayedDisownBuffer();
+@@ -1205,7 +1221,10 @@
+   auto AllocatedInfo = AllocateCodeBufferInSharedCache(HostBytes.size());
+ 
+   uint8_t* Dest = AllocatedInfo.BufferAllocationOffset;
+-  memcpy(Dest, HostBytes.data(), HostBytes.size());
++  {
++    FEXCore::LxrtJit::WriteScope Scope(Dest, HostBytes.size());
++    memcpy(Dest, HostBytes.data(), HostBytes.size());
++  }
+   ClearICache(Dest, HostBytes.size());
+ 
+   CPUBackend::CompiledCode Result;
+--- a/FEXCore/Source/Interface/Core/SharedCodeBufferManager.cpp
++++ b/FEXCore/Source/Interface/Core/SharedCodeBufferManager.cpp
+@@ -4,6 +4,7 @@
+ 
+ #include <FEXCore/fextl/memory.h>
+ #include <FEXCore/Utils/AllocatorHooks.h>
++#include <FEXCore/Utils/LxrtJit.h>
+ #include <FEXCore/Utils/LogManager.h>
+ #include <FEXCore/Utils/MathUtils.h>
+ 
+@@ -20,6 +21,11 @@
+   : AllocatedSize(Size) {
+   Ptr = static_cast<uint8_t*>(FEXCore::Allocator::VirtualAlloc(Size, true));
+   LOGMAN_THROW_A_FMT(!!Ptr, "Couldn't allocate code buffer");
++#ifdef _WIN32
++  // SteamARM: under the Darwin runtime, a MAP_JIT region switched per thread by the write scopes, instead of a
++  // read-write-execute commit that the runtime splits W^X page by page (see LxrtJit.h).
++  FEXCore::LxrtJit::Adopt(Ptr, Size);
++#endif
+ 
+   // Protect the last page of the allocated buffer to trigger SIGSEGV on write access
+   uintptr_t LastPageAddr = AlignDown(reinterpret_cast<uintptr_t>(Ptr) + Size - 1, FEXCore::Utils::FEX_PAGE_SIZE);
+--- a/FEXCore/Source/Utils/ArchHelpers/Arm64.cpp
++++ b/FEXCore/Source/Utils/ArchHelpers/Arm64.cpp
+@@ -3,6 +3,7 @@
+ #include "Interface/Core/CPUBackend.h"
+ #include "Interface/Context/Context.h"
+ #include <FEXCore/Utils/SpinWaitLock.h>
++#include <FEXCore/Utils/LxrtJit.h>
+ 
+ #include <FEXCore/Debug/InternalThreadState.h>
+ #include <FEXCore/Utils/EnumUtils.h>
+@@ -2104,6 +2105,9 @@
+   // Due to code buffer sharing between threads, code must be carefully backpatched from last to first.
+   // Multiple threads can be attempting to handle the SIGBUS or even be executing the code being backpatched.
+   FEXCore::Utils::SpinWaitLock::UniqueSpinMutex lk(&InlineTail->SpinLockFutex);
++  // Every branch below stores into PC[-1]..PC[1]; the runtime needs the write
++  // window opened before those stores and closed before the handler returns.
++  FEXCore::LxrtJit::WriteScope Scope(reinterpret_cast<void*>(&PC[-1]), 12);
+ 
+   if ((Instr & LDAXR_MASK) == LDAR_INST ||  // LDAR*
+       (Instr & LDAXR_MASK) == LDAPR_INST) { // LDAPR*
+--- /dev/null
++++ b/FEXCore/include/FEXCore/Utils/LxrtJit.h
+@@ -0,0 +1,109 @@
++// SPDX-License-Identifier: MIT
++#pragma once
++
++// W^X for FEX on top of the SteamARM Darwin runtime (lxrun), here as the
++// ARM64EC DLL Wine loads. The Linux ELF build of FEX carries the same scopes
++// (SteamARM patches/LxrtJit.h); this copy drops what an ARM64EC DLL cannot
++// have.
++//
++// Under the runtime a JIT region is Darwin MAP_JIT: a thread may write it or
++// execute it but never both, and the switch is per thread. The runtime cannot
++// make the switch from a fault (a pthread_jit_write_protect_np() inside a
++// signal handler does not survive the handler's return), so FEX asks, on its
++// own stack, around every store into its code.
++//
++// Private syscall 0x4C580020 in x8, (enable, addr, len):
++//    0  open this thread for writing (the runtime counts nested opens)
++//    1  scan [addr,len) for instructions the runtime cannot let run, and
++//       return to execute mode when the outermost scope closes
++//    3  turn [addr,len), read-write-execute memory from VirtualAlloc, into a
++//       JIT region at the same address (contents are not kept)
++//
++// Without it, Wine commits FEX's PAGE_EXECUTE_READWRITE code buffer with
++// mprotect and the runtime splits it page by page: every compiled block cost
++// a write flip and an execute flip of a 16 KiB page, each an mprotect.
++//
++// An ARM64EC DLL must not have thread_local data (it takes a TLS slot of the
++// game's), so the nesting is the runtime's to count. Anywhere else the
++// syscall number is unknown: Linux returns -ENOSYS, Windows an error status,
++// the probe latches false once, and every scope costs one predictable branch.
++
++#include <cstddef>
++#include <cstdint>
++
++namespace FEXCore::LxrtJit {
++
++#if (defined(__aarch64__) && defined(__linux__)) || defined(__arm64ec__)
++
++inline long Call(long Enable, uint64_t Addr, uint64_t Len) {
++  register long x8 asm("x8") = 0x4C580020;
++  register long x0 asm("x0") = Enable;
++  register uint64_t x1 asm("x1") = Addr;
++  register uint64_t x2 asm("x2") = Len;
++  asm volatile("svc #0" : "+r"(x0) : "r"(x8), "r"(x1), "r"(x2) : "memory", "cc");
++  return x0;
++}
++
++// Asking for execute mode is the safe probe: under the runtime it is the state
++// a thread is already in. Constant-initialised, so no guard and no TLS; a race
++// between two first callers asks twice and gets the same answer.
++inline bool Available() {
++  static int Supported = -1;
++  if (Supported < 0) {
++    Supported = Call(1, 0, 0) == 0;
++  }
++  return Supported != 0;
++}
++
++// RAII. Construct around every write into an executable buffer; pass the range
++// that write lands in so the runtime scans that and nothing else.
++class WriteScope final {
++public:
++  explicit WriteScope(void* Addr = nullptr, size_t Len = 0)
++    : Base(reinterpret_cast<uint64_t>(Addr))
++    , Size(Len) {
++    if (!Available()) {
++      return;
++    }
++    Active = true;
++    Call(0, 0, 0);
++  }
++
++  ~WriteScope() {
++    if (Active) {
++      Call(1, Base, Size);
++    }
++  }
++
++  WriteScope(const WriteScope&) = delete;
++  WriteScope& operator=(const WriteScope&) = delete;
++
++private:
++  uint64_t Base;
++  size_t Size;
++  bool Active = false;
++};
++
++// Make a freshly allocated, still unwritten code buffer a JIT region.
++inline bool Adopt(void* Addr, size_t Len) {
++  return Available() && Call(3, reinterpret_cast<uint64_t>(Addr), Len) == 0;
++}
++
++#else
++
++class WriteScope final {
++public:
++  explicit WriteScope(void* = nullptr, size_t = 0) {}
++  WriteScope(const WriteScope&) = delete;
++  WriteScope& operator=(const WriteScope&) = delete;
++};
++inline bool Available() {
++  return false;
++}
++inline bool Adopt(void*, size_t) {
++  return false;
++}
++
++#endif
++
++} // namespace FEXCore::LxrtJit
