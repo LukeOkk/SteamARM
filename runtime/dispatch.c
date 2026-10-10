@@ -3188,13 +3188,14 @@ void lxrt_dispatch(struct lxrt_regs *r)
     // (tests/elf binder_ipc.c's pool test: a handler that closes a
     // descriptor during a blocked BINDER_WRITE_READ).
     const int outer_sig_during_syscall = lxrt_sig_during_syscall;
-    // For a signal the thread sends itself, delivered right here (signal.c sync_self_signal).
-    extern _Thread_local struct lxrt_regs *lxrt_cur_regs, *lxrt_cur_outer_regs;
-    extern _Thread_local int lxrt_cur_outer_sig, lxrt_sync_pending;
-    struct lxrt_regs *const outer_regs = lxrt_cur_regs;
-    lxrt_cur_outer_regs = outer_regs;
-    lxrt_cur_regs = r;
-    lxrt_cur_outer_sig = outer_sig_during_syscall;
+    // A signal the thread sends itself is delivered inside its own tgkill or
+    // the rt_sigprocmask that unblocks it (signal.c sync_self_deliver), from
+    // these registers -- only those two calls name them, and only while they
+    // run: the runtime's own callers (the cross-process mailbox, drained in a
+    // signal handler) must not resume the thread from whatever syscall it
+    // happens to be in.
+    extern _Thread_local struct lxrt_regs *lxrt_sync_regs;
+    extern _Thread_local int lxrt_sync_outer_sig, lxrt_sync_pending;
     // A self-sent signal held for the rt_sigprocmask that unblocks it: any
     // other call first, and it becomes an ordinary pending signal.
     if (__builtin_expect(lxrt_sync_pending, 0) && nr != 135)
@@ -5019,7 +5020,10 @@ restart:
     case LNR_tgkill:
         if (a2 == 6 && (int)a0 == lxrt_ids_pid())
             abort_backtrace(r);
+        lxrt_sync_regs = r;
+        lxrt_sync_outer_sig = outer_sig_during_syscall;
         ret = lxrt_tgkill((int)a0, (int)a1, (int)a2);
+        lxrt_sync_regs = NULL;
         break;
     case 240: // rt_tgsigqueueinfo(tgid, tid, sig, siginfo)
     case 138: // rt_sigqueueinfo(pid, sig, siginfo)
@@ -5098,8 +5102,11 @@ restart:
         ret = lxrt_rt_sigpending((uint64_t *)a0, (size_t)a1);
         break;
     case LNR_rt_sigprocmask:
+        lxrt_sync_regs = r;
+        lxrt_sync_outer_sig = outer_sig_during_syscall;
         ret = lxrt_rt_sigprocmask((int)a0, (const uint64_t *)a1,
                                   (uint64_t *)a2, (size_t)a3);
+        lxrt_sync_regs = NULL;
         break;
     case LNR_exit:
         // A thread exiting, not the process. glibc's pthread_join blocks on
@@ -5178,6 +5185,5 @@ aids_done:
         fprintf(lxrt_trace_stream(), "[lxrt] %d/%d syscall %ld -> %ld\n", (int)getpid(), lxrt_gettid(), nr, ret);
 
     lxrt_sig_during_syscall = outer_sig_during_syscall;
-    lxrt_cur_regs = outer_regs;
     r->x[0] = (uint64_t)ret;
 }

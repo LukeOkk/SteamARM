@@ -885,6 +885,7 @@ void lxrt_signal_rescue_stranded(void)
 static _Thread_local struct __darwin_mcontext64 *g_exact_resume_mc;
 static _Thread_local sigset_t g_exact_resume_mask;
 extern _Thread_local int lxrt_sync_pending;
+extern _Thread_local struct lxrt_regs *lxrt_sync_regs;
 void lxrt_sync_pending_flush(void);
 static void sync_self_deliver(int lsig, uint64_t x0);
 static bool sync_self_eligible(int lsig);
@@ -921,8 +922,14 @@ static void restore_window_fixup(ucontext_t *uc)
     memcpy(uc->uc_mcontext->__ns.__v, c + 36, sizeof uc->uc_mcontext->__ns.__v);
 }
 
+static void sync_regs_restore(struct lxrt_regs **saved) { lxrt_sync_regs = *saved; }
+
 static void host_handler(int dsig, siginfo_t *dinfo, void *uap)
 {
+    // A handler interrupting the guest's own tgkill or rt_sigprocmask is not
+    // that call: whatever it sends this thread goes the kernel's way.
+    struct lxrt_regs *sync_saved __attribute__((cleanup(sync_regs_restore))) = lxrt_sync_regs;
+    lxrt_sync_regs = NULL;
     if ((dsig == SIGSEGV || dsig == SIGBUS) && uap &&
         ((ucontext_t *)uap)->uc_mcontext->__ss.__pc == (uint64_t)(uintptr_t)lxrt_probe_u32_insn) {
         ((ucontext_t *)uap)->uc_mcontext->__ss.__pc = (uint64_t)(uintptr_t)lxrt_probe_u32_fail;
@@ -2465,9 +2472,8 @@ long lxrt_sigqueueinfo(int tgid, int tid, int lsig, const void *linfo)
 // where the code at the resume pc overwrites x0 first (see x0_dead_at). Any
 // other context resumes through one real signal that only installs it.
 // LXRT_SYNC_SELF_SIGNAL=0: the kernel delivers, as before.
-_Thread_local struct lxrt_regs *lxrt_cur_regs;     // set by lxrt_dispatch
-_Thread_local struct lxrt_regs *lxrt_cur_outer_regs;
-_Thread_local int lxrt_cur_outer_sig;              // dispatch.c's outer_sig_during_syscall
+_Thread_local struct lxrt_regs *lxrt_sync_regs;    // the guest's tgkill/rt_sigprocmask now running
+_Thread_local int lxrt_sync_outer_sig;             // its dispatch.c outer_sig_during_syscall
 _Thread_local int lxrt_sync_pending;               // a self-sent signal held blocked
 void lxrt_restore_regs(const uint64_t *ctx) __attribute__((noreturn));
 
@@ -2477,7 +2483,7 @@ static bool sync_self_eligible(int lsig)
 {
     static int on = -1;
     if (on < 0) { const char *e = getenv("LXRT_SYNC_SELF_SIGNAL"); on = !(e && e[0] == '0'); }
-    if (!on || !lxrt_cur_regs || lsig != 12 || !lxrt_signo_to_darwin(lsig))
+    if (!on || !lxrt_sync_regs || lsig != 12 || !lxrt_signo_to_darwin(lsig))
         return false;
     pthread_mutex_lock(&g_actions_lock);
     struct guest_sigaction act = g_actions[lsig];
@@ -2537,7 +2543,7 @@ void lxrt_sync_pending_flush(void)
 static void sync_self_deliver(int lsig, uint64_t x0);
 static void sync_self_deliver(int lsig, uint64_t x0)
 {
-    struct lxrt_regs *r = lxrt_cur_regs;
+    struct lxrt_regs *r = lxrt_sync_regs;
     int dsig = lxrt_signo_to_darwin(lsig);
     sigset_t cur, hm;                           // hm: what the kernel blocks while host_handler runs
     host_handler_mask(&hm);
@@ -2578,11 +2584,12 @@ static void sync_self_deliver(int lsig, uint64_t x0)
     // This syscall never returns through the dispatcher: what its exit would
     // put back, put back now.
     extern _Thread_local int lxrt_sig_during_syscall;
-    lxrt_sig_during_syscall = lxrt_cur_outer_sig;
-    lxrt_cur_regs = lxrt_cur_outer_regs;
+    const int outer_sig = lxrt_sync_outer_sig;
+    lxrt_sig_during_syscall = outer_sig;
+    lxrt_sync_regs = NULL;
 
     host_handler(dsig, &si, &uc);
-    lxrt_sig_during_syscall = lxrt_cur_outer_sig;
+    lxrt_sig_during_syscall = outer_sig;
     static int slog = -1;
     if (slog < 0) slog = getenv("LXRT_SYNC_SELF_LOG") ? atoi(getenv("LXRT_SYNC_SELF_LOG")) : 0;
     if (slog > 0) {
@@ -2682,7 +2689,9 @@ long lxrt_tgkill(int tgid, int tid, int lsig)
         return kill(tgid, d) != 0 ? LERR(errno) : 0;
     }
     pthread_t target;
-    if (!lxrt_thread_lookup(tid, &target))
+    if (tid == lxrt_gettid())
+        target = pthread_self();          // itself: no table walk under the lock
+    else if (!lxrt_thread_lookup(tid, &target))
         return LERR(ESRCH);
     if (lsig == 0)
         return 0;

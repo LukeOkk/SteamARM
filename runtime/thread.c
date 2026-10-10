@@ -116,11 +116,18 @@ static void threads_unlock(void)
 }
 LXRT_FORK_SAFE(thread_g_threads_lock, g_threads_lock)
 
+// Realtime signals queued across all threads: lxrt_rt_pending_unblocked
+// answers "nothing" without the lock when it is zero -- it runs on every
+// self-delivered signal (signal.c) and every mask change. Slots reused with
+// entries still queued are subtracted then.
+static _Atomic int g_rt_queued;
+
 static void register_thread(int tid, pthread_t th, struct guest_thread *gt)
 {
     threads_lock();
     for (int i = 0; i < MAX_GUEST_THREADS; i++)
         if (!g_threads[i].used) {
+            atomic_fetch_sub(&g_rt_queued, (g_threads[i].rt_tail + RT_QUEUE_DEPTH - g_threads[i].rt_head) % RT_QUEUE_DEPTH);
             memset(&g_threads[i], 0, sizeof(g_threads[i]));
             g_threads[i].tid = tid;
             g_threads[i].th = th;
@@ -979,6 +986,7 @@ bool lxrt_rt_enqueue(int tid, int lsig)
         if (next != g_threads[i].rt_head) {     // full queues drop, as Linux does
             g_threads[i].rt[g_threads[i].rt_tail] = (uint8_t)lsig;
             g_threads[i].rt_tail = next;
+            atomic_fetch_add(&g_rt_queued, 1);
             ok = true;
         }
         break;
@@ -1013,6 +1021,7 @@ int lxrt_rt_dequeue_self_mask(uint64_t blocked)
                 j = nx;
             }
             g_threads[i].rt_tail = (uint8_t)((t + RT_QUEUE_DEPTH - 1) % RT_QUEUE_DEPTH);
+            atomic_fetch_sub(&g_rt_queued, 1);
             break;
         }
         break;
@@ -1024,6 +1033,8 @@ int lxrt_rt_dequeue_self_mask(uint64_t blocked)
 // Is anything queued for the calling thread that `blocked` lets through?
 bool lxrt_rt_pending_unblocked(uint64_t blocked)
 {
+    if (atomic_load(&g_rt_queued) <= 0)
+        return false;
     int tid = lxrt_gettid();
     bool any = false;
     threads_lock();
@@ -1074,6 +1085,7 @@ int lxrt_rt_dequeue_self(void)
         if (g_threads[i].rt_head != g_threads[i].rt_tail) {
             sig = g_threads[i].rt[g_threads[i].rt_head];
             g_threads[i].rt_head = (uint8_t)((g_threads[i].rt_head + 1) % RT_QUEUE_DEPTH);
+            atomic_fetch_sub(&g_rt_queued, 1);
         }
         break;
     }
