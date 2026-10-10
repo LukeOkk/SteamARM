@@ -7,7 +7,9 @@
 #   vk_mfxt_entry.c kk_steamarm_upscale_temporal in the built driver, called
 #                   as SteamARM's Vulkan shim calls it;
 #   vk_geometry.c   geometry shaders (patches/kosmickrisp-27), the same
-#                   scenes drawn with llvmpipe and compared.
+#                   scenes drawn with llvmpipe and compared;
+#   vk_float_strict.c KK_FLOAT_STRICT (patches/kosmickrisp-28): results,
+#                   the MSL of each stage and the caches in each mode.
 #
 # Usage: tests/kk/run.sh
 #   STEAMARM_KK_SRC  patched Mesa tree (default
@@ -66,6 +68,14 @@ else
     perl -e 'alarm 300; exec @ARGV' "$OUT/vk_geometry" "$OWN/libvulkan_kosmickrisp.dylib" "$LVP" > "$log" 2>&1
     grep -E '^  (ok|FAIL|skip)' "$log" | sed 's/^/    /'
     result vk_geometry "$log" "vk_geometry (geometry shaders against llvmpipe)"
+fi
+if ! clang -O2 -Wall -I/opt/homebrew/include tests/kk/vk_float_strict.c -o "$OUT/vk_float_strict"; then
+    echo "  FAIL  vk_float_strict (build)"; fail=$((fail + 1))
+else
+    log="$OUT/vk_float_strict.log"
+    perl -e 'alarm 300; exec @ARGV' "$OUT/vk_float_strict" "$OWN/libvulkan_kosmickrisp.dylib" > "$log" 2>&1
+    grep -E '^  (ok|FAIL)|^        bench' "$log" | sed 's/^/    /'
+    result vk_float_strict "$log" "vk_float_strict (KK_FLOAT_STRICT full, nan, fast)"
 fi
 echo "== $pass passed, $fail failed"
 [ "$fail" = 0 ]

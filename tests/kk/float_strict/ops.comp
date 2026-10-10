@@ -1,0 +1,38 @@
+#version 460
+// SignedZeroInfNanPreserve for 32-bit floats, declared the way DXVK and
+// vkd3d-proton declare it in every DXBC shader (SPV_KHR_float_controls:
+// capability 4466, execution mode 4461).
+#extension GL_EXT_spirv_intrinsics : require
+#extension GL_EXT_buffer_reference : require
+spirv_execution_mode(extensions = ["SPV_KHR_float_controls"], capabilities = [4466], 4461, 32);
+layout(local_size_x = 32) in;
+layout(buffer_reference, std430) readonly buffer Pairs { vec2 v[]; };
+layout(buffer_reference, std430) writeonly buffer Results { float r[]; };
+layout(push_constant) uniform PC { Pairs pairs; Results res; uint count; } pc;
+
+// Sixteen results per pair (a, b), in the order of op_name[] in
+// vk_float_strict.c.
+void main()
+{
+    uint i = gl_GlobalInvocationID.x;
+    if (i >= pc.count)
+        return;
+    float a = pc.pairs.v[i].x, b = pc.pairs.v[i].y;
+    uint o = i * 16u;
+    pc.res.r[o + 0u] = min(a, b);
+    pc.res.r[o + 1u] = max(a, b);
+    pc.res.r[o + 2u] = a < b ? 1.0 : 0.0;
+    pc.res.r[o + 3u] = a >= b ? 1.0 : 0.0;
+    pc.res.r[o + 4u] = a == b ? 1.0 : 0.0;
+    pc.res.r[o + 5u] = a != b ? 1.0 : 0.0;
+    pc.res.r[o + 6u] = isnan(a) ? 1.0 : 0.0;
+    pc.res.r[o + 7u] = isinf(a) ? 1.0 : 0.0;
+    pc.res.r[o + 8u] = a * b;
+    pc.res.r[o + 9u] = fma(a, b, 1.0);
+    pc.res.r[o + 10u] = sqrt(abs(a));
+    pc.res.r[o + 11u] = inversesqrt(abs(a) + 1.0);
+    pc.res.r[o + 12u] = mix(a, b, 0.25);
+    pc.res.r[o + 13u] = fract(a);
+    pc.res.r[o + 14u] = pow(abs(a) + 1.0, b);
+    pc.res.r[o + 15u] = sin(a);
+}

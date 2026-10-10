@@ -1,0 +1,292 @@
+SteamARM: KK_FLOAT_STRICT, how much of SignedZeroInfNanPreserve the MSL keeps
+
+DXVK and vkd3d-proton (dxil-spirv) declare SignedZeroInfNanPreserve for every
+DXBC shader, and KosmicKrisp honours it instruction by instruction: precise::
+functions (rsqrt, sqrt and sin about 3x Metal's fast ones, pow 15x, fma
+1.65x), a relaxed math block around every such instruction, fmin/fmax made to
+order signed zeros (3.6x), lerp and fract written out, and KK_WORKAROUND_14's
+guards: isnan tests around every float compare (2.6x) and a branch in front
+of every multiply, which also keeps it from fusing with an add (2.4x) --
+microbenchmarks on the M4 against fast math. 87 % of the 16,931 shaders in
+this Mac's KosmicKrisp cache had precise:: in them, with 3.0 M guarded
+multiplies and 1.17 M guarded compares. MoltenVK, which CrossOver ships,
+compiles every shader with fast math and ignores the request.
+
+KK_FLOAT_STRICT, read when a physical device is made:
+  full  (the default, unset) all of it, as before: what conformance needs.
+  nan   float compares, fmin/fmax and isfinite/isnormal keep their Inf/NaN
+        handling (their relaxed blocks, precise fmin/fmax -- which cost
+        nothing -- and KK_WORKAROUND_14's compare guards); signed zeros and
+        everything else as fast. spirv_to_nir marks every FMin/FMax as
+        preserving infinities whatever the shader declares (Mesa: Unity and
+        Unreal Engine break without it); nan keeps that, fast does not.
+  fast  none, as MoltenVK: no precise::, no guards, no relaxed blocks; mix
+        and fract are Metal's.
+NoContraction (nir_fp_exact) keeps its safe math block in every mode.
+
+The flags are dropped in nir_to_msl, after every NIR optimisation has run
+with them: NIR's own algebra, and the code nir_opt_varyings moves from a
+fragment shader into its vertex shader, are what they were. Only compute
+shaders and fragment shaders that do not write depth are relaxed, by the
+application's stage (kk_shader.c): vertex shaders, the kernel that runs a
+vertex shader before a geometry shader or tessellation, everything made of a
+geometry shader and fragment shaders writing depth keep their MSL to the
+byte, because whatever computes a position must compute it the same way in
+every pipeline it is linked into (patch 18: a depth prepass and a colour
+pass with depth test EQUAL). MESA_KK_DEBUG=msl now prints the geometry
+shader's variants too.
+
+The mode is part of the disk cache's driver_flags and, when not full, of
+pipelineCacheUUID and shaderBinaryUUID: neither Mesa's disk cache nor an
+application's saved VkPipelineCache (vkd3d-proton keeps one) hands a
+pipeline compiled in one mode to another. The default keys as before.
+
+Checked: tests/kk/vk_float_strict.c (per mode: results on ordinary and
+special values; the MSL of every stage, the strict ones byte for byte
+against full; both caches) and tests/elf/run_vk_arm64.sh, with
+KK_FLOAT_STRICT unset and fast. A lighting loop in a compute shader
+(tests/kk/float_strict/bench.comp, 1 M threads x 256 iterations): 28.1 ms
+full, 5.4 ms nan, 5.1 ms fast.
+
+--- a/src/kosmickrisp/compiler/nir_to_msl.c
++++ b/src/kosmickrisp/compiler/nir_to_msl.c
+@@ -2423,6 +2423,46 @@ predeclare_ssa_values(struct nir_to_msl_ctx *ctx, nir_function_impl *impl)
+    }
+ }
+ 
++/* SteamARM: KK_FLOAT_STRICT below full. An instruction's
++ * SignedZeroInfNanPreserve is honoured from its fp_math_ctrl as it is
++ * printed: precise:: functions, a relaxed math block, signed-zero fmin/fmax,
++ * the lerp and fract written out, KK_WORKAROUND_14's guard on multiplies.
++ * Here, after every NIR optimisation has run with the flags, they are
++ * dropped: "nan" keeps the Inf/NaN ones on float compares, fmin/fmax and
++ * isfinite/isnormal, "fast" none (and its caller drops KK_WORKAROUND_14's
++ * isnan guards on compares too). NoContraction (nir_fp_exact) stays. */
++static void
++msl_relax_float_controls(nir_shader *shader, enum msl_float_strict strict)
++{
++   nir_foreach_function_impl(impl, shader) {
++      nir_foreach_block(block, impl) {
++         nir_foreach_instr(instr, block) {
++            if (instr->type != nir_instr_type_alu)
++               continue;
++            nir_alu_instr *alu = nir_instr_as_alu(instr);
++            unsigned keep = 0;
++            if (strict == MSL_FLOAT_STRICT_NAN) {
++               switch (alu->op) {
++               case nir_op_flt:
++               case nir_op_fge:
++               case nir_op_feq:
++               case nir_op_fneu:
++               case nir_op_fmin:
++               case nir_op_fmax:
++               case nir_op_fisfinite:
++               case nir_op_fisnormal:
++                  keep = nir_fp_preserve_inf | nir_fp_preserve_nan;
++                  break;
++               default:
++                  break;
++               }
++            }
++            alu->fp_math_ctrl &= ~(nir_fp_preserve_sz_inf_nan & ~keep);
++         }
++      }
++   }
++}
++
+ char *
+ nir_to_msl(nir_shader *shader, struct nir_to_msl_options *options)
+ {
+@@ -2431,10 +2471,17 @@ nir_to_msl(nir_shader *shader, struct nir_to_msl_options *options)
+     */
+    rename_main_entrypoint(shader);
+ 
++   if (options->float_strict != MSL_FLOAT_STRICT_FULL)
++      msl_relax_float_controls(shader, options->float_strict);
++
+    struct nir_to_msl_ctx ctx = {
+       .shader = shader,
+       .text = _mesa_string_buffer_create(options->mem_ctx, 1024),
+-      .disabled_workarounds = options->disabled_workarounds,
++      /* KK_WORKAROUND_14 only keeps NaNs: with none to keep, no guards. */
++      .disabled_workarounds =
++         options->disabled_workarounds |
++         (options->float_strict == MSL_FLOAT_STRICT_FAST ? BITFIELD64_BIT(14)
++                                                         : 0),
+    };
+    nir_function_impl *impl = nir_shader_get_entrypoint(shader);
+    msl_gather_info(&ctx, options);
+--- a/src/kosmickrisp/compiler/nir_to_msl.h
++++ b/src/kosmickrisp/compiler/nir_to_msl.h
+@@ -10,9 +10,22 @@
+ 
+ enum pipe_format;
+ 
++/* SteamARM: how much of the SPIR-V's SignedZeroInfNanPreserve the MSL keeps
++ * (KK_FLOAT_STRICT, kk_physical_device.c). */
++enum msl_float_strict {
++   /* All of it, instruction by instruction: what conformance needs. */
++   MSL_FLOAT_STRICT_FULL = 0,
++   /* Float compares, fmin/fmax and isfinite/isnormal keep their Inf/NaN
++    * handling (not signed zero); everything else as fast. */
++   MSL_FLOAT_STRICT_NAN,
++   /* None: Metal's fast math, as MoltenVK compiles every shader. */
++   MSL_FLOAT_STRICT_FAST,
++};
++
+ struct nir_to_msl_options {
+    void *mem_ctx;
+    uint64_t disabled_workarounds;
++   enum msl_float_strict float_strict;
+ 
+    /* Required to correctly declare fragment outputs. Shader may contain
+     * shrinked writes which can lead to writting less components than the ones
+--- a/src/kosmickrisp/vulkan/kk_physical_device.c
++++ b/src/kosmickrisp/vulkan/kk_physical_device.c
+@@ -17,6 +17,7 @@
+ 
+ #include "kosmickrisp/bridge/mtl_bridge.h"
+ #include "kosmickrisp/bridge/ns_process_info.h"
++#include "kosmickrisp/compiler/nir_to_msl.h"
+ 
+ #include "util/disk_cache.h"
+ #include "util/hash_table.h"
+@@ -903,6 +904,28 @@ kk_get_device_properties(const struct kk_physical_device *pdev,
+             "Mesa " PACKAGE_VERSION MESA_GIT_SHA1);
+ }
+ 
++/* SteamARM: KK_FLOAT_STRICT=full|nan|fast, how much of the SPIR-V's
++ * SignedZeroInfNanPreserve the MSL of fragment and compute shaders keeps
++ * (nir_to_msl.c, kk_shader.c). DXVK and vkd3d-proton ask for it in every DXBC
++ * shader, and kept to the letter it costs (microbenchmarks on the M4, against
++ * Metal's fast math): precise:: rsqrt, sqrt and sin about 3x, pow 15x, fma
++ * 1.65x, a signed-zero fmax 3.6x, a compare guarded with isnan 2.6x, a
++ * guarded multiply-add 2.4x. full, the default: all of it, as conformance
++ * needs. nan: compares, fmin/fmax and isfinite/isnormal keep their Inf/NaN
++ * handling (precise fmin and fmax cost nothing), the rest is fast. fast:
++ * none, as MoltenVK compiles every shader. Vertex, tessellation and geometry
++ * shaders keep all of it in any mode (kk_shader.c). */
++static uint8_t
++kk_float_strict_from_env(void)
++{
++   const char *e = getenv("KK_FLOAT_STRICT");
++   if (e && !strcmp(e, "fast"))
++      return MSL_FLOAT_STRICT_FAST;
++   if (e && !strcmp(e, "nan"))
++      return MSL_FLOAT_STRICT_NAN;
++   return MSL_FLOAT_STRICT_FULL;
++}
++
+ static void
+ kk_physical_device_init_pipeline_cache(struct kk_physical_device *pdev)
+ {
+@@ -913,6 +936,13 @@ kk_physical_device_init_pipeline_cache(struct kk_physical_device *pdev)
+ 
+    _mesa_blake3_update(&blake3_ctx, instance->driver_build_sha,
+                        sizeof(instance->driver_build_sha));
++   /* SteamARM: what KK_FLOAT_STRICT=nan|fast compiles is not what the
++    * default does: an application's saved VkPipelineCache (vkd3d-proton keeps
++    * its own on disk) must not hand one's pipelines to the other. The default
++    * hashes the build alone, as before. */
++   if (pdev->float_strict != MSL_FLOAT_STRICT_FULL)
++      _mesa_blake3_update(&blake3_ctx, &pdev->float_strict,
++                          sizeof(pdev->float_strict));
+ 
+    unsigned char blake3[BLAKE3_KEY_LEN];
+    _mesa_blake3_final(&blake3_ctx, blake3);
+@@ -926,8 +956,9 @@ kk_physical_device_init_pipeline_cache(struct kk_physical_device *pdev)
+     * the NIR of its stages, keyed by the build, so that a pipeline seen in an
+     * earlier run skips SPIR-V -> NIR -> MSL and goes straight to Metal (whose
+     * own cache then has the compiled library). What else changes the MSL:
+-    * the GPU family, MESA_KK_DEBUG (robustness), MESA_KK_DISABLE_WORKAROUNDS
+-    * and the OS version (kk_parse_device_environment_options). */
++    * the GPU family, MESA_KK_DEBUG (robustness), MESA_KK_DISABLE_WORKAROUNDS,
++    * the OS version (kk_parse_device_environment_options) and
++    * KK_FLOAT_STRICT. */
+    char renderer[32];
+    snprintf(renderer, sizeof(renderer), "kk_apple%u",
+             pdev->info.gpu_apple_family);
+@@ -941,6 +972,7 @@ kk_physical_device_init_pipeline_cache(struct kk_physical_device *pdev)
+    driver_flags ^= (uint64_t)ns_is_os_version_at_least(27, 0, 0) << 40;
+    if (wa && wa[0])
+       driver_flags ^= (uint64_t)_mesa_hash_string(wa) << 8;
++   driver_flags ^= (uint64_t)pdev->float_strict << 44;
+ 
+    pdev->vk.disk_cache = disk_cache_create(renderer, timestamp, driver_flags);
+ #endif
+@@ -1109,6 +1141,8 @@ kk_enumerate_physical_devices(struct vk_instance *_instance)
+    if (result != VK_SUCCESS)
+       goto fail_mtl_dev;
+ 
++   /* Before the cache keys, which depend on it. */
++   pdev->float_strict = kk_float_strict_from_env();
+    kk_physical_device_init_pipeline_cache(pdev);
+ 
+    uint64_t sysmem_size_B = kk_get_sysmem_heap_size();
+--- a/src/kosmickrisp/vulkan/kk_physical_device.h
++++ b/src/kosmickrisp/vulkan/kk_physical_device.h
+@@ -66,6 +66,9 @@ struct kk_physical_device {
+    uint8_t queue_family_count;
+ 
+    VkSampleCountFlags supported_sample_counts;
++
++   /* SteamARM: enum msl_float_strict, from KK_FLOAT_STRICT. */
++   uint8_t float_strict;
+ };
+ 
+ static inline uint32_t
+--- a/src/kosmickrisp/vulkan/kk_shader.c
++++ b/src/kosmickrisp/vulkan/kk_shader.c
+@@ -903,6 +903,29 @@ kk_math_functions(void)
+    return (enum mtl_math_floating_point_functions)fns;
+ }
+ 
++/* SteamARM: how much of the application's SignedZeroInfNanPreserve the MSL of
++ * a stage keeps (KK_FLOAT_STRICT, kk_physical_device.c). `stage` is the
++ * application's: a vertex shader run as a compute kernel before tessellation
++ * or a geometry shader is still a vertex shader. Only compute shaders and
++ * fragment shaders that do not write depth are relaxed. Whatever computes a
++ * position must compute it the same way in every pipeline it is linked into:
++ * a depth prepass and a colour pass with depth test EQUAL miss every pixel
++ * where the two round differently (patch 18), and relaxed arithmetic leaves
++ * Metal's compiler free to fuse and reorder it differently each time. */
++static enum msl_float_strict
++kk_stage_float_strict(const struct kk_device *dev, mesa_shader_stage stage,
++                      const nir_shader *nir)
++{
++   enum msl_float_strict strict =
++      (enum msl_float_strict)kk_device_physical(dev)->float_strict;
++   if (stage == MESA_SHADER_COMPUTE)
++      return strict;
++   if (stage == MESA_SHADER_FRAGMENT &&
++       !(nir->info.outputs_written & BITFIELD64_BIT(FRAG_RESULT_DEPTH)))
++      return strict;
++   return MSL_FLOAT_STRICT_FULL;
++}
++
+ static void
+ kk_shader_destroy(struct vk_device *vk_dev, struct kk_shader *shader,
+                   const VkAllocationCallbacks *pAllocator)
+@@ -1177,10 +1200,14 @@ kk_compile_gs_variant(struct kk_device *dev, nir_shader *nir,
+    msl_optimize_nir(nir);
+    modify_nir_info(nir);
+ 
++   /* A geometry shader's: all of its SignedZeroInfNanPreserve in any
++    * KK_FLOAT_STRICT mode (float_strict left full), like a vertex shader. */
+    struct nir_to_msl_options options = {
+       .disabled_workarounds = dev->disabled_workarounds,
+    };
+    data->code = nir_to_msl(nir, &options);
++   if (KK_DEBUG(MSL))
++      mesa_logi("%s\n", data->code);
+    const char *name = nir_shader_get_entrypoint(nir)->function->name;
+    ralloc_steal(NULL, (void *)name);
+    data->entrypoint_name = (char *)name;
+@@ -1299,6 +1326,7 @@ kk_compile_shader(struct kk_device *dev, nir_shader *nir,
+    struct nir_to_msl_options translate_options = {
+       .mem_ctx = NULL,
+       .disabled_workarounds = dev->disabled_workarounds,
++      .float_strict = kk_stage_float_strict(dev, stage, nir),
+    };
+    if (nir->info.stage == MESA_SHADER_FRAGMENT) {
+       for (uint32_t i = 0u; i < MAX_DRAW_BUFFERS; ++i) {
