@@ -200,7 +200,7 @@ struct SettingsView: View {
     private var interfaceSection: some View {
         Group {
             Section("Inicio") {
-                LabeledContent("Steam principal", value: "SteamARM · Steam Frame")
+                LabeledContent("Steam principal", value: "SteamARM")
                 Text("Cliente ARM64 de Steam Frame.")
                     .font(.caption).foregroundStyle(.secondary)
                 Toggle("Iniciar SteamARM al abrir el launcher", isOn: $draft.launchSteamOnStart)
@@ -438,8 +438,8 @@ struct SettingsView: View {
                 choice("Escalado del juego", $draft.gameUpscaler, GameUpscalerChoice.options)
                 Text(GameUpscalerChoice.note(draft.gameUpscaler, backend: gameGraphics))
                     .font(.caption).foregroundStyle(.secondary)
-                Toggle("Interfaz de Steam ARM64 acelerada por GPU", isOn: $draft.steamUIAcceleration)
-                Text("La interfaz de Steam ARM64 y Steam Frame (Chromium) dibuja con Vulkan sobre Metal (el driver elegido arriba: MoltenVK o KosmicKrisp) en lugar de con la CPU. Sin ella, su proceso GPU no arranca en macOS y Steam pinta por software. Se aplica al abrir Steam; si su ventana se viera mal, desactívala.")
+                Toggle("Interfaz de SteamARM acelerada por GPU", isOn: $draft.steamUIAcceleration)
+                Text("La interfaz de SteamARM (Chromium) dibuja con Vulkan sobre Metal (el driver elegido arriba: MoltenVK o KosmicKrisp) en lugar de con la CPU. Sin ella, su proceso GPU no arranca en macOS y Steam pinta por software. Se aplica al abrir Steam; si su ventana se viera mal, desactívala.")
                     .font(.caption).foregroundStyle(.secondary)
             }
             Section("Pantalla y Adaptive Sync") {

@@ -4731,6 +4731,28 @@ lxrt_mvk_vkWaitSemaphoresKHR:
     br      x16
     .size   lxrt_mvk_vkWaitSemaphoresKHR, .-lxrt_mvk_vkWaitSemaphoresKHR
 
+    .globl  lxrt_mvk_vkCmdDrawMultiEXT
+    .hidden lxrt_mvk_vkCmdDrawMultiEXT
+    .type   lxrt_mvk_vkCmdDrawMultiEXT,%function
+lxrt_mvk_vkCmdDrawMultiEXT:
+    adrp    x16, lxrt_vk_table
+    add     x16, x16, :lo12:lxrt_vk_table
+    ldr     x16, [x16, #3448]
+    cbz     x16, .Lmissing
+    br      x16
+    .size   lxrt_mvk_vkCmdDrawMultiEXT, .-lxrt_mvk_vkCmdDrawMultiEXT
+
+    .globl  lxrt_mvk_vkCmdDrawMultiIndexedEXT
+    .hidden lxrt_mvk_vkCmdDrawMultiIndexedEXT
+    .type   lxrt_mvk_vkCmdDrawMultiIndexedEXT,%function
+lxrt_mvk_vkCmdDrawMultiIndexedEXT:
+    adrp    x16, lxrt_vk_table
+    add     x16, x16, :lo12:lxrt_vk_table
+    ldr     x16, [x16, #3456]
+    cbz     x16, .Lmissing
+    br      x16
+    .size   lxrt_mvk_vkCmdDrawMultiIndexedEXT, .-lxrt_mvk_vkCmdDrawMultiIndexedEXT
+
 // MoltenVK did not export this entry point. Failing loudly beats branching
 // through zero, and the runtime's fault reporter names the address.
 .Lmissing:
@@ -9482,6 +9504,28 @@ lxrt_mvk_vkWaitSemaphoresKHR:
     ldr     x16, [x16, #3440]
     br      x16
 
+.Lcnt431:
+    adrp    x17, lxrt_vk_counts
+    add     x17, x17, :lo12:lxrt_vk_counts
+    ldr     x16, [x17, #3448]
+    add     x16, x16, #1
+    str     x16, [x17, #3448]
+    adrp    x16, lxrt_vk_real
+    add     x16, x16, :lo12:lxrt_vk_real
+    ldr     x16, [x16, #3448]
+    br      x16
+
+.Lcnt432:
+    adrp    x17, lxrt_vk_counts
+    add     x17, x17, :lo12:lxrt_vk_counts
+    ldr     x16, [x17, #3456]
+    add     x16, x16, #1
+    str     x16, [x17, #3456]
+    adrp    x16, lxrt_vk_real
+    add     x16, x16, :lo12:lxrt_vk_real
+    ldr     x16, [x16, #3456]
+    br      x16
+
     .section .data.rel.ro,"aw"
     .p2align 3
     .globl  lxrt_vk_cnt_thunks
@@ -9918,3 +9962,5 @@ lxrt_vk_cnt_thunks:
     .quad   .Lcnt428
     .quad   .Lcnt429
     .quad   .Lcnt430
+    .quad   .Lcnt431
+    .quad   .Lcnt432

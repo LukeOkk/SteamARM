@@ -81,11 +81,21 @@ def vulkan_api(el):
     return api is None or "vulkan" in api.split(",")
 
 
+def member_text(m):
+    """Declaration only: registry comments may contain array-like brackets."""
+    parts = [m.text or ""]
+    for child in m:
+        if child.tag != "comment":
+            parts.append("".join(child.itertext()))
+        parts.append(child.tail or "")
+    return "".join(parts)
+
+
 def member_info(m):
     """(type, name, pointer depth, fixed array?, len attr, text)"""
     t = m.find("type").text
     n = m.find("name").text
-    text = "".join(m.itertext())
+    text = member_text(m)
     depth = text.split(n)[0].count("*")
     fixed = "[" in text.split(n, 1)[1] if n in text else False
     return t, n, depth, fixed, m.get("len"), text

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """The launcher's settings.json as the environment of the programs SteamARM
 starts (launcher/SETTINGS_SPEC.md). run-app.sh imports env_from_settings() and
-with_overrides(); run-steam.sh evaluates --shell.
+with_overrides(); run-steam-arm64.sh evaluates --shell.
 
   scripts/settings-env.py --shell [settings.json]   export lines for a shell
   scripts/settings-env.py --json  [settings.json]   the environment as JSON

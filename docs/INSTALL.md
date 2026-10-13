@@ -1,7 +1,7 @@
 # Installing SteamARM
 
-SteamARM runs the Linux Steam client, and the Windows games Steam runs
-through Proton, on an Apple Silicon Mac **without a virtual machine**. This
+SteamARM runs the ARM64 Steam Frame client, and Windows games through
+FEX and Proton, on an Apple Silicon Mac **without a virtual machine**. This
 page covers installing from the downloadable package (the easy way) and from
 source.
 
@@ -18,7 +18,7 @@ source.
 | macOS | 14 Sonoma or later |
 | Disk | about 25 GB free in your home folder (plus room for games) |
 | Tools | Xcode Command Line Tools and [Homebrew](https://brew.sh) |
-| Time | 20–60 minutes the first time: it compiles FEX and downloads Linux packages and Steam |
+| Time | 20–60 minutes the first time: it compiles FEX and downloads Linux runtime packages |
 
 Install the Command Line Tools with `xcode-select --install` if you don't
 have them. For Homebrew, follow the instructions at <https://brew.sh>. The
@@ -52,7 +52,7 @@ Or, from Terminal (this only removes the download quarantine flag):
 xattr -dr com.apple.quarantine /Applications/SteamARM.app
 ```
 
-## 3. Install the runtime and Steam
+## 3. Install the runtime and prepare SteamARM
 
 On first start the launcher unpacks its source into
 `~/Library/Application Support/SteamARM/src` and shows **"Falta instalar
@@ -67,17 +67,19 @@ SteamARM"** with an **Instalar** button. Clicking it opens Terminal and runs
 4. clones and builds [FEX](https://github.com/FEX-Emu/FEX) (x86 → ARM64) and
    its Vulkan thunks, with SteamARM's patches;
 5. builds XQuartz's X server and quartz-wm (windows for Linux programs);
-6. assembles the Linux roots: Fedora packages for the aarch64 side, Ubuntu
-   24.04 x86-64 for FEX, and the root Steam runs in;
-7. installs the Steam client (Valve's `steam_latest.deb` bootstrap);
+6. assembles Linux roots for ARM64 applications and x86-64 game runtimes;
+7. installs the FEX, graphics and Proton game support, and adds Vulkan hooks
+   to an existing Steam Frame root;
 8. runs quick self-tests.
 
 If it stops (network error, not enough space, Terminal closed), click
 **Instalar** again. Every step skips what is already done.
 
-When it finishes, the banner disappears. Click **Steam** in the launcher.
-The first Steam start updates the client (a few minutes) and then shows the
-sign-in window.
+The principal client requires `arm64root` from a Steam Frame image:
+[STEAM_FRAME_IMAGE.md](STEAM_FRAME_IMAGE.md). Setup preserves an existing
+root; it does not download or reinstall retired Fedora/x86 Steam clients.
+When setup finishes and that root is available, click **SteamARM** in the
+launcher. The client may update before showing its sign-in window.
 
 ## 4. First steps in Steam
 
@@ -95,8 +97,8 @@ sign-in window.
 | `/Applications/SteamARM.app` | the launcher |
 | `~/Library/Application Support/SteamARM/src` | the source the app unpacked, and what setup builds in it (`build/`) |
 | `~/SteamARM-build` | FEX, its thunks, XQuartz, package caches |
-| `~/SteamARM-roots` | the Linux roots, Steam and your games (`steamroot/`), launcher settings (`launcher/`), logs (`logs/`) |
-| `/tmp/lxrt-root`, `/tmp/lxrt-steamroot` | links to the roots (re-created at each start; macOS empties `/tmp` at boot) |
+| `~/SteamARM-roots` | principal SteamARM root (`arm64root/`), shared x86 game runtimes (`steamroot/`), launcher settings (`launcher/`), logs (`logs/`) |
+| `/tmp/lxrt-root`, `/tmp/lxrt-steamroot`, `/tmp/lxrt-arm64root` | links to the roots (re-created at each start; macOS empties `/tmp` at boot) |
 
 Nothing is installed system-wide, and nothing needs root, except what
 Homebrew itself installs.
@@ -128,7 +130,7 @@ if you want to keep them. The Homebrew formulae stay; remove them with
 ```sh
 git clone https://github.com/LukeOkk/SteamARM.git && cd SteamARM
 scripts/setup.sh            # resumable; scripts/setup.sh --list shows the steps
-open build/SteamARM.app     # or: scripts/run-steam.sh
+open build/SteamARM.app     # or: scripts/run-app.sh steam-arm64-frame
 ```
 
 An app built this way uses the checkout it was built from. To build the

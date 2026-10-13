@@ -429,3 +429,5 @@ vkWaitForPresent2KHR
 vkWaitForPresentKHR
 vkWaitSemaphores
 vkWaitSemaphoresKHR
+vkCmdDrawMultiEXT
+vkCmdDrawMultiIndexedEXT

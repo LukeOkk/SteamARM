@@ -20,7 +20,7 @@
 # would get them. Nothing changes for a game until the variable is set and the
 # game tool adds the DLL override (tools/steamarm-fex-proton). Files are
 # replaced by rename, so a running game keeps the copy it loaded; Steam may
-# be running. scripts/setup.sh runs this at every setup (step "steam").
+# be running. scripts/setup.sh runs this at every setup (step "games").
 #
 # --root     the x86 Steam root (default $LXRT_ROOT, else /tmp/lxrt-steamroot)
 # FFX_BUILD  the built DLLs' directory (default build/ffx-metalfx, made with

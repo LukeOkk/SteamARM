@@ -1,15 +1,12 @@
 #!/bin/bash
-# The root Valve's native arm64 Steam client runs in (SteamARM64): Fedora 43
-# aarch64 packages, no emulation. The client (steamrtarm64/steam) and its
-# libraries are aarch64 ELF; they need a desktop's worth of system libraries
-# (GTK 2, NSS, X11, audio, SDL2...), which the minimal FEX root does not have.
-# The package set is the shared-library closure of the libraries the client
-# links (seeded by soname), resolved by scripts/mkroot-rpm.sh into its own
-# lock (scripts/mkarmroot.lock) and stage.
+# Generic Fedora 43 aarch64 desktop root for Heroic and custom ARM64 apps,
+# without emulation. GTK, NSS, X11, audio and SDL2 system libraries are
+# resolved by scripts/mkroot-rpm.sh into its own lock (scripts/mkarmroot.lock)
+# and stage. SteamARM's principal client uses arm64root (Steam Frame).
 #
 #   scripts/mkarmroot.sh [out-dir]      default $STEAMARM_STATE/armroot
 #   scripts/mkarmroot.sh --stage-only   refresh RPM lock/stage, preserve live root
-# A rebuild keeps <out-dir>/tmp (the client's home, tmp/armhome) and
+# A rebuild keeps <out-dir>/tmp (application homes) and
 # <out-dir>/opt/apps: scripts/roots.sh (root_swap) carries them into the new
 # root, and puts them back if a swap was interrupted. out-dir is resolved
 # (symlinks, trailing slashes, relative to the caller's directory) before

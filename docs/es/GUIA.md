@@ -30,21 +30,21 @@ de ahí a Metal (MoltenVK).
    que:
    - instala con Homebrew lo que necesita;
    - compila el runtime, FEX, el servidor X y el servicio de mandos;
-   - descarga los sistemas Linux y Steam;
+   - descarga los sistemas Linux y prepara los runtimes para juegos;
    - hace unas pruebas rápidas.
 
    Si se corta, vuelve a pulsar **Instalar**: sigue donde quedó.
-4. Pulsa **Steam**. El primer arranque actualiza el cliente (unos minutos) e
+4. Con la raíz Steam Frame preparada, pulsa **SteamARM**. El primer arranque puede actualizar el cliente e
    inicia sesión.
 5. En Steam, activa **Ajustes → Compatibilidad → Steam Play** para todos los
    títulos y elige **Proton Experimental**.
 
-Las tarjetas **Steam ARM64 (experimental)** y **Steam ARM64 · Steam Frame
-(experimental)** abren el cliente ARM64 nativo de Valve, sin FEX. Llega a
-su ventana de inicio de sesión, pero el inicio de sesión, la biblioteca y
-los juegos no están verificados, y Proton ARM64 no funciona en macOS.
-**Instalar** no las prepara: cada tarjeta sale desactivada, con el motivo,
-mientras falten su raíz o el cliente. Para jugar, usa **Steam**.
+La única tarjeta principal es **SteamARM (experimental)**: cliente ARM64 de
+Steam Frame, sin FEX para el cliente. **Instalar** conserva esa raíz y prepara
+los runtimes; la tarjeta queda desactivada, con el motivo, si falta la raíz o
+el cliente. Consulta [STEAM_FRAME_IMAGE.md](../STEAM_FRAME_IMAGE.md).
+Los clientes antiguos Fedora y x86 están retirados. FEX y Proton x86 siguen
+disponibles para los juegos.
 
 Con **+ → Heroic Games Launcher (ARM64, experimental)** se instala la
 versión linux-arm64 de Heroic en la raíz ARM64, sin FEX: su ventana, sus

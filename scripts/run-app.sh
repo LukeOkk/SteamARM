@@ -3,12 +3,12 @@
 # running, then the app's guest command under the runtime -- directly for an
 # aarch64 program (scripts/run-native.sh), through FEX for an x86 one
 # (scripts/run-fex.sh), by the entry's "architecture" (default x86_64). The
-# launcher's counterpart of scripts/run-steam.sh (see launcher/SPEC.md).
+# launcher session entry point (see docs/APPLICATION_MANAGER.md).
 #
 #   scripts/run-app.sh <app-id>            start (or re-show) an app from
 #                                          $STATE/launcher/apps.json;
-#                                          scripts/builtin-apps.json defines "steam"
-#                                          (x86), "steam-arm64" and "steam-arm64-frame" (experimental)
+#                                          scripts/builtin-apps.json defines SteamARM
+#                                          (id "steam-arm64-frame", native ARM64)
 #   scripts/run-app.sh --stop              stop the guest processes (X keeps running)
 #   scripts/run-app.sh --reap [SID]        stop what a finished session left behind
 #                                          (default: the session in running.pgid)
@@ -17,7 +17,7 @@
 #
 # On success the last line says what happened: "session=started", or
 # "session=reshown" (the app was already running), or "session=adopted" (a
-# Steam that scripts/run-steam.sh started: no session wrapper).
+# SteamARM that scripts/run-steam-arm64.sh started: no session wrapper).
 #
 # Display ("display" in settings, or STEAMARM_DISPLAY which overrides it):
 #   native (default)  the native rootless X server (scripts/run-x11-native.sh,
@@ -62,22 +62,15 @@ ARCHFILE="$LDIR/running.arch"
 PGIDFILE="$LDIR/running.pgid"
 STATUSFILE="$LDIR/running.status"   # read and removed by the launcher, not here
 X11_BUNDLE_ID=org.steamarm.X11
-STEAM_PATTERN='build/lxrun .*ubuntu12_32/steam '
-# The native ARM64 client (scripts/run-steam-arm64.sh); which entry it is
-# comes from its root, in its environment (the runtime keeps LXRT_* through
-# guest execs): /tmp/lxrt-armroot is steam-arm64, /tmp/lxrt-arm64root
-# steam-arm64-frame (scripts/builtin-apps.json).
+# The principal client, identified by its unchanged Frame root.
 ARM64_PATTERN='build/lxrun .*steamrtarm64/steam '
 
-# The client of this entry, started outside this script (run-steam.sh,
-# run-steam-arm64.sh): its pid, or nothing.
+# The principal client started outside this script: its pid, or nothing.
 outside_client() {
     local p want
     case "$ID" in
-        steam) pgrep -f "$STEAM_PATTERN" | head -1 ;;
-        steam-arm64|steam-arm64-frame)
-            want=/tmp/lxrt-armroot
-            [ "$ID" = steam-arm64-frame ] && want=/tmp/lxrt-arm64root
+        steam-arm64-frame)
+            want=/tmp/lxrt-arm64root
             for p in $(pgrep -f "$ARM64_PATTERN"); do
                 ps -E -o command= -p "$p" 2>/dev/null | tr ' ' '\n' | grep -qx "LXRT_ROOT=$want" && { echo "$p"; return; }
             done ;;
@@ -185,12 +178,18 @@ def load(path, default):
     except (OSError, ValueError):
         return default
 
+principal = "steam-arm64-frame"
+retired = {"steam", "steam-arm64"}
+if app_id in retired:
+    sys.stderr.write("run-app: retired Steam client; use steam-arm64-frame (SteamARM)\n")
+    sys.exit(2)
 steam = {
-    "id": "steam", "name": "Steam",
-    "command": ["/bin/bash", "/tmp/fexhome/.local/share/Steam/steam.sh", "-noverifyfiles"],
-    "root": "/tmp/lxrt-steamroot", "fexRootfs": "/", "env": {},
-    # The x86 client under FEX: TRANSITIONAL_COMPATIBILITY (docs/APPLICATION_MANAGER.md).
-    "architecture": "x86_64",
+    "id": principal, "name": "SteamARM",
+    "command": ["/tmp/armhome/.local/share/Steam/steamrtarm64/steam"],
+    "root": "/tmp/lxrt-arm64root", "fexRootfs": None,
+    "env": {"HOME_IN_GUEST": "/tmp/armhome", "LXRT_GUEST_PAGE": "4096",
+            "LXRT_X18_ALL_TEXT": "libcef.so", "STEAM_IGNORE_INDIRECT_RENDERING": "1"},
+    "architecture": "aarch64",
 }
 apps = load(apps_path, [])
 if isinstance(apps, dict):
@@ -198,7 +197,7 @@ if isinstance(apps, dict):
 builtins = load(os.path.join(os.getcwd(), "scripts", "builtin-apps.json"), [])   # cwd: the checkout
 if not isinstance(builtins, list):
     builtins = []
-if not any(b.get("id") == "steam" for b in builtins if isinstance(b, dict)):
+if not any(b.get("id") == principal for b in builtins if isinstance(b, dict)):
     builtins.append(steam)
 # Built-ins first: an apps.json entry cannot shadow them.
 app = next((a for a in builtins if isinstance(a, dict) and a.get("id") == app_id), None) \
@@ -206,6 +205,11 @@ app = next((a for a in builtins if isinstance(a, dict) and a.get("id") == app_id
 if app is None:
     sys.stderr.write("run-app: unknown app id %r (not in %s)\n" % (app_id, apps_path))
     sys.exit(2)
+if app.get("kind") == "steam" and app_id != principal:
+    sys.stderr.write("run-app: retired Steam client; use steam-arm64-frame (SteamARM)\n")
+    sys.exit(2)
+if app_id == principal:
+    app = dict(app, name="SteamARM", kind="steam")
 # An Android app (docs/APK_SUPPORT.md): installed by scripts/android-pm.py,
 # opened by scripts/android-session.py in SteamARM's Android session -- the
 # x86_64 Android 11 root under FEX, zero VM, its screen a macOS window
@@ -252,11 +256,6 @@ if app.get("kind") == "android":
     app = dict(app, command=["run", pkg], architecture="x86_64",
                root=os.environ.get("ANDROID_SESSION_ROOT") or "/Volumes/SteamARMAndroid/session")
 cmd = [str(c) for c in app.get("command") or []]
-# -noverifyfiles on a fresh install also skips downloading the client itself
-# (the bootstrap finds no steamui.so and exits): only for an installed client.
-if app_id == "steam" and not os.path.exists(
-        "/tmp/lxrt-steamroot/tmp/fexhome/.local/share/Steam/ubuntu12_32/steamui.so"):
-    cmd = [c for c in cmd if c != "-noverifyfiles"]
 if not cmd:
     sys.stderr.write("run-app: app %r has no command\n" % app_id)
     sys.exit(2)
@@ -378,7 +377,7 @@ xvnc_geometry() {
 }
 
 # VNC password file: the classic VNC obfuscation (DES, fixed key) of at most
-# eight characters, which is what Xvnc's -rfbauth reads (as run-steam.sh).
+# eight characters, which is what Xvnc's -rfbauth reads.
 ensure_password() {
     PWTXT="$STATE/vncpasswd.txt"
     PWFILE="$STATE/vncpasswd"
@@ -534,7 +533,7 @@ if [ -n "$(guest_pids)" ]; then
         exit 0
     fi
     if spid="$(outside_client)" && [ -n "$spid" ]; then
-        # Started elsewhere (run-steam.sh, run-steam-arm64.sh): its DISPLAY
+        # Started elsewhere (run-steam-arm64.sh): its DISPLAY
         # tells the mode.
         case "$(ps -E -o command= -p "$spid" 2>/dev/null)" in
             *" DISPLAY=:1"*) rmode=vnc ;;
@@ -550,7 +549,7 @@ if [ -n "$(guest_pids)" ]; then
         echo "$ID" > "$IDFILE"
         echo "$rmode" > "$MODEFILE"
         show_display "$rmode"
-        echo "Steam is already running."
+        echo "SteamARM is already running."
         echo "session=adopted"
         exit 0
     fi

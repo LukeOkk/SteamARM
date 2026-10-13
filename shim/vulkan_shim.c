@@ -6,14 +6,14 @@
 #include "lxrt_host.h"
 
 __attribute__((visibility("hidden")))
-void *lxrt_vk_table[431];
+void *lxrt_vk_table[433];
 
 // LXRT_VK_CALLS=1 (vulkan_shim.S): the driver's entry points while the table
 // holds the counting thunks, and how often each was called.
-__attribute__((visibility("hidden"))) void *lxrt_vk_real[431];
-__attribute__((visibility("hidden"))) unsigned long long lxrt_vk_counts[431];
+__attribute__((visibility("hidden"))) void *lxrt_vk_real[433];
+__attribute__((visibility("hidden"))) unsigned long long lxrt_vk_counts[433];
 __attribute__((visibility("hidden"))) int lxrt_vk_calls_on;
-extern void *const lxrt_vk_cnt_thunks[431] __attribute__((visibility("hidden")));
+extern void *const lxrt_vk_cnt_thunks[433] __attribute__((visibility("hidden")));
 
 static const char *const k_names[] = {
     "vk_icdGetInstanceProcAddr",
@@ -447,6 +447,8 @@ static const char *const k_names[] = {
     "vkWaitForPresentKHR",
     "vkWaitSemaphores",
     "vkWaitSemaphoresKHR",
+    "vkCmdDrawMultiEXT",
+    "vkCmdDrawMultiIndexedEXT",
 };
 #define N_NAMES (sizeof(k_names) / sizeof(k_names[0]))
 #define I_vkCreateInstance 206

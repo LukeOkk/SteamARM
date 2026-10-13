@@ -1,5 +1,6 @@
 #!/bin/bash
-# SteamARM from a clean Mac: build everything and install Steam, no VM.
+# SteamARM: build the runtime and game components, no VM. The principal
+# client comes from the user's Steam Frame root (docs/STEAM_FRAME_IMAGE.md).
 #
 #   scripts/setup.sh              all steps (each one skips what is already done)
 #   scripts/setup.sh --list       the steps, without running them
@@ -17,9 +18,9 @@
 #   $STEAMARM_STATE        the guest roots, logs (default ~/SteamARM-roots):
 #     lxrt-root            aarch64 root (Fedora 43 RPMs): FEX, Xvnc, test programs
 #     x86-rootfs           FEX's Ubuntu 24.04 x86-64 rootfs
-#     steamroot            the root Steam runs in (x86-64 tree + the emulator)
+#     steamroot            x86 game runtimes, Proton and the emulator
 #   /tmp/lxrt-root, /tmp/lxrt-steamroot   links to the roots (scripts/env-links.sh;
-#                          macOS empties /tmp at boot: run-steam.sh re-creates them)
+#                          macOS empties /tmp at boot: env-links.sh re-creates them)
 set -euo pipefail
 cd "$(dirname "$0")/.." || exit 1
 REPO="$(pwd)"
@@ -122,9 +123,8 @@ step_roots() {
     log "roots ready under $STATE"
 }
 
-step_steam() {
-    log "Steam client and graphics in the Steam root"
-    scripts/install-steam.sh
+step_games() {
+    log "FEX, graphics and FidelityFX for x86 games (no legacy Steam client)"
     scripts/install-fex-host.sh
     LXRT_ROOT=/tmp/lxrt-root scripts/build-fex-thunks.sh install
     scripts/install-steamroot-gfx.sh
@@ -169,11 +169,13 @@ step_done() {
     [ -f .bundle-version ] && cp .bundle-version build/.setup-version
     log "done. Start SteamARM:"
     echo "  open $REPO/build/SteamARM.app        (launcher: Steam and other apps)"
-    echo "  scripts/run-steam.sh                  (Steam directly)"
-    echo "The first Steam start updates the client (several minutes)."
+    echo "  scripts/run-app.sh steam-arm64-frame  (SteamARM directly)"
+    if [ ! -f "$STATE/arm64root/tmp/armhome/.local/share/Steam/steamrtarm64/steam" ]; then
+        echo "The principal ARM64 client requires your Steam Frame root: docs/STEAM_FRAME_IMAGE.md."
+    fi
 }
 
-STEPS=(check brew make fex thunks xquartz kosmickrisp pulseaudio roots steam frameroot test done)
+STEPS=(check brew make fex thunks xquartz kosmickrisp pulseaudio roots games frameroot test done)
 if [ "${1:-}" = --list ]; then
     printf '%s\n' "${STEPS[@]}"
     exit 0

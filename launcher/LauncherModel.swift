@@ -47,7 +47,7 @@ final class LauncherModel: ObservableObject {
     private var polling = false
     /// run-app.sh has not returned yet: the session's processes may not exist.
     private var launchInFlight = false
-    /// Adopted from scripts/run-steam.sh: no session wrapper, so no exit
+    /// Adopted from scripts/run-steam-arm64.sh: no session wrapper, so no exit
     /// status and no known start.
     private var adoptedWithoutWrapper = false
     /// The session's start is not known (adopted without a wrapper, or a
@@ -164,11 +164,11 @@ final class LauncherModel: ObservableObject {
         }
     }
 
-    /// Nothing built or no Steam root yet: the first-start banner offers setup.
+    /// Runtime/game components missing: setup never reinstalls retired clients.
     var needsSetup: Bool {
         let fm = FileManager.default
         return !fm.fileExists(atPath: projectDir.appendingPathComponent("build/lxrun").path) ||
-            !fm.fileExists(atPath: Paths.steamRoot.appendingPathComponent("tmp/fexhome/.local/share/Steam/steam.sh").path) ||
+            !fm.fileExists(atPath: Paths.steamRoot.appendingPathComponent("usr/lib/lxrt-emu/FEX").path) ||
             needsUpdate
     }
 
@@ -192,7 +192,7 @@ final class LauncherModel: ObservableObject {
         let q = "'" + projectDir.path.replacingOccurrences(of: "'", with: "'\\''") + "'"
         let body = """
         #!/bin/bash
-        # SteamARM: build everything and install Steam (scripts/setup.sh).
+        # SteamARM: build the runtime and game components (scripts/setup.sh).
         cd \(q) || exit 1
         if [ ! -x /opt/homebrew/bin/brew ]; then
             echo "SteamARM necesita Homebrew (https://brew.sh). Instálalo con:"
@@ -593,7 +593,7 @@ final class LauncherModel: ObservableObject {
                 return
             }
             // run-app.sh re-shows a running app on the display it started on,
-            // and adopts a Steam started by run-steam.sh: neither is a launch.
+            // and adopts a Steam started by run-steam-arm64.sh: neither is a launch.
             // Its last line says which ("session=..."), whatever the app is called.
             let kind = SessionFiles.launchKind(r.output) ?? .started
             let reshown = kind != .started
@@ -718,18 +718,19 @@ final class LauncherModel: ObservableObject {
     private func adoptRunningApp() {
         let id: String
         var start: Date?
-        // session.py writes running.pgid, which an adopted run-steam.sh lacks.
+        // session.py writes running.pgid, which an adopted run-steam-arm64.sh lacks.
         let wrapped = FileManager.default.fileExists(atPath: Paths.pgidFile.path)
         if let pid = Shell.readPID(Paths.pidFile), Shell.isAlive(pid),
            SessionLiveness.isLeader(command: Shell.command(of: pid), wrapped: wrapped) {
-            id = ((try? String(contentsOf: Paths.idFile, encoding: .utf8)) ?? "steam")
+            id = ((try? String(contentsOf: Paths.idFile, encoding: .utf8)) ?? AppEntry.steam.id)
                 .trimmingCharacters(in: .whitespacesAndNewlines)
+            guard id != "steam", id != "steam-arm64" else { return }
             // run-app.sh wrote running.pid when it started the session.
             start = (try? FileManager.default.attributesOfItem(atPath: Paths.pidFile.path))?[.modificationDate] as? Date
             adoptedWithoutWrapper = !wrapped
         } else if let client = OutsideClient.find(Shell.guestProcesses(),
                                                    root: { Shell.environmentValue("LXRT_ROOT", of: $0) }) {
-            id = client.id   // started by scripts/run-steam.sh or run-steam-arm64.sh
+            id = client.id   // started by scripts/run-steam-arm64.sh
             // No session wrapper: a status, group or architecture on disk is
             // an earlier session's, not this Steam's...
             for f in [Paths.statusFile, Paths.pgidFile, Paths.archFile] {
@@ -804,7 +805,7 @@ final class LauncherModel: ObservableObject {
         timer = nil
         // scripts/session.py records how the program ended: "N" for exit code
         // N, "N signal S" for a death by signal S. Without it (a run adopted
-        // from run-steam.sh), the only sign of a crash is that it was gone
+        // from run-steam-arm64.sh), the only sign of a crash is that it was gone
         // within 15 s.
         let (status, bySignal) = SessionFiles.status((try? String(contentsOf: Paths.statusFile, encoding: .utf8)) ?? "")
         let stopped = session.phase == .stopping

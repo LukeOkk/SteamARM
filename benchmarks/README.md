@@ -94,6 +94,7 @@ the Fedora VM that was deleted on 2026-09-27; they are history, and
 | 56 | `stage56-ultra-quality-input.txt` | 10-05 | Bilinear MetalFX spatial silently skipped whole low-resolution inputs: patch 21 accepts both allocation layouts at 77%, with actual-encode logs and readbacks. Blend/scissor and native-resolution draws remain the original shader. Render regressions passed on both drivers; no measured +150% game FPS gain. |
 | 57 | `stage57-depth-cache-and-frame-pacing.txt` | 10-05 | Optional bounded depth/stencil cache: 39.4% less recording time in a paired microbenchmark, pixels/FEX/Proton probes passed; default off. CS2 and native Metal traces still show hitches and no established stable 100 FPS. Current display link exposes fixed refresh rates only. |
 | 58 | `stage58-adaptive-sync-and-drawable-wait.txt` | 10-05 | bounded notification wait tested on ARM64/FEX; actual display/native fullscreen eligibility and fixed-refresh fallback; <10 ms CS2 and physical VRR remain unverified |
+| 59 | `stage59-steamarm-performance.txt` | 10-06 | Low guest descriptor/multi-draw pointers rebased before native Vulkan calls; paired CPU microprobes and GPU readbacks on MoltenVK/KosmicKrisp; NTSYNC queue bound retires with waiters, 17/17 semantics and 128-thread churn; no game FPS guarantee |
 
 ## After stage 21 (no stage file)
 
