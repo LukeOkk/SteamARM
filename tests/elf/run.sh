@@ -63,6 +63,26 @@ else
     bad "x18 decoder/planner self-test" "$(tail -5 <<<"$out")"
 fi
 
+# What the runtime keeps per file mapping goes with the guest's munmap, on the
+# host (tests/elfsect_unmap_check.c): glibc's dlopen/dlclose of the root's own
+# libraries at a new address every cycle. The Steam client reloads libusb
+# four times a second, and each cycle used to leave its function tables
+# (4 x 16 KiB) and file names behind.
+unmap_libs=()
+for l in lib64/libc.so.6 lib64/libvulkan.so.1 usr/lib64/libstdc++.so.6; do
+    [ -f "$GUEST_ROOT/$l" ] && unmap_libs+=("$GUEST_ROOT/$l")
+done
+if [ ${#unmap_libs[@]} -gt 0 ]; then
+    if out=$(make -s build/elfsect_unmap_check 2>&1 &&
+             build/elfsect_unmap_check -n 1000 "${unmap_libs[@]}" 2>&1); then
+        ok "function tables and file names freed at munmap: ${#unmap_libs[@]} libraries, 1000 dlopen/dlclose cycles, $(sed -n 's/.*heap growth over the last \([0-9]*\) cycles: \(-*[0-9]*\) bytes.*/\2 bytes of heap growth in \1/p' <<<"$out"), lookups unchanged"
+    else
+        bad "function tables and file names across munmap" "$(grep -E 'FAIL' <<<"$out" | head -5)"
+    fi
+else
+    echo "  skip  elfsect_unmap_check (no libc.so.6 in $GUEST_ROOT)"
+fi
+
 # x18 loads and stores at sp offsets the immediate field cannot absorb
 # (Steam's stp x18, x17, [sp, #0x1f8]): addressed through a copy of the
 # original sp. Plain loads read back what the rewritten stores wrote.
