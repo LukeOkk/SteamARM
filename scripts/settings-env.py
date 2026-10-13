@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """The launcher's settings.json as the environment of the programs SteamARM
 starts (launcher/SETTINGS_SPEC.md). run-app.sh imports env_from_settings() and
-with_overrides(); run-steam.sh evaluates --shell.
+with_overrides(); run-steam-arm64.sh evaluates --shell.
 
   scripts/settings-env.py --shell [settings.json]   export lines for a shell
   scripts/settings-env.py --json  [settings.json]   the environment as JSON
@@ -24,7 +24,7 @@ SHIM = os.path.join(STATE, "steamroot", "usr", "lib", "lxrt-emu", "libvulkan.so.
 ICD_MARKER = b"STEAMARM_VK_ICD"
 OVERRIDABLE = ("display", "vsync", "synchronization", "graphicsBackend", "scalingFilter")
 SCALING_FILTERS = ("auto", "linear", "nearest", "fsr", "metalfx", "metalfx-temporal")
-GAME_UPSCALERS = ("auto", "fsr")
+GAME_UPSCALERS = ("auto", "fsr", "metalfx")
 STEAM_UI_GPU_SWITCHES = ("--use-gl=angle", "--use-angle=vulkan",
                          "--enable-features=Vulkan,VulkanFromANGLE,DefaultANGLEVulkan",
                          "--ignore-gpu-blocklist")
@@ -237,10 +237,10 @@ def upscaling_policy(chip, display=None):
 
 
 def game_upscaler(s):
-    """"Escalado del juego": "auto" (MetalFX wherever it can take the
-    game's FSR) or "fsr" (the game's own FSR, untouched). Anything else,
-    nothing stored included (a settings.json from before the setting), is
-    "auto": the user's rule is MetalFX by default. Mirrors
+    """"Escalado del juego": AUTO retains the existing spatial FSR hook,
+    "fsr" leaves the game's upscaler alone, and explicit "metalfx" enables
+    the temporal FidelityFX DLL bridge. Missing/unknown values are AUTO.
+    Mirrors
     SettingsMigration.gameUpscaler (launcher/ApplicationCore.swift)."""
     value = s.get("gameUpscaler")
     return value if value in GAME_UPSCALERS else "auto"
@@ -398,7 +398,8 @@ def env_from_settings(s, total=None, chip=None, display=None):
     #   (patches/kosmickrisp-14, -16, -17), which leaves the game's pass
     #   for formats or sizes MetalFX does not take. Exported whatever the
     #   backend: only KosmicKrisp reads it.
-    # - FSR 3.1 and FSR 4 of Windows games: SteamARM's FidelityFX API DLLs
+    # - Explicit "metalfx" only: FSR 3.1 and FSR 4 of Windows games through
+    #   SteamARM's FidelityFX API DLLs
     #   (Wine builtins over amd_fidelityfx_*) send the upscale to MetalFX's
     #   temporal scaler, and to the game's own DLL when it fails, when
     #   STEAMARM_WIN_UPSCALER=metalfx (harmless before they are installed).
@@ -408,8 +409,8 @@ def env_from_settings(s, total=None, chip=None, display=None):
     #   game's own DLL loads untouched.
     # "fsr" leaves the game's FSR as it is.
     upscaler = game_upscaler(s)
-    env["KK_FSR_METALFX"] = "1" if upscaler == "auto" else "0"
-    if upscaler == "auto" and env.get("STEAMARM_VK_ICD") == "kosmickrisp":
+    env["KK_FSR_METALFX"] = "0" if upscaler == "fsr" else "1"
+    if upscaler == "metalfx" and env.get("STEAMARM_VK_ICD") == "kosmickrisp":
         env["STEAMARM_WIN_UPSCALER"] = "metalfx"
     # "Escala de render": games whose window covers the screen render at this
     # fraction of it (the game tool passes STEAMARM_RENDER_SCALE to the game

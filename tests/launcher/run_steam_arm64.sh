@@ -3,7 +3,7 @@
 # fake_lxrun.c, STEAMARM_LXRUN), roots and links in a temporary directory, no
 # memory guard and no X server; no guest runs, nothing real is touched:
 #   1. ARMROOT without ARMROOT_LINK: a root that is not one of the state
-#      directory's is refused, and the launcher's /tmp/lxrt-armroot is left
+#      directory's is refused, and the launcher's /tmp/lxrt-arm64root is left
 #      alone;
 #   2. a link a running guest uses is not re-pointed, and a root a guest runs
 #      on is not started twice;
@@ -42,13 +42,20 @@ run() {
 
 # 1. The shared link is not taken for a root of its own. rootC has no client,
 # so a script that got this wrong would still stop (at "no arm64 client")
-# before it could touch the real /tmp/lxrt-armroot.
+# before it could touch the real /tmp/lxrt-arm64root.
 mkdir -p "$T/rootC"
-tmp_link_before=$(readlink /tmp/lxrt-armroot 2>/dev/null || echo none)
+tmp_link_before=$(readlink /tmp/lxrt-arm64root 2>/dev/null || echo none)
 run ARMROOT="$T/rootC" scripts/run-steam-arm64.sh --for 1; rc=$?
-check "ARMROOT that is not \$STATE/armroot, without ARMROOT_LINK: refused (rc $rc)" \
+check "ARMROOT that is not \$STATE/arm64root, without ARMROOT_LINK: refused (rc $rc)" \
     '[ $rc -ne 0 ] && grep -q "ARMROOT_LINK" "$T/run.log" && [ -z "$(ls "$T/fake")" ]'
-check "... /tmp/lxrt-armroot left as it was" '[ "$(readlink /tmp/lxrt-armroot 2>/dev/null || echo none)" = "$tmp_link_before" ]'
+check "... /tmp/lxrt-arm64root left as it was" '[ "$(readlink /tmp/lxrt-arm64root 2>/dev/null || echo none)" = "$tmp_link_before" ]'
+mkdir -p "$T/state/armroot"
+run ARMROOT="$T/state/armroot" ARMROOT_LINK="$T/retired-link" scripts/run-steam-arm64.sh --for 1; rc=$?
+check "the retired Fedora client is refused (rc $rc)" \
+    '[ $rc -ne 0 ] && grep -q "retired" "$T/run.log" && [ ! -e "$T/retired-link" ]'
+run ARMROOT_LINK="$T/default-link" scripts/run-steam-arm64.sh --for 1; rc=$?
+check "the default client root is Frame, never Fedora (rc $rc)" \
+    '[ $rc -ne 0 ] && grep -q "$T/state/arm64root" "$T/run.log" && [ ! -e "$T/default-link" ]'
 
 # 2. Guests on the link or on the root.
 ln -s "$T/rootA" "$T/link"

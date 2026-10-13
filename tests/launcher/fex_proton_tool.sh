@@ -131,7 +131,46 @@ tool -- run x.exe >/dev/null 2>&1; rc=$?
 check "a relative path in the conf is refused (rc $rc)" '[ $rc -eq 3 ]'
 cp "$T/conf.saved" "$DEST/steamarm-fex-proton.conf"
 
-# 3. uninstall removes the tool's directory and nothing else
+# 3. NGX is opt-in and shares the protected-game / x86_64-only guards.
+GAME="$T/dlss-game"
+mkdir -p "$GAME"
+echo model > "$GAME/nvngx_dlss.dll"
+/usr/bin/python3 - "$GAME" <<'PY'
+import pathlib, sys
+for name, machine in (("game64.exe", 0x8664), ("game32.exe", 0x14c)):
+    data = bytearray(128)
+    data[:2] = b"MZ"
+    data[60:64] = (64).to_bytes(4, "little")
+    data[64:68] = b"PE\0\0"
+    data[68:70] = machine.to_bytes(2, "little")
+    (pathlib.Path(sys.argv[1]) / name).write_bytes(data)
+PY
+out=$(tool STEAM_COMPAT_INSTALL_PATH="$GAME" -- run "$GAME/game64.exe" 2>"$T/err")
+check "without opt-in, no NGX override or NVIDIA adapter setting" \
+    '! grep -q "nvngx=b,n\|NVIDIA_WINE_DLL_DIR\|customVendorId" <<<"$out"'
+out=$(tool STEAMARM_WIN_DLSS=metalfx STEAM_COMPAT_INSTALL_PATH="$GAME" -- run "$GAME/game64.exe" 2>"$T/err")
+check "temporal NGX opt-in sets both builtins and the core directory" \
+    'grep -qxF "env: WINEDLLOVERRIDES=nvngx,_nvngx=b,n" <<<"$out" &&
+     grep -qxF "env: NVIDIA_WINE_DLL_DIR=/opt/steamarm/wine/x86_64-windows" <<<"$out" &&
+     grep -qxF "env: STEAMARM_NGX_MODEL=$GAME/nvngx_dlss.dll" <<<"$out"'
+out=$(tool STEAMARM_WIN_DLSS=metalfx STEAM_COMPAT_INSTALL_PATH="$GAME" DXVK_CONFIG="dxgi.customVendorId = 1002" WINEDLLOVERRIDES="nvngx=n" -- run "$GAME/game64.exe" 2>"$T/err")
+check "user vendor and later DLL override keep precedence" \
+    'grep -qxF "env: DXVK_CONFIG=dxgi.customVendorId = 1002" <<<"$out" &&
+     grep -qxF "env: WINEDLLOVERRIDES=nvngx,_nvngx=b,n;nvngx=n" <<<"$out"'
+mkdir -p "$GAME/EasyAntiCheat"
+out=$(tool STEAMARM_WIN_DLSS=metalfx STEAMARM_WIN_UPSCALER=metalfx STEAM_COMPAT_INSTALL_PATH="$GAME" -- run "$GAME/game64.exe" 2>"$T/err")
+check "anti-cheat blocks both bridges and vendor changes" \
+    'grep -q "anti-cheat:" "$T/err" && ! grep -q "WINEDLLOVERRIDES\|customVendorId\|NVIDIA_WINE_DLL_DIR" <<<"$out"'
+rmdir "$GAME/EasyAntiCheat"
+out=$(tool STEAMARM_WIN_DLSS=metalfx STEAMARM_WIN_UPSCALER=metalfx STEAM_COMPAT_INSTALL_PATH="$GAME" -- run "$GAME/game32.exe" 2>"$T/err")
+check "PE i386 keeps original game DLLs and adapter settings" \
+    'grep -q "32-bit Windows executable" "$T/err" && ! grep -q "WINEDLLOVERRIDES\|customVendorId\|NVIDIA_WINE_DLL_DIR" <<<"$out"'
+rm "$GAME/nvngx_dlss.dll"
+out=$(tool STEAMARM_WIN_DLSS=metalfx STEAM_COMPAT_INSTALL_PATH="$GAME" -- run "$GAME/game64.exe" 2>"$T/err")
+check "a game without a DLSS model receives no NGX override" \
+    'grep -q "no nvngx_dlss.dll" "$T/err" && ! grep -q "WINEDLLOVERRIDES\|customVendorId\|NVIDIA_WINE_DLL_DIR" <<<"$out"'
+
+# 4. uninstall removes the tool's directory and nothing else
 inst --uninstall; rc=$?
 check "uninstall removes the tool, keeps the client (rc $rc)" \
     '[ $rc -eq 0 ] && [ ! -e "$DEST" ] && [ -f "$T/state/armroot/tmp/armhome/.local/share/Steam/steamrtarm64/steam" ]'

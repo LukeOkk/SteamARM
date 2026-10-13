@@ -424,6 +424,10 @@ static void sigstats_print(const char *when)
         uint32_t c = atomic_exchange(&g_sigstats[i], 0);
         if (c) n += snprintf(buf + n, sizeof buf - n, " %d:%u", i, c);
     }
+    extern _Atomic uint64_t lxrt_rescan_calls, lxrt_rescan_words;
+    uint64_t rc = atomic_exchange(&lxrt_rescan_calls, 0), rw = atomic_exchange(&lxrt_rescan_words, 0);
+    if (rc && n < (int)sizeof buf - 48)
+        n += snprintf(buf + n, sizeof buf - n, " rescan:%llu/%lluKw", (unsigned long long)rc, (unsigned long long)(rw / 1024));
     snprintf(buf + n, sizeof buf - n, "\n");
     fputs(buf, lxrt_trace_stream());
 }

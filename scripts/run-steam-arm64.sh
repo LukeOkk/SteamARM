@@ -1,18 +1,15 @@
 #!/bin/bash
 # Valve's native arm64 Steam client (steamrtarm64/steam) under the runtime:
-# no FEX for the client, no VM. EXPERIMENTAL: where it stops is recorded in
-# benchmarks/stage22-native-arm64-bringup.txt. The working Steam is still the
-# x86 client under FEX (scripts/run-steam.sh).
+# SteamARM's principal client: no FEX for the client, no VM. Its upstream
+# Steam Frame layout and technical executable names stay unchanged.
 #
 #   scripts/run-steam-arm64.sh [--for SECONDS] [--jitless] [steam args...]
 #
-# Root: scripts/mkarmroot.sh ($STEAMARM_STATE/armroot, seen by the runtime as
-# /tmp/lxrt-armroot; ARMROOT=<dir> ARMROOT_LINK=/tmp/<name> for another root,
-# e.g. the Steam Frame root of scripts/mkframeroot.sh:
-#   ARMROOT=$STEAMARM_STATE/arm64root ARMROOT_LINK=/tmp/lxrt-arm64root);
+# Root: $STEAMARM_STATE/arm64root, seen as /tmp/lxrt-arm64root (the user's
+# Steam Frame root from scripts/mkframeroot.sh).
 # the client lives in its tmp/armhome (HOME=/tmp/armhome in the guest).
-# ARMROOT without ARMROOT_LINK: the link env-links.sh gives that root
-# ($STATE/armroot, $STATE/arm64root); any other root needs its own link.
+# ARMROOT without ARMROOT_LINK accepts that root; isolated test roots need
+# their own ARMROOT_LINK. The retired Fedora client root is refused.
 # Refused while a guest runs on the root or on the link (one client per home;
 # the runtime follows the link on every lookup, so re-pointing it would move
 # a running session).
@@ -39,20 +36,23 @@ cd "$(dirname "$0")/.." || exit 1
 . scripts/roots.sh
 STATE="${STEAMARM_STATE:-$HOME/SteamARM-roots}"
 # The /tmp link the runtime sees the root through. Each root has its own, as
-# scripts/env-links.sh makes them: /tmp/lxrt-armroot is the launcher's Fedora
-# root (scripts/builtin-apps.json, steam-arm64), /tmp/lxrt-arm64root its
-# Steam Frame root. Pointing one of those at another root would also move
+# scripts/env-links.sh makes them: /tmp/lxrt-arm64root is the principal
+# client root. Pointing it at another root would also move
 # every later launch from the launcher, so such a root names its own link.
+if [ -n "${ARMROOT:-}" ] && [ "$(canon_path "$ARMROOT")" = "$(canon_path "$STATE/armroot")" ] &&
+   [ "$(canon_path "$ARMROOT")" != "$(canon_path "$STATE/arm64root")" ]; then
+    echo "the Fedora Steam client is retired; use SteamARM in \$STEAMARM_STATE/arm64root" >&2
+    exit 1
+fi
 if [ -n "${ARMROOT_LINK:-}" ]; then
-    ARMROOT="${ARMROOT:-$STATE/armroot}" LINK="$ARMROOT_LINK"
+    ARMROOT="${ARMROOT:-$STATE/arm64root}" LINK="$ARMROOT_LINK"
 elif [ -z "${ARMROOT:-}" ]; then
-    ARMROOT="$STATE/armroot" LINK=/tmp/lxrt-armroot
+    ARMROOT="$STATE/arm64root" LINK=/tmp/lxrt-arm64root
 else
     a=$(canon_path "$ARMROOT") || { echo "no root at $ARMROOT" >&2; exit 1; }
-    if [ "$a" = "$(canon_path "$STATE/armroot")" ]; then LINK=/tmp/lxrt-armroot
-    elif [ "$a" = "$(canon_path "$STATE/arm64root")" ]; then LINK=/tmp/lxrt-arm64root
+    if [ "$a" = "$(canon_path "$STATE/arm64root")" ]; then LINK=/tmp/lxrt-arm64root
     else
-        echo "ARMROOT=$ARMROOT is neither \$STEAMARM_STATE/armroot nor .../arm64root: set ARMROOT_LINK=/tmp/<a name of its own> as well" >&2
+        echo "ARMROOT is not \$STEAMARM_STATE/arm64root: set ARMROOT_LINK=/tmp/<a name of its own> for an isolated root" >&2
         exit 1
     fi
 fi

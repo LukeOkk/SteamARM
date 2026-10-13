@@ -94,15 +94,14 @@ struct LinuxBaseEnvironment: Codable, Equatable, Identifiable {
     var transitional: Bool                // TRANSITIONAL_COMPATIBILITY
 
     static let legacyX86 = LinuxBaseEnvironment(
-        id: "legacy-x86", name: "Raíz x86-64 de Steam (FEX)", guestRoot: "/tmp/lxrt-steamroot",
+        id: "legacy-x86", name: "Raíz x86-64 para juegos (FEX)", guestRoot: "/tmp/lxrt-steamroot",
         architectures: [.x86_64, .i386], translator: .fex, fexRootfs: "/", transitional: true)
     static let arm64 = LinuxBaseEnvironment(
         id: "arm64", name: "Raíz ARM64 (Steam Frame / Holo)", guestRoot: "/tmp/lxrt-arm64root",
         architectures: [.aarch64], translator: .none, fexRootfs: nil, transitional: false)
-    /// The Fedora 43 aarch64 root of scripts/mkarmroot.sh, where the native
-    /// arm64 Steam client runs (benchmarks/stage21). Transitional until the
-    /// Holo-derived root exists. A rebuild replaces the system and keeps
-    /// tmp/ (the client's home, tmp/armhome) and opt/apps.
+    /// The Fedora 43 aarch64 root of scripts/mkarmroot.sh for Heroic and
+    /// custom ARM64 applications. A rebuild replaces the system and keeps
+    /// tmp/ (application homes) and opt/apps.
     static let armroot = LinuxBaseEnvironment(
         id: "armroot", name: "Raíz ARM64 (Fedora 43, scripts/mkarmroot.sh)", guestRoot: "/tmp/lxrt-armroot",
         architectures: [.aarch64], translator: .none, fexRootfs: nil, transitional: true)
@@ -293,7 +292,7 @@ enum LaunchKind: String {
     case started
     /// This app was already running in a session: shown again, not launched.
     case reshown
-    /// A Steam that scripts/run-steam.sh started: no session wrapper, so no
+    /// A Steam that scripts/run-steam-arm64.sh started: no session wrapper, so no
     /// process group, no exit status and no known start.
     case adopted
 }
@@ -305,7 +304,7 @@ enum LaunchKind: String {
 /// client's webhelper zygotes, for one, leave the group and outlive the
 /// client with parent 1 (benchmarks/stage23-frame-root.txt C2, F7), and
 /// run-app.sh --reap stops what the session left like that. Without a
-/// wrapper (a Steam adopted from scripts/run-steam.sh) there is nothing
+/// wrapper (a Steam adopted from scripts/run-steam-arm64.sh) there is nothing
 /// better to ask than whether any guest program still runs.
 enum SessionLiveness {
     struct Probe: Equatable {
@@ -381,7 +380,7 @@ struct AppStats: Codable, Equatable {
     }
 
     /// The end of a session. `countRuntime` is false for a session whose start
-    /// is unknown (adopted from scripts/run-steam.sh).
+    /// is unknown (adopted from scripts/run-steam-arm64.sh).
     mutating func noteEnd(_ record: SessionRecord, countRuntime: Bool = true) {
         if countRuntime { totalRuntime = (totalRuntime ?? 0) + max(0, record.duration) }
         lastStatus = record.status
@@ -558,18 +557,14 @@ enum PrimarySteam {
     }
 }
 
-/// A Steam client started outside the launcher (scripts/run-steam.sh, or
-/// scripts/run-steam-arm64.sh for the native one), which the launcher adopts.
-/// The native client's entry comes from its root: /tmp/lxrt-arm64root is the
-/// Steam Frame root, anything else the Fedora one (scripts/builtin-apps.json).
+/// SteamARM started by scripts/run-steam-arm64.sh, which the launcher adopts.
+/// Only the principal Steam Frame root is accepted; retired clients are ignored.
 enum OutsideClient {
     static func find(_ processes: [(pid: Int32, command: String)],
                      root: (Int32) -> String?) -> (id: String, arch: String?)? {
-        if processes.contains(where: { $0.command.contains("ubuntu12_32/steam ") }) {
-            return ("steam", nil)
-        }
-        if let p = processes.first(where: { $0.command.contains("steamrtarm64/steam ") }) {
-            return (root(p.pid) == "/tmp/lxrt-arm64root" ? "steam-arm64-frame" : "steam-arm64", "aarch64 none")
+        if processes.contains(where: { $0.command.contains("steamrtarm64/steam ")
+            && root($0.pid) == "/tmp/lxrt-arm64root" }) {
+            return ("steam-arm64-frame", "aarch64 none")
         }
         return nil
     }
@@ -913,7 +908,7 @@ enum SettingsMigration {
 
     /// "Escalado del juego" (gameUpscaler): a stored choice, else
     /// Automático -- nothing stored (a settings.json from before the setting)
-    /// included, since the user's rule is MetalFX by default.
+    /// included. New temporal DLL bridges require an explicit MetalFX choice.
     /// settings-env.py game_upscaler() is the same rule.
     static func gameUpscaler(stored: String?) -> String {
         stored.flatMap { value in GameUpscalerChoice.options.contains { $0.0 == value } ? value : nil } ?? "auto"
@@ -1634,6 +1629,7 @@ enum GameUpscalerChoice {
     static let options: [(String, String)] = [
         ("auto", "Automático (recomendado)"),
         ("fsr", "AMD FSR del juego"),
+        ("metalfx", "MetalFX temporal (experimental)"),
     ]
 
     static func label(_ value: String) -> String {
@@ -1646,7 +1642,9 @@ enum GameUpscalerChoice {
         if value == "fsr" {
             return "El FSR que elijas en el juego queda tal cual, sin MetalFX. El FSR 4 propio de AMD solo funciona en GPU AMD: en el Mac los juegos ofrecen FSR 3.1 o anterior. Se aplica al reiniciar Steam."
         }
-        let rules = "Usa MetalFX siempre que sea compatible con el FSR elegido en el juego: el FSR 1 pasa a MetalFX espacial; el FSR 3.1 y el FSR 4 de los juegos Windows, a MetalFX temporal (en preparación). Si MetalFX no puede con un juego o con un pase, se queda el FSR del propio juego. En juegos con anticheat (EasyAntiCheat, BattlEye) no se cambia nada."
+        let rules = value == "metalfx"
+            ? "Solicita el puente experimental FSR 3.1/4 a MetalFX temporal en juegos Windows de 64 bits. Si un pase no es compatible, usa la DLL original del juego o informa del error. En juegos con anticheat no se añaden las DLL. DLSS requiere activar STEAMARM_WIN_DLSS=metalfx por separado; DLSS 1, generación de cuadros y reconstrucción de rayos no están disponibles."
+            : "Conserva el pase espacial FSR 1 a MetalFX en KosmicKrisp cuando es compatible. Los juegos Windows usan sus DLL originales: el puente temporal necesita la opción MetalFX experimental."
         switch backend {
         case .vulkanKosmicKrisp:
             return rules + " Se aplica al reiniciar Steam."

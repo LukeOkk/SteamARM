@@ -109,7 +109,7 @@ for mode in ${@:-fl11 fl12 ots}; do
     esac
     log="$LOGS/win-d3d12-mfxt-$mode.log"
     start=$SECONDS
-    env STEAMARM_RUN_ID=$RUN_ID LXRT_MOUNTS="$MOUNTS" LXRT_VK_DEBUG=1 "${menv[@]}" \
+    env STEAMARM_RUN_ID=$RUN_ID LXRT_MOUNTS="$MOUNTS" LXRT_VK_DEBUG=1 ${menv[@]+"${menv[@]}"} \
         STEAMARM_VK_ICD=kosmickrisp STEAMARM_KK_DIR="$PRIV/kk" VKD3D_DEBUG=warn \
         WINEDLLOVERRIDES="d3d12,d3d12core,dxgi=n" \
         DISPLAY=:2 WINEPREFIX=$PFX_GUEST WINEDEBUG=-all LXRT_ROOT=$ROOT FEX_ROOTFS=/ \

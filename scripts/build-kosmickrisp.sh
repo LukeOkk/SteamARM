@@ -60,6 +60,10 @@
 #       by MetalFX's spatial scaler instead, from the part of the input its
 #       constants name (KK_FSR_METALFX=0: the game's own; tests/elf/vk_fsr.c).
 #
+#   23  initialize each Metal render-pass descriptor once: new already calls
+#       init; a second init leaked its color-attachment array (96 bytes per
+#       pass on macOS 27; tests/kk/render_pass_lifetime.m). Same +1 ownership.
+#
 # Only Homebrew formulae and a Python virtualenv are installed. Re-running is
 # safe: the download is cached and the build is incremental. Needs macOS 26.
 set -euo pipefail

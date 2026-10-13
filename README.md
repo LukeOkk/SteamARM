@@ -1,14 +1,13 @@
 # SteamARM
 
-The Linux Steam client, and the Windows games Steam runs through Proton, on
-an Apple Silicon Mac, **without a virtual machine**.
+SteamARM's principal ARM64 Steam Frame client, and Windows games through
+FEX and Proton, on an Apple Silicon Mac, **without a virtual machine**.
 
 ```
-Steam (x86 / i386 Linux)  ─┐
-Proton / Wine (x86)        ├─ FEX (x86 → ARM64 JIT) ─┐
-DXVK / VKD3D-Proton        ┘                         ├─ lxrun (Linux on Darwin) ─ macOS
-aarch64 Linux programs, no FEX ──────────────────────┘
-  (experimental: Valve's native arm64 Steam client, up to its sign-in window)
+Proton / Wine (x86)  ─┐
+DXVK / VKD3D-Proton  ─┴─ FEX (x86 → ARM64 JIT) ─┐
+SteamARM (ARM64 Steam Frame), no FEX ───────────┼─ lxrun (Linux on Darwin) ─ macOS
+aarch64 Linux programs, no FEX ────────────────┘
 
 Vulkan: x86 through FEX's thunks, aarch64 directly ─ Vulkan shim ─ MoltenVK ─ Metal
                                          (or KosmicKrisp, experimental)
@@ -31,7 +30,8 @@ an app that isn't notarized, are in [docs/INSTALL.md](docs/INSTALL.md).
 
 Requirements: Apple Silicon, macOS 14+, Xcode Command Line Tools, Homebrew,
 about 25 GB free. The first install takes 20–60 minutes: it builds the
-runtime and FEX and downloads the Linux packages and Steam.
+runtime and FEX and downloads Linux packages. The principal client requires
+the user's Steam Frame root; see [STEAM_FRAME_IMAGE.md](docs/STEAM_FRAME_IMAGE.md).
 
 ## What you get
 
@@ -114,10 +114,14 @@ guides, and nothing in them is ready for players yet. Start with the plan,
 
 ```sh
 git clone https://github.com/LukeOkk/SteamARM.git && cd SteamARM
-scripts/setup.sh            # builds everything and installs Steam; resumable
-open build/SteamARM.app     # or: scripts/run-steam.sh
+scripts/setup.sh            # builds runtime and game components; resumable
+open build/SteamARM.app     # or: scripts/run-app.sh steam-arm64-frame
 scripts/make-release.sh     # the downloadable .dmg, in build/release/
 ```
+
+The principal SteamARM client requires the Steam Frame root in `arm64root`:
+[STEAM_FRAME_IMAGE.md](docs/STEAM_FRAME_IMAGE.md). Setup preserves it and the
+shared FEX/Proton game runtimes; retired Fedora and x86 Steam clients are not installed.
 
 Tests: `tests/elf/run.sh`, `tests/elf/run_i386.sh`,
 `tests/elf/run_vk_device.sh`, `tests/win/run.sh`,

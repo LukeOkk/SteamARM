@@ -655,8 +655,8 @@ class Boot:
             # keeps them in 16 bits, and binder, /proc and kill must agree.
             "LXRT_SMALL_IDS": os.environ.get("LXRT_SMALL_IDS", "1"),
             # Marks every process of the boot as the Android session's, so
-            # scripts/run-steam.sh and scripts/run-app.sh, which stop guest
-            # programs, leave it alone (carried through guest execs).
+            # scripts/run-app.sh, which stops guest programs, leaves it
+            # alone (carried through guest execs).
             "LXRT_SESSION": "android",
         }
         if self.x86:

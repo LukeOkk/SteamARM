@@ -6,17 +6,12 @@ follows the layout of the [Ryujinx](https://ryujinx.app) emulator's.
 
 ## The launcher
 
-- **Steam** starts the Linux Steam client (the x86 client under FEX: the
-  working route). Its windows are ordinary macOS windows (a rootless X
-  server). The card shows **Detener** while it runs.
-- **Steam ARM64 (experimental)** and **Steam ARM64 · Steam Frame
-  (experimental)** start Valve's native arm64 client with no FEX, on two
-  different ARM64 roots. It reaches its "Sign in to Steam" window
-  (MEASURED, `benchmarks/stage23-*.txt`); sign-in, the library, downloads
-  and games under it are not verified, and Proton ARM64 does not run on
-  macOS. Neither root nor the client is set up by **Instalar**: each card
-  is disabled, with the reason, until they exist
-  (`docs/STEAM_ARM64_BRINGUP.md`). Opening one asks for confirmation first.
+- **SteamARM (experimental)** starts the principal ARM64 Steam Frame client
+  without FEX. Its windows are ordinary macOS windows (a rootless X server).
+  The card shows **Detener** while it runs and is disabled, with the reason,
+  when the Frame root/client is missing ([STEAM_FRAME_IMAGE.md](STEAM_FRAME_IMAGE.md)).
+  Retired Fedora and x86 Steam clients are not offered or installed. FEX,
+  x86 Proton and shared game runtimes remain available for games.
 - **+** adds other Linux programs: a `.tar.gz`/`.zip`/AppImage you pick, or
   a known installer (Heroic, Prism Launcher). **Heroic Games Launcher
   (ARM64, experimental)** installs Heroic's linux-arm64 build into the ARM64
@@ -181,7 +176,7 @@ your checkout):
 
 | Command | |
 |---|---|
-| `scripts/run-steam.sh` / `--stop` | start / stop Steam |
+| `scripts/run-app.sh steam-arm64-frame` / `scripts/run-app.sh --stop` | start SteamARM / stop the current launcher session |
 | `scripts/run-app.sh` | what the launcher runs for any program |
 | `scripts/safeguard.sh status` | the memory guard |
 | `scripts/audio.sh status` | sound |

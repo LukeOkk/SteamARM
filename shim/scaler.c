@@ -1424,30 +1424,58 @@ static void fps_limit_wait(void)
 
 // LXRT_VK_FRAMETIMES=<file>: the time between one present and the next, one
 // line per present in microseconds (frame pacing: average, 1 % and 0.1 % lows,
-// p99; tests/win and the Schedule I measurements). Appended in 4 KiB pieces.
+// p99; tests/win and the Schedule I measurements). Appended in 4 KiB pieces,
+// at least once per second, or per present with LXRT_VK_FRAMETIMES_SYNC=1.
 extern int open(const char *, int, ...);
 extern long write(int, const void *, size_t);
 extern int snprintf(char *, size_t, const char *, ...);
-static void frametime_note(uint64_t t)
+extern int *__errno_location(void);
+static void frametime_note(void)
 {
     static int fd = -1;
-    static uint64_t last;
+    static uint64_t last, flushed;
     static char buf[4096];
     static unsigned n;
-    if (fd == -1) {
-        const char *e = getenv("LXRT_VK_FRAMETIMES");
-        fd = e && *e ? open(e, 01 | 0100 | 02000, 0644) : -2;   // O_WRONLY|O_CREAT|O_APPEND (Linux)
-    }
-    if (fd < 0)
+    static int sync;            // LXRT_VK_FRAMETIMES_SYNC=1: one write per present
+    if (__atomic_load_n(&fd, __ATOMIC_ACQUIRE) == -2)
         return;
     lock();
-    if (last) {
+    if (fd == -1) {
+        const char *e = getenv("LXRT_VK_FRAMETIMES");
+        int opened = e && *e ? open(e, 01 | 0100 | 02000, 0600) : -1; // O_WRONLY|O_CREAT|O_APPEND
+        const char *sy = getenv("LXRT_VK_FRAMETIMES_SYNC");
+        sync = sy && *sy && *sy != '0';
+        __atomic_store_n(&fd, opened >= 0 ? opened : -2, __ATOMIC_RELEASE);
+    }
+    if (fd < 0) {
+        unlock();
+        return;
+    }
+    // Sample while serialized: two presenting threads cannot publish an
+    // earlier timestamp after a later one and wrap an unsigned interval.
+    uint64_t t = now_ns();
+    if (!flushed)
+        flushed = t;
+    if (last && t >= last) {
         int k = snprintf(buf + n, sizeof buf - n, "%llu\n", (unsigned long long)((t - last) / 1000));
-        if (k > 0)
+        if (k > 0 && (unsigned)k < sizeof buf - n)
             n += (unsigned)k;
-        if (n > sizeof buf - 32) {
-            write(fd, buf, n);
+        // Appended in 4 KiB pieces, or per present when a watchdog on the
+        // file's growth samples the process during a stall (stage 61).
+        if (n > sizeof buf - 32 || sync || t - flushed >= 1000000000ull) {
+            unsigned done = 0;
+            while (done < n) {
+                long wrote = write(fd, buf + done, n - done);
+                if (wrote < 0 && *__errno_location() == 4) // Linux EINTR
+                    continue;
+                if (wrote <= 0) {
+                    __atomic_store_n(&fd, -2, __ATOMIC_RELEASE);
+                    break;
+                }
+                done += (unsigned)wrote;
+            }
             n = 0;
+            flushed = t;
         }
     }
     last = t;
@@ -1458,7 +1486,7 @@ static VkResult present_inner(VkQueue q, const VkPresentInfoKHR *pi);
 VkResult lxrt_inner_vkQueuePresentKHR(VkQueue q, const VkPresentInfoKHR *pi)
 {
     fps_limit_wait();
-    frametime_note(now_ns());
+    frametime_note();
     if (!timing_on())
         return present_inner(q, pi);
     uint64_t t0 = now_ns();

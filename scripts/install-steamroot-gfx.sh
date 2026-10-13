@@ -36,7 +36,7 @@ die() { log "error: $*"; exit 1; }
 
 [ -d "$EMU" ] || die "no $EMU (scripts/mksteamroot.sh first)"
 if pgrep -f 'build/lxrun .*ubuntu12_32/steam ' >/dev/null; then
-    die "Steam is running (scripts/run-steam.sh --stop first)"
+    die "A retired Steam client is running; close it before updating shared game libraries"
 fi
 for f in "$BUILD/out/FEX-emu" "$THUNKS/HostThunks/libvulkan-host.so" \
          "$THUNKS/GuestThunks/libvulkan-guest.so" build/libvulkan.so.1; do

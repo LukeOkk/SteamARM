@@ -1,0 +1,54 @@
+Stage 62 -- KosmicKrisp render-pass descriptor lifetime
+2026-10-06, Apple M4, macOS 27. Native ARM64, zero VM, Rosetta 0.
+
+Patch 23 initializes MTL4RenderPassDescriptor once. Objective-C `new`
+already performs allocation and initialization. Calling `init` again
+overwrites the descriptor's retained color-attachment array on this OS.
+The bridge keeps its existing autorelease pools and +1/release ownership.
+Source comparison of both KosmicKrisp trees found only this source change.
+
+Native Metal constructor probe (tests/kk/render_pass_lifetime.m):
+10,000 warm-up cycles, then 500,000 construct/access/release cycles.
+                                       active heap delta    RSS delta
+  old: [[MTL4RenderPassDescriptor new] init]  48,000,000 B     48,365,568 B
+  new: [MTL4RenderPassDescriptor new]                 0 B              0 B
+The old constructor retains 96 bytes per descriptor. The new one passes
+the bounded-heap assertion and the clear-color field readback.
+
+Whole-driver reproduction: native ARM64 Vulkan 1.3 ELF, actual
+KosmicKrisp Mesa 26.2.4 (Vulkan 1.4.354), no display or game. Record
+empty dynamic render passes, 1,000 per command buffer, reset the buffer
+between batches. Warm up 10,000 passes, then record 500,000. No GPU
+submission in this memory probe. Host malloc active-heap statistics and
+process maximum RSS were sampled immediately before and after the loop.
+Three paired runs used the same runtime, shim, guest root and probe.
+                   active heap delta (B)       max-RSS delta (KiB)
+  old, pair 1              48,000,752                     47,712
+  new, pair 1                  33,168                         64
+  old, pair 2              48,229,808                     47,680
+  new, pair 2                -195,808                        128
+  old, pair 3              48,065,936                     47,648
+  new, pair 3                -195,760                        208
+Lazy allocator/cache changes explain bounded residual variation; none
+of the new runs accumulated the old approximately 48 MB of live objects.
+
+GPU correctness with the new driver: 8/8 PASS (all exit 0):
+  vk_passes, vk_resubmit, vk_vtxread, vk_alphamask,
+  vk_vsonly (normal and pipeline-cache variants),
+  vk_dynamic_depth (depth-state cache disabled and enabled).
+These submit work and read pixels/buffers back. The optional depth-state
+cache reports 64 entries, 59,998 hits, 64 misses and 322 capacity fallbacks;
+it remains disabled by default.
+
+Actual FEX guest regression: 4/4 PASS, x86_64 and i386 vk_device/vk_reload.
+Device probes read back 0xcafef00d and 0x0badc0de; reload probes complete
+three loads. Private cloned roots only; no Steam Frame assets changed.
+
+This fixes one measured host-memory leak. These synthetic probes do not
+measure CS2 FPS, frame-time percentiles, whole-game memory or stuttering.
+No game settings, resolution, quality, TSO, sync backend or driver
+defaults were changed by patch 23. Native Wine/DXVK testing, when run,
+is recorded separately.
+
+Primary API reference:
+https://developer.apple.com/documentation/objectivec/nsobject-swift.class/new?language=objc

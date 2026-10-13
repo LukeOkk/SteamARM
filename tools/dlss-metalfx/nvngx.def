@@ -1,0 +1,87 @@
+; The NGX surface games and NVIDIA's static NGX SDK look up in the NGX core
+; (_nvngx.dll) or in nvngx.dll: the public SDK's entry points (github.com/
+; NVIDIA/DLSS include/nvsdk_ngx.h, nvsdk_ngx_vk.h, nvsdk_ngx_params.h) and
+; the core's own names the static SDK calls (the _ProjectID and
+; _PopulateParameters_Impl forms, NVSDK_NGX_GetSnippetVersion), as
+; OptiScaler's nvngx stand-in resolves them. build.sh sets LIBRARY to the
+; file name it builds.
+LIBRARY nvngx.dll
+EXPORTS
+    NVSDK_NGX_D3D12_Init
+    NVSDK_NGX_D3D12_Init_Ext
+    NVSDK_NGX_D3D12_Init_ProjectID
+    NVSDK_NGX_D3D12_Init_with_ProjectID
+    NVSDK_NGX_D3D12_Shutdown
+    NVSDK_NGX_D3D12_Shutdown1
+    NVSDK_NGX_D3D12_GetParameters
+    NVSDK_NGX_D3D12_GetCapabilityParameters
+    NVSDK_NGX_D3D12_AllocateParameters
+    NVSDK_NGX_D3D12_PopulateParameters_Impl
+    NVSDK_NGX_D3D12_DestroyParameters
+    NVSDK_NGX_D3D12_GetScratchBufferSize
+    NVSDK_NGX_D3D12_CreateFeature
+    NVSDK_NGX_D3D12_ReleaseFeature
+    NVSDK_NGX_D3D12_EvaluateFeature
+    NVSDK_NGX_D3D12_EvaluateFeature_C
+    NVSDK_NGX_D3D12_GetFeatureRequirements
+    NVSDK_NGX_VULKAN_RequiredExtensions
+    NVSDK_NGX_VULKAN_Init
+    NVSDK_NGX_VULKAN_Init_Ext
+    NVSDK_NGX_VULKAN_Init_Ext2
+    NVSDK_NGX_VULKAN_Init_ProjectID
+    NVSDK_NGX_VULKAN_Init_ProjectID_Ext
+    NVSDK_NGX_VULKAN_Init_with_ProjectID
+    NVSDK_NGX_VULKAN_Shutdown
+    NVSDK_NGX_VULKAN_Shutdown1
+    NVSDK_NGX_VULKAN_GetParameters
+    NVSDK_NGX_VULKAN_GetCapabilityParameters
+    NVSDK_NGX_VULKAN_AllocateParameters
+    NVSDK_NGX_VULKAN_PopulateParameters_Impl
+    NVSDK_NGX_VULKAN_DestroyParameters
+    NVSDK_NGX_VULKAN_GetScratchBufferSize
+    NVSDK_NGX_VULKAN_CreateFeature
+    NVSDK_NGX_VULKAN_CreateFeature1
+    NVSDK_NGX_VULKAN_ReleaseFeature
+    NVSDK_NGX_VULKAN_EvaluateFeature
+    NVSDK_NGX_VULKAN_EvaluateFeature_C
+    NVSDK_NGX_VULKAN_GetFeatureRequirements
+    NVSDK_NGX_VULKAN_GetFeatureInstanceExtensionRequirements
+    NVSDK_NGX_VULKAN_GetFeatureDeviceExtensionRequirements
+    NVSDK_NGX_D3D11_Init
+    NVSDK_NGX_D3D11_Init_Ext
+    NVSDK_NGX_D3D11_Init_ProjectID
+    NVSDK_NGX_D3D11_Init_with_ProjectID
+    NVSDK_NGX_D3D11_Shutdown
+    NVSDK_NGX_D3D11_Shutdown1
+    NVSDK_NGX_D3D11_GetParameters
+    NVSDK_NGX_D3D11_GetCapabilityParameters
+    NVSDK_NGX_D3D11_AllocateParameters
+    NVSDK_NGX_D3D11_PopulateParameters_Impl
+    NVSDK_NGX_D3D11_DestroyParameters
+    NVSDK_NGX_D3D11_GetScratchBufferSize
+    NVSDK_NGX_D3D11_CreateFeature
+    NVSDK_NGX_D3D11_ReleaseFeature
+    NVSDK_NGX_D3D11_EvaluateFeature
+    NVSDK_NGX_D3D11_EvaluateFeature_C
+    NVSDK_NGX_D3D11_GetFeatureRequirements
+    NVSDK_NGX_UpdateFeature
+    NVSDK_NGX_GetSnippetVersion
+    NVSDK_NGX_Parameter_SetULL
+    NVSDK_NGX_Parameter_SetF
+    NVSDK_NGX_Parameter_SetD
+    NVSDK_NGX_Parameter_SetUI
+    NVSDK_NGX_Parameter_SetI
+    NVSDK_NGX_Parameter_SetD3d11Resource
+    NVSDK_NGX_Parameter_SetD3d12Resource
+    NVSDK_NGX_Parameter_SetVoidPointer
+    NVSDK_NGX_Parameter_GetULL
+    NVSDK_NGX_Parameter_GetF
+    NVSDK_NGX_Parameter_GetD
+    NVSDK_NGX_Parameter_GetUI
+    NVSDK_NGX_Parameter_GetI
+    NVSDK_NGX_Parameter_GetD3d11Resource
+    NVSDK_NGX_Parameter_GetD3d12Resource
+    NVSDK_NGX_Parameter_GetVoidPointer
+    SteamARM_NGX_Ident
+    SteamARM_NGX_DeviceInfo
+    SteamARM_NGX_FeatureStats

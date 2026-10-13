@@ -89,7 +89,7 @@ struct ApplicationCoreTests {
         let envs = try JSONDecoder().decode([LinuxBaseEnvironment].self,
                                             from: JSONEncoder().encode(LinuxBaseEnvironment.builtIn))
         check(envs == LinuxBaseEnvironment.builtIn, "environments round-trip as JSON")
-        // The Fedora ARM64 root of the native arm64 Steam client: native, never FEX.
+        // The Fedora ARM64 root for Heroic/custom applications: native, never FEX.
         let p4 = try LaunchPlanner.plan(architecture: "aarch64", environmentID: "armroot")
         check(p4.runner == .native && p4.environment.guestRoot == "/tmp/lxrt-armroot" && !p4.usesVirtualMachine, "aarch64 in armroot -> native")
         check(p4.environment.transitional, "armroot is transitional")
@@ -111,7 +111,7 @@ struct ApplicationCoreTests {
         check(SessionFiles.launchKind("Steam (x86_64, translator: FEX) starting on :2 (log l).\nsession=started\n") == .started, "started")
         check(SessionFiles.launchKind("Steam is already running.\nsession=reshown\n") == .reshown,
               "the x86 Steam of run-app.sh shown again is not an adoption")
-        check(SessionFiles.launchKind("Steam is already running.\nsession=adopted") == .adopted, "run-steam.sh Steam adopted")
+        check(SessionFiles.launchKind("Steam is already running.\nsession=adopted") == .adopted, "run-steam-arm64.sh Steam adopted")
         check(SessionFiles.launchKind("Heroic Steam is already running.\nsession=reshown") == .reshown, "a name ending in Steam")
         check(SessionFiles.launchKind("Steam is already running.") == nil, "no marker: nothing guessed from the text")
         check(SessionFiles.launchKind("session=adopted is already running.\nsession=started") == .started, "only a whole line counts")
@@ -251,13 +251,16 @@ struct ApplicationCoreTests {
         check(PrimarySteam.pick("steam-arm64", usable: { _ in false }) == nil, "none can start: nil")
         // Clients started outside the launcher.
         let x86 = [(pid: Int32(10), command: "build/lxrun /tmp/lxrt-root/usr/bin/FEX-gb /tmp/fexhome/.local/share/Steam/ubuntu12_32/steam -noverifyfiles")]
-        check(OutsideClient.find(x86, root: { _ in nil })?.id == "steam" && OutsideClient.find(x86, root: { _ in nil })?.arch == nil,
-              "outside x86 client: steam, architecture unknown")
+        check(OutsideClient.find(x86, root: { _ in nil }) == nil, "retired outside x86 client ignored")
         let arm = [(pid: Int32(11), command: "build/lxrun /tmp/armhome/.local/share/Steam/steamrtarm64/steam -srt-logger-opened")]
-        check(OutsideClient.find(arm, root: { _ in "/tmp/lxrt-armroot" })?.id == "steam-arm64", "outside native client, Fedora root")
+        check(OutsideClient.find(arm, root: { _ in "/tmp/lxrt-armroot" }) == nil, "retired outside Fedora client ignored")
+        check(OutsideClient.find(arm, root: { _ in nil }) == nil, "unidentified outside root ignored")
         check(OutsideClient.find(arm, root: { _ in "/tmp/lxrt-arm64root" })?.id == "steam-arm64-frame"
               && OutsideClient.find(arm, root: { _ in "/tmp/lxrt-arm64root" })?.arch == "aarch64 none",
               "outside native client, Steam Frame root, aarch64")
+        let mixed = arm + [(pid: Int32(13), command: arm[0].command)]
+        check(OutsideClient.find(mixed, root: { $0 == 13 ? "/tmp/lxrt-arm64root" : "/tmp/lxrt-armroot" })?.id == "steam-arm64-frame",
+              "principal client found even after a retired client")
         check(OutsideClient.find([(pid: Int32(12), command: "build/lxrun /usr/bin/foo")], root: { _ in nil }) == nil, "no client")
         check(caps.effectiveGraphics(.auto) == .vulkanMoltenVK, "AUTO graphics is MoltenVK")
         check(caps.effectiveGraphics(.vulkanKosmicKrisp) == .vulkanMoltenVK, "undetected KosmicKrisp -> MoltenVK")

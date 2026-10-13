@@ -7,7 +7,7 @@ CC        := clang
 
 .PHONY: all clean
 
-all: lxrt shim launcher inputd wlmac ffx-metalfx
+all: lxrt shim launcher inputd wlmac ffx-metalfx dlss-metalfx
 
 # steamarm-inputd: the Mac's controllers as /dev/input for guests (tools/inputd).
 .PHONY: inputd
@@ -32,11 +32,21 @@ build/steamarm-inputd: tools/inputd/inputd.c
 FFX_DIR  := build/ffx-metalfx/x86_64-windows
 FFX_DLLS := $(addprefix $(FFX_DIR)/,amd_fidelityfx_dx12.dll amd_fidelityfx_vk.dll amd_fidelityfx_upscaler_dx12.dll)
 FFX_SRCS := $(wildcard tools/ffx-metalfx/*.c tools/ffx-metalfx/*.h tools/ffx-metalfx/*.def) \
-            tools/ffx-metalfx/build.sh tools/ffx-metalfx/wine-builtin-mark.py
+            tools/ffx-metalfx/build.sh tools/ffx-metalfx/wine-builtin-mark.py shim/mfx_temporal.h
 .PHONY: ffx-metalfx
 ffx-metalfx: $(FFX_DLLS)
 $(FFX_DIR)/%.dll: $(FFX_SRCS)
 	FFX_OUT=$@ tools/ffx-metalfx/build.sh
+
+# Experimental NGX temporal bridge; selected explicitly with STEAMARM_WIN_DLSS.
+NGX_DIR  := build/dlss-metalfx/x86_64-windows
+NGX_DLLS := $(addprefix $(NGX_DIR)/,nvngx.dll _nvngx.dll)
+NGX_SRCS := $(wildcard tools/dlss-metalfx/*.c tools/dlss-metalfx/*.h tools/dlss-metalfx/*.def) \
+            tools/dlss-metalfx/build.sh tools/ffx-metalfx/wine-builtin-mark.py shim/mfx_temporal.h
+.PHONY: dlss-metalfx
+dlss-metalfx: $(NGX_DLLS)
+$(NGX_DIR)/%.dll: $(NGX_SRCS)
+	NGX_OUT=$@ tools/dlss-metalfx/build.sh
 
 resources/AppIcon.icns: scripts/make-icon.py scripts/make-icns.sh
 	@python3 scripts/make-icon.py resources/icon.png

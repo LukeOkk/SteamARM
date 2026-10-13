@@ -84,7 +84,7 @@ BASE_ROOT = os.environ.get("ANDROID_X86_ROOT") or VOLUME + "/root-x86_64"
 ROOT = os.environ.get("ANDROID_SESSION_ROOT") or VOLUME + "/session"
 # Every runtime process of the session (Weston, Android's services) carries
 # this through its guest execs (the runtime keeps LXRT_* variables), so
-# scripts/run-steam.sh and scripts/run-app.sh, which stop guest programs,
+# scripts/run-app.sh, which stops guest programs,
 # can leave the Android session alone. They used to kill every lxrun
 # process, Android included (MEASURED: a Steam stop ended the session's boot).
 os.environ["LXRT_SESSION"] = "android"

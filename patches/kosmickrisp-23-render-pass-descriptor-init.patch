@@ -1,0 +1,15 @@
+diff --git a/src/kosmickrisp/bridge/mtl_render_state.m b/src/kosmickrisp/bridge/mtl_render_state.m
+--- a/src/kosmickrisp/bridge/mtl_render_state.m
++++ b/src/kosmickrisp/bridge/mtl_render_state.m
+@@ -22,7 +22,10 @@
+ mtl_new_render_pass_descriptor(void)
+ {
+    @autoreleasepool {
+-      return [[MTL4RenderPassDescriptor new] init];
++      /* new already initializes the descriptor. A second init overwrites
++       * its retained color-attachment array: 96 bytes lost per descriptor
++       * on macOS 27. Keep the same +1 ownership with exactly one init. */
++      return [MTL4RenderPassDescriptor new];
+    }
+ }
+ 

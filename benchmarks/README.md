@@ -95,6 +95,9 @@ the Fedora VM that was deleted on 2026-09-27; they are history, and
 | 57 | `stage57-wine-arm64-native.txt` | 10-06 | Valve's Proton ARM64 natively under the runtime: KUSER_SHARED_DATA as a virtual page (runtime/lowpage.c), the TEB block limit and the bin dir fixed in a prototype; wineserver (aarch64) and the ARM64X ntdll/kernel32 load; stops at x18 reads in PE code. |
 | 57 | `stage57-depth-cache-and-frame-pacing.txt` | 10-05 | Optional bounded depth/stencil cache: 39.4% less recording time in a paired microbenchmark, pixels/FEX/Proton probes passed; default off. CS2 and native Metal traces still show hitches and no established stable 100 FPS. Current display link exposes fixed refresh rates only. |
 | 58 | `stage58-adaptive-sync-and-drawable-wait.txt` | 10-05 | bounded notification wait tested on ARM64/FEX; actual display/native fullscreen eligibility and fixed-refresh fallback; <10 ms CS2 and physical VRR remain unverified |
+| 59 | `stage59-steamarm-performance.txt` | 10-06 | corrected Vulkan guest descriptor/multi-draw pointers, driver readbacks, FEX and NTSYNC queue bounds; CPU microbenchmarks, not game FPS |
+| 61 | `stage61-cs2-stutter.txt` | 10-06 | CS2 memory-pressure and JIT/readlink diagnosis; exact scoped JIT rescan, opt-in prefix cache; post-change game comparison pending |
+| 62 | `stage62-kosmickrisp-descriptor-lifetime.txt` | 10-06 | fixes repeated Metal render-pass initialization: about 48 MB per 500,000 passes removed, render/FEX readbacks pass |
 
 ## After stage 21 (no stage file)
 

@@ -5,6 +5,10 @@ com.steamarm.launcher) that runs Linux apps through the SteamARM runtime (no VM)
 styled like Ryujinx / GameHub. UI text in Spanish.
 
 ## Context
+Historical phase-A document: the x86/Fedora Steam client entrypoints below
+(`run-steam.sh` and `install-steam.sh`) are retired. The current principal
+client is SteamARM (`steam-arm64-frame`); shared FEX/Proton game support remains.
+
 The launch path below predates the ARM64-first dispatch: `aarch64` entries
 now run through `scripts/run-native.sh`, without FEX. The current lifecycle is
 in `docs/APPLICATION_MANAGER.md`.
