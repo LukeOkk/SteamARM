@@ -3264,6 +3264,77 @@ static void readstats_note(int fd, long ret, uint64_t ns)
     pthread_mutex_unlock(&lk);
 }
 
+// ------------------------------------------------- getrusage(RUSAGE_THREAD)
+//
+// Valve's ntdll brackets every NtYieldExecution -- SwitchToThread, Sleep(0),
+// a zero NtDelayExecution -- with two getrusage(RUSAGE_THREAD), and answers
+// STATUS_NO_YIELD_PERFORMED when ru_nvcsw and ru_nivcsw both came back the
+// same. That was a process-wide getrusage here, and XNU walks every thread of
+// the task for one (calcru): the ntdll sequence cost 5.3-6.0 us with 130
+// threads alive, where the sched_yield in it costs 0.13 us (MEASURED, a guest
+// loop of it). Now, with nothing that grows with the thread count:
+//   - ru_utime, ru_stime: this thread's, from thread_info on the port
+//     libpthread already holds for it (no mach_thread_self/deallocate pair);
+//   - ru_nvcsw, ru_nivcsw: the runtime's own counts (thread.c), kept below;
+//   - the rest is process-wide, as it was (and as Linux's ru_maxrss is): a
+//     sample each thread takes again when its copy is a second old.
+//
+// A context switch is read off the clock. Darwin rewrites TPIDR_EL0 at every
+// switch-in, which gave an experiment its ground truth (and nothing more: it
+// is no marker for the runtime to set, xzone malloc reads that register):
+// with 0 to 20 spinning threads, on performance and on efficiency cores, a
+// swtch_pri (sched_yield) that stayed on the CPU took under 2 us -- all but
+// 0.2-2 % of them on an efficiency core, under 0.1 % on a performance core --
+// and one that left it took 2 us or more, every time (MEASURED). swtch_pri's
+// own answer is no help: under load it said "someone else could run" for
+// nearly every call that never left the CPU.
+#define CSW_NS 2000
+
+// The calls that wait: time past CSW_NS in one was spent off the CPU, and
+// counts as a voluntary switch, as the sleep it was is on Linux.
+static bool csw_wait_call(long nr, uint64_t a1)
+{
+    switch (nr) {
+    case LNR_futex: {
+        unsigned op = (unsigned)a1 & 0x7f;     // WAIT, WAIT_BITSET, the PI waits
+        return op == 0 || op == 9 || op == 6 || op == 11 || op == 13;
+    }
+    case 449:                                   // futex_waitv
+    case LNR_nanosleep: case LNR_clock_nanosleep:
+    case LNR_epoll_pwait: case LNR_epoll_pwait2: case LNR_ppoll: case LNR_pselect6:
+        return true;
+    }
+    return false;
+}
+
+static long thread_rusage(int64_t *o)
+{
+    thread_basic_info_data_t ti;
+    mach_msg_type_number_t cnt = THREAD_BASIC_INFO_COUNT;
+    if (thread_info(pthread_mach_thread_np(pthread_self()), THREAD_BASIC_INFO,
+                    (thread_info_t)&ti, &cnt) != KERN_SUCCESS)
+        memset(&ti, 0, sizeof ti);
+    static _Thread_local struct { uint64_t at; int64_t f[12]; } proc;
+    uint64_t now = clock_gettime_nsec_np(CLOCK_UPTIME_RAW);
+    if (!proc.at || now - proc.at > 1000000000ull) {
+        struct rusage ru;
+        if (getrusage(RUSAGE_SELF, &ru) != 0)
+            return LERR(errno);
+        const int64_t f[12] = {
+            ru.ru_maxrss / 1024, ru.ru_ixrss, ru.ru_idrss, ru.ru_isrss, ru.ru_minflt, ru.ru_majflt,
+            ru.ru_nswap, ru.ru_inblock, ru.ru_oublock, ru.ru_msgsnd, ru.ru_msgrcv, ru.ru_nsignals,
+        };
+        memcpy(proc.f, f, sizeof f);
+        proc.at = now;
+    }
+    o[0] = ti.user_time.seconds; o[1] = ti.user_time.microseconds;
+    o[2] = ti.system_time.seconds; o[3] = ti.system_time.microseconds;
+    memcpy(&o[4], proc.f, sizeof proc.f);       // ru_maxrss .. ru_nsignals
+    o[16] = (int64_t)lxrt_nvcsw;
+    o[17] = (int64_t)lxrt_nivcsw;
+    return 0;
+}
+
 void lxrt_sync_pending_flush(void);
 
 void lxrt_dispatch(struct lxrt_regs *r)
@@ -3290,6 +3361,8 @@ void lxrt_dispatch(struct lxrt_regs *r)
         g_readstats = getenv("LXRT_READSTATS") ? 1 : 0;
     const uint64_t rs_t0 = (g_readstats && (nr == 63 || nr == 65 || nr == 67 || nr == 69))
                                ? clock_gettime_nsec_np(CLOCK_UPTIME_RAW) : 0;
+    // A wait that left the CPU, for getrusage(RUSAGE_THREAD) (thread_rusage).
+    const uint64_t csw_t0 = csw_wait_call(nr, a1) ? clock_gettime_nsec_np(CLOCK_UPTIME_RAW) : 0;
 
     // Entry trace. Without it a syscall that never returns leaves no record at
     // all, and "the last line is the one before the problem" is a guess.
@@ -3891,9 +3964,15 @@ restart:
         else
             ret = do_nanosleep(a2, a3);
         break;
-    case LNR_sched_yield:
+    case LNR_sched_yield: {
+        // Counted when it gave the CPU away (thread_rusage): only then does
+        // Wine report the yield as performed, as Linux's counts let it.
+        uint64_t t0 = clock_gettime_nsec_np(CLOCK_UPTIME_RAW);
         ret = ret_of(sched_yield());
+        if (clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - t0 >= CSW_NS)
+            lxrt_nivcsw++;
         break;
+    }
     case LNR_personality:
         // FEX sets ADDR_NO_RANDOMIZE so the guest's layout is reproducible.
         // Nothing here randomises anything, so the request is already
@@ -3904,26 +3983,17 @@ restart:
         // Linux: two 16-byte timevals (long, long) then 14 longs; Darwin's
         // timeval carries a 32-bit tv_usec plus padding, and ru_maxrss is in
         // bytes where Linux counts KiB. RUSAGE_THREAD (1) has no Darwin
-        // counterpart: this thread's times come from thread_info, the rest
-        // from the process. (Unimplemented, bash's `time` printed garbage.)
+        // counterpart: thread_rusage, above lxrt_dispatch. (Unimplemented,
+        // bash's `time` printed garbage.)
         if (!a1) { ret = LERR(EFAULT); break; }
         long who = (long)a0;
         if (who != 0 && who != -1 && who != 1) { ret = LERR(EINVAL); break; }
+        if (who == 1) { ret = thread_rusage((int64_t *)a1); break; }
         struct rusage ru;
         if (getrusage(who == -1 ? RUSAGE_CHILDREN : RUSAGE_SELF, &ru) != 0) { ret = LERR(errno); break; }
         int64_t *o = (int64_t *)a1;
         o[0] = ru.ru_utime.tv_sec; o[1] = ru.ru_utime.tv_usec;
         o[2] = ru.ru_stime.tv_sec; o[3] = ru.ru_stime.tv_usec;
-        if (who == 1) {
-            thread_basic_info_data_t ti;
-            mach_msg_type_number_t cnt = THREAD_BASIC_INFO_COUNT;
-            mach_port_t th = mach_thread_self();
-            if (thread_info(th, THREAD_BASIC_INFO, (thread_info_t)&ti, &cnt) == KERN_SUCCESS) {
-                o[0] = ti.user_time.seconds; o[1] = ti.user_time.microseconds;
-                o[2] = ti.system_time.seconds; o[3] = ti.system_time.microseconds;
-            }
-            mach_port_deallocate(mach_task_self(), th);
-        }
         o[4] = ru.ru_maxrss / 1024;
         o[5] = ru.ru_ixrss; o[6] = ru.ru_idrss; o[7] = ru.ru_isrss;
         o[8] = ru.ru_minflt; o[9] = ru.ru_majflt; o[10] = ru.ru_nswap;
@@ -3947,13 +4017,29 @@ restart:
         ret = (long)(clock_gettime_nsec_np(CLOCK_MONOTONIC_RAW) / 10000000ull);
         break;
     }
-    case LNR_getcpu:
-        // (cpu, node, tcache). Reporting CPU 0 is allowed and is what a caller
-        // that only wants a hint can act on.
-        if (a0) *(uint32_t *)a0 = 0;
+    case LNR_getcpu: {
+        // (cpu, node, tcache). The CPU the thread is on, where Darwin's own
+        // pthread_cpu_number_np reads it: the low bits of TPIDR_EL0, which
+        // the kernel sets for the CPU at every switch-in -- no syscall, and
+        // guest code never writes that register (rewrite.c). glibc's
+        // sched_getcpu ends up here (rseq is ENOSYS, and an aarch64 vDSO
+        // has no getcpu), Wine's NtGetCurrentProcessorNumber through it, and
+        // FEX's ARM64EC JIT offers x86 code no RDTSCP or RDPID under Wine.
+        // CPU 0 for every thread made Windows code that keeps per-processor
+        // state (GetCurrentProcessorNumber) pile onto one slot. Kept below
+        // the count sched_getaffinity reports.
+        static long ncpu;
+        if (!ncpu) {
+            long n = sysconf(_SC_NPROCESSORS_ONLN);
+            ncpu = n > 0 ? n : 1;
+        }
+        size_t cpu = 0;
+        pthread_cpu_number_np(&cpu);
+        if (a0) *(uint32_t *)a0 = (uint32_t)(cpu % (size_t)ncpu);
         if (a1) *(uint32_t *)a1 = 0;
         ret = 0;
         break;
+    }
     case LNR_getcwd: {
         // Linux returns the length INCLUDING the terminator; getcwd(3) returns
         // the buffer. A guest that reads the return value as a pointer is
@@ -5316,6 +5402,10 @@ restart:
 aids_done:
     if (rs_t0)
         readstats_note((int)a0, ret, clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - rs_t0);
+    // EAGAIN never parked: the futex word had already changed (a spin that
+    // saw it change can outlast CSW_NS).
+    if (csw_t0 && ret != LERR(EAGAIN) && clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - csw_t0 >= CSW_NS)
+        lxrt_nvcsw++;
     if (g_trace && nr != LNR_clock_gettime)
         fprintf(lxrt_trace_stream(), "[lxrt] %d/%d syscall %ld -> %ld\n", (int)getpid(), lxrt_gettid(), nr, ret);
 

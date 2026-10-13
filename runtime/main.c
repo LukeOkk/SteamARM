@@ -46,6 +46,7 @@ static void *guest_thread(void *arg)
     // Registered before any guest code runs, with tid == pid, so the thread
     // table always holds the initial thread (lxrt_thread_exit counts it).
     (void)lxrt_gettid();
+    lxrt_server_prio_apply();           // wineserver's thread: thread.c
     // A process-directed signal goes to any thread that is not blocking it,
     // and the main thread is sitting inside AppKit. Delivering a guest handler
     // there would rewrite AppKit's context into guest code. main() blocks

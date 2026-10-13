@@ -2235,6 +2235,10 @@ static bool resolve_prio_thread(int who, pthread_t *out)
 // already been recorded by the caller; this is only the effect.
 static long apply_nice(pthread_t t, int nice)
 {
+    // wineserver's main thread keeps the band the runtime gave it
+    // (thread.c, LXRT_WINESERVER_QOS); the value is still recorded.
+    if (lxrt_server_boosted(t))
+        return 0;
     int pol = 0;
     struct sched_param dp;
     memset(&dp, 0, sizeof dp);

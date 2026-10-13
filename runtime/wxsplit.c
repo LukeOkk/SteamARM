@@ -141,6 +141,7 @@ static int g_lazy;              // LXRT_LAZY_EXEC (header): 0 off, 1 every R-X r
 
 static bool g_program_is_fex;
 static bool g_program_is_wine_loader;
+static bool g_program_is_wineserver;
 
 void lxrt_wx_set_program(const char *path)
 {
@@ -150,6 +151,9 @@ void lxrt_wx_set_program(const char *path)
     // (lxrt_no_x18 below).
     g_program_is_wine_loader = !strcmp(base, "wine") || !strcmp(base, "wine64") ||
                                !strcmp(base, "wine-preloader") || !strcmp(base, "wine64-preloader");
+    // The server: Wine execs it by that name (start_server), from Proton's
+    // files/bin (thread.c, lxrt_server_prio_apply).
+    g_program_is_wineserver = !strcmp(base, "wineserver");
     // The emulator itself: /usr/lib/lxrt-emu/FEX, FEX-gb, FEXInterpreter,
     // FEXLoader. FEXServer and the config tools are ordinary native programs.
     g_program_is_fex = !strncmp(base, "FEX", 3) && strncmp(base, "FEXServer", 9) &&
@@ -170,6 +174,7 @@ void lxrt_wx_set_program(const char *path)
 
 // Whether the main program is the emulator (stack.c: its AT_HWCAP).
 bool lxrt_program_is_fex(void) { return g_program_is_fex; }
+bool lxrt_program_is_wineserver(void) { return g_program_is_wineserver; }
 
 // LXRT_NO_X18 (set by tools/steamarm-native-proton): no x18 virtualisation,
 // so Wine's PE code and FEX's ARM64EC JIT output keep the hardware register,

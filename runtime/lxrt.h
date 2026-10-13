@@ -466,6 +466,12 @@ unsigned long lxrt_tlskeep_fixups(void);
 // thread.c -- guest threads and futexes.
 int  lxrt_gettid(void);
 void lxrt_qos_apply(void);            // LXRT_QOS=interactive (thread.c)
+void lxrt_server_prio_apply(void);    // LXRT_WINESERVER_QOS: wineserver's main thread (thread.c)
+bool lxrt_server_boosted(pthread_t t);
+// The calling thread's context switches the runtime saw, for
+// getrusage(RUSAGE_THREAD): voluntary (a wait that left the CPU) and
+// involuntary (a sched_yield that gave it away). dispatch.c counts them.
+extern _Thread_local uint64_t lxrt_nvcsw, lxrt_nivcsw;
 void lxrt_futex_park_enter(const void *addr);   // a thread about to park on a futex word (thread.c)
 void lxrt_futex_park_leave(const void *addr);
 void lxrt_futex_park_reset(void);               // in a fork child
@@ -531,6 +537,7 @@ int lxrt_pe_images(uint64_t start, uint64_t end, struct lxrt_range *out, int max
 long lxrt_membarrier(int cmd, unsigned flags);
 bool lxrt_hwcap_cpuid(void);
 bool lxrt_program_is_fex(void);
+bool lxrt_program_is_wineserver(void);
 bool lxrt_no_x18(void);
 // subpage.c: the free rest of a host page under a rounded-up partial file
 // mapping (dispatch.c), and the mappings that end it.

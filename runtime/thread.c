@@ -337,11 +337,24 @@ static struct guest_thread *gt_self(void)
     return gt;
 }
 
+// The calling thread's context switches as getrusage(RUSAGE_THREAD) reports
+// them (dispatch.c). Darwin counts switches per thread but gives user space
+// no way to read the count, so these are the ones the runtime sees happen:
+// a wait call that left the CPU (voluntary) and a sched_yield that gave it
+// away (involuntary -- the thread stayed runnable, as Linux counts it).
+_Thread_local uint64_t lxrt_nvcsw, lxrt_nivcsw;
+
+static void server_prio_set(void);
+static pthread_t g_server_th;
+static bool g_server_boosted;
+
 // After fork(): only the forking thread survives, and Linux makes it the
 // new process's main thread -- tid == pid. Every other registry entry is a
 // dead thread, and a lock one of them held would never be released.
 void lxrt_thread_after_fork(void)
 {
+    // A new Linux task starts with no switches counted.
+    lxrt_nvcsw = lxrt_nivcsw = 0;
     pthread_mutex_init(&g_threads_lock, NULL);
     pthread_t me = pthread_self();
     for (int i = 0; i < MAX_GUEST_THREADS; i++) {
@@ -357,6 +370,13 @@ void lxrt_thread_after_fork(void)
     atomic_store(&g_next_tid, 1);
     g_main_guest = me;
     g_main_guest_set = true;
+    // Darwin does not carry a thread's precedence into the child (it ran at
+    // 31 again, MEASURED), and wineserver serves from the child it
+    // daemonises into: see lxrt_server_prio_apply.
+    if (g_server_boosted && pthread_equal(g_server_th, me))
+        server_prio_set();
+    else
+        g_server_boosted = false;
 }
 
 
@@ -746,6 +766,50 @@ void lxrt_qos_apply(void)
     }
     if (mode == 1)
         pthread_set_qos_class_self_np(QOS_CLASS_USER_INTERACTIVE, 0);
+}
+
+// LXRT_WINESERVER_QOS (on unless it is 0): wineserver's main thread -- all of
+// Valve's wineserver, which serves every request from that one thread -- at
+// the priority of a user-interactive thread of the frontmost app, still
+// timesharing. Every SetEvent that wakes another thread, every wait and every
+// other server call goes through it, and at the default 31 it waited for a
+// busy performance core behind the game's own threads. CrossOver raises its
+// server thread the same way, and further (fixed priority, importance 63:
+// server/msync.c, set_thread_policy_qos).
+//
+// The QoS class would change nothing here: a process below an app that gave
+// it no role of its own -- whatever the X server's spawn service or the
+// launcher starts -- has USER_INITIATED and USER_INTERACTIVE capped at the
+// default (threads of those classes MEASURED at 31, UTILITY at 20,
+// BACKGROUND at 4; no thread of the running lxrun processes above 31 but
+// those a guest gave a priority of its own). LXRT_QOS above meets the same
+// cap. A precedence set with pthread_setschedparam is not capped (47,
+// MEASURED), so this takes the top of the timesharing band, where nice -20
+// lands (fileops2.c). Timesharing keeps the decay: a server that spins sinks
+// toward the default like any other thread.
+//
+// Wine probes nice values on itself as it starts (init_threading: -20, then
+// 0); fileops2.c records them but leaves this thread's band alone, or the 0
+// would put it back at 31.
+static void server_prio_set(void)
+{
+    struct sched_param sp = { .sched_priority = sched_get_priority_max(SCHED_OTHER) };
+    g_server_boosted = sp.sched_priority > 0 &&
+                       pthread_setschedparam(pthread_self(), SCHED_OTHER, &sp) == 0;
+    g_server_th = pthread_self();
+}
+
+// On wineserver's main guest thread, before any guest code (main.c).
+void lxrt_server_prio_apply(void)
+{
+    const char *e = getenv("LXRT_WINESERVER_QOS");
+    if (lxrt_program_is_wineserver() && !(e && !strcmp(e, "0")))
+        server_prio_set();
+}
+
+bool lxrt_server_boosted(pthread_t t)
+{
+    return g_server_boosted && pthread_equal(g_server_th, t);
 }
 
 static void *thread_start(void *arg)

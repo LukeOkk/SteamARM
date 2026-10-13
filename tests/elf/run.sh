@@ -902,6 +902,54 @@ if [ -f "$STAGE/usr/lib64/libc.a" ] && [ -n "$GCCDIR" ]; then
     done
 fi
 
+# 19k. getrusage(RUSAGE_THREAD) as Wine's NtYieldExecution reads it: this
+# thread's times and the context switches the runtime saw it make, not the
+# process's from a getrusage that walks every thread (runtime/dispatch.c,
+# thread_rusage); getcpu gives the CPU the thread is on, not 0. Then
+# wineserver's thread at the top of the timesharing band (runtime/thread.c,
+# LXRT_WINESERVER_QOS): the program's "server" mode starts as wineserver does
+# -- a nice probe, then the fork it serves from -- and ps reads the child's
+# thread priorities, under the name wineserver, with LXRT_WINESERVER_QOS=0,
+# and under its own name.
+if [ -f "$STAGE/usr/lib64/libc.a" ] && [ -n "$GCCDIR" ]; then
+    if err=$(glibc_cc -static-pie -O2 -o build/thread_rusage tests/elf/thread_rusage.c 2>&1); then
+        out=$(deadline 30 ./build/lxrun "$PWD/build/thread_rusage" 2>&1); rc=$?
+        if [ "$rc" -eq 0 ] && grep -q '^PASS' <<<"$out"; then
+            ok "thread_rusage: $(grep -c '^  OK  ' <<<"$out") of $(grep -cE '^  (OK |MAL)' <<<"$out"); $(grep "^ntdll's yield" <<<"$out")"
+        else
+            bad "thread_rusage" "rc=$rc $(grep MAL <<<"$out" | head -3 | tr '\n' ' ')"
+        fi
+        srv=$(mktemp -d /tmp/lxrt-wineserver.XXXXXX)
+        cp build/thread_rusage "$srv/wineserver"
+        server_pri() {      # $1: the program, then env settings; the child's highest thread priority
+            local prog=$1 pid="" i bg; shift
+            deadline 30 env "$@" ./build/lxrun "$prog" server >"$srv/out" 2>&1 &
+            bg=$!
+            for i in $(seq 1 50); do
+                pid=$(sed -n 's/^child \([0-9]*\).*/\1/p' "$srv/out")
+                [ -n "$pid" ] && break
+                sleep 0.1
+            done
+            sleep 0.5
+            [ -n "$pid" ] && ps -M -p "$pid" |
+                awk 'NR > 1 { for (i = 1; i <= NF; i++) if ($i ~ /^[0-9]+[A-Z]$/) print $i + 0 }' | sort -n | tail -1
+            wait "$bg"
+        }
+        p_on=$(server_pri "$srv/wineserver")
+        p_off=$(server_pri "$srv/wineserver" LXRT_WINESERVER_QOS=0)
+        p_name=$(server_pri "$PWD/build/thread_rusage")
+        rm -rf "$srv"
+        if [ -n "$p_on" ] && [ -n "$p_off" ] && [ -n "$p_name" ] &&
+           [ "$p_on" -ge $((p_off + 8)) ] && [ "$p_name" -le "$p_off" ]; then
+            ok "wineserver's thread at priority $p_on after its nice probe and fork ($p_off with LXRT_WINESERVER_QOS=0, $p_name under another name)"
+        else
+            bad "wineserver's thread priority" "named wineserver ${p_on:-?}, LXRT_WINESERVER_QOS=0 ${p_off:-?}, another name ${p_name:-?}"
+        fi
+    else
+        bad "build thread_rusage" "$err"
+    fi
+fi
+
 # 19c. 32-bit bionic needs process and thread IDs below 65536. Exercise the
 # opt-in namespace with native aarch64 first, leaving the normal run untouched.
 if [ -f "$STAGE/usr/lib64/libc.a" ] && [ -n "$GCCDIR" ]; then
