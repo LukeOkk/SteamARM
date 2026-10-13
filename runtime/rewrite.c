@@ -20,11 +20,14 @@
 // long-term implementation.
 
 #include "lxrt.h"
+#include "offmap.h"
 #include "x18.h"
 bool lxrt_trace_on(void);
 
 #include <errno.h>
 #include <libkern/OSCacheControl.h>
+#include <pthread.h>
+#include <signal.h>
 #include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -88,33 +91,108 @@ static inline uint32_t set_imm16(uint32_t insn, unsigned imm)
 
 static struct lxrt_rewrite_report g_totals;
 
-// Every pool handed out, so a later mapping over one can be recognised rather
-// than silently corrupting live trampolines.
+// Every pool handed out, with the host pages of the guest code it serves:
+//   - a later mapping over one can be recognised rather than silently
+//     corrupting live trampolines;
+//   - it is freed once that code is gone (lxrt_pool_unmapped). The Steam
+//     client's controller thread dlopens and dlcloses libusb about four times
+//     a second, and every load took a 32 KiB pool that stayed (with the
+//     pages offmap.c now frees, ~690 MB of address space an hour, MEASURED
+//     on the live client), and this table was full after about four minutes
+//     -- from then on lxrt_pool_maybe answered yes for every address.
+// A slot whose end is 0 is free and is reused. Readers take no lock (signal.c
+// asks from a fault handler): a pool's slot is not written while the pool
+// lives, a slot is published end last and retired end first, so a reader can
+// at worst see a pool that is just being retired, never miss a live one.
+// Writers hold g_pool_lock with the asynchronous signals blocked: munmap
+// takes it, and a guest signal handler runs nested in the host handler and
+// may call munmap (as offmap.c, wxsplit.c).
 #define MAX_POOLS 1024
-static struct { uint64_t start, end; } g_pools[MAX_POOLS];
-static int g_npools;
+static struct pool {
+    uint64_t start, end;            // end == 0: free
+    uint64_t own_lo, own_hi;        // host pages of the code it serves
+    bool gap;                       // borrowed from an ELF load gap: the guest's reservation
+    bool lost;                      // unmapped or replaced by the guest: not ours to free
+} g_pools[MAX_POOLS];
+static int g_npools;                // slots [0, g_npools) have been used
+static pthread_mutex_t g_pool_lock = PTHREAD_MUTEX_INITIALIZER;
+LXRT_FORK_SAFE(rewrite_pool_lock, g_pool_lock)
 
 #define MAX_ELF_GAPS 128
 static struct { uint64_t next, end; } g_elf_gaps[MAX_ELF_GAPS];
 static int g_nelf_gaps;
+
+static void pool_lock(sigset_t *old)
+{
+    sigset_t all;
+    sigfillset(&all);
+    sigdelset(&all, SIGBUS);
+    sigdelset(&all, SIGSEGV);
+    sigdelset(&all, SIGILL);
+    sigdelset(&all, SIGTRAP);
+    pthread_sigmask(SIG_BLOCK, &all, old);
+    pthread_mutex_lock(&g_pool_lock);
+}
+
+static void pool_unlock(const sigset_t *old)
+{
+    pthread_mutex_unlock(&g_pool_lock);
+    pthread_sigmask(SIG_SETMASK, old, NULL);
+}
+
+static uint64_t ld(const uint64_t *p) { return __atomic_load_n(p, __ATOMIC_ACQUIRE); }
+static int npools(void) { return __atomic_load_n(&g_npools, __ATOMIC_ACQUIRE); }
 
 void lxrt_pool_offer_elf_gap(uint64_t start, uint64_t end)
 {
     if (!start || end <= start || start % LXRT_HOST_PAGE ||
         end % LXRT_HOST_PAGE)
         return;
-    for (int i = 0; i < g_nelf_gaps; i++)
-        if (g_elf_gaps[i].next == start && g_elf_gaps[i].end == end)
-            return;
-    if (g_nelf_gaps < MAX_ELF_GAPS) {
+    sigset_t old;
+    pool_lock(&old);
+    bool known = false;
+    for (int i = 0; i < g_nelf_gaps && !known; i++)
+        known = g_elf_gaps[i].next == start && g_elf_gaps[i].end == end;
+    if (!known && g_nelf_gaps < MAX_ELF_GAPS) {
         g_elf_gaps[g_nelf_gaps].next = start;
         g_elf_gaps[g_nelf_gaps].end = end;
         g_nelf_gaps++;
     }
+    pool_unlock(&old);
 }
 
-// Set when a pool could not be recorded (more than MAX_POOLS).
+// Set when a pool could not be recorded (more than MAX_POOLS live at once).
 static bool g_pools_overflow;
+
+// Record a pool. Caller holds g_pool_lock.
+static void pool_add_locked(uint64_t start, uint64_t end, uint64_t range_start,
+                            uint64_t range_end, bool gap)
+{
+    int n = g_npools, i = 0;
+    while (i < n && g_pools[i].end)
+        i++;
+    if (i == MAX_POOLS) {
+        g_pools_overflow = true;
+        return;
+    }
+    struct pool *p = &g_pools[i];
+    p->own_lo = LXRT_ALIGN_DOWN(range_start, LXRT_HOST_PAGE);
+    p->own_hi = LXRT_ALIGN_UP(range_end, LXRT_HOST_PAGE);
+    p->gap = gap;
+    p->lost = false;
+    __atomic_store_n(&p->start, start, __ATOMIC_RELAXED);
+    __atomic_store_n(&p->end, end, __ATOMIC_RELEASE);
+    if (i == n)
+        __atomic_store_n(&g_npools, n + 1, __ATOMIC_RELEASE);
+}
+
+static void pool_add(uint64_t start, uint64_t end, uint64_t range_start, uint64_t range_end)
+{
+    sigset_t old;
+    pool_lock(&old);
+    pool_add_locked(start, end, range_start, range_end, false);
+    pool_unlock(&old);
+}
 
 // Could addr be inside a pool? lxrt_pool_contains, or true once the list
 // overflowed: signal.c's br x18 recovery must not miss a trampoline.
@@ -125,18 +203,116 @@ bool lxrt_pool_maybe(uint64_t addr)
 
 bool lxrt_pool_contains(uint64_t addr)
 {
-    for (int i = 0; i < g_npools; i++)
-        if (addr >= g_pools[i].start && addr < g_pools[i].end)
+    for (int i = 0, n = npools(); i < n; i++) {
+        uint64_t e = ld(&g_pools[i].end);
+        if (e && addr < e && addr >= ld(&g_pools[i].start))
             return true;
+    }
     return false;
 }
 
 bool lxrt_pool_overlaps(uint64_t start, uint64_t end)
 {
-    for (int i = 0; i < g_npools; i++)
-        if (start < g_pools[i].end && end > g_pools[i].start)
+    for (int i = 0, n = npools(); i < n; i++) {
+        uint64_t e = ld(&g_pools[i].end);
+        if (e && start < e && end > ld(&g_pools[i].start))
             return true;
+    }
     return false;
+}
+
+// The guest is unmapping or replacing the host pages [lo, hi): a pool in them
+// goes with them and is never freed here, and an ELF load gap there is not
+// the guest's reservation any more.
+void lxrt_pool_clobbered(uint64_t lo, uint64_t hi)
+{
+    if (lo >= hi)
+        return;
+    bool gaps = false;
+    for (int i = 0; i < __atomic_load_n(&g_nelf_gaps, __ATOMIC_ACQUIRE) && !gaps; i++)
+        gaps = g_elf_gaps[i].next < hi && g_elf_gaps[i].end > lo;
+    if (!gaps && !lxrt_pool_overlaps(lo, hi))
+        return;
+    sigset_t old;
+    pool_lock(&old);
+    for (int i = 0; i < g_npools; i++)
+        if (g_pools[i].end && lo < g_pools[i].end && hi > g_pools[i].start)
+            g_pools[i].lost = true;
+    for (int i = 0; i < g_nelf_gaps; i++)
+        if (g_elf_gaps[i].next < hi && g_elf_gaps[i].end > lo) {
+            g_elf_gaps[i] = g_elf_gaps[--g_nelf_gaps];
+            i--;
+        }
+    pool_unlock(&old);
+}
+
+// Nothing at all mapped in [lo, hi)?
+static bool range_unmapped(uint64_t lo, uint64_t hi)
+{
+    mach_vm_address_t ra = lo;
+    mach_vm_size_t rs = 0;
+    vm_region_basic_info_data_64_t ri;
+    mach_msg_type_number_t rc = VM_REGION_BASIC_INFO_COUNT_64;
+    mach_port_t obj = MACH_PORT_NULL;
+    kern_return_t kr = mach_vm_region(mach_task_self(), &ra, &rs, VM_REGION_BASIC_INFO_64,
+                                      (vm_region_info_t)&ri, &rc, &obj);
+    if (obj != MACH_PORT_NULL)
+        mach_port_deallocate(mach_task_self(), obj);
+    return kr != KERN_SUCCESS || ra >= hi;
+}
+
+// The guest unmapped (part of) the host pages [lo, hi). A pool whose code has
+// no host page left mapped serves nothing any more -- a trampoline is entered
+// only by the branch that replaced its site in that code -- and is freed:
+// unmapped, or, borrowed from an ELF load gap, given back to the guest's
+// reservation as fresh PROT_NONE memory. Its slot is reused. Code that is
+// still partly mapped keeps its pool, and so does code whose range something
+// else was mapped into meanwhile (a pool can only be kept too long, never
+// freed under live code).
+void lxrt_pool_unmapped(uint64_t lo, uint64_t hi)
+{
+    bool any = false;
+    for (int i = 0, n = npools(); i < n && !any; i++)
+        any = ld(&g_pools[i].end) && g_pools[i].own_lo < hi && g_pools[i].own_hi > lo;
+    if (!any)
+        return;
+    int from = 0;
+    for (;;) {
+        struct { uint64_t start, end; bool gap; } done[16];
+        int nd = 0;
+        sigset_t old;
+        pool_lock(&old);
+        for (; from < g_npools && nd < 16; from++) {
+            struct pool *p = &g_pools[from];
+            if (!p->end || p->own_lo >= hi || p->own_hi <= lo ||
+                !range_unmapped(p->own_lo, p->own_hi))
+                continue;
+            if (!p->lost)
+                done[nd++] = (typeof(done[0])){ p->start, p->end, p->gap };
+            __atomic_store_n(&p->end, 0, __ATOMIC_RELEASE);
+            __atomic_store_n(&p->start, 0, __ATOMIC_RELAXED);
+        }
+        bool more = from < g_npools;
+        pool_unlock(&old);
+        // Out of the table first, then out of the address space: until then
+        // nothing else can be placed there. Nor may anything offmap.c noted
+        // about these pages (a guest munmap that took in part of one) outlive
+        // them.
+        for (int k = 0; k < nd; k++) {
+            size_t len = (size_t)(done[k].end - done[k].start);
+            lxrt_offmap_disown_pages(done[k].start, len);
+            if (done[k].gap)
+                mmap((void *)(uintptr_t)done[k].start, len, PROT_NONE,
+                     MAP_PRIVATE | MAP_ANON | MAP_FIXED, -1, 0);
+            else
+                mach_vm_deallocate(mach_task_self(), done[k].start, len);
+            if (lxrt_trace_on())
+                fprintf(lxrt_trace_stream(), "[lxrt] trampoline pool 0x%llx+0x%zx freed: its code "
+                        "is unmapped\n", (unsigned long long)done[k].start, len);
+        }
+        if (!more)
+            break;
+    }
 }
 
 void lxrt_rewrite_totals(struct lxrt_rewrite_report *out) { *out = g_totals; }
@@ -182,13 +358,7 @@ static uint8_t *reserve_pool_at(uint64_t candidate, uint64_t range_start,
         mach_vm_deallocate(mach_task_self(), at, need);
         return NULL;
     }
-    if (g_npools < MAX_POOLS) {
-        g_pools[g_npools].start = at;
-        g_pools[g_npools].end = at + need;
-        g_npools++;
-    } else {
-        g_pools_overflow = true;
-    }
+    pool_add(at, at + need, range_start, range_end);
     *got = need;
     return (uint8_t *)at;
 }
@@ -259,18 +429,24 @@ static uint8_t *alloc_pool_near(uint64_t range_start, uint64_t range_end,
     // first reserves its full span, including holes between PT_LOADs. Those
     // holes contain no ELF data. The caller offers only host pages wholly
     // inside a program-header-proven hole, so borrowing one is safe.
-    for (int i = 0; i < g_nelf_gaps; i++) {
+    // A borrowed gap is only used when it can be recorded: it is freed (given
+    // back as PROT_NONE) by its record.
+    sigset_t old;
+    pool_lock(&old);
+    bool room = false;
+    for (int i = 0; i < MAX_POOLS && !room; i++)
+        room = i >= g_npools || !g_pools[i].end;
+    for (int i = 0; room && i < g_nelf_gaps; i++) {
         uint64_t at = g_elf_gaps[i].next;
         uint32_t tmp;
-        if (g_elf_gaps[i].end - at < need || g_npools >= MAX_POOLS ||
+        if (g_elf_gaps[i].end - at < need ||
             !encode_b(range_start, at, &tmp) ||
             !encode_b(range_end, at + need, &tmp) ||
             mprotect((void *)at, need, PROT_READ | PROT_WRITE) != 0)
             continue;
         g_elf_gaps[i].next += need;
-        g_pools[g_npools].start = at;
-        g_pools[g_npools].end = at + need;
-        g_npools++;
+        pool_add_locked(at, at + need, range_start, range_end, true);
+        pool_unlock(&old);
         *got = need;
         if (lxrt_trace_on())
             fprintf(lxrt_trace_stream(),
@@ -278,6 +454,7 @@ static uint8_t *alloc_pool_near(uint64_t range_start, uint64_t range_end,
                     (unsigned long long)at, need);
         return (uint8_t *)at;
     }
+    pool_unlock(&old);
 
     // Nothing near enough was free. Let the kernel choose: encode_b at the call
     // site will poison any site it cannot reach from there.
@@ -285,13 +462,7 @@ static uint8_t *alloc_pool_near(uint64_t range_start, uint64_t range_end,
                    -1, 0);
     if (p == MAP_FAILED)
         return NULL;
-    if (g_npools < MAX_POOLS) {
-        g_pools[g_npools].start = (uint64_t)p;
-        g_pools[g_npools].end = (uint64_t)p + need;
-        g_npools++;
-    } else {
-        g_pools_overflow = true;
-    }
+    pool_add((uint64_t)p, (uint64_t)p + need, range_start, range_end);
     *got = need;
     return p;
 }

@@ -983,9 +983,11 @@ static long do_madvise(uint64_t addr, uint64_t len, int ladvice)
 // frees mmap'd chunks at byte lengths; bash under FEX then dereferenced
 // garbage (0x85c, 0x100000021) inside FEX's IR compiler. Only host pages
 // wholly inside the range are unmapped; a partial page stays mapped, and its
-// tracked guest ranges are forgotten so a later mmap can reuse them. The
-// divergence: reading a freed 4 KiB slot that shares a host page with live
-// memory does not fault here. Linux would SIGSEGV; nothing measured minds.
+// tracked guest ranges are forgotten so a later mmap can reuse them. offmap.c
+// remembers which slots of such a page no guest mapping covers any more and
+// unmaps the page once none is left. The divergence: reading a freed 4 KiB
+// slot that shares a host page with live memory does not fault here. Linux
+// would SIGSEGV; nothing measured minds.
 static long do_munmap_inner(uint64_t addr, uint64_t len);
 static long do_munmap(uint64_t addr, uint64_t len)
 {
@@ -993,6 +995,19 @@ static long do_munmap(uint64_t addr, uint64_t len)
     if (r == 0)
         lxrt_arena_unmapped(addr, len);    // holes in the guest's arena get its reservation back
     return r;
+}
+
+// Everything the runtime keeps about a guest range that is gone.
+static void forget_unmapped(uint64_t addr, uint64_t len)
+{
+    lxrt_subpage_forget(addr, len);
+    lxrt_jit_forget(addr, len);
+    lxrt_wx_forget(addr, len);
+    lxrt_privmap_forget(addr, len);
+    // The x18 pass's function tables and the LXRT_GUEST_FAULTS file names,
+    // freed when wholly inside (elfsect.c, memlog.c).
+    lxrt_elf_forget(addr, len);
+    lxrt_memlog_file_forget(addr, len);
 }
 
 static long do_munmap_inner(uint64_t addr, uint64_t len)
@@ -1007,25 +1022,48 @@ static long do_munmap_inner(uint64_t addr, uint64_t len)
     }
     if (addr % 4096 || !len)
         return LERR(EINVAL);
+    // Linux unmaps whole pages: the length is rounded up to 4 KiB first.
+    // glibc's dlclose passes an unrounded one (l_map_end - l_map_start,
+    // 0x30188 for the libusb the Steam client reloads four times a second)
+    // while the RW segment it mapped runs to the next 4 KiB boundary: with
+    // the raw length that segment's file name stayed (tests/
+    // elfsect_unmap_check.c --raw-len), and so did the host page it ends in,
+    // which only it used (tests/elf/dlcycle.c). Not to the guest's page size:
+    // that is Linux's answer at 16 KiB pages, but FEX maps 4 KiB-aligned
+    // ranges there too.
+    uint64_t len4k = LXRT_ALIGN_UP(len, 4096);
+    if (len4k < len || addr + len4k < addr)
+        return LERR(EINVAL);
+    len = len4k;
     if (host_heap_hit(addr, len, "munmap"))
         return LERR(EINVAL);
     uint64_t end = addr + len;
     uint64_t hstart = LXRT_ALIGN_UP(addr, LXRT_HOST_PAGE);
     uint64_t hend = LXRT_ALIGN_DOWN(end, LXRT_HOST_PAGE);
-    lxrt_subpage_forget(addr, len);
-    lxrt_jit_forget(addr, len);
-    lxrt_wx_forget(addr, len);
-    lxrt_privmap_forget(addr, len);
-    if (hstart < hend && munmap((void *)hstart, (size_t)(hend - hstart)) != 0)
-        return LERR(errno);
-    if (hstart < hend)
+    forget_unmapped(addr, len);
+    if (hstart < hend) {
+        // What offmap.c knew of these pages goes before they do: once they
+        // are unmapped, another thread's mapping can land there. A trampoline
+        // pool in them (one borrowed from an ELF load gap, rewrite.c) goes
+        // with them, never the runtime's to free again.
+        lxrt_offmap_disown_pages(hstart, hend - hstart);
+        lxrt_pool_clobbered(hstart, hend);
+        if (munmap((void *)hstart, (size_t)(hend - hstart)) != 0)
+            return LERR(errno);
         lxrt_mremap_forget_shared(hstart, hend - hstart);
-    // A partly covered page at either end that belongs to a 4 KiB-offset file
-    // mapping (offmap.c) holds nothing else: it goes with its last guest byte.
+    }
+    // A partly covered page at either end with no guest page left in it goes
+    // too: the rest of it was never the guest's (the tail of a mapping whose
+    // length is not a multiple of 16 KiB, the head of a 4 KiB-offset file
+    // mapping) or was unmapped before (offmap.c).
     uint64_t dead[2];
     int ndead = lxrt_offmap_unmapped(addr, len, dead);
-    for (int i = 0; i < ndead; i++)
-        lxrt_subpage_forget(dead[i], LXRT_HOST_PAGE);
+    for (int i = 0; i < ndead; i++) {
+        forget_unmapped(dead[i], LXRT_HOST_PAGE);
+        lxrt_mremap_forget_shared(dead[i], LXRT_HOST_PAGE);
+    }
+    // The trampoline pools of code that is gone now (rewrite.c).
+    lxrt_pool_unmapped(LXRT_ALIGN_DOWN(addr, LXRT_HOST_PAGE), LXRT_ALIGN_UP(end, LXRT_HOST_PAGE));
     return 0;
 }
 
@@ -1197,10 +1235,14 @@ static long do_mmap_inner(uint64_t addr, uint64_t len, long prot, long lflags,
         lxrt_wx_forget(addr, len);     // a new mapping is not the old RWX range
         lxrt_mremap_forget_shared(addr, len);
     }
-    // Something placed into the host pages of a 4 KiB-offset file mapping
-    // makes them no longer that mapping's alone (offmap.c).
+    // What is placed into a host page holds guest bytes there from now on
+    // (offmap.c). A trampoline pool it replaces is no longer the runtime's
+    // to free (rewrite.c).
     if ((flags & MAP_FIXED) || (lflags & LINUX_MAP_FIXED_NOREPLACE))
         lxrt_offmap_disown(addr, len);
+    if (flags & MAP_FIXED)
+        lxrt_pool_clobbered(LXRT_ALIGN_DOWN(addr, LXRT_HOST_PAGE),
+                            LXRT_ALIGN_UP(addr + len, LXRT_HOST_PAGE));
     // A private mapping of a shared-memory file keeps seeing the file's
     // updates until the guest writes, as on Linux (privmap.c: wine's session
     // objects). Aligned ranges only; the whole host pages are replaced, so the
@@ -1569,6 +1611,15 @@ static long do_mmap_inner(uint64_t addr, uint64_t len, long prot, long lflags,
         if (rc < 0)
             return rc;
     }
+    // Placed here, with a length that is not a multiple of 16 KiB: the rest
+    // of the last host page is nobody's, and munmap frees that page with the
+    // guest's last byte in it (offmap.c). ld.so maps ld.so.cache and reserves
+    // a library's span this way, glibc's malloc its large blocks: each
+    // dlopen/dlclose cycle used to keep two such pages (tests/elf/dlcycle.c).
+    if (!(flags & MAP_FIXED) && len % LXRT_HOST_PAGE)
+        lxrt_offmap_note((uint64_t)(uintptr_t)p,
+                         LXRT_ALIGN_UP((uint64_t)(uintptr_t)p + len, LXRT_HOST_PAGE),
+                         (uint64_t)(uintptr_t)p, len);
     return (long)(uintptr_t)p;
 }
 
@@ -3282,7 +3333,11 @@ restart:
     }
     case LNR_mmap:
         if (!((long)a3 & LINUX_MAP_ANONYMOUS) && lxrt_binder_is((int)a4)) {
+            if (a0)
+                lxrt_offmap_disown_pages(a0, a1);    // binder's own host pages, from now on
             ret = lxrt_binder_mmap(a0, a1, (int)a2, (int)a3, (int)a4, a5);
+            if (ret >= 0)
+                lxrt_offmap_disown_pages((uint64_t)ret, a1);
             break;
         }
         ret = do_mmap(a0, a1, (long)a2, (long)a3, (long)a4, (long)a5);
@@ -4268,6 +4323,15 @@ restart:
             break;
         }
         lxrt_privmap_forget(a0, a1);
+        // The slots it may grow into or be moved onto hold guest bytes from
+        // now on (offmap.c; again below, for where it went). MREMAP_FIXED
+        // replaces whatever is there, a trampoline pool too (rewrite.c).
+        lxrt_offmap_disown_pages(a0, a2 > a1 ? a2 : a1);
+        if (a3 & 2) {
+            lxrt_offmap_disown_pages(a4, a2);
+            lxrt_pool_clobbered(LXRT_ALIGN_DOWN(a4, LXRT_HOST_PAGE),
+                                LXRT_ALIGN_UP(a4 + a2, LXRT_HOST_PAGE));
+        }
         // 4 KiB guest pages that do not fill a host page: do_mremap_subpage.
         if ((a0 % LXRT_HOST_PAGE) || ((a3 & 2) && (a4 % LXRT_HOST_PAGE)) ||
             lxrt_subpage_tracked(a0, a1) || ((a3 & 2) && lxrt_subpage_tracked(a4, a2)))
@@ -4276,10 +4340,10 @@ restart:
             ret = lxrt_mremap(a0, a1, a2, (int)a3, a4);
         if (ret >= 0) {
             lxrt_wx_moved(a0, a1, (uint64_t)ret, a2);
-            // The host pages moved, shrank or were replaced: none of them is
-            // a 4 KiB-offset mapping's alone any more (offmap.c).
-            lxrt_offmap_disown(a0, a1);
-            lxrt_offmap_disown((uint64_t)ret, a2);
+            // The host pages moved, shrank or were replaced: what offmap.c
+            // knew of their slots is stale.
+            lxrt_offmap_disown_pages(a0, a1);
+            lxrt_offmap_disown_pages((uint64_t)ret, a2);
         }
         lxrt_memlog('r', a0, a1, (long)a2, (long)a3, ret);
         if (ret >= 0)
@@ -4314,6 +4378,7 @@ restart:
                 ret = LERR(EINVAL);
                 break;
             }
+            lxrt_offmap_disown_pages(a1, sz);   // what it lands on holds its pages from now on
         }
         ret = lxrt_shmat((int)a0, a1, (int)a2);
         lxrt_memlog('s', ret >= 0 ? (uint64_t)ret : a1, LXRT_HOST_PAGE, (long)a0, (long)a2, ret);
@@ -4321,7 +4386,7 @@ restart:
             struct shmid_ds ds;
             uint64_t sz = shmctl((int)a0, IPC_STAT, &ds) == 0 ? ds.shm_segsz : LXRT_HOST_PAGE;
             lxrt_futex_shared_add((uint64_t)ret, sz);
-            lxrt_offmap_disown((uint64_t)ret, sz);
+            lxrt_offmap_disown_pages((uint64_t)ret, sz);
         }
         break;
     case LNR_shmdt:

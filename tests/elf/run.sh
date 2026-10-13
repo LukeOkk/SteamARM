@@ -63,6 +63,26 @@ else
     bad "x18 decoder/planner self-test" "$(tail -5 <<<"$out")"
 fi
 
+# What the runtime keeps per file mapping goes with the guest's munmap, on the
+# host (tests/elfsect_unmap_check.c): glibc's dlopen/dlclose of the root's own
+# libraries at a new address every cycle. The Steam client reloads libusb
+# four times a second, and each cycle used to leave its function tables
+# (4 x 16 KiB) and file names behind.
+unmap_libs=()
+for l in lib64/libc.so.6 lib64/libvulkan.so.1 usr/lib64/libstdc++.so.6; do
+    [ -f "$GUEST_ROOT/$l" ] && unmap_libs+=("$GUEST_ROOT/$l")
+done
+if [ ${#unmap_libs[@]} -gt 0 ]; then
+    if out=$(make -s build/elfsect_unmap_check 2>&1 &&
+             build/elfsect_unmap_check -n 1000 "${unmap_libs[@]}" 2>&1); then
+        ok "function tables and file names freed at munmap: ${#unmap_libs[@]} libraries, 1000 dlopen/dlclose cycles, $(sed -n 's/.*heap growth over the last \([0-9]*\) cycles: \(-*[0-9]*\) bytes.*/\2 bytes of heap growth in \1/p' <<<"$out"), lookups unchanged"
+    else
+        bad "function tables and file names across munmap" "$(grep -E 'FAIL' <<<"$out" | head -5)"
+    fi
+else
+    echo "  skip  elfsect_unmap_check (no libc.so.6 in $GUEST_ROOT)"
+fi
+
 # x18 loads and stores at sp offsets the immediate field cannot absorb
 # (Steam's stp x18, x17, [sp, #0x1f8]): addressed through a copy of the
 # original sp. Plain loads read back what the rewritten stores wrote.
@@ -1238,6 +1258,97 @@ if [ -f "$STAGE/usr/lib64/libc.a" ] && [ -n "$GCCDIR" ] &&
     else bad "build auxv_layout/libpg4k" "$err"; fi
 else
     echo "  skip  ARM64_AUXV_LAYOUT (no $STAGE or $GUEST_ROOT/lib64/libc.so.6)"
+fi
+
+# DLOPEN_CYCLE: 2000 dlopen/dlclose cycles of a small library, each also
+# mapping and unmapping a file with an odd length (as ld.so maps
+# ld.so.cache) and an odd number of anonymous 4 KiB pages (as glibc's malloc
+# maps a large block); the library's raw syscall, TLS, data and bss are used
+# every time (tests/elf/dlcycle.c). Three layouts: lld's default (four
+# segments, 64 KiB aligned), the Steam client's libusb's (one R E segment,
+# then one RW segment whose first page is not on a host page), and 4 KiB
+# segments. The Steam client reloads libusb four times a second, and every
+# cycle used to keep five host regions and 64 KiB of dirty memory: the tails
+# of ld.so.cache and of glibc's reservation of the span, the RW segment's
+# last host page, the trampoline pool (runtime/offmap.c, runtime/rewrite.c).
+# Measured on the host at the guest's two stops (vmmap -summary: region
+# count and physical footprint), plus the guest's own count of small
+# regions. At 16 KiB guest pages the libusb layout keeps one page a cycle:
+# its RW segment ends in a 16 KiB page past dlclose's 4 KiB-rounded length,
+# and munmap cannot round to 16 KiB without breaking FEX's 4 KiB munmaps
+# there.
+dlcycle_run() {     # lib page cycles: sets DLC_RC, DLC_OUT, DLC_REGIONS, DLC_KB
+    local fifo="$DLC_ROOT/go" pid a b ra fa rb fb
+    DLC_RC=-1; DLC_OUT=""; DLC_REGIONS=0; DLC_KB=0
+    rm -f "$fifo" && mkfifo "$fifo" || return 1
+    # perl itself, not the deadline function: $! must be lxrun's pid (exec).
+    LXRT_ROOT="$DLC_ROOT" LXRT_GUEST_PAGE=$2 LXRT_GUEST_FAULTS=1 perl -e 'alarm shift; exec @ARGV' 120 \
+        ./build/lxrun /tmp/dlcycle "/tmp/$1" "$3" wait <"$fifo" >"$DLC_ROOT/out" 2>&1 &
+    pid=$!
+    exec 7>"$fifo"
+    dlcycle_stop() {    # wait for the guest's line, then: "<regions> <footprint KiB>"
+        local i
+        for ((i = 0; i < 1200; i++)); do
+            grep -q "== dlcycle: $1" "$DLC_ROOT/out" && break
+            kill -0 "$pid" 2>/dev/null || return 1
+            sleep 0.1
+        done
+        vmmap -summary "$pid" 2>/dev/null | perl -ne '
+            $f = $1 * {K => 1, M => 1024, G => 1048576}->{$2} if /^Physical footprint:\s+([\d.]+)([KMG])/;
+            if (/^TOTAL/ && !$t) { @w = split; $r = $w[-1]; $t = 1 }
+            END { printf "%d %d\n", $r, $f }'
+    }
+    a=$(dlcycle_stop warm); echo go >&7
+    b=$(dlcycle_stop cycled); echo go >&7
+    exec 7>&-
+    wait "$pid"; DLC_RC=$?
+    DLC_OUT=$(cat "$DLC_ROOT/out")
+    read -r ra fa <<<"$a"; read -r rb fb <<<"$b"
+    DLC_REGIONS=$(( ${rb:-0} - ${ra:-0} )); DLC_KB=$(( ${fb:-0} - ${fa:-0} ))
+    [ -n "$ra" ] && [ -n "$rb" ] && [ "${fa:-0}" -gt 0 ]
+}
+if [ -f "$STAGE/usr/lib64/libc.a" ] && [ -n "$GCCDIR" ] &&
+   [ -f "$GUEST_ROOT/lib64/libc.so.6" ] && [ -f "$GUEST_ROOT/lib/ld-linux-aarch64.so.1" ]; then
+    # A private guest root under build/, as for ARM64_AUXV_LAYOUT.
+    DLC_ROOT="$PWD/build/dlcycle-root"
+    mkdir -p "$DLC_ROOT/lib" "$DLC_ROOT/lib64" "$DLC_ROOT/tmp"
+    if ! cp "$GUEST_ROOT/lib/ld-linux-aarch64.so.1" "$DLC_ROOT/lib/" ||
+       ! cp "$GUEST_ROOT/lib64/libc.so.6" "$DLC_ROOT/lib64/"; then
+        bad "prepare dlcycle guest root" "$GUEST_ROOT"
+    elif err=$(glibc_cc -O2 -o "$DLC_ROOT/tmp/dlcycle" tests/elf/dlcycle.c) &&
+         err=$(glibc_cc -shared -fPIC -O2 -o "$DLC_ROOT/tmp/libdlcycle.so" tests/elf/libdlcycle.c) &&
+         err=$(glibc_cc -shared -fPIC -O2 -DDLCYCLE_TEXT_PAD=0x3000 -Wl,--no-rosegment -Wl,-z,norelro \
+                        -o "$DLC_ROOT/tmp/libdlcycle2.so" tests/elf/libdlcycle.c) &&
+         err=$(glibc_cc -shared -fPIC -O2 -Wl,-z,max-page-size=4096 -Wl,-z,common-page-size=4096 \
+                        -o "$DLC_ROOT/tmp/libdlcycle4k.so" tests/elf/libdlcycle.c); then
+        rw=$(/opt/homebrew/opt/llvm/bin/llvm-readelf -lW "$DLC_ROOT/tmp/libdlcycle2.so" |
+             awk '$1 == "LOAD" && $7 == "RW" { print $3; exit }')
+        if [ -z "$rw" ] || [ $(( (rw & ~0xfff) % 16384 )) -eq 0 ]; then
+            bad "DLOPEN_CYCLE libusb layout precondition" "RW segment at ${rw:-?}: not off a host page"
+        else
+            for c in "libdlcycle.so 4096" "libdlcycle2.so 4096" "libdlcycle4k.so 4096" \
+                     "libdlcycle.so 16384" "libdlcycle2.so 16384"; do
+                read -r lib page <<<"$c"
+                if ! dlcycle_run "$lib" "$page" 2000; then
+                    bad "DLOPEN_CYCLE $lib at $page" "rc=$DLC_RC, no measurement $(grep -E 'FAIL' <<<"$DLC_OUT" | head -3)"
+                    continue
+                fi
+                small=$(sed -n 's/.*(\([0-9]*\) under 1 MiB) after [0-9]* cycles, [0-9]* (\([0-9]*\)) after.*/\1 -> \2/p' <<<"$DLC_OUT")
+                what="$lib, $page-byte pages, 2000 cycles: host regions $( ((DLC_REGIONS >= 0)) && echo +)$DLC_REGIONS, footprint $( ((DLC_KB >= 0)) && echo +)$DLC_KB KiB, guest regions under 1 MiB ${small:-?}"
+                if [ "$DLC_RC" -eq 0 ] && grep -q '== dlcycle: ok' <<<"$DLC_OUT" &&
+                   [ "$DLC_REGIONS" -lt 100 ] && [ "$DLC_KB" -lt 4096 ]; then
+                    ok "DLOPEN_CYCLE: $what"
+                elif [ "$lib $page" = "libdlcycle2.so 16384" ] && [ "$DLC_REGIONS" -lt 2100 ] &&
+                     ! grep -qE 'cycle [0-9]+:' <<<"$DLC_OUT"; then
+                    xfail "DLOPEN_CYCLE: $what" "one 16 KiB page a cycle: the RW segment ends past dlclose's 4 KiB-rounded length (see above)"
+                else
+                    bad "DLOPEN_CYCLE: $what" "rc=$DLC_RC $(grep -E 'FAIL' <<<"$DLC_OUT" | head -3)"
+                fi
+            done
+        fi
+    else bad "build dlcycle/libdlcycle" "$err"; fi
+else
+    echo "  skip  DLOPEN_CYCLE (no $STAGE or $GUEST_ROOT/lib64/libc.so.6)"
 fi
 
 # X18_THREAD_ISOLATION: nine threads keep distinct values in x18 through
