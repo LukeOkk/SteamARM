@@ -223,6 +223,17 @@ static void fn_register(uint64_t lo, uint64_t hi, struct lxrt_range *r, int n)
     unlock_nosig(&old);
 }
 
+// A table from outside this file: the function bounds of a PE image's code
+// window (runtime/pesect.c), looked up exactly like an ELF's.
+void lxrt_fn_register(uint64_t lo, uint64_t hi, struct lxrt_range *r, int n)
+{
+    if (hi <= lo) {
+        free(r);
+        return;
+    }
+    fn_register(lo, hi, r, n);
+}
+
 // The guest unmapped [addr, addr+len) (dispatch.c passes the length rounded
 // up to 4 KiB, as Linux does): free the table of every window wholly inside
 // it. A window only partly unmapped keeps its table -- the rest of it may

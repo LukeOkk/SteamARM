@@ -745,7 +745,11 @@ static long rewrite_and_seal(void *p, size_t len, int want_prot, size_t scan_len
     struct lxrt_rewrite_report rep;
     char *err = NULL;
     // The x18 pass needs to know which bytes are instructions: the file's
-    // executable sections, translated to where this mapping put them.
+    // executable sections, translated to where this mapping put them. A PE
+    // image mapped executable in one go registers its code first (pesect.c;
+    // rewrite.c finds the windows by address).
+    if (fd >= 0)
+        lxrt_pe_note_mmap(fd, off, len, (uint64_t)p);
     struct lxrt_range code[16];
     int ncode = fd >= 0 ? lxrt_elf_exec_sections(fd, off, len, (uint64_t)p, code, 16) : 0;
     if (lxrt_rewrite_range_code(start, scan_end, code, ncode, &rep, &err) != 0) {
@@ -1032,6 +1036,7 @@ static long do_munmap_inner(uint64_t addr, uint64_t len)
     // the guest's.
     uint64_t len4k = LXRT_ALIGN_UP(len, 4096);
     lxrt_elf_forget(addr, len4k);
+    lxrt_pe_forget(addr, len4k);
     lxrt_memlog_file_forget(addr, len4k);
     if (hstart < hend && munmap((void *)hstart, (size_t)(hend - hstart)) != 0)
         return LERR(errno);
@@ -1172,9 +1177,13 @@ static long do_mmap(uint64_t addr, uint64_t len, long prot, long lflags,
     if (addr && !(lflags & LINUX_MAP_FIXED) && lxrt_arena_free(addr, len))
         lflags = (lflags & ~(long)LINUX_MAP_FIXED_NOREPLACE) | LINUX_MAP_FIXED;
     long r = do_mmap_inner(addr, len, prot, lflags, fd, off);
-    if (r >= 0)
+    if (r >= 0) {
         lxrt_arena_mapped((uint64_t)r, len);
-    else if (addr >= 0x140000000ull && addr < 0x160000000ull && getenv("LXRT_ARENA_DEBUG"))
+        // A PE image's header (Wine's loader maps it first, read-write), or
+        // a mapping over the code of one already mapped (pesect.c).
+        lxrt_pe_note_mmap((lflags & LINUX_MAP_ANONYMOUS) ? -1 : (int)fd, (uint64_t)off, len,
+                          (uint64_t)r);
+    } else if (addr >= 0x140000000ull && addr < 0x160000000ull && getenv("LXRT_ARENA_DEBUG"))
         fprintf(lxrt_trace_stream(), "[lxrt] arena: mmap 0x%llx+0x%llx prot %ld flags 0x%lx fd %ld -> %ld (arena %s)\n",
                 (unsigned long long)addr, (unsigned long long)len, prot, lflags, fd, r,
                 lxrt_arena_on() ? "on" : "OFF");
@@ -1493,6 +1502,8 @@ static long do_mmap_inner(uint64_t addr, uint64_t len, long prot, long lflags,
             // exact guest range, put the union protection back.
             uint64_t hs = LXRT_ALIGN_DOWN(addr, LXRT_HOST_PAGE);
             uint64_t he = LXRT_ALIGN_UP(addr + len, LXRT_HOST_PAGE);
+            if (fd >= 0 && !(lflags & LINUX_MAP_ANONYMOUS))
+                lxrt_pe_note_mmap((int)fd, off, len, addr);     // a PE's code: pesect.c
             if (mprotect((void *)hs, (size_t)(he - hs), PROT_READ | PROT_WRITE) == 0) {
                 struct lxrt_rewrite_report rep;
                 char *err = NULL;

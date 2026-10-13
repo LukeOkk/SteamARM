@@ -40,6 +40,35 @@ int lxrt_elf_exec_sections_path(const char *path, uint64_t load_bias,
 void lxrt_elf_forget(uint64_t addr, uint64_t len);
 bool lxrt_elf_gap_before_exec(int fd, uint64_t file_off, uint64_t map_base,
                               struct lxrt_range *gap);
+// A function table for the code window [lo, hi): what lxrt_elf_in_function
+// answers there. Takes `r` (malloc'd, n entries; none is a valid table).
+void lxrt_fn_register(uint64_t lo, uint64_t hi, struct lxrt_range *r, int n);
+
+// The aarch64 code of a PE image (runtime/pefile.c): Wine's ARM64X / ARM64EC
+// / ARM64 DLLs, which Wine's own loader maps. RVAs; runtime/pesect.c puts
+// them where the guest mapped the image.
+struct lxrt_pe_sect { uint32_t va, vsize, raw, rawsz, ch; };
+struct lxrt_pe_info {
+    uint16_t machine;
+    bool chpe;                  // ARM64EC code map present (ARM64X / ARM64EC)
+    bool has_fn;                // an ARM64 RUNTIME_FUNCTION table was read
+    uint32_t size_of_image, size_of_headers;
+    struct lxrt_pe_sect *sect;
+    int nsect;
+    struct lxrt_range *code;    // aarch64 code ranges (never x64), sorted
+    int ncode;
+    struct lxrt_range *fn;      // function bounds inside them, sorted, merged
+    int nfn;
+};
+int lxrt_pe_parse_fd(int fd, struct lxrt_pe_info *info, char *why, size_t whylen);
+void lxrt_pe_info_free(struct lxrt_pe_info *info);
+int64_t lxrt_pe_rva_offset(const struct lxrt_pe_info *info, uint32_t rva, uint32_t need);
+// pesect.c: the PE images the guest has mapped (dispatch.c reports every
+// mapping and unmapping; rewrite.c asks for the code windows).
+void lxrt_pe_note_mmap(int fd, uint64_t off, uint64_t len, uint64_t addr);
+void lxrt_pe_forget(uint64_t addr, uint64_t len);
+int lxrt_pe_code_windows(uint64_t start, uint64_t end, struct lxrt_range *out, int max);
+bool lxrt_pe_intersects(uint64_t start, uint64_t end);
 
 struct lxrt_image {
     uint8_t *base;          // where the image actually landed
