@@ -188,7 +188,8 @@ struct LauncherSettings: Codable, Equatable {
     /// FallbackPolicy raw value.
     var fallbackPolicy: String = "auto"
     var fexDiskCache: Bool = false
-    var fexTSO: String = "full"
+    /// MemoryOrderingProfile raw value (Procesador -> Orden de memoria).
+    var fexTSO: String = MemoryOrderingProfile.default.rawValue
     var fexMultiblock: Bool = true
     var fexSMC: String = "mtrack"
     var fexX87Reduced: Bool = false
@@ -254,7 +255,8 @@ struct LauncherSettings: Codable, Equatable {
         dramGB = try c.decodeIfPresent(Int.self, forKey: .dramGB) ?? 0
         vramGB = try c.decodeIfPresent(Int.self, forKey: .vramGB) ?? 0
         fexDiskCache = try c.decodeIfPresent(Bool.self, forKey: .fexDiskCache) ?? false
-        fexTSO = try c.decodeIfPresent(String.self, forKey: .fexTSO) ?? "full"
+        // "full" from before 2026-10-06 ran FEX's defaults: it reads as Rápido and is saved so.
+        fexTSO = MemoryOrderingProfile.stored(try c.decodeIfPresent(String.self, forKey: .fexTSO)).rawValue
         fexMultiblock = try c.decodeIfPresent(Bool.self, forKey: .fexMultiblock) ?? true
         fexSMC = try c.decodeIfPresent(String.self, forKey: .fexSMC) ?? "mtrack"
         fexX87Reduced = try c.decodeIfPresent(Bool.self, forKey: .fexX87Reduced) ?? false

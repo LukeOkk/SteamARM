@@ -449,6 +449,60 @@ extension ApplicationBackendPreset {
     }
 }
 
+/// Procesador -> Orden de memoria (TSO): what FEX does about x86 memory
+/// ordering, which Apple silicon does not keep by itself. The chip's TSO mode
+/// is the kernel's and only for Rosetta-translated processes (no public API;
+/// SteamARM uses none), so every profile is FEX's software emulation of the
+/// ordering, as it translates loads and stores. scripts/settings-env.py
+/// (TSO_PROFILES) exports the variables; this table is what the UI says, and
+/// tests/test_settings_env.py keeps the two equal. The default is FEX's own
+/// defaults. Until 2026-10-06 the stored "full" (Completo) set nothing, the
+/// same as "fast": an old file's "full" reads as Rápido, what it ran, and
+/// Completo with every access ordered is a new value ("strict") nobody has
+/// stored yet. Measured: benchmarks/stage58-tso-cost.txt.
+enum MemoryOrderingProfile: String, CaseIterable {
+    case strict, fast, off
+
+    static let `default` = MemoryOrderingProfile.fast
+
+    /// The profile a stored value means: "full" from an older settings.json
+    /// is Rápido (what it ran); anything unknown is the default.
+    static func stored(_ raw: String?) -> MemoryOrderingProfile {
+        raw == "full" ? .fast : raw.flatMap(MemoryOrderingProfile.init(rawValue:)) ?? .default
+    }
+
+    var label: String {
+        switch self {
+        case .strict: return "Completo"
+        case .fast: return "Rápido"
+        case .off: return "Apagado"
+        }
+    }
+
+    /// FEX's variables, exactly as scripts/settings-env.py sets them.
+    var fexVariables: [String: String] {
+        switch self {
+        case .strict: return ["FEX_TSOENABLED": "1", "FEX_VECTORTSOENABLED": "1", "FEX_MEMCPYSETTSOENABLED": "1"]
+        case .fast: return [:]
+        case .off: return ["FEX_TSOENABLED": "0"]
+        }
+    }
+
+    var caption: String {
+        switch self {
+        case .strict:
+            return "Cada acceso a memoria en orden x86: también los vectoriales (SSE/AVX, el memcpy de glibc) y las copias rep movs/stos (FEX_VECTORTSOENABLED=1, FEX_MEMCPYSETTSOENABLED=1). Lo más seguro para un juego que sincronice hilos con esos accesos, y lo más lento: medido en el M4, los movimientos vectoriales 4,6 veces más lentos que en Rápido, memcpy 5,9 y rep movs 25; lo escalar y los atómicos, igual (benchmarks/stage58-tso-cost.txt)."
+        case .fast:
+            return "Lo que FEX trae por defecto, y lo que SteamARM ejecutó hasta el 2026-10-06 también con Completo (entonces no cambiaba nada): los accesos escalares en orden x86; los vectoriales y rep movs/stos, en el orden débil de ARM. Puede romper un juego que sincronice hilos con cargas o escrituras vectoriales (raro)."
+        case .off:
+            return "Orden débil de ARM para todo (FEX_TSOENABLED=0). Rompe los juegos multihilo: el cliente de Steam corrompió sus listas sin este orden (benchmarks/stage8-steam-zero-vm.txt). Solo para medir."
+        }
+    }
+
+    /// What is true of every profile.
+    static let note = "Emulación por software de FEX en todos los casos: el modo TSO del hardware de Apple lo enciende el kernel solo para procesos traducidos por Rosetta, sin API pública, y SteamARM no usa APIs privadas. Se aplica al iniciar Steam o la app; Lightning JIT usa siempre Rápido."
+}
+
 enum SynchronizationBackend: String, Codable, CaseIterable {
     case auto, wineserver, msync, fsync, esync, ntsync
 

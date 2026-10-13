@@ -349,8 +349,11 @@ struct SettingsView: View {
             }
             Section("Caché de CPU") { Toggle("Caché de traducción en disco", isOn: $draft.fexDiskCache) }
             Section("Emulación x86 (FEX)") {
-                choice("Orden de memoria (TSO)", $draft.fexTSO, [("full", "Completo"), ("fast", "Rápido"), ("off", "Desactivado")])
-                    .help("rápido, puede romper juegos multihilo")
+                choice("Orden de memoria (TSO)", $draft.fexTSO, MemoryOrderingProfile.allCases.map { ($0.rawValue, $0.label) })
+                Text((MemoryOrderingProfile(rawValue: draft.fexTSO) ?? .default).caption)
+                    .font(.caption).foregroundStyle(.secondary)
+                Text(MemoryOrderingProfile.note)
+                    .font(.caption).foregroundStyle(.secondary)
                 Toggle("Multibloque", isOn: $draft.fexMultiblock)
                 choice("Código automodificable (SMC)", $draft.fexSMC, ["none", "mtrack", "full"])
                 Toggle("Precisión reducida x87", isOn: $draft.fexX87Reduced)

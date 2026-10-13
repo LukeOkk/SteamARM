@@ -230,6 +230,27 @@ struct ApplicationCoreTests {
         var withJIT = caps
         withJIT.execution[.lightningJIT] = .init(state: .experimental, reason: "test")
         check(ApplicationBackendPreset.lightningJIT.offered(in: withJIT), "a usable Lightning JIT would be offered again")
+        // Procesador -> Orden de memoria: three profiles that differ (Completo and Rápido were the
+        // same), the default is FEX's own defaults, and nothing claims hardware TSO.
+        check(MemoryOrderingProfile.allCases.map(\.rawValue) == ["strict", "fast", "off"], "TSO profiles")
+        check(MemoryOrderingProfile.allCases.map(\.label) == ["Completo", "Rápido", "Apagado"], "TSO labels")
+        check(MemoryOrderingProfile.default == .fast && MemoryOrderingProfile.fast.fexVariables.isEmpty,
+              "Rápido is FEX's defaults: nothing set")
+        check(MemoryOrderingProfile.strict.fexVariables ==
+              ["FEX_TSOENABLED": "1", "FEX_VECTORTSOENABLED": "1", "FEX_MEMCPYSETTSOENABLED": "1"],
+              "Completo orders vector and memcpy accesses too")
+        // An old settings.json's "full" ran FEX's defaults: it is Rápido, never the new Completo.
+        check(MemoryOrderingProfile.stored("full") == .fast && MemoryOrderingProfile.stored(nil) == .fast
+              && MemoryOrderingProfile.stored("bogus") == .fast, "old or missing values read as Rápido")
+        check(MemoryOrderingProfile.stored("strict") == .strict && MemoryOrderingProfile.stored("off") == .off,
+              "the new values are kept")
+        check(MemoryOrderingProfile.off.fexVariables == ["FEX_TSOENABLED": "0"], "Apagado turns the emulation off")
+        check(Set(MemoryOrderingProfile.allCases.map(\.fexVariables)).count == 3, "the three profiles set different things")
+        for p in MemoryOrderingProfile.allCases {
+            check(!p.caption.isEmpty && !p.caption.lowercased().contains("hardware"), "caption of \(p) claims no hardware TSO")
+        }
+        check(MemoryOrderingProfile.note.contains("Rosetta") && MemoryOrderingProfile.note.contains("software"),
+              "the note says whose TSO it is")
         // Sync: fsync rides on lxrun's futex_waitv (experimental); AUTO picks only a ready one.
         check(caps.synchronization[.fsync]?.state == .experimental, "fsync experimental")
         check(caps.effectiveSynchronization(.fsync) == .fsync, "requested fsync is what runs")

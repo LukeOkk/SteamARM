@@ -11,6 +11,13 @@ struct SettingsTests {
         let defaults = try decoder.decode(LauncherSettings.self, from: Data("{}".utf8))
         precondition(defaults == LauncherSettings())
         precondition(!defaults.adaptiveSync)
+        // Orden de memoria: FEX's defaults (Rápido) unless stored; an old file's "full" ran those
+        // defaults and reads as Rápido; the new Completo ("strict") and "off" are kept as stored.
+        precondition(defaults.fexTSO == "fast" && MemoryOrderingProfile(rawValue: defaults.fexTSO) == .fast)
+        precondition(try decoder.decode(LauncherSettings.self, from: Data(#"{"fexTSO":"full"}"#.utf8)).fexTSO == "fast")
+        precondition(try decoder.decode(LauncherSettings.self, from: Data(#"{"fexTSO":"strict"}"#.utf8)).fexTSO == "strict")
+        precondition(try decoder.decode(LauncherSettings.self, from: Data(#"{"fexTSO":"off"}"#.utf8)).fexTSO == "off")
+        precondition(try decoder.decode(LauncherSettings.self, from: Data(#"{"fexTSO":"bogus"}"#.utf8)).fexTSO == "fast")
         let legacy = try decoder.decode(LauncherSettings.self, from: Data(#"{"metalHud":true,"display":"vnc","resolution":"1920x1080","extraEnv":{"TEST":"1"}}"#.utf8))
         precondition(legacy.metalHud && legacy.display == .vnc && legacy.confirmStop)
         precondition(!legacy.adaptiveSync)

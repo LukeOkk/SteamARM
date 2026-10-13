@@ -95,6 +95,7 @@ the Fedora VM that was deleted on 2026-09-27; they are history, and
 | 57 | `stage57-wine-arm64-native.txt` | 10-06 | Valve's Proton ARM64 natively under the runtime: KUSER_SHARED_DATA as a virtual page (runtime/lowpage.c), the TEB block limit and the bin dir fixed in a prototype; wineserver (aarch64) and the ARM64X ntdll/kernel32 load; stops at x18 reads in PE code. |
 | 57 | `stage57-depth-cache-and-frame-pacing.txt` | 10-05 | Optional bounded depth/stencil cache: 39.4% less recording time in a paired microbenchmark, pixels/FEX/Proton probes passed; default off. CS2 and native Metal traces still show hitches and no established stable 100 FPS. Current display link exposes fixed refresh rates only. |
 | 58 | `stage58-adaptive-sync-and-drawable-wait.txt` | 10-05 | bounded notification wait tested on ARM64/FEX; actual display/native fullscreen eligibility and fixed-refresh fallback; <10 ms CS2 and physical VRR remain unverified |
+| 58 | `stage58-tso-cost.txt` | 10-06 | What FEX's x86 memory-ordering emulation costs (`tso_bench.c`, `tso_bench.sh`; `x86_bench.c` again): against no ordering, FEX's defaults ("Rápido", what every game ran) cost 1.5x on a scalar load+store loop, 2-4 % on loads, 9.7x on a producer/consumer handoff, 1.16-1.25x on `x86_bench`; "Completo" (vector and REP MOVS ordered too) adds 4.6x on 16-byte moves, 5.9x on memcpy, 25x on rep movsb, nothing on scalar code, atomics or handoffs; "Apagado" breaks message passing (0.6-0.8 % of ring items read stale). Hardware TSO is the kernel's, for Rosetta only; `scripts/arch-audit.py` says which profile runs |
 
 ## After stage 21 (no stage file)
 
@@ -197,6 +198,20 @@ rows. Two findings decided the design:
 runs an x86-64 Linux program through FEX under lxrun. `x86_bench.c` is the
 freestanding benchmark behind `stage5-x86-throughput.txt`; it builds as
 x86-64 and as aarch64 from the same source.
+
+**Stage 58, the cost of FEX's memory-ordering (TSO) emulation:**
+
+```
+benchmarks/tso_bench.sh            # RUNS=3 SCALE=1 PROFILES="off fast full"
+scripts/arch-audit.py              # its TSO section: who orders x86 memory, which profile runs
+```
+
+`tso_bench.sh` builds `tso_bench.c` (x86-64, glibc + pthreads) against the
+thunk build's x86-64 sysroot, puts it in the x86 root's `/tmp` and runs it
+through FEX three times under each profile of Procesador → Orden de memoria
+with exactly the variables `scripts/settings-env.py --tso-profile` exports.
+Result (`stage58-tso-cost.txt`): the profiles differ now, and "Completo"
+costs 4.6-25x on vector moves and copies only.
 
 **Stage 5, a W^X flip inside a signal handler:**
 

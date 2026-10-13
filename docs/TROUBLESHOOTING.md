@@ -79,8 +79,11 @@ guests, including direct `scripts/run-fex.sh` use.
 Games are not verified yet, so some won't run. In **Configuración →
 Registros**, enable the Proton log, start the game again, and look at
 `steam-<appid>.log` in `~/SteamARM-roots/steamroot/tmp/fexhome/` (Proton's
-home folder). Set **Procesador → Orden de memoria (TSO)** back to
-the full mode if you changed it, and **Sistema → esync/fsync** off.
+home folder). Set **Procesador → Orden de memoria (TSO)** to Rápido (FEX's
+defaults, what every game ran with until 2026-10-06) if you changed it --
+Apagado breaks multithreaded games, and Completo only adds ordering on top of
+Rápido, at a cost (`benchmarks/stage58-tso-cost.txt`) -- and **Sistema →
+esync/fsync** off.
 
 ## Performance
 

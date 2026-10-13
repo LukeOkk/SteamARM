@@ -1,0 +1,168 @@
+What FEX's x86 memory-ordering (TSO) emulation costs, by profile. 2026-10-06.
+Apple M4 (10 cores), 16 GB, macOS 27.0.1; FEX FEX-2609-113-g08f451d (the
+SteamARM-patched build in /tmp/lxrt-root/usr/bin, FEX-gb) under lxrun built
+from this tree; the x86 root /tmp/lxrt-steamroot as FEX_ROOTFS=/. No Proton,
+no window, nothing installed. A FEXServer and the lead's session were running;
+nothing else was started or stopped.
+
+WHO KEEPS x86 MEMORY ORDERING HERE [F]
+- Apple silicon has a hardware TSO mode (the chip orders loads and stores as
+  x86 does). On macOS the kernel switches it on for Rosetta-translated
+  processes only. Apple's documentation describes Rosetta as "a translation
+  process that allows users to run Mac apps that contain x86_64 instructions
+  on Apple silicon" (About the Rosetta translation environment) and the chip's
+  own model as "A weak memory ordering model, like the one in Apple silicon,
+  gives the processor more flexibility to reorder memory instructions and
+  improve performance, but doesn't add implicit memory barriers" (Addressing
+  architectural differences in your macOS code). No public API switches the
+  mode on for another process; SteamARM uses no private API, and the runtime
+  answers EINVAL to FEX's PR_SET_MEM_MODEL request (runtime/dispatch.c), so
+  FEX never believes the hardware does it. scripts/arch-audit.py prints this
+  as its TSO section, with the profile in use.
+- So every profile of Procesador -> Orden de memoria is FEX's software
+  emulation: it translates x86 loads and stores to ARM ordered ones (ldapr,
+  stlr; the M4 has FEAT_LRCPC/LRCPC2). FEX's options (FEXCore Config.json.in,
+  read as FEX_<OPTION>): TSOEnabled (default true), VectorTSOEnabled (false:
+  16/32-byte vector moves stay plain), MemcpySetTSOEnabled (false: REP
+  MOVS/STOS stay plain), HalfBarrierTSOEnabled (true), StrictInProcessSplitLocks
+  (false); VolatileMetadata (true) reads PE files' volatile metadata, so it
+  matters to Wine ARM64EC, not to a Linux x86 guest.
+- Until today the launcher's "Completo" set nothing and "Rápido" set
+  FEX_TSOENABLED=1 FEX_VECTORTSOENABLED=0 FEX_MEMCPYSETTSOENABLED=0: the
+  defaults twice. Now (scripts/settings-env.py TSO_PROFILES, the launcher's
+  MemoryOrderingProfile): full = FEX_TSOENABLED=1 FEX_VECTORTSOENABLED=1
+  FEX_MEMCPYSETTSOENABLED=1; fast = nothing set (FEX's defaults, what every
+  profile ran before); off = FEX_TSOENABLED=0. The default is fast.
+
+THE PROGRAM
+benchmarks/tso_bench.c (x86-64 Linux, glibc + pthreads, built against the
+thunk build's sysroot by benchmarks/tso_bench.sh), run by scripts/run-fex.sh
+three times under each profile with exactly the variables settings-env.py
+exports (scripts/settings-env.py --tso-profile). Nanoseconds per operation:
+  regs     xorshift64 in registers, no memory access (control)
+  scalar   one 8-byte load + one store per element, scalar code, 256 KiB array
+  vector   one 16-byte SSE2 load + store per element (what VectorTSOEnabled covers)
+  memcpy   glibc memcpy of 256 KiB, per 64 bytes (glibc's vector moves)
+  repmovs  rep movsb of 256 KiB, per 64 bytes (what MemcpySetTSOEnabled covers)
+  atomic   4 threads, lock xadd on one shared counter, per op per thread
+  atomic1  4 threads, lock xadd each on its own cache line, per op per thread
+  ring     2 producer/consumer pairs (4 threads), 4096-slot rings, plain stores
+           publish and plain loads consume as x86 lock-free code does; the
+           consumer checks every item and counts the ones read before the
+           data store was visible ("violations": x86 forbids them, ARM does not)
+
+RESULTS [F], ns per op, three runs each (run 1 / run 2 / run 3)
+
+  profile off (FEX_TSOENABLED=0)
+    regs     1.54 / 1.53 / 1.57
+    scalar   0.27 / 0.28 / 0.28
+    vector   0.25 / 0.25 / 0.25
+    memcpy   0.98 / 1.09 / 0.94
+    repmovs  0.90 / 0.92 / 0.86
+    atomic   41.24 / 43.01 / 44.01
+    atomic1  2.44 / 2.09 / 3.33
+    ring     3.10 / 3.13 / 3.36      violations 218331 / 244373 / 191295 of 32000000
+  profile fast (nothing set: FEX's defaults)
+    regs     1.53 / 1.54 / 1.58
+    scalar   0.42 / 0.42 / 0.42
+    vector   0.26 / 0.25 / 0.25
+    memcpy   0.87 / 1.00 / 0.90
+    repmovs  0.86 / 0.91 / 0.85
+    atomic   40.08 / 29.10 / 35.88
+    atomic1  2.37 / 3.43 / 2.34
+    ring     29.83 / 30.43 / 31.66   violations 0 / 0 / 0
+  profile full (FEX_TSOENABLED=1 FEX_VECTORTSOENABLED=1 FEX_MEMCPYSETTSOENABLED=1)
+    regs     1.53 / 1.53 / 1.53
+    scalar   0.43 / 0.42 / 0.43
+    vector   1.16 / 1.15 / 1.15
+    memcpy   5.28 / 5.36 / 5.27
+    repmovs  21.84 / 21.84 / 21.89
+    atomic   37.43 / 40.03 / 37.60
+    atomic1  2.23 / 2.62 / 2.97
+    ring     30.65 / 30.42 / 31.45   violations 0 / 0 / 0
+
+  Ratios of the medians:
+                  fast / off     full / fast     full / off
+    regs            1.00           1.00            0.99
+    scalar          1.50           1.02            1.54
+    vector          1.00           4.6             4.6
+    memcpy          0.92 (noise)   5.9             5.4
+    repmovs         0.96 (noise)   25              24
+    atomic          0.83 (noise: 29-44 ns across all runs)
+    atomic1         ~1 (noise: 2.1-3.4 ns across all runs)
+    ring            9.7            1.01            9.8
+
+A second program, benchmarks/x86_bench.c (freestanding x86-64, static PIE,
+the Stage 5 one: sieve of Eratosthenes to 16M = strided byte stores, FNV-1a
+over 32 MiB x8 = byte loads, 4 MiB block copy x32 = a loop clang vectorises
+into 16-byte moves), milliseconds, three runs each, sieve / fnv / copy / total:
+  off    37/284/4/325    35/283/3/321    36/287/3/326
+  fast   80/294/3/377   110/292/3/405    98/298/4/400
+  full   84/287/10/381   70/291/10/371   73/291/10/374
+  Total: fast 1.16-1.25x off; full 1.14-1.17x off. The byte-load loop (fnv)
+  costs 2-4 % under ordering; the byte-store loop (sieve) 2-3x; the
+  vectorised copy 3x under full only. The sieve's spread (70-110 ms) is
+  the same code under fast and full and is run-to-run noise.
+
+READINGS
+1. [F] "Apagado" is not a profile for games: in 50 ms the ring consumer read
+   191 000-244 000 items (0.6-0.8 %) before their data store was visible.
+   That is the x86 message-passing contract broken, the same way the Steam
+   client corrupted its lock-free lists in stage 8. tests/elf/i386_tso.c
+   checks the same contract for i386 guests.
+2. [F] What the ordering costs today (fast vs off), i.e. the price of
+   correctness that FEX pays on this hardware: register-only code nothing;
+   loads nearly nothing (fnv +2-4 %); a scalar load+store loop 1.5x; a strided
+   byte-store loop 2-3x; a producer/consumer handoff 9.7x (3.1 -> 30 ns an
+   item). The single-thread total of x86_bench is 1.16-1.25x.
+   [I] The ring's 10x is the release store draining the store buffer at every
+   publish, so the head's cache line bounces between the two cores for every
+   item, where plain stores let the consumer take items in batches; that is
+   latency per handoff, not a throughput loss on ordinary code.
+3. [F] What "Completo" adds on top (full vs fast): scalar code, atomics and
+   the handoff the same; 16-byte vector moves 4.6x slower, glibc's memcpy
+   5.9x, rep movsb 25x (0.86 -> 21.8 ns per 64 bytes; FEX turns the whole
+   REP MOVS into ordered byte-or-word accesses). It protects only a program
+   that synchronises threads with vector loads and stores or with REP
+   MOVS/STOS, which x86 itself keeps ordered and FEX's defaults do not.
+4. [F] Atomics (lock xadd) do not depend on the profile: they are
+   load-acquire/store-release or LSE atomics in every mode, so lock-based and
+   atomic-counter code pays nothing extra under "Completo". Contended
+   atomics vary 29-44 ns from run to run with four threads on one line.
+
+WHAT A GAME WOULD SEE [I] (an estimate from the ratios above, not a measurement)
+- Changing from the old "Completo" or "Rápido" to the new "Rápido": nothing;
+  it is the same translation every game has run with so far.
+- "Completo": a game's frame time grows only by its share of vector memory
+  moves and copies on the translated threads. Today that includes Wine, DXVK
+  and vkd3d-proton themselves (x86 under FEX in the x86 Proton), whose memcpy
+  of vertex and constant buffers is glibc's. If a fraction v of a thread's
+  time is 16-byte moves and m is memcpy, the thread's time grows by about
+  3.6 v + 4.9 m (and 24 r for rep movs). For v = 10 %, m = 5 %: +60 % on that
+  thread. For a thread with no such accesses: 0. The shares in Counter-Strike 2
+  or Schedule I are NOT measured; measure before recommending Completo to
+  anyone, and expect a visible frame-rate loss on upload-heavy games.
+- "Apagado": the ring says it would run handoffs 10x faster and scalar
+  store loops 1.5x, and that it would corrupt a multithreaded game (and
+  did corrupt the Steam client). Not an option; it is in the menu to measure.
+- The gap between "Rápido" and no ordering at all (1.16-1.25x on
+  single-thread memory-bound code, 10x on handoffs) is the part of the
+  Proton ARM64 gain that a hardware TSO mode would recover (FEX turns its
+  emulation off when the kernel grants PR_SET_MEM_MODEL_TSO) and that volatile
+  metadata recovers only for PE code (Wine ARM64EC, stage 57). Neither is
+  available to SteamARM on macOS today; nothing here claims otherwise.
+
+CAVEATS
+- One Mac, one FEX build, L2-resident arrays (the instruction cost, not DRAM
+  bandwidth); tso_bench's rings use one producer and one consumer each; the
+  contended atomic numbers are noisy by nature.
+- The ring's violation count under "off" is of this program's timing; another
+  program sees more or fewer. Zero under fast and full is the expected
+  result, not a proof of correctness.
+- No game was measured (the lead plays on this Mac; HARD RULES). The
+  "what a game would see" section is arithmetic on these ratios.
+
+HOW TO REPEAT
+  benchmarks/tso_bench.sh                 (RUNS=3 SCALE=1 PROFILES="off fast full")
+  scripts/arch-audit.py                   (the TSO section: who orders, which profile)
+  scripts/settings-env.py --tso-profile full | fast | off

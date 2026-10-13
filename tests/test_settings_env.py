@@ -285,6 +285,56 @@ class SettingsEnvironmentTests(unittest.TestCase):
         # A display no common mode fits: the scaled size, even.
         self.assertEqual(policy(m4, (1512, 982))["render"], [1014, 658])
 
+    def test_fex_tso_profiles(self):
+        # Procesador -> Orden de memoria: Completo ("strict") orders every access
+        # (vector and memcpy too), Rápido is FEX's defaults, Apagado turns the
+        # emulation off. Nothing is set for Rápido, an unknown value, a
+        # settings.json without the key, or the old "full", which set nothing
+        # either (an old file keeps running what it ran).
+        strict = self.env({"fexTSO": "strict"})
+        self.assertEqual((strict["FEX_TSOENABLED"], strict["FEX_VECTORTSOENABLED"], strict["FEX_MEMCPYSETTSOENABLED"]),
+                         ("1", "1", "1"))
+        for settings in ({"fexTSO": "fast"}, {}, {"fexTSO": "bogus"}, {"fexTSO": None}, {"fexTSO": "full"}):
+            with self.subTest(settings=settings):
+                self.assertEqual({k for k in self.env(settings) if "TSO" in k}, set())
+                self.assertEqual(self.settings.tso_profile(settings), "fast")
+        off = self.env({"fexTSO": "off"})
+        self.assertEqual(off["FEX_TSOENABLED"], "0")
+        self.assertNotIn("FEX_VECTORTSOENABLED", off)
+        self.assertNotIn("FEX_MEMCPYSETTSOENABLED", off)
+        self.assertEqual(self.settings.tso_profile({"fexTSO": "strict"}), "strict")
+        self.assertEqual(self.settings.TSO_DEFAULT, "fast")
+        self.assertEqual(self.settings.TSO_LEGACY, {"full": "fast"})
+        # The three profiles differ (Completo and Rápido used to be the same).
+        self.assertEqual(len({tuple(sorted(v.items())) for v in self.settings.TSO_PROFILES.values()}), 3)
+        # Lightning JIT keeps FEX's defaults whatever is stored.
+        for stored in ("strict", "off"):
+            jit = self.env({"execution": "lightningJIT", "fexTSO": stored})
+            self.assertEqual({k for k in jit if "TSO" in k}, set(), stored)
+        # The launcher's table (MemoryOrderingProfile, launcher/ApplicationCore.swift)
+        # sets the same variables, and nothing there claims hardware TSO.
+        swift = (REPO / "launcher/ApplicationCore.swift").read_text()
+        for name, variables in self.settings.TSO_PROFILES.items():
+            for key, value in variables.items():
+                self.assertIn('"%s": "%s"' % (key, value), swift, name)
+        self.assertNotIn("TSO del hardware activ", swift)
+        self.assertNotIn("hardware TSO activ", swift)
+
+    def test_tso_profile_cli(self):
+        # benchmarks/tso_bench.sh takes the variables from here, as export lines.
+        import contextlib
+        import io
+        for name, expected in (("strict", "export FEX_MEMCPYSETTSOENABLED=1\nexport FEX_TSOENABLED=1\n"
+                                          "export FEX_VECTORTSOENABLED=1\n"),
+                               ("fast", ""), ("off", "export FEX_TSOENABLED=0\n")):
+            with self.subTest(name=name):
+                out = io.StringIO()
+                with contextlib.redirect_stdout(out):
+                    self.settings.main(["settings-env.py", "--tso-profile", name])
+                self.assertEqual(out.getvalue(), expected)
+        with self.assertRaises(SystemExit):
+            self.settings.main(["settings-env.py", "--tso-profile", "bogus"])
+
     def test_fex_smc_and_lightning_jit(self):
         # FEX reads SMCChecks as text; a number meant none.
         self.assertEqual(self.env({"fexSMC": "full"})["FEX_SMCCHECKS"], "full")

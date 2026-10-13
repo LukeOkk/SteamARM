@@ -8,6 +8,7 @@ with_overrides(); run-steam.sh evaluates --shell.
   scripts/settings-env.py --volume [settings.json]  output volume, empty when muted
   scripts/settings-env.py --emulate-modeset [settings.json]  "on" or "off" (Escala de resolución)
   scripts/settings-env.py --upscaling        this Mac's upscaling recommendation as JSON
+  scripts/settings-env.py --tso-profile NAME  export lines of one Orden de memoria profile (strict/fast/off)
 
 Also writes $STATE/launcher/limits.env (the memory ceiling the guard reads).
 Games inherit Steam's environment, so a change reaches them when Steam starts.
@@ -31,6 +32,46 @@ STEAM_UI_GPU_SWITCHES = ("--use-gl=angle", "--use-angle=vulkan",
 
 
 ZINK_GL45_OVERRIDE = "+GL_ARB_vertex_type_2_10_10_10_rev +GL_ARB_texture_buffer_object_rgb32"
+
+# Procesador -> Orden de memoria (TSO): FEX's software emulation of x86
+# memory ordering, which Apple silicon's hardware does not keep for us. The
+# chip's TSO mode is switched on by the kernel for Rosetta-translated
+# processes only; no public API does it for anyone else, and the runtime
+# answers EINVAL to FEX's PR_SET_MEM_MODEL request (runtime/dispatch.c), so
+# every profile here is FEX translating loads and stores to ordered ones.
+# FEX reads FEX_<OPTION>; its own defaults (FEXCore Config.json.in) are
+# TSOEnabled=true, VectorTSOEnabled=false, MemcpySetTSOEnabled=false,
+# HalfBarrierTSOEnabled=true. The launcher's table (MemoryOrderingProfile,
+# launcher/ApplicationCore.swift) says the same; tests/test_settings_env.py
+# keeps the two equal. Measured: benchmarks/stage58-tso-cost.txt.
+TSO_PROFILES = {
+    # "Completo": every access in x86 order -- scalar, the 16/32-byte vector
+    # moves (SSE/AVX, glibc's memcpy) and REP MOVS/STOS too.
+    "strict": {"FEX_TSOENABLED": "1", "FEX_VECTORTSOENABLED": "1", "FEX_MEMCPYSETTSOENABLED": "1"},
+    # "Rápido": FEX's defaults, nothing set: scalar accesses ordered, vector
+    # and memcpy/memset relaxed.
+    "fast": {},
+    # "Apagado": ARM's weak ordering for everything. Multithreaded x86 code
+    # breaks (the Steam client corrupted its lock-free lists when FEX's
+    # emulation went off, benchmarks/stage8-steam-zero-vm.txt): measuring only.
+    "off": {"FEX_TSOENABLED": "0"},
+}
+# Until 2026-10-06 the launcher stored "full" for Completo and set nothing for
+# it (FEX's defaults; "fast" set the same defaults by name): a settings.json
+# with "full" ran Rápido and keeps running it. Completo with every access
+# ordered is the new value, chosen on purpose, never by an old file.
+TSO_LEGACY = {"full": "fast"}
+TSO_DEFAULT = "fast"
+
+
+def tso_profile(s):
+    """The Orden de memoria profile of a settings dict: the stored one when it
+    is a known name ("full" from an older file is Rápido, what it ran),
+    otherwise Rápido (FEX's defaults, also what a settings.json without the
+    key ran)."""
+    name = s.get("fexTSO") if isinstance(s, dict) else None
+    name = TSO_LEGACY.get(name, name)
+    return name if name in TSO_PROFILES else TSO_DEFAULT
 
 
 def effective_synchronization(value):
@@ -308,13 +349,7 @@ def env_from_settings(s, total=None, chip=None, display=None):
     # Procesador (FEX reads FEX_<OPTION>)
     if s.get("fexDiskCache"):
         env["FEX_DISKCACHE"] = "1"
-    tso = s.get("fexTSO") or "full"
-    if tso == "off":
-        env["FEX_TSOENABLED"] = "0"
-    elif tso == "fast":
-        env["FEX_TSOENABLED"] = "1"
-        env["FEX_VECTORTSOENABLED"] = "0"
-        env["FEX_MEMCPYSETTSOENABLED"] = "0"
+    env.update(TSO_PROFILES[tso_profile(s)])
     if s.get("fexMultiblock") is False:
         env["FEX_MULTIBLOCK"] = "0"
     # FEX reads SMCChecks as text (Config.h SMCCheckHandler: "none", "mtrack",
@@ -327,15 +362,15 @@ def env_from_settings(s, total=None, chip=None, display=None):
     # Lightning JIT (launcher "Backend de la aplicación"): native windows and
     # FEX's JIT set for speed over the choices above: the code cache on disk
     # (code already translated is not translated again at the next start)
-    # and x87 at double precision (old games' maths). FEX's defaults already
-    # leave vector loads and memcpy/memset out of the memory ordering, and
-    # multi-block translation on; self-modifying code stays tracked (mtrack:
-    # games with JITs of their own -- .NET, Unity, LuaJIT -- need it).
+    # and x87 at double precision (old games' maths). Memory ordering is
+    # FEX's defaults, the Rápido profile (vector loads and memcpy/memset out
+    # of the ordering), whatever Orden de memoria says; multi-block
+    # translation on; self-modifying code stays tracked (mtrack: games with
+    # JITs of their own -- .NET, Unity, LuaJIT -- need it).
     if s.get("execution") == "lightningJIT":
         env["FEX_DISKCACHE"] = "1"
-        env.pop("FEX_TSOENABLED", None)
-        env.pop("FEX_VECTORTSOENABLED", None)
-        env.pop("FEX_MEMCPYSETTSOENABLED", None)
+        for key in TSO_PROFILES["strict"]:
+            env.pop(key, None)
         env.pop("FEX_MULTIBLOCK", None)
         env.pop("FEX_SMCCHECKS", None)
         env["FEX_X87REDUCEDPRECISION"] = "1"
@@ -569,6 +604,15 @@ def load(path):
 
 def main(argv):
     mode = argv[1] if len(argv) > 1 else "--shell"
+    if mode == "--tso-profile":
+        # The variables of one Orden de memoria profile, for benchmarks/tso_bench.sh:
+        # the measurement runs exactly what the launcher would set.
+        name = argv[2] if len(argv) > 2 else TSO_DEFAULT
+        if name not in TSO_PROFILES:
+            sys.exit("settings-env: unknown TSO profile %r (one of %s)" % (name, ", ".join(TSO_PROFILES)))
+        for k, v in sorted(TSO_PROFILES[name].items()):
+            print("export %s=%s" % (k, shlex.quote(v)))
+        return
     path = argv[2] if len(argv) > 2 else os.path.join(STATE, "launcher", "settings.json")
     s = load(path)
     if mode == "--upscaling":

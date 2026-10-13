@@ -13,9 +13,16 @@ accesses it marks as not volatile). An ELF is x86-64, i386 or aarch64. A
 Mach-O is arm64, x86_64 or both. A process is native, translated by Rosetta
 (the kernel's P_TRANSLATED flag) or, for SteamARM's runtime, the guest it
 runs: an aarch64 ELF directly, or x86 through FEX.
+
+The TSO section says who keeps x86 memory ordering for the x86 guests: never
+the hardware (Apple silicon's TSO mode is the kernel's, for Rosetta-translated
+processes only, and SteamARM uses no private API), always FEX's software
+emulation, in the profile the launcher's settings.json selects (Procesador ->
+Orden de memoria; scripts/settings-env.py), with the exact FEX variables.
 """
 import ctypes
 import glob
+import importlib.util
 import os
 import struct
 import subprocess
@@ -207,6 +214,69 @@ def stack():
     return items
 
 
+# ------------------------------------------------------------------ TSO
+
+# FEX's own defaults (FEXCore/Source/Interface/Config/Config.json.in of the
+# SteamARM-patched FEX): what runs when a variable is not set.
+FEX_TSO_DEFAULTS = (("TSOEnabled", "true"), ("VectorTSOEnabled", "false"), ("MemcpySetTSOEnabled", "false"),
+                    ("HalfBarrierTSOEnabled", "true"), ("StrictInProcessSplitLocks", "false"))
+
+# Apple's words, so the claim is theirs: developer.apple.com/documentation/apple-silicon/
+# about-the-rosetta-translation-environment and .../addressing-architectural-differences-in-your-macos-code.
+ROSETTA_IS = ("Rosetta is a translation process that allows users to run Mac apps that contain "
+              "x86_64 instructions on Apple silicon")
+WEAK_MODEL = ("A weak memory ordering model, like the one in Apple silicon, gives the processor more "
+              "flexibility to reorder memory instructions and improve performance, but doesn't add "
+              "implicit memory barriers")
+
+
+def settings_env():
+    """scripts/settings-env.py as a module (it is not importable by name)."""
+    spec = importlib.util.spec_from_file_location(
+        "settings_env", os.path.join(os.path.dirname(os.path.abspath(__file__)), "settings-env.py"))
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def tso(rosetta_count, translated_self):
+    """The TSO section: hardware (unavailable to us, and why) and FEX's
+    software emulation in the profile the settings select."""
+    lines = ["TSO (x86 memory ordering for the x86 guests):",
+             "   hardware, Apple silicon's TSO mode:      unavailable to user processes on macOS",
+             "      The kernel switches it on for Rosetta-translated processes only, and Rosetta",
+             "      translates x86_64 Mac apps (\"%s\")." % ROSETTA_IS,
+             "      Every other process runs with the chip's own model (\"%s\")." % WEAK_MODEL,
+             "      No public API turns it on; SteamARM uses none, and the runtime answers EINVAL to",
+             "      FEX's PR_SET_MEM_MODEL request (runtime/dispatch.c; docs/ARCHITECTURE.md).",
+             "      Rosetta processes now: %d; this audit: %s." % (
+                 rosetta_count, "translated" if translated_self else "not translated")]
+    try:
+        se = settings_env()
+        path = os.path.join(se.STATE, "launcher", "settings.json")
+        settings = se.load(path)
+        stored = settings.get("fexTSO")
+        profile = se.tso_profile(settings)
+        variables = se.TSO_PROFILES[profile]
+        label = {"full": "Completo", "fast": "Rápido", "off": "Apagado"}.get(profile, profile)
+        if not os.path.exists(path):
+            origin = "no %s: the default" % path
+        elif stored in se.TSO_PROFILES:
+            origin = "from %s" % path
+        else:
+            origin = "%s stores %r, not a profile: the default" % (path, stored)
+        lines.append("   software, FEX (SteamARM-patched):        profile %s (%s), %s" % (profile, label, origin))
+        lines.append("      " + (" ".join("%s=%s" % kv for kv in sorted(variables.items()))
+                                 or "nothing set: FEX's defaults") +
+                     ("; Lightning JIT ignores the profile (FEX's defaults)" if settings.get("execution") == "lightningJIT" else ""))
+        lines.append("      FEX defaults otherwise: " + " ".join("%s=%s" % kv for kv in FEX_TSO_DEFAULTS))
+        lines.append("      VolatileMetadata=true applies to PE files (Wine ARM64EC's), not to Linux x86 guests.")
+        lines.append("      Measured cost of each profile: benchmarks/stage58-tso-cost.txt.")
+    except (OSError, AttributeError, KeyError) as e:
+        lines.append("   software, FEX: profile unknown (%s: %s)" % (e.__class__.__name__, e))
+    return lines
+
+
 def main(argv):
     if argv:
         for p in argv:
@@ -220,6 +290,9 @@ def main(argv):
     for c in rosetta:
         print("   " + c)
     print("runtime guests now: %s" % ", ".join("%s %d" % (k, v) for k, v in guests.items()))
+    print()
+    for line in tso(len(rosetta), translated(os.getpid())):
+        print(line)
     return 0
 
 
