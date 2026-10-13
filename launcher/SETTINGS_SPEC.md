@@ -26,7 +26,7 @@ this stack: show them greyed out with the reason as help text, never fake.
 | timezone | "auto" or an IANA name ("UTC", "Europe/Berlin", …) | "auto" (= the Mac's) | TZ of the guest |
 | vsync | "game" \| "on" \| "off" (shown AUTO / ON / OFF) | "game" | on/off: DXVK dxgi.syncInterval and d3d9.presentInterval 1/0, and VKD3D_SWAPCHAIN_PRESENT_MODE FIFO/IMMEDIATE (uppercase: vkd3d-proton compares with strcmp; Proton 10.0's vkd3d has no such variable). game: nothing set. MoltenVK offers only FIFO and IMMEDIATE; the effect on screen is not measured |
 | dramGB | 0 = automático, or N GB | 0 | memory ceiling for everything SteamARM runs (Steam + game): the memory guard stops the guests above it instead of letting the Mac run out |
-| vramGB | 0 = automático, or N GB | 0 | video memory reported to games: Vulkan heap size in the shim (LXRT_VK_MAX_VRAM_MB) and DXVK dxgi.maxDeviceMemory |
+| vramGB | 0 = automático (half of the RAM), or N GB | 0 | video memory reported to games: Vulkan device-local heap size and VK_EXT_memory_budget in the shim (LXRT_VK_MAX_VRAM_MB, shim/memcap.c) and DXVK dxgi.maxDeviceMemory |
 | synchronization | "auto" \| "wineserver" \| "msync" \| "fsync" \| "esync" (AUTO / DEFAULT / MSYNC / FSYNC / ESYNC) | "auto" | esync: PROTON_NO_FSYNC=1 only. Everything else resolves to wineserver: PROTON_NO_ESYNC=1 and PROTON_NO_FSYNC=1. FSYNC is shown disabled (lxrun has no futex_waitv, syscall 449), MSYNC disabled (no MSync-capable Wine), ESYNC experimental (only Proton 10.0 has it; eventfd across processes under lxrun is not verified) and disabled when no installed Proton has it. AUTO follows RuntimeCapabilities.effectiveSynchronization: wineserver today. Replaces the old "esync"/"fsync" booleans: a settings.json that still has them and no "synchronization" is translated exactly as before; the launcher migrates esync:true to "esync" and esync:false to "wineserver" |
 | fallbackPolicy | "auto" \| "strict" \| "ask" | "auto" | what a launch does when a setting it asks for cannot work (VNC for a program outside the x86 root; a stored synchronization/graphics value that is no longer usable): AUTO launches with the fallback, STRICT refuses, ASK asks. No effect when every setting can work. Never a VM |
 | fexDiskCache | bool | false | FEX_DISKCACHE (translation cache on disk, like PPTC) |
@@ -56,9 +56,15 @@ this stack: show them greyed out with the reason as help text, never fake.
 
 Total RAM T (GB, from the Mac). The top of the list is the usable maximum
 M = T − 2 when T ≤ 8, otherwise M = T − 4 (8 → 6, 16 → 12, 24 → 20,
-32 → 28, 64 → 60, 128 → 124). The list is "Automático (N GiB)" (N = M)
+32 → 28, 64 → 60, 128 → 124). The list is "Automático (N GiB)" 
 followed by M and then every value of [48, 32, 24, 16, 12, 8, 6, 4, 2] below
-M. Stored as 0 for automático.
+M. N is M for DRAM; for VRAM it is half of T, at least 2 and at most M
+(8 -> 4, 16 -> 8, 24 -> 12, 32 -> 16, 64 -> 32): `MemoryChoices.vramDefault`,
+the same number as scripts/settings-env.py's `vram_default_gb`. The GPU has
+no memory of its own, so the video memory a game is told it has comes out of
+the RAM its own data, Proton, Steam and macOS share (Schedule I, M4 16 GB,
+2026-10-06: 6.2-6.5 GB of graphics memory in a 9.9-10.3 GB footprint, 4-5 GB
+of swap). Stored as 0 for automático.
 
 ## Sections (sidebar, Ryujinx order and SF Symbols)
 

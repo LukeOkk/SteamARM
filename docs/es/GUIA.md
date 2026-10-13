@@ -115,7 +115,14 @@ La ventana de configuración sigue el diseño de Ryujinx:
 
   En los dos casos el launcher dice que fue él y por qué, en lugar de
   "terminó con la señal 9".
-- La VRAM es la memoria de vídeo que ven los juegos.
+- La VRAM es la memoria de vídeo que ven los juegos (tamaño del heap
+  Vulkan y presupuesto de VK_EXT_memory_budget en el shim; DedicatedVideoMemory
+  y QueryVideoMemoryInfo en DXVK). Su **Automático** es la mitad de la RAM
+  (8 GB → 4, 16 GB → 8, 32 GB → 16), no el máximo: la GPU no tiene memoria
+  propia, así que lo que el juego cree tener sale de la misma RAM que sus
+  datos, Proton, Steam y macOS. Súbela si un juego se queda sin texturas;
+  bájala si llena la memoria y el Mac usa swap. Solo la respetan los juegos
+  que miran la memoria de vídeo que se les anuncia.
 
 ## Mandos
 

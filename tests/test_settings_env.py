@@ -323,6 +323,23 @@ class SettingsEnvironmentTests(unittest.TestCase):
             self.assertNotIn("STEAMARM_VK_ICD", env)
             self.assertEqual(env["PROTON_NO_ESYNC"], "1")
 
+    def test_vram(self):
+        # Automático: half of the RAM, at least 2 GB, never above the DRAM top.
+        for total, want in [(4, 2), (8, 4), (16, 8), (24, 12), (32, 16), (64, 32), (128, 64)]:
+            self.assertEqual(self.settings.vram_default_gb(total), want, total)
+            self.assertLessEqual(want, self.settings.usable_gb(total))
+        env = self.env({})
+        self.assertEqual(env["LXRT_VK_MAX_VRAM_MB"], "8192")
+        self.assertIn("dxgi.maxDeviceMemory = 8192", env["DXVK_CONFIG"])
+        env = self.env({"vramGB": 12})
+        self.assertEqual(env["LXRT_VK_MAX_VRAM_MB"], "12288")
+        self.assertIn("dxgi.maxDeviceMemory = 12288", env["DXVK_CONFIG"])
+        # A stored value above the top of the list is held to it.
+        env = self.env({"vramGB": 20})
+        self.assertEqual(env["LXRT_VK_MAX_VRAM_MB"], "12288")
+        env = self.settings.env_from_settings({"vramGB": 0}, total=8)
+        self.assertEqual(env["LXRT_VK_MAX_VRAM_MB"], "4096")
+
     def test_shim_selects_icd(self):
         with tempfile.TemporaryDirectory(prefix="steamarm-shim-test-") as temp:
             path = Path(temp) / "libvulkan.so.1"

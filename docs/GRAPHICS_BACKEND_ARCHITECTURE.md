@@ -38,7 +38,7 @@ x86-64 / i386 program ─ libvulkan-guest.so ─ FEX thunk ─ libvulkan-host.so
 | `wsi.c` | X11/xcb surfaces: a `CAMetalLayer` per X window from the runtime, published as `_STEAMARM_LAYER` (`shim/wsi.c:185-189`); `docs/WINDOWING_AND_PRESENTATION.md` |
 | `features.c` | reports `geometryShader`, `shaderCullDistance` and, since `8a716c9`, `fillModeNonSolid` and strips them from `vkCreateDevice`; claims `VK_EXT_depth_clip_enable` (emulated with depth clamp), `VK_EXT_transform_feedback` (commands are no-ops) and `VK_EXT_dynamic_rendering_unused_attachments`, only when the driver lacks them. `LXRT_VK_NO_SPOOF=1` turns it off |
 | `fallback.c` | replaces a compute pipeline MoltenVK cannot compile by an empty one (VKD3D-Proton's DirectStorage decompression); `LXRT_VK_NO_STUB_PIPELINES=1` turns it off |
-| `memcap.c` | caps the reported device-local heap and memory budget (`LXRT_VK_MAX_VRAM_MB`, the VRAM setting) |
+| `memcap.c` | caps the reported device-local heap and VK_EXT_memory_budget budget (`LXRT_VK_MAX_VRAM_MB`, the VRAM setting; default half of the RAM, `scripts/settings-env.py vram_default_gb`), on MoltenVK and KosmicKrisp alike (both report one heap the size of the RAM). KosmicKrisp's budget is its usage and nothing more whenever the Mac has under ~4 GB free or inactive (MEASURED 2026-10-06: budget 0.1 MiB at usage 0.1, 257 at 257), which DXVK would pass to games as Budget == CurrentUsage; the shim answers the cap instead. `tests/elf/vk_memcap.c` |
 | `map32.c` | `vkMapMemory` for 32-bit guests: host pages aliased into FEX's guest window |
 | `gen_rebase.py` → `vk_rebase.c` | rebases guest pointers from FEX's low window before they reach the driver; forwards only, when there is no guest base |
 

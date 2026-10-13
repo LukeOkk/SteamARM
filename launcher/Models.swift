@@ -292,6 +292,12 @@ struct LauncherSettings: Codable, Equatable {
 enum MemoryChoices {
     static func maximum(totalGB: Int) -> Int { max(0, totalGB - (totalGB <= 8 ? 2 : 4)) }
     static var maximum: Int { maximum(totalGB: Int(ProcessInfo.processInfo.physicalMemory / 1_073_741_824)) }
+    /// VRAM "Automático": half of the RAM, at least 2 GiB, at most `maximum`
+    /// (scripts/settings-env.py vram_default_gb says the same number). The
+    /// GPU has no memory of its own: what a game is told it has comes out of
+    /// the RAM its own data, Proton, Steam and macOS share.
+    static func vramDefault(totalGB: Int) -> Int { max(2, min(maximum(totalGB: totalGB), totalGB / 2)) }
+    static var vramDefault: Int { vramDefault(totalGB: Int(ProcessInfo.processInfo.physicalMemory / 1_073_741_824)) }
     static var values: [Int] { Array(Set([maximum] + [48, 32, 24, 16, 12, 8, 6, 4, 2].filter { $0 <= maximum })).filter { $0 > 0 }.sorted(by: >) }
 }
 

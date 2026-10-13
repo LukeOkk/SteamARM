@@ -103,8 +103,16 @@ total − 2 GB up to 8 GB, total − 4 GB above that. So 8 GB → 6, 16 GB → 1
 - **DRAM** is the ceiling for everything SteamARM runs (Steam and the game
   together). The memory guard stops the Linux programs before the Mac runs
   out of memory, instead of letting macOS freeze.
-- **VRAM** is the video memory reported to games: the Vulkan heap size seen
-  by DXVK/VKD3D-Proton, and DXVK's `dxgi.maxDeviceMemory`.
+- **VRAM** is the video memory reported to games: the Vulkan device-local
+  heap size and the VK_EXT_memory_budget budget seen by DXVK/VKD3D-Proton
+  and native Vulkan games (DXGI's DedicatedVideoMemory and
+  QueryVideoMemoryInfo come from them), and DXVK's `dxgi.maxDeviceMemory`.
+  Its **Automático** is half of the RAM (8 GB → 4, 16 GB → 8, 32 GB → 16),
+  not the maximum: the GPU has no memory of its own, so what a game is
+  told it has comes out of the RAM its own data, Proton, Steam and macOS
+  share. Raise it if a game runs out of textures; lower it if a game fills
+  the memory and the Mac swaps. A game only follows it if it looks at the
+  video memory it is told it has.
 
 ## Controllers (Entrada)
 

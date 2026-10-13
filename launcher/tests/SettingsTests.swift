@@ -58,6 +58,11 @@ struct SettingsTests {
         for (total, expected) in [(8, 6), (16, 12), (24, 20), (32, 28), (64, 60), (128, 124)] {
             precondition(MemoryChoices.maximum(totalGB: total) == expected)
         }
+        // VRAM "Automático": half of the RAM (scripts/settings-env.py vram_default_gb).
+        for (total, expected) in [(8, 4), (16, 8), (24, 12), (32, 16), (64, 32), (128, 64)] {
+            precondition(MemoryChoices.vramDefault(totalGB: total) == expected)
+            precondition(MemoryChoices.vramDefault(totalGB: total) <= MemoryChoices.maximum(totalGB: total))
+        }
         for (old, new) in [("ProController", "switchpro"), ("Xbox", "xboxseries")] {
             let player = try decoder.decode(PlayerConfig.self, from: Data("{\"controllerType\":\"\(old)\",\"mapping\":{\"a\":\"b\"}}".utf8))
             precondition(player.controllerType == new && player.mapping["a"] == "b")

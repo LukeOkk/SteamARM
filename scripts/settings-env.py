@@ -107,6 +107,23 @@ def usable_gb(total=None):
     return max(2, t - 2 if t <= 8 else t - 4)
 
 
+def vram_default_gb(total=None):
+    """VRAM "Automático": half of the Mac's RAM, at least 2 GB, at most usable_gb.
+
+    The GPU has no memory of its own, so the video memory a game is told it
+    has (the Vulkan device-local heap and VK_EXT_memory_budget in the shim,
+    DXGI's DedicatedVideoMemory and QueryVideoMemoryInfo through DXVK) comes
+    out of the same RAM as the game's own code and data, Proton, Steam and
+    macOS. Schedule I (MEASURED 2026-10-06, M4 16 GB): 6.2-6.5 GB of graphics
+    memory inside a 9.9-10.3 GB footprint, 4-5 GB of swap; a game that
+    believed in 12 GB of video memory could fill it all. Half: 8 GB -> 4,
+    16 -> 8, 24 -> 12, 32 -> 16, 64 -> 32 (launcher/Models.swift
+    MemoryChoices.vramDefault says the same number).
+    """
+    t = total if total is not None else total_ram_gb()
+    return max(2, min(usable_gb(t), t // 2))
+
+
 # Upscaling, "Filtro de escalado" AUTO (the default): AMD's FSR 1.0 in the
 # Vulkan shim (LXRT_VK_SCALER=fsr, shim/scaler.c). It was the fastest
 # filter in every measurement, 7-9 frames a second over MetalFX spatial,
@@ -281,8 +298,12 @@ def env_from_settings(s, total=None, chip=None, display=None):
         # vkd3d-proton compares with strcmp against FIFO, IMMEDIATE, ...: lowercase
         # is ignored. Proton 10.0's vkd3d has no such variable.
         env["VKD3D_SWAPCHAIN_PRESENT_MODE"] = "FIFO" if vsync == "on" else "IMMEDIATE"
+    # The shim caps the device-local heap and VK_EXT_memory_budget
+    # (shim/memcap.c: what DXGI's DedicatedVideoMemory and
+    # QueryVideoMemoryInfo's Budget come from); dxgi.maxDeviceMemory is DXVK's
+    # own cap on DedicatedVideoMemory, the same number twice.
     top = usable_gb(total)
-    vram = int(s.get("vramGB") or 0) or top
+    vram = int(s.get("vramGB") or 0) or vram_default_gb(total)
     vram = min(vram, top)
     env["LXRT_VK_MAX_VRAM_MB"] = str(vram * 1024)
     dxvk.append("dxgi.maxDeviceMemory = %d" % (vram * 1024))

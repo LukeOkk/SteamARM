@@ -299,8 +299,8 @@ struct SettingsView: View {
                 memory("Tope de memoria de las apps", $draft.dramGB)
                 Text("No da memoria a los juegos (ven toda la del Mac): es el límite a partir del cual el vigilante de SteamARM cierra todas las apps para que el Mac no se cuelgue.")
                     .font(.caption).foregroundStyle(.secondary)
-                memory("VRAM que ven los juegos", $draft.vramGB)
-                Text("La memoria de vídeo que el juego cree tener. Automático: la que da Metal en este Mac. Bájala solo si un juego reserva de más.")
+                memory("VRAM que ven los juegos", $draft.vramGB, auto: MemoryChoices.vramDefault)
+                Text("La memoria de vídeo que el juego cree tener (tamaño del heap Vulkan y presupuesto de VK_EXT_memory_budget en el shim; DedicatedVideoMemory y QueryVideoMemoryInfo en DXVK). La GPU no tiene memoria propia: sale de la misma RAM que el juego, Proton, Steam y macOS. Automático: la mitad de la RAM del Mac. Súbela si un juego se queda sin texturas; bájala si llena la memoria y el Mac usa swap.")
                     .font(.caption).foregroundStyle(.secondary)
             }
             Section("Sincronización (Proton)") {
@@ -583,8 +583,8 @@ struct SettingsView: View {
             if !values.contains(value.wrappedValue) { Text("\(value.wrappedValue) (guardado)").tag(value.wrappedValue) }
         }
     }
-    private func memory(_ title: String, _ value: Binding<Int>) -> some View {
-        integerChoice(title + " (GiB)", value, [0] + MemoryChoices.values, zero: "Automático (\(MemoryChoices.maximum) GiB)")
+    private func memory(_ title: String, _ value: Binding<Int>, auto: Int = MemoryChoices.maximum) -> some View {
+        integerChoice(title + " (GiB)", value, [0] + MemoryChoices.values, zero: "Automático (\(auto) GiB)")
     }
     private func unavailable(_ title: String, _ reason: String) -> some View {
         LabeledContent(title) { Text("No disponible") }.disabled(true).help(reason)

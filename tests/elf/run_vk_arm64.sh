@@ -277,6 +277,38 @@ else
         run_bilinear "kosmickrisp native" shader 0 native STEAMARM_VK_ICD=kosmickrisp STEAMARM_KK_DIR="$OWN" KK_FSR_METALFX=1
     fi
 fi
+# vk_memcap: the video memory a game sees (shim/memcap.c, LXRT_VK_MAX_VRAM_MB):
+# heap sizes, VK_EXT_memory_budget's budget and usage, before and after a
+# 256 MiB allocation. With the cap, both drivers must answer a heap of at
+# most 4096 MiB and a budget of at most that and above the usage:
+# KosmicKrisp's own budget is its usage whenever the Mac has little free or
+# inactive memory, and the old shim passed that on.
+exe10="$ROOT/tmp/vktest/vk_memcap"
+if ! "$CLANG" --target=aarch64-redhat-linux-gnu --sysroot="$STAGE" --gcc-install-dir="$GCCDIR" -fuse-ld=lld \
+        --ld-path=/opt/homebrew/opt/lld/bin/ld.lld -w -O2 -I/opt/homebrew/include -o "$exe10" \
+        tests/elf/vk_memcap.c "$ROOT/usr/lib/libvulkan.so.1"; then
+    echo "  FAIL  vk_memcap (build)"; fail=$((fail + 1))
+else
+    run_memcap() { # label, then environment assignments
+        local label=$1; shift
+        local log="$ROOT/tmp/vktest/vk_memcap_${label// /_}.log"
+        env OBJC_DISABLE_INITIALIZE_FORK_SAFETY=YES LXRT_ROOT="$ROOT" "$@" \
+            perl -e 'alarm 60; exec @ARGV' ./build/lxrun /tmp/vktest/vk_memcap > "$log" 2>&1
+        if [ "$(grep -E '^== vk_memcap' "$log" | tail -1)" = "== vk_memcap: ok" ]; then
+            printf '  ok    vk_memcap %s (%s)\n' "$label" "$(grep -m1 '^after heap\[0\]' "$log" | cut -d' ' -f2-)"; pass=$((pass + 1))
+        else
+            printf '  FAIL  vk_memcap %s: %s (log %s)\n' "$label" "$(grep -B1 '^== vk_memcap' "$log" | head -1)" "$log"
+            fail=$((fail + 1))
+        fi
+    }
+    run_memcap "moltenvk" STEAMARM_VK_ICD=moltenvk
+    run_memcap "moltenvk cap" STEAMARM_VK_ICD=moltenvk LXRT_VK_MAX_VRAM_MB=4096
+    run_memcap "kosmickrisp homebrew cap" STEAMARM_VK_ICD=kosmickrisp LXRT_VK_MAX_VRAM_MB=4096
+    if [ -f "$OWN/libvulkan_kosmickrisp.dylib" ]; then
+        run_memcap "kosmickrisp steamarm" STEAMARM_VK_ICD=kosmickrisp STEAMARM_KK_DIR="$OWN"
+        run_memcap "kosmickrisp steamarm cap" STEAMARM_VK_ICD=kosmickrisp STEAMARM_KK_DIR="$OWN" LXRT_VK_MAX_VRAM_MB=4096
+    fi
+fi
 # vk_x11_present: a swapchain on an X window of SteamARM's X server. With
 # IMMEDIATE the shim's mailbox (shim/mailbox.c) must not wait for the display
 # (the layer is shown by another process and takes one drawable per refresh:
