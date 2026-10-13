@@ -3721,6 +3721,11 @@ restart:
             lxrt_memlog_file((uint64_t)ret, a1, (uint64_t)a5, (int)a4);
         if (ret >= 0 && ((long)a3 & LINUX_MAP_SHARED))
             lxrt_futex_shared_add((uint64_t)ret, a1);
+        else if (ret >= 0)
+            // A private mapping replaced whatever was there, a shared one
+            // included: Wine unmaps its views by mapping PROT_NONE over them
+            // (futex_ops.c, "which futexes really cross tasks").
+            lxrt_futex_shared_remove((uint64_t)ret, a1);
         break;
     case LNR_munmap:
         if (lxrt_pool_overlaps(a0, a0 + a1))
@@ -4700,6 +4705,9 @@ restart:
             break;
         }
         lxrt_privmap_forget(a0, a1);
+        // A shared mapping stays shared where it goes (futex_ops.c: a waiter
+        // and a waker must agree on its ulock flavour).
+        bool futex_shared = lxrt_futex_shared_has(a0);
         // 4 KiB guest pages that do not fill a host page: do_mremap_subpage.
         bool sub = (a0 % LXRT_HOST_PAGE) || ((a3 & 2) && (a4 % LXRT_HOST_PAGE)) ||
                    lxrt_subpage_tracked(a0, a1) || ((a3 & 2) && lxrt_subpage_tracked(a4, a2));
@@ -4707,6 +4715,11 @@ restart:
             ret = do_mremap_subpage(a0, a1, a2, (long)a3, a4);
         else
             ret = lxrt_mremap(a0, a1, a2, (int)a3, a4);
+        if (ret >= 0 && futex_shared) {
+            if (!(a3 & 4))                      // MREMAP_DONTUNMAP keeps the old range
+                lxrt_futex_shared_remove(a0, a1);
+            lxrt_futex_shared_add((uint64_t)ret, a2);
+        }
         if (ret >= 0) {
             // The W^X table follows what lxrt_mremap moved, at its host-page
             // rounded lengths (wxsplit.c also drops whatever it held at the

@@ -611,8 +611,19 @@ static int x18_stats_on(void)
 // copies, and fault_report's had lost the alignment filter: a misaligned
 // store-release into a W^X page, taken for a write flip, retried forever
 // (stage 23 review; tests/elf/wx_owner.c, "misaligned").
+extern char lxrt_probe_u32_insn[], lxrt_probe_u32_fail[];
+
 bool lxrt_absorb_runtime_fault(int dsig, siginfo_t *dinfo, void *uap)
 {
+    // lxrt_probe_u32's load: not readable, it returns 0. host_handler tests
+    // this first itself; main.c's fault_report -- the handler of a process
+    // whose guest never installed one, where futex_ops.c probes futex words
+    // too -- has only this chain.
+    if ((dsig == SIGSEGV || dsig == SIGBUS) && uap &&
+        ((ucontext_t *)uap)->uc_mcontext->__ss.__pc == (uint64_t)(uintptr_t)lxrt_probe_u32_insn) {
+        ((ucontext_t *)uap)->uc_mcontext->__ss.__pc = (uint64_t)(uintptr_t)lxrt_probe_u32_fail;
+        return true;
+    }
     // A load or store on a virtual page below 4 GiB (lowpage.c): carried out
     // here, the instruction skipped, nothing for the guest to see. Both
     // fault paths come through here (host_handler, main.c's fault_report).
@@ -898,7 +909,6 @@ void lxrt_sync_pending_flush(void);
 static void sync_self_deliver(int lsig, uint64_t x0);
 static bool sync_self_eligible(int lsig);
 
-extern char lxrt_probe_u32_insn[], lxrt_probe_u32_fail[];
 extern char lxrt_restore_regs_end[], lxrt_restore_regs_x0_end[];
 void lxrt_restore_regs_x0(const uint64_t *ctx) __attribute__((noreturn));
 // The block the thread's lxrt_restore_regs(_x0) is loading (set just before

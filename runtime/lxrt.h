@@ -329,6 +329,9 @@ bool lxrt_fd_hidden(int fd);
 int lxrt_fd_dup_private(int fd);
 int lxrt_open_private(const char *path, int flags, int mode);   // procfs.c: high, hidden
 void lxrt_close_private(int fd);
+// trampoline.S: a 32-bit load that may fault -- 1 and *out, or 0 if addr is not
+// readable (both host fault handlers resume it at its fail label).
+int lxrt_probe_u32(uint64_t addr, uint32_t *out);
 // futex_waitv.c: futex_waitv(2), and the note every FUTEX_WAKE leaves for it
 long lxrt_futex_waitv(uint64_t waiters, uint32_t nr, uint32_t flags, uint64_t timeout, int32_t clockid);
 void lxrt_futex_waitv_notify(const void *addr);
@@ -390,6 +393,12 @@ void lxrt_memlog_file(uint64_t addr, uint64_t len, uint64_t off, int fd);
 bool lxrt_memlog_file_lookup(uint64_t addr, char *path, size_t n, uint64_t *off);
 void lxrt_memlog_file_forget(uint64_t addr, uint64_t len);
 void lxrt_futex_shared_add(uint64_t addr, uint64_t len);
+// futex_ops.c: the ranges above, read without a lock. The ulock flavour a
+// futex waiter on addr parks on (shared: no FUTEX_PRIVATE_FLAG / FUTEX2_PRIVATE);
+// whether a shared range could not be recorded (no memory).
+bool lxrt_futex_shared_has(uint64_t addr);
+bool lxrt_futex_shared_lost(void);
+uint32_t lxrt_futex_flavour(const void *addr, bool shared);
 long lxrt_sendto(int fd, const void *buf, size_t len, int lflags, const void *laddr, unsigned lalen);
 long lxrt_recvfrom(int fd, void *buf, size_t len, int lflags, void *laddr, uint32_t *lalen);
 void lxrt_futex_shared_remove(uint64_t addr, uint64_t len);
@@ -468,6 +477,7 @@ int  lxrt_gettid(void);
 void lxrt_qos_apply(void);            // LXRT_QOS=interactive (thread.c)
 void lxrt_futex_park_enter(const void *addr);   // a thread about to park on a futex word (thread.c)
 void lxrt_futex_park_leave(const void *addr);
+bool lxrt_futex_maybe_parked(const void *addr); // a thread of this process may be parked there
 void lxrt_futex_park_reset(void);               // in a fork child
 extern int lxrt_guestprof_on;                   // LXRT_GUESTPROF=1 (guestprof.c)
 void lxrt_guestprof_start(void);

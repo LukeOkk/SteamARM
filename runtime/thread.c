@@ -422,9 +422,10 @@ long lxrt_set_tid_address(uint32_t *ctid)
 // before its wake, which reads the bucket after a full barrier. One of the
 // two always sees the other (the store-then-load pattern on both sides), so a
 // wake skips the kernel only when no thread of this process is parked or
-// about to park. Both parking paths count (here, and the shared form in
-// futex_ops.c); futex_waitv has its own notification. A wake that is not
-// private may be for another process and always goes to the kernel.
+// about to park. Every parking path counts (here, the shared form and the PI
+// lock in futex_ops.c, futex_waitv's single-word wait); futex_waitv's board
+// has its own notification. A wake that is not private may be for another
+// process and always goes to the kernel for a shared word (futex_ops.c).
 // LXRT_FUTEX_SPIN_US=N: spin up to N microseconds before parking (0, the
 // default: park at once, as before).
 #define PARK_BUCKETS 4096
@@ -459,6 +460,13 @@ static bool nobody_parked(const void *addr)
 {
     atomic_thread_fence(memory_order_seq_cst);
     return atomic_load_explicit(park_slot(addr), memory_order_seq_cst) == 0;
+}
+
+// For futex_ops.c's wakes, which may skip the task-local queue on the same
+// grounds: only threads of this process can be on it.
+bool lxrt_futex_maybe_parked(const void *addr)
+{
+    return !nobody_parked(addr);
 }
 
 static uint32_t futex_spin_us(void)

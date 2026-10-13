@@ -866,11 +866,13 @@ fi
 # host page stays writable. Both were checks Chromium's WebView renderer
 # makes before it runs. exec with a guest environment of its own (Termux's)
 # keeps the runtime's settings and /proc; pseudo-terminals the Linux way
-# (Termux's terminal).
+# (Termux's terminal). Proton fsync's single-object waits parked on the word
+# itself, and on futex_waitv's board again with LXRT_WAITV_DIRECT=0.
 if [ -f "$STAGE/usr/lib64/libc.a" ] && [ -n "$GCCDIR" ]; then
-    for t in memfd_seal_xproc readonly_efault lost_guard exec_env pty unlink_dir fd_scan_threads futex_waitv futex_long futex_long_spin eventfd_scm ntsync self_signal self_signal_kernel; do
+    for t in memfd_seal_xproc readonly_efault lost_guard exec_env pty unlink_dir fd_scan_threads futex_waitv futex_waitv_fsync futex_waitv_fsync_board futex_long futex_long_spin eventfd_scm ntsync self_signal self_signal_kernel; do
         src=$t; [ "$t" = futex_long_spin ] && src=futex_long     # the same program with the runtime's spin on
         [ "$t" = self_signal_kernel ] && src=self_signal         # and with Darwin delivering the self-signal
+        [ "$t" = futex_waitv_fsync_board ] && src=futex_waitv_fsync
         if err=$(glibc_cc -static-pie -O2 -o build/$t tests/elf/$src.c 2>&1); then
             env=""
             if [ "$t" = futex_long_spin ]; then
@@ -882,6 +884,9 @@ if [ -f "$STAGE/usr/lib64/libc.a" ] && [ -n "$GCCDIR" ]; then
             elif [ "$t" = self_signal_kernel ]; then
                 env="LXRT_SYNC_SELF_SIGNAL=0"
                 out=$(LXRT_SYNC_SELF_SIGNAL=0 deadline 30 ./build/lxrun "$PWD/build/$t" 2>&1); rc=$?
+            elif [ "$t" = futex_waitv_fsync_board ]; then
+                env="LXRT_WAITV_DIRECT=0"
+                out=$(LXRT_WAITV_DIRECT=0 deadline 30 ./build/lxrun "$PWD/build/$t" 2>&1); rc=$?
             elif [ "$t" = exec_env ]; then
                 out=$(LXRT_TEST_EXEC_ENV=kept deadline 30 ./build/lxrun "$PWD/build/$t" 2>&1); rc=$?
             elif [ "$t" = ntsync ]; then

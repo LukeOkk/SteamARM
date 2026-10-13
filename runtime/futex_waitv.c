@@ -35,6 +35,11 @@
 // that word's index; fsync -- the user this exists for -- always stores before
 // it wakes (events set signaled, semaphores count, mutexes the owner), and
 // re-checks its objects after any return.
+//
+// A wait on ONE word skips the board (wait_one below): it parks on the word
+// itself, as a FUTEX_WAIT would -- what CrossOver's msync does on macOS with
+// __ulock_wait2 on the object's own word. fsync waits on one word whenever a
+// thread waits for one object without an alert, which is most of its waits.
 #include "lxrt.h"
 
 #include <errno.h>
@@ -42,6 +47,7 @@
 #include <pthread.h>
 #include <stdatomic.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <sys/mman.h>
 #include <sys/stat.h>
@@ -51,6 +57,7 @@
 #define LERR(e) (-(long)lxrt_errno_to_linux(e))
 
 extern int __ulock_wait(uint32_t operation, void *addr, uint64_t value, uint32_t timeout_us);
+extern int __ulock_wait2(uint32_t operation, void *addr, uint64_t value, uint64_t timeout_ns, uint64_t value2);
 extern int __ulock_wake(uint32_t operation, void *addr, uint64_t wake_value);
 #define UL_COMPARE_AND_WAIT_SHARED 3
 #define ULF_WAKE_ALL               0x00000100
@@ -129,6 +136,97 @@ static int64_t clock_ns(int clockid)
     return (int64_t)lxrt_guest_clock_ns(clockid == 0 ? 0 : 1);
 }
 
+// LXRT_WAITV_DIRECT=0: single-word waits use the board as well, the way every
+// futex_waitv did before wait_one.
+static bool direct_on(void)
+{
+    static _Atomic int on = -1;
+    int v = atomic_load_explicit(&on, memory_order_relaxed);
+    if (v < 0) {
+        const char *e = getenv("LXRT_WAITV_DIRECT");
+        v = !(e && *e == '0');
+        atomic_store_explicit(&on, v, memory_order_relaxed);
+    }
+    return v;
+}
+
+// One __ulock_wait2 sleeps at most this long; the loop re-derives the rest (a
+// wait longer than this re-parks once per slice, as futex_ops.c's waits do).
+#define SLICE_NS 4294967294000ull               // ULOCK_MAX_US, ~71.6 minutes
+
+// --------------------------------------------------------- one word, no board
+//
+// The waiter parks on the futex word itself, on the ulock flavour futex_ops.c
+// gives a FUTEX_WAIT of the same kind (lxrt_futex_flavour): the process-shared
+// flavour for an entry without FUTEX2_PRIVATE inside a mapping this runtime
+// made shared, the task-local one everywhere else. That is the queue every
+// wake of the word already reaches, because a FUTEX_WAIT parks there:
+//   shared FUTEX_WAKE, WAKE_BITSET, requeue, WAKE_OP, UNLOCK_PI, from any
+//       process: flavour 3 for a shared word, then flavour 1 when this
+//       process has a thread parked (futex_ops.c wake_up_to);
+//   private FUTEX_WAKE(_BITSET) from this process: flavour 1, then 3
+//       (thread.c wake_waiters);
+//   a thread's exit (CLONE_CHILD_CLEARTID): both flavours (thread.c).
+// The waiter counts itself in thread.c's g_parked before it last reads the
+// word, as every waiter does: those wakes skip a task-local queue only when
+// nobody of their process is counted there. Fsync's words live in 64 KiB
+// MAP_SHARED pieces of one shared memory object, mapped at its own address in
+// each process, so its waits and wakes meet on flavour 3, keyed by the object
+// and offset whatever the address.
+//
+// No lost wakeup: a waker stores to the word before it wakes, and Darwin
+// compares the word with val and queues the waiter under the queue's lock,
+// which the wake takes too -- either the waiter is queued when the wake runs,
+// or its compare sees the store and it does not sleep. With the word changed
+// before it parks, the waiter returns at once (EAGAIN on the first look, 0
+// after: the word changed during the call, which the board path reported as a
+// wake of that word too).
+//
+// Returns 0 when woken, which Linux also does for a wake that changed nothing;
+// fsync re-checks its objects after every return, and the board path's
+// re-park for a wake that changed no word stays where the board is used.
+static long wait_one(_Atomic uint32_t *addr, uint32_t val, bool priv, bool timed,
+                     int64_t deadline, int32_t clockid)
+{
+    uint32_t op = lxrt_futex_flavour((const void *)addr, !priv) | ULF_NO_ERRNO;
+    unsigned faults = 0;
+    for (bool first = true;; first = false) {
+        uint64_t ns = 0;                             // 0: no timeout
+        if (timed) {
+            int64_t left = deadline - clock_ns(clockid);
+            if (left <= 0)
+                return LERR(ETIMEDOUT);
+            ns = (uint64_t)left > SLICE_NS ? SLICE_NS : (uint64_t)left;
+        }
+        lxrt_futex_park_enter((const void *)addr);
+        uint32_t cur;
+        if (!lxrt_probe_u32((uint64_t)(uintptr_t)addr, &cur)) {
+            lxrt_futex_park_leave((const void *)addr);
+            return LERR(EFAULT);                     // unmapped while we waited
+        }
+        if (cur != val) {
+            lxrt_futex_park_leave((const void *)addr);
+            return first ? LERR(EAGAIN) : 0;
+        }
+        int r = __ulock_wait2(op, (void *)addr, val, ns, 0);
+        lxrt_futex_park_leave((const void *)addr);
+        if (r >= 0)
+            return 0;                                // woken, or the word moved as it parked
+        if (r == -ETIMEDOUT)
+            continue;                                // the guest's clock decides, above
+        if (r == -EINTR && lxrt_interrupted_internally())
+            continue;                                // no guest handler ran: Linux would still wait
+        // Darwin reads the word with page faults disabled and answers EFAULT
+        // when the page is not resident -- compressed or paged out since our
+        // own read -- for the caller to fault it in and ask again (xnu
+        // sys_ulock_wait2; msync retries the same way). The probe above does
+        // that, or reports the word unmapped.
+        if (r == -EFAULT && ++faults < 1000)
+            continue;
+        return LERR(-r);                             // EINTR: a guest handler ran
+    }
+}
+
 long lxrt_futex_waitv(uint64_t waiters, uint32_t nr, uint32_t flags, uint64_t timeout, int32_t clockid)
 {
     // Linux's order of checks (kernel/futex/syscalls.c): flags, count,
@@ -162,6 +260,27 @@ long lxrt_futex_waitv(uint64_t waiters, uint32_t nr, uint32_t flags, uint64_t ti
         val[i] = (uint32_t)w[i].val;
     }
 
+    // A deadline past what 64-bit nanoseconds hold is no deadline: Linux
+    // saturates it (ktime_set), and the product below would overflow into
+    // one already past.
+    bool timed = ts && ts->tv_sec < INT64_MAX / 1000000000LL;
+    int64_t deadline = timed ? ts->tv_sec * 1000000000LL + ts->tv_nsec : 0;
+
+    // The first look, in index order as Linux's: a word that cannot be read is
+    // EFAULT, not a fault in the runtime; one that already differs is EAGAIN.
+    for (uint32_t i = 0; i < nr; i++) {
+        uint32_t cur;
+        if (!lxrt_probe_u32((uint64_t)(uintptr_t)addr[i], &cur))
+            return LERR(EFAULT);
+        if (cur != val[i])
+            return LERR(EAGAIN);
+    }
+
+    // Without the full table of shared ranges (no memory to record one), the
+    // flavour of a word could not be told: the board knows no flavours.
+    if (nr == 1 && direct_on() && !lxrt_futex_shared_lost())
+        return wait_one(addr[0], val[0], (w[0].flags & FUTEX2_PRIVATE) != 0, timed, deadline, clockid);
+
     struct board *b = board();
     if (!b)
         return LERR(ENOMEM);
@@ -177,7 +296,6 @@ long lxrt_futex_waitv(uint64_t waiters, uint32_t nr, uint32_t flags, uint64_t ti
             atomic_fetch_add_explicit(&b->multi[bucket_of((const void *)addr[i])], 1, memory_order_seq_cst);
     _Atomic uint32_t *gen = one_bucket ? &b->gen[k0] : &b->multigen;
 
-    int64_t deadline = ts ? ts->tv_sec * 1000000000LL + ts->tv_nsec : 0;
     long ret;
     bool first = true;
     for (;;) {
@@ -191,7 +309,7 @@ long lxrt_futex_waitv(uint64_t waiters, uint32_t nr, uint32_t flags, uint64_t ti
             break;
         first = false;
         uint32_t us = 0;                             // 0: no timeout
-        if (ts) {
+        if (timed) {
             int64_t left = deadline - clock_ns(clockid);
             if (left <= 0) { ret = LERR(ETIMEDOUT); break; }
             int64_t u = left / 1000;

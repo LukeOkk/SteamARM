@@ -33,6 +33,8 @@
 #include <errno.h>
 #include <mach/mach.h>
 #include <mach/mach_vm.h>
+#include <sched.h>
+#include <signal.h>
 #include <stdatomic.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -208,6 +210,14 @@ _Static_assert(ATOMIC_INT_LOCK_FREE == 2,
 // a SIGSEGV handler, and SIGSEGV already belongs to main.c's fault reporter and
 // signal.c's guest delivery path -- a third claimant there would break guest
 // signal handling to fix a case a correct guest never reaches.
+//
+// The process-shared FUTEX_WAIT and FUTEX_WAKE no longer pay it: they read the
+// word with lxrt_probe_u32 (trampoline.S), one load that the fault path of
+// both host handlers turns into a failed return instead of a fault, which is
+// the same test -- readable or EFAULT -- without the region walk. Proton's
+// fsync makes every SetEvent and ReleaseSemaphore a shared FUTEX_WAKE, and
+// mach_vm_region takes the vm_map lock that Minecraft Dungeons II's ~20k
+// mprotect/s are holding much of the time.
 static bool guest_range_ok(const void *p, size_t len, vm_prot_t need)
 {
     if (!p)
@@ -263,57 +273,249 @@ static bool guest_word_ok(const void *p, vm_prot_t need)
 // tests/elf/jit_fork_mt.c; the i386 Steam client). So flavour 3 is used only
 // inside the mappings this runtime created as shared; everything else is
 // task-local, flavour 1, exactly Linux's split.
-#define MAX_SHARED_RANGES 1024
-static struct { uint64_t start, end; } g_shared[MAX_SHARED_RANGES];
-static int g_nshared;
+//
+// Both ends of a futex read this table -- the waiter to pick the queue it
+// parks on, the waker to pick the queue it wakes -- so it is part of every
+// wakeup: a range that one process has and another lacks gives a waiter and a
+// waker in those two processes different flavours, and the wakeup is lost.
+// It used to hold 1024 ranges and drop the rest without a word, and to cut a
+// range short when a munmap in its middle needed a 1025th entry, which could
+// flip a word's flavour inside one process between a wait and its wake. Wine
+// made that likely: it never unmaps a view inside its reserved areas, it maps
+// PROT_NONE over it (unmap_area), so every MAP_SHARED view it had ever mapped
+// stayed here. Now:
+//   - an mmap that is not MAP_SHARED takes its range out, as munmap does: it
+//     replaced whatever was mapped there (dispatch.c); mremap moves a shared
+//     range along with its pages;
+//   - the table has no size limit. Should memory for it run out, that is
+//     recorded (lxrt_futex_shared_lost): shared wakes then always ask the
+//     shared flavour too, and futex_waitv keeps every wait on its board.
+//
+// Every process-shared futex wait and wake reads it, and futex_waitv with
+// them, so reading takes no lock. The ranges are sorted, disjoint, touching
+// ones merged, and searched by bisection; a writer edits them inside a
+// sequence count that is odd while it does, and a reader whose read overlapped
+// an edit reads again. A table that has to grow is copied and the old copy is
+// never freed -- a reader may still be inside it -- which with the capacity
+// doubling every time leaves less behind than the table itself holds. Writers
+// hold g_shared_lock with the asynchronous signals blocked, as offmap.c does:
+// a guest handler runs nested in the host handler and may itself map, unmap
+// or wake, and a reader there would wait forever for its own thread's edit.
+struct shared_tab {
+    int cap;
+    _Atomic int n;
+    struct { _Atomic uint64_t start, end; } r[];
+};
+static struct shared_tab *_Atomic g_tab;
+static _Atomic uint32_t g_tab_seq;              // odd while a writer edits
+static _Atomic bool g_tab_lost;                 // a shared range could not be recorded
 static pthread_mutex_t g_shared_lock = PTHREAD_MUTEX_INITIALIZER;
 LXRT_FORK_SAFE(futex_shared, g_shared_lock)
 
-void lxrt_futex_shared_add(uint64_t addr, uint64_t len)
+static uint64_t r_start(const struct shared_tab *t, int i)
 {
-    if (!len) return;
-    pthread_mutex_lock(&g_shared_lock);
-    if (g_nshared < MAX_SHARED_RANGES) {
-        g_shared[g_nshared].start = addr;
-        g_shared[g_nshared].end = addr + len;
-        g_nshared++;
-    }
-    pthread_mutex_unlock(&g_shared_lock);
+    return atomic_load_explicit(&t->r[i].start, memory_order_relaxed);
 }
 
-void lxrt_futex_shared_remove(uint64_t addr, uint64_t len)
+static uint64_t r_end(const struct shared_tab *t, int i)
 {
-    uint64_t end = addr + len;
-    pthread_mutex_lock(&g_shared_lock);
-    for (int i = 0; i < g_nshared; ) {
-        uint64_t s = g_shared[i].start, e = g_shared[i].end;
-        if (e <= addr || s >= end) { i++; continue; }
-        if (s < addr && e > end && g_nshared < MAX_SHARED_RANGES) {   // split
-            g_shared[g_nshared].start = end;
-            g_shared[g_nshared].end = e;
-            g_nshared++;
-            g_shared[i].end = addr;
-            i++;
-        } else if (s < addr) {
-            g_shared[i].end = addr; i++;
-        } else if (e > end) {
-            g_shared[i].start = end; i++;
-        } else {
-            g_shared[i] = g_shared[--g_nshared];
-        }
+    return atomic_load_explicit(&t->r[i].end, memory_order_relaxed);
+}
+
+static void r_set(struct shared_tab *t, int i, uint64_t s, uint64_t e)
+{
+    atomic_store_explicit(&t->r[i].start, s, memory_order_relaxed);
+    atomic_store_explicit(&t->r[i].end, e, memory_order_relaxed);
+}
+
+// The first of the n entries whose end is above a.
+static int tab_lower(const struct shared_tab *t, int n, uint64_t a)
+{
+    int lo = 0, hi = n;
+    while (lo < hi) {
+        int mid = lo + (hi - lo) / 2;
+        if (r_end(t, mid) <= a) lo = mid + 1;
+        else hi = mid;
     }
-    pthread_mutex_unlock(&g_shared_lock);
+    return lo;
+}
+
+// Whether [s, e) meets a recorded range. Takes no lock.
+static bool tab_meets(uint64_t s, uint64_t e)
+{
+    for (unsigned tries = 0;; tries++) {
+        uint32_t seq = atomic_load_explicit(&g_tab_seq, memory_order_acquire);
+        if (!(seq & 1)) {
+            const struct shared_tab *t = atomic_load_explicit(&g_tab, memory_order_acquire);
+            bool hit = false;
+            if (t) {
+                // n never exceeds the capacity of the copy it belongs to, so
+                // even a read torn by an edit stays inside that copy; the
+                // sequence check below throws such a read away.
+                int n = atomic_load_explicit(&t->n, memory_order_relaxed);
+                int i = tab_lower(t, n, s);
+                hit = i < n && r_start(t, i) < e;
+            }
+            atomic_thread_fence(memory_order_acquire);
+            if (atomic_load_explicit(&g_tab_seq, memory_order_relaxed) == seq)
+                return hit;
+        }
+        // An edit takes a few hundred nanoseconds, unless the scheduler took
+        // the writer's core in the middle of it.
+        if (tries < 64)
+            __asm__ volatile("yield");
+        else
+            sched_yield();
+    }
 }
 
 static bool truly_shared(const void *p)
 {
     uint64_t a = (uint64_t)(uintptr_t)p;
-    bool found = false;
+    return tab_meets(a, a + 1);
+}
+
+static void tab_lock(sigset_t *old)
+{
+    sigset_t all;
+    sigfillset(&all);
+    sigdelset(&all, SIGBUS);
+    sigdelset(&all, SIGSEGV);
+    sigdelset(&all, SIGILL);
+    sigdelset(&all, SIGTRAP);
+    pthread_sigmask(SIG_BLOCK, &all, old);
     pthread_mutex_lock(&g_shared_lock);
-    for (int i = 0; i < g_nshared && !found; i++)
-        found = a >= g_shared[i].start && a < g_shared[i].end;
+    uint32_t s = atomic_load_explicit(&g_tab_seq, memory_order_relaxed);
+    atomic_store_explicit(&g_tab_seq, s + 1, memory_order_relaxed);
+    atomic_thread_fence(memory_order_release);
+}
+
+static void tab_unlock(const sigset_t *old)
+{
+    uint32_t s = atomic_load_explicit(&g_tab_seq, memory_order_relaxed);
+    atomic_store_explicit(&g_tab_seq, s + 1, memory_order_release);
     pthread_mutex_unlock(&g_shared_lock);
-    return found;
+    pthread_sigmask(SIG_SETMASK, old, NULL);
+}
+
+// Under tab_lock: the table, with room for `extra` more entries. A new copy is
+// published before anything is edited in it; NULL when there is no memory.
+static struct shared_tab *tab_room(int extra)
+{
+    struct shared_tab *t = atomic_load_explicit(&g_tab, memory_order_relaxed);
+    int n = t ? atomic_load_explicit(&t->n, memory_order_relaxed) : 0;
+    if (t && n + extra <= t->cap)
+        return t;
+    int cap = t ? t->cap * 2 : 64;
+    while (cap < n + extra)
+        cap *= 2;
+    struct shared_tab *nt = malloc(sizeof *nt + (size_t)cap * sizeof nt->r[0]);
+    if (!nt)
+        return NULL;
+    nt->cap = cap;
+    for (int i = 0; i < n; i++)
+        r_set(nt, i, r_start(t, i), r_end(t, i));
+    atomic_store_explicit(&nt->n, n, memory_order_relaxed);
+    atomic_store_explicit(&g_tab, nt, memory_order_release);
+    return nt;                                  // the old copy stays: see above
+}
+
+void lxrt_futex_shared_add(uint64_t addr, uint64_t len)
+{
+    if (!len)
+        return;
+    uint64_t s = addr, e = addr + len;
+    sigset_t old;
+    tab_lock(&old);
+    struct shared_tab *t = atomic_load_explicit(&g_tab, memory_order_relaxed);
+    int n = t ? atomic_load_explicit(&t->n, memory_order_relaxed) : 0;
+    int i = t ? tab_lower(t, n, s) : 0;
+    if (i > 0 && r_end(t, i - 1) == s)
+        i--;                                    // touching on the left
+    int j = i;
+    while (j < n && r_start(t, j) <= e) {       // overlapping, or touching on the right
+        if (r_start(t, j) < s) s = r_start(t, j);
+        if (r_end(t, j) > e) e = r_end(t, j);
+        j++;
+    }
+    if (j > i) {                                // one entry replaces [i, j)
+        r_set(t, i, s, e);
+        for (int k = j; k < n; k++)
+            r_set(t, i + 1 + (k - j), r_start(t, k), r_end(t, k));
+        atomic_store_explicit(&t->n, n - (j - i - 1), memory_order_relaxed);
+    } else if ((t = tab_room(1)) != NULL) {
+        for (int k = n; k > i; k--)
+            r_set(t, k, r_start(t, k - 1), r_end(t, k - 1));
+        r_set(t, i, s, e);
+        atomic_store_explicit(&t->n, n + 1, memory_order_relaxed);
+    } else if (!atomic_exchange(&g_tab_lost, true)) {
+        fprintf(lxrt_info_stream(), "[lxrt] futex: no memory to record a shared mapping; "
+                "process-shared wakes now ask both ulock flavours\n");
+    }
+    tab_unlock(&old);
+}
+
+void lxrt_futex_shared_remove(uint64_t addr, uint64_t len)
+{
+    uint64_t s = addr, e = addr + len;
+    // Most munmaps and private mmaps touch no shared range: no lock and no
+    // signal mask for them.
+    if (!len || !tab_meets(s, e))
+        return;
+    sigset_t old;
+    tab_lock(&old);
+    struct shared_tab *t = atomic_load_explicit(&g_tab, memory_order_relaxed);
+    int n = t ? atomic_load_explicit(&t->n, memory_order_relaxed) : 0;
+    int i = t ? tab_lower(t, n, s) : 0;
+    while (i < n && r_start(t, i) < e) {
+        uint64_t rs = r_start(t, i), re = r_end(t, i);
+        if (rs < s && re > e) {                 // split in two
+            // Without the memory to split, the range is kept whole: a range
+            // kept too long only gives a word of this process the shared
+            // flavour at both ends, where one dropped would give a shared
+            // word the task-local flavour here and the shared one elsewhere.
+            struct shared_tab *g = tab_room(1);
+            if (!g)
+                break;
+            t = g;
+            for (int k = n; k > i + 1; k--)
+                r_set(t, k, r_start(t, k - 1), r_end(t, k - 1));
+            r_set(t, i + 1, e, re);
+            r_set(t, i, rs, s);
+            atomic_store_explicit(&t->n, n + 1, memory_order_relaxed);
+            break;
+        }
+        if (rs < s) {                           // keep its head
+            r_set(t, i, rs, s);
+            i++;
+        } else if (re > e) {                    // keep its tail
+            r_set(t, i, e, re);
+            break;
+        } else {                                // wholly inside: drop it
+            for (int k = i + 1; k < n; k++)
+                r_set(t, k - 1, r_start(t, k), r_end(t, k));
+            atomic_store_explicit(&t->n, --n, memory_order_relaxed);
+        }
+    }
+    tab_unlock(&old);
+}
+
+bool lxrt_futex_shared_has(uint64_t addr)
+{
+    return tab_meets(addr, addr + 1);
+}
+
+bool lxrt_futex_shared_lost(void)
+{
+    return atomic_load_explicit(&g_tab_lost, memory_order_relaxed);
+}
+
+// The ulock flavour a waiter on this word parks on, for a process-shared
+// futex or a private one: what every wake below is built to reach.
+// futex_waitv.c parks its single-word waits by it as well.
+uint32_t lxrt_futex_flavour(const void *addr, bool shared)
+{
+    return shared && truly_shared(addr) ? UL_COMPARE_AND_WAIT_SHARED : UL_COMPARE_AND_WAIT;
 }
 
 static bool aligned(const void *p)
@@ -372,28 +574,48 @@ static int64_t now_ns(bool realtime)
 // it also try the task-local queue. That second call matters when dispatch.c
 // has NOT been wired to offer WAIT to this module (see lxrt_futex_ext), because
 // then a shared waiter is parked by thread.c on flavour 1 and a flavour-3-only
-// wake would turn today's working in-process broadcast into a hang. Its cost is
-// one extra 111 ns syscall on shared wakes that found nobody, and its one
+// wake would turn today's working in-process broadcast into a hang. Its one
 // divergence is that a PRIVATE waiter on the same address can be released by a
 // SHARED wake, which Linux would not do -- an extra wakeup, which is the
 // direction every caller here already has to tolerate.
+//
+// Which queues can hold a waiter, and so which calls a wake needs:
+//   flavour 3  only words inside a shared range (lxrt_futex_flavour), and its
+//              waiters may be in any process: always asked for such a word;
+//   flavour 1  task-local, so only threads of THIS process -- and every one
+//              of them counts itself in thread.c's g_parked before it last
+//              reads the word (thread.c's waits, shared_wait, pi_lock, the
+//              single-word futex_waitv). The waker stored to the word before
+//              it came here and lxrt_futex_maybe_parked reads the count after
+//              a full barrier, so when that says nobody, a thread still on
+//              its way to park reads the new value and does not park.
+// So a shared wake on a shared word costs one __ulock_wake whether or not
+// anybody waits (two only when this process has a thread parked there that
+// flavour 3 did not hold), and a wake of a word nobody here waits on and no
+// other process can see costs none. A private wake also asks flavour 3 when
+// flavour 1 was empty, as thread.c's does.
 static int wake_up_to(void *addr, int64_t budget, bool shared)
 {
     if (budget <= 0)
         return 0;
-    lxrt_futex_waitv_notify(addr);      // futex_waitv callers parked on this word
+    lxrt_futex_waitv_notify(addr);      // futex_waitv callers parked on its board
     uint32_t flags = ULF_NO_ERRNO;
     if (budget > 1)
         flags |= ULF_WAKE_ALL;
 
     // -ENOENT is an empty queue. -EINVAL would be a malformed address, already
     // ruled out by the caller. Neither released anything.
-    uint32_t first = (shared && truly_shared(addr)) ? UL_COMPARE_AND_WAIT_SHARED : UL_COMPARE_AND_WAIT;
-    if (__ulock_wake(flags | first, addr, 0) == 0)
+    if (shared && (truly_shared(addr) || lxrt_futex_shared_lost())) {
+        if (__ulock_wake(flags | UL_COMPARE_AND_WAIT_SHARED, addr, 0) == 0)
+            return 1;
+        return lxrt_futex_maybe_parked(addr) &&
+               __ulock_wake(flags | UL_COMPARE_AND_WAIT, addr, 0) == 0;
+    }
+    if (!lxrt_futex_maybe_parked(addr))
+        return 0;
+    if (__ulock_wake(flags | UL_COMPARE_AND_WAIT, addr, 0) == 0)
         return 1;
-    if (shared && first == UL_COMPARE_AND_WAIT_SHARED && __ulock_wake(flags | UL_COMPARE_AND_WAIT, addr, 0) == 0)
-        return 1;
-    return 0;
+    return !shared && __ulock_wake(flags | UL_COMPARE_AND_WAIT_SHARED, addr, 0) == 0;
 }
 
 // ------------------------------------------- FUTEX_WAIT / FUTEX_WAKE
@@ -412,7 +634,8 @@ static long shared_wait(uint32_t *uaddr, uint32_t val, uint64_t utime,
 {
     if (!aligned(uaddr))
         return LERR(EINVAL);
-    if (!guest_word_ok(uaddr, VM_PROT_READ))
+    uint32_t probe;
+    if (!lxrt_probe_u32((uint64_t)(uintptr_t)uaddr, &probe))
         return LERR(EFAULT);
     // Measured on the guest: FUTEX_WAIT_BITSET and FUTEX_WAKE_BITSET both
     // return -22 for a zero bitset, and -11/0 for a non-zero one.
@@ -479,7 +702,7 @@ static long shared_wait(uint32_t *uaddr, uint32_t val, uint64_t utime,
     if (cur != val)
         return LERR(EAGAIN);
 
-    uint32_t flavour = (truly_shared(uaddr) ? UL_COMPARE_AND_WAIT_SHARED : UL_COMPARE_AND_WAIT) | ULF_NO_ERRNO;
+    uint32_t flavour = lxrt_futex_flavour(uaddr, true) | ULF_NO_ERRNO;
     for (;;) {
         uint32_t us = 0;   // 0 is "no timeout" to __ulock_wait
         if (timed) {
@@ -528,7 +751,8 @@ static long shared_wake(uint32_t *uaddr, uint32_t val, uint32_t bitset,
 {
     if (!aligned(uaddr))
         return LERR(EINVAL);
-    if (!guest_word_ok(uaddr, VM_PROT_READ))
+    uint32_t probe;
+    if (!lxrt_probe_u32((uint64_t)(uintptr_t)uaddr, &probe))
         return LERR(EFAULT);
     if (bitset_form && bitset == 0)
         return LERR(EINVAL);
@@ -854,7 +1078,7 @@ static long pi_lock(uint32_t *uaddr, uint64_t utime, bool realtime, bool shared,
     }
     uint32_t tid = (uint32_t)lxrt_gettid() & FUTEX_TID_MASK;
     _Atomic uint32_t *w = (_Atomic uint32_t *)uaddr;
-    uint32_t flavour = ((shared && truly_shared(uaddr)) ? UL_COMPARE_AND_WAIT_SHARED : UL_COMPARE_AND_WAIT) | ULF_NO_ERRNO;
+    uint32_t flavour = lxrt_futex_flavour(uaddr, shared) | ULF_NO_ERRNO;
     for (;;) {
         uint32_t cur = atomic_load_explicit(w, memory_order_acquire);
         uint32_t owner = cur & FUTEX_TID_MASK;
