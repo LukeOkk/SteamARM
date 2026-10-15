@@ -245,6 +245,7 @@ test-launcher-core: test-adaptive-sync
 	    tests/test_apk_inspect.py tests/test_android_pm.py tests/test_android_gapps.py
 	tests/launcher/run_app_dispatch.sh
 	tests/launcher/session.sh
+	tests/launcher/image_volume.sh
 	tests/launcher/safeguard.sh
 	tests/launcher/guest_env.sh
 	tests/launcher/mkarmroot.sh

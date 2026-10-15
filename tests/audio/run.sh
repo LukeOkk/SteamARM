@@ -19,7 +19,8 @@ ok()  { pass=$((pass + 1)); echo "  ok    $1"; }
 bad() { fail=$((fail + 1)); echo "  FAIL  $1"; }
 
 # audio.sh finds PulseAudio at $BREW/opt/pulseaudio/bin: wrappers there run the
-# real one, with module-coreaudio-detect replaced by a null sink.
+# real one, with module-coreaudio-detect replaced by a null sink
+# (AUDIO_TEST_COREAUDIO=1: the real module, for the start-up case below).
 B="$W/brew/opt/pulseaudio/bin"
 mkdir -p "$B" "$W/state" "$W/steamroot" "$W/arm64root" "$W/xdg"
 chmod 700 "$W/xdg"
@@ -27,7 +28,7 @@ cat > "$B/pulseaudio" <<EOF
 #!/bin/bash
 args=()
 while [ \$# -gt 0 ]; do
-    if [ "\$1" = -F ]; then
+    if [ "\$1" = -F ] && [ "\${AUDIO_TEST_COREAUDIO:-0}" != 1 ]; then
         sed 's/^load-module module-coreaudio-detect\$/load-module module-null-sink/' "\$2" > "\$2.test"
         args+=(-F "\$2.test"); shift 2; continue
     fi
@@ -85,6 +86,37 @@ LXRT_ROOT="$W/arm64root" a stop >/dev/null 2>&1
 sleep 0.5
 [ "$(npa)" = 0 ] && ok "stop ends the server" || bad "servers after stop: $(npa)"
 [ ! -e "$W/state/launcher/pulse.socket" ] && ok "stop forgets the server's socket" || bad "pulse.socket left"
+
+echo "== started as the SteamARM app starts it: no locale, CoreAudio loaded"
+# What the app starts gets no LANG (Launch Services sets none). With
+# --daemonize, PulseAudio forked a parent that libintl had made multithreaded
+# (setlocale asks CoreFoundation for the locale when LANG is unset) and
+# module-coreaudio-detect aborted in the fork child: no server after every
+# restart of the Mac, and Steam's client never opened its window (MEASURED
+# 2026-10-15, benchmarks/stage63-pulseaudio-fork.txt). The real CoreAudio
+# module here: it plays nothing, it only lists the Mac's devices.
+if [ "$(uname -s)" = Darwin ]; then
+    rm -f "$W/state/logs/pulseaudio.log"
+    if env -i HOME="$HOME" PATH=/usr/bin:/bin:/usr/sbin:/sbin TMPDIR="${TMPDIR:-/tmp}" \
+           BREW="$BREW" STEAMARM_STATE="$STEAMARM_STATE" XDG_RUNTIME_DIR="$XDG_RUNTIME_DIR" \
+           STEAMARM_BREW_PULSE=1 AUDIO_TEST_COREAUDIO=1 LXRT_ROOT="$W/arm64root" \
+           scripts/audio.sh start >"$W/log3" 2>&1 && live "$W/arm64root/tmp/pulse/native"; then
+        ok "starts without LANG, CoreAudio loaded"
+    else
+        bad "no server without LANG (CoreAudio loaded)"; cat "$W/log3"
+        tail -3 "$W/state/logs/pulseaudio.log" 2>/dev/null
+    fi
+    # The server is no child of whoever asked for it: a stop of the app's
+    # session (its process group) must not take the sound down.
+    pid="$(pgrep -f "pulseaudio.*$W/state" | head -1)"
+    [ -n "$pid" ] && [ "$(ps -o pgid= -p "$pid" | tr -d ' ')" = "$pid" ] &&
+        ok "the server leads a process group of its own" || bad "server process group (pid ${pid:-none})"
+    LXRT_ROOT="$W/arm64root" a stop >/dev/null 2>&1
+    sleep 0.5
+    [ "$(npa)" = 0 ] && ok "stop ends it" || bad "servers after stop: $(npa)"
+else
+    echo "  skip  not macOS: no CoreAudio"
+fi
 
 echo "$pass passed, $fail failed"
 [ "$fail" -eq 0 ]

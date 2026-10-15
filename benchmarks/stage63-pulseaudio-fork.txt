@@ -1,0 +1,130 @@
+Stage 63 -- Steam would not open after a restart: PulseAudio's fork child
+==========================================================================
+
+Symptom (the user, 2026-10-15: "each update stops it from working again"):
+after a restart of the Mac, "SteamARM" from the launcher started the client,
+no window ever appeared, and the session log filled with
+
+    shared memfd open() failed: Too many open files
+
+28,679 times (28,674 in the newer client), then the client's
+"CSteamEngine::BMainLoop appears to have stalled > 15 seconds" and guest
+SIGSEGVs. The same happened on 10-08 (right after a restart), on 10-13 and
+on 10-15 (every launch from the app that day). M4, macOS 27.0.1, SteamARM
+0.3.72.
+Everything below was MEASURED on that Mac unless marked otherwise.
+
+1. Where the message comes from
+   -----------------------------
+   "%s open() failed: %s" is in Steam's libpulsecommon-10.0.so
+   (steamrtarm64/); "shared memfd" is PulseAudio's name for its memfd pool
+   (pulsecore/shm.c). Every pa_context gets one. lsof on the client process
+   while the messages ran: 1,113 lines, 768 of them memfd backing files
+   = 256 memfds, 3 lines each. 256 is runtime/fex_support.c MEMFD_MAX: the
+   runtime's per-process table of memfds (seals), which answers EMFILE when
+   full ("out of seal slots, not out of fds"). So the client kept the pools
+   of its attempts to reach a PulseAudio server that was not there (one per
+   pa_context: inferred, not traced), until the table was full.
+
+2. Why there was no server
+   -----------------------
+   scripts/audio.sh started the Mac's PulseAudio (SteamARM's own 17.0 build)
+   with --daemonize=yes. A crash report for every failed launch, two per
+   launch (the ARM64 root's start, then the x86 root's):
+     pulseaudio  EXC_CRASH (SIGABRT), termination namespace OBJC
+     "crashed on child side of fork pre-exec"; CoreFoundation:
+     "*** single-threaded process forked ***"
+     _objc_fatal <- performForkChildInitialize <- objc_lookUpImpOrForward
+       <- CoreFoundation _createQueryTableAtPath <- CFBundleCopyResourceURL
+       <- CoreAudio HALSystem::InitializeShell <- HALSystem::CheckOutInstance
+       <- AudioObjectAddPropertyListener <- module-coreaudio-detect pa__init
+     parent: exited; responsible process X11.bin (coalition org.steamarm.X11)
+   PulseAudio daemonizes with fork() and no exec and loads its modules in the
+   grandchild; module-coreaudio-detect is the first thing to touch CoreAudio,
+   which libobjc refuses in the child of a multithreaded fork. pulseaudio.log
+   held one line: "Daemon startup failed" (the parent's).
+   Reports with this stack: 10-08 17:24 to 17:27 (4), 10-13 16:32, and every
+   launch of 10-15. The 10-08 episode was put down to launchd's 256
+   open-files limit (0.3.59); that limit was real, but this crash was there
+   too.
+
+3. Why only from the launcher: LANG
+   --------------------------------
+   The same command from a terminal started fine. Bisected with env -i:
+     launcher environment (no LANG)               fails
+     + LANG=es_MX.UTF-8 / en_US.UTF-8 / C         starts
+     + LC_ALL=C                                   starts
+     + LC_MESSAGES=es_ES.UTF-8 or LANGUAGE=es     fails
+     + OBJC_DISABLE_INITIALIZE_FORK_SAFETY=YES    fails differently: SIGSEGV
+       in libdispatch _dispatch_mgr_queue_push <- CoreAudio
+       Dispatch_Queue::install_mach_port_death_notification <- HALC_ProxySystem
+   A 20-line program linked against Homebrew's libintl (gettext 1.0), as
+   PulseAudio is, counting threads with task_threads():
+     no LANG:   1 thread before setlocale(LC_ALL, ""), 3 after
+     LANG set:  1 before, 1 after
+   Without LANG, libintl asks CoreFoundation for the user's locale, and that
+   starts two threads. PulseAudio's main() calls setlocale before it
+   daemonizes, so its fork child was a multithreaded fork child.
+   Processes macOS starts (Launch Services: the SteamARM app, and through it
+   the X server's spawn service) get no LANG; a terminal sets one. A server
+   started from a terminal (setup's tests, a debugging session) kept running
+   until the next restart and hid the bug; after each restart the app's first
+   start failed. With OBJC_DISABLE_INITIALIZE_FORK_SAFETY the crash only
+   moves: CoreAudio cannot start in a fork child here at all.
+
+4. Without a server Steam does not open
+   ------------------------------------
+   PulseAudio absent, and the guests' client.conf with enable-shm = no,
+   enable-memfd = no (so no memfd leak): no "shared memfd" message, the
+   webhelper started, but still no Steam window after 90 s. The client
+   needs the server; the memfd exhaustion was only the loudest symptom.
+
+5. Changes (0.3.73)
+   ----------------
+   scripts/audio.sh: PulseAudio runs with --daemonize=no, exec'd in a session
+     of its own (scripts/session.py detach, as FEXServer and the safeguard):
+     no fork child, and a stop of an app's process group does not end it.
+     The wait for its socket is 20 s (CoreAudio's device scan took 2.8 s
+     on a cold start here), and stops early when the process is gone.
+   scripts/run-app.sh: a failed start through the X server's spawn service
+     gets one more try from run-app.sh; a Steam client is not started without
+     the server (exit 4; the launcher says so in Spanish) instead of hanging.
+   scripts/session.py + run-app.sh: STEAMARM_SESSION_RESTART=42 for Steam
+     clients. The client exits 42 after installing an update and expects to
+     be started again (Valve's steam.sh: "Restarting Steam by request"); run
+     directly, it stayed closed after every update of the client, and the
+     launcher counted a crash. At most 5 restarts in 10 minutes.
+   tests/audio/run.sh: a start in env -i (no LANG) with the real
+     module-coreaudio-detect. 0.3.72's audio.sh: "no server without LANG"
+     (FAIL); 0.3.73: ok. tests/launcher/session.sh: restart cases.
+
+6. The Steam Frame root's disk image, detached and attached at every start
+   -----------------------------------------------------------------------
+   Every start printed "[image-volume] growing steamframe-root.sparsebundle
+   from 1734 GiB to 1862 GiB". scripts/image-volume.sh asked
+   `diskutil image resize --size 1862g`, and diskutil's g is 10^9 bytes
+   (hdiutil's is 2^30): 1,862,000,001,024 bytes = 1734 GiB, still more than
+   1 GiB short of the target, so the next ensure detached the image again,
+   "grew" it to the same size and attached it again -- at every start, and
+   at every opening of the launcher, which runs the same ensure
+   (attachRootImages). A scratch image: "2g" -> 2,000,003,072 bytes,
+   "4294967296B" -> exactly 4 GiB.
+   With both at once (the launcher opened with "Iniciar SteamARM al abrir"
+   on, the image detached as after a restart), the image came up attached
+   READ-ONLY ("Media Read-Only: Yes"): PulseAudio's
+   "bind(): Read-only file system" for its socket in the ARM64 root, so no
+   sound server again, and run-app.sh stopped with exit 4. Two ensures at
+   once on a scratch image: "could not attach" from one of them.
+   Second cause of the same loop, found once the size was right: an
+   attached image's size was read from its mounted volume, which leaves out
+   the partition map and the EFI partition -- 1861.80 GiB for an image of
+   1862.00 GiB, with the target at 1862.82 GiB less 1 GiB of slack, still
+   "smaller" by 0.02 GiB. Now from hdiutil info's block count.
+   Changes: the size goes in bytes (grown once, then left alone); ensure runs
+   under lockf ($STATE/launcher/.image-volume.lock), one at a time; an image
+   attached read-only is detached and attached again when nothing has a file
+   open on it, else ensure fails and says so; run-app.sh refuses a root it
+   cannot write. tests/launcher/image_volume.sh (a 100 MB sparse image grown
+   to 20 GiB for a target just under 21): 11 passed; with 0.3.72's script 4
+   fail (detached again by the second ensure, errors from two at once, a
+   read-only image in use not reported).

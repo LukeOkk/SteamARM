@@ -613,8 +613,14 @@ final class LauncherModel: ObservableObject {
             self.launchInFlight = false
             if r.status != 0 {
                 self.offerStop = r.status == 3
+                // Status 4: run-app.sh found no sound server, without which
+                // Steam's client never opens its window.
                 self.alert = r.status == 3
                     ? "Ya hay otro programa de Linux en marcha. Detenlo antes de abrir \(app.name)."
+                    : r.status == 4
+                    ? "No arrancó el servidor de sonido (PulseAudio) y \(app.name) no abre sin él. "
+                        + "Vuelve a intentarlo; el registro está en ~/SteamARM-roots/logs/pulseaudio.log.\n\n"
+                        + r.output.suffix(600)
                     : "No se pudo iniciar \(app.name) (código \(r.status)).\n\n" + r.output.suffix(1200)
                 if self.session.phase == .stopping { try? self.session.ended(status: r.status) }
                 else { try? self.session.startFailed(status: r.status) }

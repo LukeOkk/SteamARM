@@ -20,6 +20,11 @@ Linux (macOS has no setsid command, hence this file).
         for a death by signal S (N = 128 + S). Then gives the rest of the
         group GRACE seconds to leave before SIGTERM and, KILL_AFTER seconds
         later, SIGKILL. Exits with N.
+        STEAMARM_SESSION_RESTART=N (taken out of the program's environment):
+        an exit with status N starts the program again, in the same session,
+        after its group is cleaned as above -- what Valve's steam.sh does
+        with the client's 42 after an update. At most MAX_RESTARTS times in
+        RESTART_WINDOW seconds; the status recorded is the last exit's.
     session.py stop <launcher-dir> [grace-seconds]
         SIGTERM to the recorded group; members still alive after the grace
         period get SIGKILL. Waits for running.status to be written. Does
@@ -47,6 +52,10 @@ import time
 
 GRACE = 5.0        # seconds the group gets to finish on its own after the program
 KILL_AFTER = 2.0   # seconds between SIGTERM and SIGKILL for what is left
+# STEAMARM_SESSION_RESTART: restarts allowed within the window, so that a
+# program that keeps asking (a broken update) ends instead of looping.
+MAX_RESTARTS = 5
+RESTART_WINDOW = 600.0
 
 
 def log(msg):
@@ -171,36 +180,10 @@ def status_line(returncode):
     return "%d" % returncode
 
 
-def cmd_run(ldir, argv):
-    if not argv:
-        log("run: no command")
-        return 2
-    hup_ignored = signal.getsignal(signal.SIGHUP) == signal.SIG_IGN   # nohup
-    pgid = own_group()
-    os.makedirs(ldir, exist_ok=True)
-    write_atomic(os.path.join(ldir, "running.pgid"), "%d\n" % pgid)
-    # A handler, not SIG_IGN: the program must still be killable by the same
-    # signals, and an ignored signal would survive its exec.
-    for s in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):
-        signal.signal(s, lambda *_: None)
-    log("process group %d: %s" % (pgid, " ".join(argv)))
-    try:
-        # restore_signals (the default) gives the program SIGPIPE and SIGXFSZ
-        # back; nohup's ignored SIGHUP is put back by hand.
-        proc = subprocess.Popen(argv, stdin=subprocess.DEVNULL,
-                                preexec_fn=(lambda: signal.signal(signal.SIGHUP, signal.SIG_IGN))
-                                if hup_ignored else None)
-    except OSError as e:
-        log("cannot start %s: %s" % (argv[0], e))
-        write_atomic(os.path.join(ldir, "running.status"), "127\n")
-        return 127
-    rc = proc.wait()
-    line = status_line(rc)
-    write_atomic(os.path.join(ldir, "running.status"), line + "\n")
-    log("%s ended with status %s" % (os.path.basename(argv[0]), line))
-    # The program is gone; helpers it left behind get a moment, then the
-    # signals. What is left after that has no owner and would block the next
-    # launch ("Another Linux program is running").
+def clean_group(pgid):
+    """The program is gone; helpers it left behind get a moment, then the
+    signals. What is left after that has no owner and would block the next
+    launch ("Another Linux program is running")."""
     if not wait_empty(pgid, GRACE):
         log("group still has process(es) left: SIGTERM")
         kill_members(pgid, signal.SIGTERM)
@@ -208,6 +191,61 @@ def cmd_run(ldir, argv):
             log("SIGKILL to what is left")
             kill_members(pgid, signal.SIGKILL)
             wait_empty(pgid, 1.0)
+
+
+def cmd_run(ldir, argv):
+    if not argv:
+        log("run: no command")
+        return 2
+    # Not for the program: it would hand it on to everything it starts.
+    restart = os.environ.pop("STEAMARM_SESSION_RESTART", "").strip()
+    restart_status = int(restart) if restart.isdigit() else None
+    hup_ignored = signal.getsignal(signal.SIGHUP) == signal.SIG_IGN   # nohup
+    pgid = own_group()
+    os.makedirs(ldir, exist_ok=True)
+    write_atomic(os.path.join(ldir, "running.pgid"), "%d\n" % pgid)
+    # A handler, not SIG_IGN: the program must still be killable by the same
+    # signals, and an ignored signal would survive its exec.
+    stopping = []
+    def on_signal(*_):
+        stopping.append(True)
+    for s in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):
+        signal.signal(s, on_signal)
+    log("process group %d: %s" % (pgid, " ".join(argv)))
+    name = os.path.basename(argv[0])
+    restarts = []
+    while True:
+        try:
+            # restore_signals (the default) gives the program SIGPIPE and
+            # SIGXFSZ back; nohup's ignored SIGHUP is put back by hand.
+            proc = subprocess.Popen(argv, stdin=subprocess.DEVNULL,
+                                    preexec_fn=(lambda: signal.signal(signal.SIGHUP, signal.SIG_IGN))
+                                    if hup_ignored else None)
+        except OSError as e:
+            log("cannot start %s: %s" % (argv[0], e))
+            write_atomic(os.path.join(ldir, "running.status"), "127\n")
+            return 127
+        rc = proc.wait()
+        if restart_status is None or rc != restart_status or stopping:
+            break
+        now = time.monotonic()
+        restarts = [t for t in restarts if now - t < RESTART_WINDOW]
+        if len(restarts) >= MAX_RESTARTS:
+            log("%s asked to be started again %d times in %d s: not again"
+                % (name, len(restarts) + 1, int(RESTART_WINDOW)))
+            break
+        restarts.append(now)
+        # Steam's client exits 42 once it has installed an update: its own
+        # steam.sh starts it again. Run directly, it stayed closed after
+        # every update until it was opened again by hand.
+        log("%s ended with status %d: started again, as it asked" % (name, rc))
+        clean_group(pgid)
+        if stopping:
+            break
+    line = status_line(rc)
+    write_atomic(os.path.join(ldir, "running.status"), line + "\n")
+    log("%s ended with status %s" % (name, line))
+    clean_group(pgid)
     return int(line.split()[0])
 
 

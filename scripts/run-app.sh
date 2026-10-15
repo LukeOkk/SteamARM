@@ -591,6 +591,13 @@ if [ -z "$APP_ANDROID" ] && [ ! -d "$APP_ROOT/usr" ]; then
     echo "run-app: the root $APP_ROOT of $APP_NAME is not there (a volume that is not attached?)" >&2
     exit 2
 fi
+# ...and writable: the Steam Frame root's image once came up read-only (two
+# attaches at once; scripts/image-volume.sh serializes them now), and
+# nothing in it could be written -- not even PulseAudio's socket.
+if [ -z "$APP_ANDROID" ] && [ -d "$APP_ROOT/tmp" ] && [ ! -w "$APP_ROOT/tmp" ]; then
+    echo "run-app: the root $APP_ROOT of $APP_NAME is read-only (its disk image attached read-only?): stop what uses it, then start again" >&2
+    exit 2
+fi
 [ -z "$APP_PREFIX" ] || mkdir -p "$APP_ROOT$APP_PREFIX" || exit 1
 if [ "$MODE" = native ]; then ensure_native_x; else ensure_xvnc; fi
 
@@ -598,7 +605,20 @@ if [ -z "$APP_ANDROID" ]; then
 # Sound (scripts/audio.sh) at the launcher's volume, unless it is muted.
 apply_resolution_scaling "$LDIR/settings.json"
 VOL="$(/usr/bin/python3 scripts/settings-env.py --volume "$LDIR/settings.json")"
-[ -n "$VOL" ] && { in_x11 env LXRT_ROOT="$APP_ROOT" scripts/audio.sh start "$VOL" >/dev/null || echo "run-app: no sound (scripts/audio.sh)" >&2; }
+# A failure in the X server's spawn service gets one more try from here. A
+# Steam client is not started without the server: with no PulseAudio its
+# libpulse retried without end, the runtime's memfd slots ran out (28,679
+# "shared memfd open() failed: Too many open files") and the client never
+# opened a window -- a silent hang, where this says what is wrong (exit 4;
+# the launcher shows it). MEASURED 2026-10-15, benchmarks/stage63.
+if [ -n "$VOL" ] && ! in_x11 env LXRT_ROOT="$APP_ROOT" scripts/audio.sh start "$VOL" >/dev/null &&
+       ! env LXRT_ROOT="$APP_ROOT" scripts/audio.sh start "$VOL" >/dev/null; then
+    if [ "$APP_KIND" = steam ]; then
+        echo "run-app: the sound server (PulseAudio) did not start, and Steam's client does not open without it; not starting $APP_NAME. Log: $LOGS/pulseaudio.log" >&2
+        exit 4
+    fi
+    echo "run-app: no sound (scripts/audio.sh)" >&2
+fi
 # An ARM64 client's games run in the x86 Steam root (steamarm-fex-linux,
 # steamarm-fex-proton) and look for the socket there: it existed only when
 # something else had made it since the server started (the setup's tests),
@@ -623,6 +643,11 @@ rm -f "$STATUSFILE" "$PGIDFILE"
 # under it. PYTHONCOERCECLOCALE: see session.py (no Python locale for guests).
 # The log is opened for appending: the session's watcher writes to it too.
 SESSION=(env PYTHONCOERCECLOCALE=0 STEAMARM_SESSION_PY=1 /usr/bin/python3 scripts/session.py run "$LDIR" "$RUNNER")
+# Steam's client exits 42 after installing an update and expects to be
+# started again (Valve's steam.sh does it): the session does it here, or
+# Steam closed after every update of the client.
+[ "$APP_KIND" != steam ] ||
+    SESSION=(env STEAMARM_SESSION_RESTART=42 "${SESSION[@]:1}")
 # Free space inside the disk images is the Mac's (runtime/fileops2.c).
 LXRT_STATFS_BACKING="$(scripts/image-volume.sh backing 2>/dev/null)"
 export LXRT_STATFS_BACKING

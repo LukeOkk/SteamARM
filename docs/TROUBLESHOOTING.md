@@ -35,7 +35,17 @@ Finished steps are skipped. To redo one step: `scripts/setup.sh <step>`
 **Steam's window doesn't appear**
 The first start updates the client and can take several minutes. Watch
 the newest `~/SteamARM-roots/logs/steam-*.log`. If Steam exits right away, stop it from
-the launcher (**Detener**) and start it again.
+the launcher (**Detener**) and start it again. After installing an update
+the client exits with status 42 and SteamARM starts it again by itself
+(since 0.3.73).
+
+If that log fills with `shared memfd open() failed: Too many open files`,
+the sound server is missing: Steam's client does not open without it. Run
+`scripts/audio.sh status` in the source folder and look at
+`~/SteamARM-roots/logs/pulseaudio.log`. Before 0.3.73 this happened after
+every restart of the Mac (`benchmarks/stage63-pulseaudio-fork.txt`); now
+the launcher says so ("No arrancó el servidor de sonido") instead of
+starting a Steam that would hang.
 
 **Steam uses "Proton ARM64" / games don't start**
 This applies to the x86 Steam client, the route the launcher uses today.

@@ -10,6 +10,7 @@
 #   scripts/audio.sh volume N          set the output volume (0-100)
 #   scripts/audio.sh stop | status
 set -u
+HERE="$(cd "$(dirname "$0")" && pwd)"
 ROOT="${LXRT_ROOT:-/tmp/lxrt-steamroot}"
 STATE="${STEAMARM_STATE:-$HOME/SteamARM-roots}"
 # SteamARM's own build when it is there (scripts/build-pulseaudio.sh: the
@@ -39,6 +40,8 @@ server() {
 }
 pactl_() { "$PA/pactl" -s "unix:$(server)" "$@"; }
 running() { [ -n "$(server)" ]; }
+# The server process this script started (its command line names $CONF).
+server_pid() { pgrep -f "pulseaudio.*-F $CONF" 2>/dev/null | head -1; }
 
 start() {
     [ -x "$PA/pulseaudio" ] || { echo "audio: PulseAudio not installed (brew install pulseaudio)" >&2; return 1; }
@@ -97,14 +100,44 @@ flat-volumes = no
 default-fragments = 4
 default-fragment-size-msec = 20
 EOF
-            PULSE_CONFIG="$DAEMONCONF" "$PA/pulseaudio" --daemonize=yes --exit-idle-time=-1 --use-pid-file=no \
+            # Not --daemonize: PulseAudio daemonizes with fork() and no exec,
+            # and module-coreaudio-detect then loads CoreAudio in the fork
+            # child, which macOS does not support. It aborted there ("crashed
+            # on child side of fork pre-exec") whenever the parent had threads
+            # at the fork -- and it had them whenever LANG was unset, as for
+            # everything the SteamARM app starts: libintl's setlocale() asks
+            # CoreFoundation for the locale, which starts two threads. So
+            # after every restart of the Mac the app's first start had no
+            # sound server, and without one Steam's client never opened its
+            # window; a server started from a terminal (LANG set) hid it
+            # until the next restart (MEASURED 2026-10-15,
+            # benchmarks/stage63-pulseaudio-fork.txt). The server runs in the
+            # foreground instead, exec'd in a session of its own
+            # (session.py detach): no fork child, and no stop of an app's
+            # process group takes it down.
+            rm -f "$LOG"
+            ( PULSE_CONFIG="$DAEMONCONF" nohup env PYTHONCOERCECLOCALE=0 STEAMARM_SESSION_PY=1 \
+                /usr/bin/python3 "$HERE/session.py" detach \
+                "$PA/pulseaudio" --daemonize=no --exit-idle-time=-1 --use-pid-file=no \
                 --disallow-exit --disable-shm=yes -n -F "$CONF" --log-target=file:"$LOG" \
-                || { echo "audio: PulseAudio did not start (log $LOG)" >&2; return 1; }
+                </dev/null >/dev/null 2>&1 & )
             echo "$SOCK" > "$SRVFILE"
             echo "$PA/pulseaudio" > "$BINFILE"
         fi
-        for _ in $(seq 1 50); do live "$SOCK" && break; sleep 0.1; done
-        live "$SOCK" || { echo "audio: no socket at $SOCK (log $LOG)" >&2; return 1; }
+        # CoreAudio lists every device of the Mac first: 3 s with a monitor,
+        # a USB interface and Steam's virtual devices (MEASURED). Up to 20 s;
+        # a server that is already gone is not waited for.
+        local i
+        for i in $(seq 1 200); do
+            live "$SOCK" && break
+            [ "$i" -lt 20 ] || [ -n "$(server_pid)" ] || break
+            sleep 0.1
+        done
+        live "$SOCK" || {
+            echo "audio: PulseAudio did not start: no socket at $SOCK (log $LOG)" >&2
+            tail -3 "$LOG" 2>/dev/null >&2
+            return 1
+        }
     fi
     local s
     while IFS= read -r s; do

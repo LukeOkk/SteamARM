@@ -133,6 +133,34 @@ theirs=$(ps -o pgid= -p "$svc" | tr -d ' ')
 [ -n "$theirs" ] && [ "$theirs" != "$mine" ] && ok "detached service in group $theirs, test in $mine" || bad "service group $theirs vs $mine"
 kill "$svc" 2>/dev/null; wait "$svc" 2>/dev/null
 
+echo "== STEAMARM_SESSION_RESTART: a program that asks for it is started again"
+# Steam's client exits 42 after an update and expects a new start (steam.sh).
+cat > "$W/runner42" <<'EOF'
+#!/bin/bash
+n=$(( $(cat "$COUNT" 2>/dev/null || echo 0) + 1 )); echo "$n" > "$COUNT"
+echo "run $n restart=${STEAMARM_SESSION_RESTART-unset}"
+[ "$n" -lt "$UNTIL" ] && exit 42
+exit 0
+EOF
+chmod +x "$W/runner42"
+fresh
+COUNT="$W/count1" UNTIL=2 env STEAMARM_SESSION_RESTART=42 "${PY[@]}" run "$W/ldir" "$W/runner42" >"$W/log15" 2>&1
+rc=$?
+[ "$rc" = 0 ] && [ "$(status)" = 0 ] && ok "42, then 0: the session ends with 0" || bad "rc $rc, status $(status)"
+[ "$(cat "$W/count1")" = 2 ] && ok "the program ran twice" || bad "runs: $(cat "$W/count1")"
+grep -q "started again" "$W/log15" && ok "the log says it was started again" || { bad "log"; cat "$W/log15"; }
+grep -q "restart=unset" "$W/log15" && ! grep -q "restart=42" "$W/log15" \
+    && ok "the program does not see STEAMARM_SESSION_RESTART" || { bad "the variable reached the program"; cat "$W/log15"; }
+fresh
+COUNT="$W/count2" UNTIL=99 env STEAMARM_SESSION_RESTART=42 "${PY[@]}" run "$W/ldir" "$W/runner42" >"$W/log16" 2>&1
+rc=$?
+[ "$rc" = 42 ] && [ "$(status)" = 42 ] && ok "always 42: the session ends with 42" || bad "rc $rc, status $(status)"
+[ "$(cat "$W/count2")" = 6 ] && ok "five restarts, then no more" || bad "runs: $(cat "$W/count2")"
+fresh
+COUNT="$W/count3" UNTIL=2 "${PY[@]}" run "$W/ldir" "$W/runner42" >"$W/log17" 2>&1
+rc=$?
+[ "$rc" = 42 ] && [ "$(cat "$W/count3")" = 1 ] && ok "without the variable 42 is just the status" || bad "rc $rc, runs $(cat "$W/count3")"
+
 echo "== a command that cannot start"
 fresh
 "${PY[@]}" run "$W/ldir" "$W/does-not-exist" >"$W/log9" 2>&1
