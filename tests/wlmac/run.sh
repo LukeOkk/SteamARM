@@ -20,7 +20,7 @@ ok()  { echo "  ok    $1"; PASS=$((PASS + 1)); }
 bad() { echo "  FAIL  $1"; [ -n "${2:-}" ] && echo "        $2"; FAIL=$((FAIL + 1)); }
 echo "== tests/wlmac (native Wayland compositor)"
 tools/wlmac/build.sh >/dev/null || { bad "build steamarm-wlmac"; exit 1; }
-WR="${WESTON_ROOT:-${STEAMARM_STATE:-$HOME/SteamARM-roots}/westonroot}"
+WR="${WESTON_ROOT:-${STEAMARM_STATE:-$(d="$HOME/Developer/SteamARM-roots"; [ -d "$d" ] || [ ! -d "$HOME/SteamARM-roots" ] || d="$HOME/SteamARM-roots"; echo "$d")}/westonroot}"
 xdg=/dev/shm/steamarm-wlmac-test-$$
 host="/tmp/lxrt-shm-$(id -u)${xdg#/dev/shm}"
 dump=$(mktemp -d /tmp/wlmac-dump.XXXXXX)

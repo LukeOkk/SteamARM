@@ -32,8 +32,8 @@
 set -euo pipefail
 cd "$(dirname "$0")/.." || exit 1
 REPO=$PWD
-STATE="${STEAMARM_STATE:-$HOME/SteamARM-roots}"
-BUILD="${STEAMARM_BUILD:-$HOME/SteamARM-build}"
+STATE="${STEAMARM_STATE:-$(d="$HOME/Developer/SteamARM-roots"; [ -d "$d" ] || [ ! -d "$HOME/SteamARM-roots" ] || d="$HOME/SteamARM-roots"; echo "$d")}"
+BUILD="${STEAMARM_BUILD:-$(d="$HOME/Developer/SteamARM-build"; [ -d "$d" ] || [ ! -d "$HOME/SteamARM-build" ] || d="$HOME/SteamARM-build"; echo "$d")}"
 VERSION=2.22.3
 ELECTRON=43.1.1
 ROOT="$STATE/armroot"

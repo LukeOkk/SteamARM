@@ -19,7 +19,7 @@ ROOT=/tmp/lxrt-steamroot
 PFX_GUEST=/tmp/fexhome/wtest
 PROTON_GUEST="/tmp/fexhome/.local/share/Steam/steamapps/common/Proton - Experimental/files"
 PROTON="$ROOT$PROTON_GUEST"
-LOGS="${STEAMARM_STATE:-$HOME/SteamARM-roots}/logs"
+LOGS="${STEAMARM_STATE:-$(d="$HOME/Developer/SteamARM-roots"; [ -d "$d" ] || [ ! -d "$HOME/SteamARM-roots" ] || d="$HOME/SteamARM-roots"; echo "$d")}/logs"
 mkdir -p "$LOGS"
 [ -x "$PROTON/bin/wine" ] || { echo "no Proton Experimental in the Steam root" >&2; exit 1; }
 [ -f "$ROOT/usr/lib/lxrt-emu/thunks/HostThunks/libvulkan-host.so" ] ||

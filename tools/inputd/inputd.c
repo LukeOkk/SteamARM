@@ -858,9 +858,18 @@ int main(int argc, char **argv)
     const char *base = getenv("STEAMARM_STATE"), *home = getenv("HOME");
     if (base)
         snprintf(configpath, sizeof(configpath), "%s/launcher/controllers.json", base);
-    else
-        snprintf(configpath, sizeof(configpath), "%s/SteamARM-roots/launcher/controllers.json",
-                 home ? home : ".");
+    else {
+        /* Same rule as the scripts: ~/Developer/SteamARM-roots when it exists,
+         * else an older install's ~/SteamARM-roots, else ~/Developer. */
+        char newer[PATH_MAX], older[PATH_MAX];
+        struct stat st;
+        const char *dir = newer;
+        snprintf(newer, sizeof(newer), "%s/Developer/SteamARM-roots", home ? home : ".");
+        snprintf(older, sizeof(older), "%s/SteamARM-roots", home ? home : ".");
+        if (!(stat(newer, &st) == 0 && S_ISDIR(st.st_mode)) && stat(older, &st) == 0 && S_ISDIR(st.st_mode))
+            dir = older;
+        snprintf(configpath, sizeof(configpath), "%s/launcher/controllers.json", dir);
+    }
     for (int i = 1; i < argc; i++) {
         if (!strcmp(argv[i], "--foreground")) {
             foreground = 1;

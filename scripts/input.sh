@@ -6,8 +6,8 @@
 #
 #   scripts/input.sh start | stop | status
 set -u
-BUILD="${STEAMARM_BUILD:-$HOME/SteamARM-build}"
-STATE="${STEAMARM_STATE:-$HOME/SteamARM-roots}"
+BUILD="${STEAMARM_BUILD:-$(d="$HOME/Developer/SteamARM-build"; [ -d "$d" ] || [ ! -d "$HOME/SteamARM-build" ] || d="$HOME/SteamARM-build"; echo "$d")}"
+STATE="${STEAMARM_STATE:-$(d="$HOME/Developer/SteamARM-roots"; [ -d "$d" ] || [ ! -d "$HOME/SteamARM-roots" ] || d="$HOME/SteamARM-roots"; echo "$d")}"
 DIR=/tmp/lxrt-input
 LOG="$STATE/logs/inputd.log"
 cd "$(dirname "$0")/.." || exit 1

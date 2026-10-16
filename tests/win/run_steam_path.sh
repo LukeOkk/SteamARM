@@ -34,7 +34,7 @@ PROTON_TOOL="${STEAMPATH_PROTON:-Proton - Experimental}"
 PROBE="${STEAMPATH_PROBE:-$G/steamapps/common/SteamARM-Probe}"
 PFX="${STEAMPATH_PFX:-$G/steamapps/compatdata/999999}"
 PROBE_TIMEOUT="${PROBE_TIMEOUT:-300}"
-LOGS="${STEAMARM_STATE:-$HOME/SteamARM-roots}/logs"
+LOGS="${STEAMARM_STATE:-$(d="$HOME/Developer/SteamARM-roots"; [ -d "$d" ] || [ ! -d "$HOME/SteamARM-roots" ] || d="$HOME/SteamARM-roots"; echo "$d")}/logs"
 PACTL=/opt/homebrew/opt/pulseaudio/bin/pactl
 appid=$(sed -n 's/.*"require_tool_appid"[[:space:]]*"\([0-9]*\)".*/\1/p' \
         "$R$G/steamapps/common/$PROTON_TOOL/toolmanifest.vdf" 2>/dev/null | head -1)

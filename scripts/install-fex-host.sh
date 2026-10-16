@@ -4,8 +4,8 @@
 set -euo pipefail
 cd "$(dirname "$0")/.." || exit 1
 
-BUILD="${STEAMARM_BUILD:-$HOME/SteamARM-build}"
-STATE="${STEAMARM_STATE:-$HOME/SteamARM-roots}"
+BUILD="${STEAMARM_BUILD:-$(d="$HOME/Developer/SteamARM-build"; [ -d "$d" ] || [ ! -d "$HOME/SteamARM-build" ] || d="$HOME/SteamARM-build"; echo "$d")}"
+STATE="${STEAMARM_STATE:-$(d="$HOME/Developer/SteamARM-roots"; [ -d "$d" ] || [ ! -d "$HOME/SteamARM-roots" ] || d="$HOME/SteamARM-roots"; echo "$d")}"
 LXRT_ROOT="${LXRT_ROOT:-/tmp/lxrt-root}"
 STEAM_ROOT="${LXRT_STEAM_ROOT:-/tmp/lxrt-steamroot}"
 STAMP="$(date +%Y%m%d-%H%M%S)"

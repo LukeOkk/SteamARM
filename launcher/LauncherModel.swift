@@ -619,7 +619,7 @@ final class LauncherModel: ObservableObject {
                     ? "Ya hay otro programa de Linux en marcha. Detenlo antes de abrir \(app.name)."
                     : r.status == 4
                     ? "No arrancó el servidor de sonido (PulseAudio) y \(app.name) no abre sin él. "
-                        + "Vuelve a intentarlo; el registro está en ~/SteamARM-roots/logs/pulseaudio.log.\n\n"
+                        + "Vuelve a intentarlo; el registro está en \(Paths.logs.path)/pulseaudio.log.\n\n"
                         + r.output.suffix(600)
                     : "No se pudo iniciar \(app.name) (código \(r.status)).\n\n" + r.output.suffix(1200)
                 if self.session.phase == .stopping { try? self.session.ended(status: r.status) }

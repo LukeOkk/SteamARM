@@ -11,7 +11,7 @@
 set -u
 cd "$(dirname "$0")/../.." || exit 1
 ROOT="${1:-/tmp/lxrt-steamroot}"
-OUT="${STEAMARM_BUILD:-$HOME/SteamARM-build}/thunks-build"
+OUT="${STEAMARM_BUILD:-$(d="$HOME/Developer/SteamARM-build"; [ -d "$d" ] || [ ! -d "$HOME/SteamARM-build" ] || d="$HOME/SteamARM-build"; echo "$d")}/thunks-build"
 CLANG=/opt/homebrew/opt/llvm/bin/clang
 pass=0 fail=0
 for arch in x86_64 i386; do

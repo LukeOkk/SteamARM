@@ -50,7 +50,7 @@ CANON_BASE=$PWD
 cd "$(dirname "$0")/.." || exit 1
 . scripts/roots.sh
 
-STATE="${STEAMARM_STATE:-$HOME/SteamARM-roots}"
+STATE="${STEAMARM_STATE:-$(d="$HOME/Developer/SteamARM-roots"; [ -d "$d" ] || [ ! -d "$HOME/SteamARM-roots" ] || d="$HOME/SteamARM-roots"; echo "$d")}"
 ANDROID_STATE="${ANDROID_STATE:-$STATE/android}"
 IMAGES="$ANDROID_STATE/images"
 BUNDLE="${ANDROID_BUNDLE:-$STATE/android.sparsebundle}"
@@ -63,7 +63,7 @@ PY=scripts/androidroot.py
 # (scripts/build-fex-host.sh); FEXServer is the plain build, started through
 # that loader (scripts/run-android-x86.sh). The glibc libraries come from the
 # aarch64 root, as in scripts/mksteamroot.sh.
-FEX_OUT="${STEAMARM_BUILD:-$HOME/SteamARM-build}/out"
+FEX_OUT="${STEAMARM_BUILD:-$(d="$HOME/Developer/SteamARM-build"; [ -d "$d" ] || [ ! -d "$HOME/SteamARM-build" ] || d="$HOME/SteamARM-build"; echo "$d")}/out"
 FEXEMU="${FEXEMU:-$FEX_OUT/FEX-emu}"
 FEXSERVER="${FEXSERVER:-$FEX_OUT/FEXServer}"
 ARM_ROOT="${ARM_ROOT:-/tmp/lxrt-root}"

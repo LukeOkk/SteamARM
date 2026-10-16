@@ -77,7 +77,7 @@
 set -euo pipefail
 
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
-WORK="${STEAMARM_BUILD:-$HOME/SteamARM-build}"
+WORK="${STEAMARM_BUILD:-$(d="$HOME/Developer/SteamARM-build"; [ -d "$d" ] || [ ! -d "$HOME/SteamARM-build" ] || d="$HOME/SteamARM-build"; echo "$d")}"
 RPMDIR="$WORK/rpms"
 META="$WORK/repodata-f43"
 STAGE="${MKROOT_STAGE:-$WORK/rootstage-f43}"

@@ -10,7 +10,7 @@
 # Re-running is safe: downloads are cached, the build is incremental.
 set -euo pipefail
 
-XQ_ROOT="${XQ_ROOT:-${STEAMARM_BUILD:-$HOME/SteamARM-build}/xquartz}"
+XQ_ROOT="${XQ_ROOT:-${STEAMARM_BUILD:-$(d="$HOME/Developer/SteamARM-build"; [ -d "$d" ] || [ ! -d "$HOME/SteamARM-build" ] || d="$HOME/SteamARM-build"; echo "$d")}/xquartz}"
 PREFIX="$XQ_ROOT/prefix"
 BREW="${BREW:-/opt/homebrew}"
 PROJECT_DIR="$(cd "$(dirname "$0")/.." && pwd)"

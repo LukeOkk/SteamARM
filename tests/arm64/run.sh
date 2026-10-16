@@ -4,7 +4,7 @@
 # Every check skips cleanly when its files are missing (STEAMARM_STATE, ARMROOT).
 set -uo pipefail
 cd "$(dirname "$0")/../.."
-STATE="${STEAMARM_STATE:-$HOME/SteamARM-roots}"
+STATE="${STEAMARM_STATE:-$(d="$HOME/Developer/SteamARM-roots"; [ -d "$d" ] || [ ! -d "$HOME/SteamARM-roots" ] || d="$HOME/SteamARM-roots"; echo "$d")}"
 ARMROOT="${ARMROOT:-$STATE/armroot}"
 SD="$ARMROOT/tmp/armhome/.local/share/Steam"
 RT="$SD/steamrtarm64"

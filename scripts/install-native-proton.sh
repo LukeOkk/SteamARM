@@ -35,7 +35,7 @@
 # restart.
 set -euo pipefail
 cd "$(dirname "$0")/.." || exit 1
-STATE="${STEAMARM_STATE:-$HOME/SteamARM-roots}"
+STATE="${STEAMARM_STATE:-$(d="$HOME/Developer/SteamARM-roots"; [ -d "$d" ] || [ ! -d "$HOME/SteamARM-roots" ] || d="$HOME/SteamARM-roots"; echo "$d")}"
 ROOT="$STATE/arm64root"
 DRY=0 UNINSTALL=0
 while [ $# -gt 0 ]; do
@@ -126,7 +126,7 @@ ln -sfn bin-arm64 "$DEST/dist/files/bin"
 python3 tools/steamarm-native-proton/vcrun_version.py dist "$DEST/dist" | sed 's/^/[install-native-proton] /'
 # 4. SteamARM's vkd3d-proton, when built: it accepts a placed resource that
 #    Vulkan can bind where Valve's refuses it (scripts/build-vkd3d-proton.sh).
-VKD3D_OUT="${STEAMARM_BUILD:-$HOME/SteamARM-build}/vkd3d-proton/out"
+VKD3D_OUT="${STEAMARM_BUILD:-$(d="$HOME/Developer/SteamARM-build"; [ -d "$d" ] || [ ! -d "$HOME/SteamARM-build" ] || d="$HOME/SteamARM-build"; echo "$d")}/vkd3d-proton/out"
 VKD3D_DIR="$DEST/dist/files/lib/wine/vkd3d-proton/aarch64-windows"
 if [ -f "$VKD3D_OUT/d3d12core.dll" ] && [ -f "$VKD3D_OUT/d3d12.dll" ] && [ -d "$VKD3D_DIR" ]; then
     for f in d3d12.dll d3d12core.dll; do
@@ -137,7 +137,7 @@ if [ -f "$VKD3D_OUT/d3d12core.dll" ] && [ -f "$VKD3D_OUT/d3d12.dll" ] && [ -d "$
 fi
 # 5. SteamARM's FEX ARM64EC module, when built: Valve's commit with patches
 #    (scripts/build-fex-arm64ec.sh).
-FEX_EC_OUT="${STEAMARM_BUILD:-$HOME/SteamARM-build}/fex-arm64ec/out"
+FEX_EC_OUT="${STEAMARM_BUILD:-$(d="$HOME/Developer/SteamARM-build"; [ -d "$d" ] || [ ! -d "$HOME/SteamARM-build" ] || d="$HOME/SteamARM-build"; echo "$d")}/fex-arm64ec/out"
 FEX_EC_DIR="$DEST/dist/files/lib/wine/aarch64-windows"
 if [ -f "$FEX_EC_OUT/libarm64ecfex.dll" ] && [ -f "$FEX_EC_DIR/libarm64ecfex.dll" ]; then
     rm -f "$FEX_EC_DIR/libarm64ecfex.dll"
@@ -148,7 +148,7 @@ fi
 #    source of this very Proton build (KNOWN_VERSION, checked above: it must
 #    match the ntdll.so it talks to) with patches/wine-ntdll, which carry EFlags
 #    PF/AF through ARM64EC exceptions (scripts/build-wine-ntdll.sh).
-NTDLL_OUT="${STEAMARM_BUILD:-$HOME/SteamARM-build}/wine-ntdll/out"
+NTDLL_OUT="${STEAMARM_BUILD:-$(d="$HOME/Developer/SteamARM-build"; [ -d "$d" ] || [ ! -d "$HOME/SteamARM-build" ] || d="$HOME/SteamARM-build"; echo "$d")}/wine-ntdll/out"
 if [ -f "$NTDLL_OUT/ntdll.dll" ] && [ -f "$FEX_EC_DIR/ntdll.dll" ]; then
     rm -f "$FEX_EC_DIR/ntdll.dll"
     cp "$NTDLL_OUT/ntdll.dll" "$FEX_EC_DIR/ntdll.dll"

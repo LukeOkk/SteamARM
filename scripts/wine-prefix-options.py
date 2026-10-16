@@ -27,7 +27,10 @@ import re
 import sys
 import time
 
-STATE = os.environ.get("STEAMARM_STATE") or os.path.expanduser("~/SteamARM-roots")
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))  # scripts/steamarm_paths.py
+import steamarm_paths  # noqa: E402
+
+STATE = steamarm_paths.state_dir()
 SECTION = r"Software\\Wine\\X11 Driver"     # as user.reg spells it (backslashes doubled)
 VALUE = "EmulateModeset"
 

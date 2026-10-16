@@ -1,7 +1,11 @@
 """VNC security handshake shared by scripts/vnc_snapshot.py and vnc_click.py:
 None when offered, else classic VncAuth with the password from
-$STEAMARM_VNC_PASSWORD or ~/SteamARM-roots/vncpasswd.txt (DES via openssl)."""
+$STEAMARM_VNC_PASSWORD or <state dir>/vncpasswd.txt (scripts/steamarm_paths.py) (DES via openssl)."""
 import os, struct, subprocess
+import sys
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))  # scripts/steamarm_paths.py
+import steamarm_paths  # noqa: E402
 
 
 def _recvn(s, n):
@@ -17,7 +21,7 @@ def _recvn(s, n):
 def _password():
     pw = os.environ.get("STEAMARM_VNC_PASSWORD")
     if not pw:
-        p = os.path.expanduser(os.environ.get("STEAMARM_STATE", "~/SteamARM-roots") + "/vncpasswd.txt")
+        p = os.path.join(steamarm_paths.state_dir(), "vncpasswd.txt")
         with open(p) as f:
             pw = f.read().strip()
     return pw

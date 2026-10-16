@@ -21,6 +21,9 @@ import struct
 import subprocess
 import sys
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))  # scripts/steamarm_paths.py
+import steamarm_paths  # noqa: E402
+
 MACHINES = {0x14C: "x86", 0x8664: "x64", 0xAA64: "ARM64", 0xA641: "ARM64EC", 0xA64E: "ARM64X"}
 ELF = {0x03: "i386", 0x3E: "x86-64", 0xB7: "aarch64"}
 
@@ -150,8 +153,8 @@ def home(p):
 
 
 def stack():
-    state = os.environ.get("STEAMARM_STATE") or home("~/SteamARM-roots")
-    build = os.environ.get("STEAMARM_BUILD") or home("~/SteamARM-build")
+    state = steamarm_paths.state_dir()
+    build = steamarm_paths.build_dir()
     x86 = state + "/steamroot/tmp/fexhome/.local/share/Steam/steamapps/common"
     frame = state + "/arm64root/tmp/armhome/.local/share/Steam/steamapps/common"
     items = [

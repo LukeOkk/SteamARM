@@ -36,7 +36,7 @@ T=/tmp/ffxload                              # guest folder of the wine cases
 SPROBE="$G/steamapps/common/SteamARM-FFXLoad"   # the steam cases' "game"
 SPFX="$G/steamapps/compatdata/999996"
 OPT=/opt/steamarm-ffxtest/wine              # builtin folder for the steam cases
-LOGS="${STEAMARM_STATE:-$HOME/SteamARM-roots}/logs"
+LOGS="${STEAMARM_STATE:-$(d="$HOME/Developer/SteamARM-roots"; [ -d "$d" ] || [ ! -d "$HOME/SteamARM-roots" ] || d="$HOME/SteamARM-roots"; echo "$d")}/logs"
 RUN_ID="ffxload.$$.$(date +%s)"
 mkdir -p "$LOGS"
 [ -x "$R$PROTON_GUEST/bin/wine" ] || { echo "no $PROTON_TOOL in the Steam root" >&2; exit 1; }

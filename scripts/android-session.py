@@ -71,9 +71,12 @@ import subprocess
 import sys
 import time
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))  # scripts/steamarm_paths.py
+import steamarm_paths  # noqa: E402
+
 HERE = os.path.dirname(os.path.abspath(__file__))
 REPO = os.path.dirname(HERE)
-STATE = os.environ.get("STEAMARM_STATE") or os.path.expanduser("~/SteamARM-roots")
+STATE = steamarm_paths.state_dir()
 ADIR = os.path.join(STATE, "android")
 SESSION_FILE = os.path.join(ADIR, "session.json")
 LOCK_FILE = os.path.join(ADIR, "session.lock")
@@ -292,7 +295,7 @@ def update_base_emu():
     a SteamARM update rebuilds that FEX (patches/fex-lxrt-*.patch) but left
     the root's copy alone. Install the new one when they differ, unless a
     guest runs on the base root (the tests' own sessions)."""
-    fexemu = os.path.join(os.environ.get("STEAMARM_BUILD") or os.path.expanduser("~/SteamARM-build"), "out", "FEX-emu")
+    fexemu = os.path.join(steamarm_paths.build_dir(), "out", "FEX-emu")
     base = BASE_ROOT + "/usr/lib/lxrt-emu/FEX"
     try:
         if not os.path.isfile(fexemu) or not os.path.isfile(base) or filecmp.cmp(fexemu, base, shallow=False):

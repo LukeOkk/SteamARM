@@ -64,7 +64,7 @@
 # shasum, python3, bsdtar.
 set -euo pipefail
 
-WORK="${STEAMARM_BUILD:-$HOME/SteamARM-build}"
+WORK="${STEAMARM_BUILD:-$(d="$HOME/Developer/SteamARM-build"; [ -d "$d" ] || [ ! -d "$HOME/SteamARM-build" ] || d="$HOME/SteamARM-build"; echo "$d")}"
 INDEX_URL=https://rootfs.fex-emu.gg/RootFS_links.json
 DISTRO="Ubuntu 24.04"                     # the index entry name, minus " (SquashFS)"
 DATE=2026-08-11                           # the image FEX published that day

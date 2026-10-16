@@ -59,7 +59,7 @@
 set -euo pipefail
 
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
-WORK="${STEAMARM_BUILD:-$HOME/SteamARM-build}"
+WORK="${STEAMARM_BUILD:-$(d="$HOME/Developer/SteamARM-build"; [ -d "$d" ] || [ ! -d "$HOME/SteamARM-build" ] || d="$HOME/SteamARM-build"; echo "$d")}"
 MAIN="$WORK/FEX"
 SRC="$WORK/FEX-thunks"
 OUT="$WORK/thunks-build"

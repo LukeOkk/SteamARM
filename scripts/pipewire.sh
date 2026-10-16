@@ -18,7 +18,7 @@ CMD="${1:-status}"
 ROOT="${2:-${LXRT_ROOT:-/tmp/lxrt-arm64root}}"
 GDIR=/tmp/steamarm-pipewire
 HDIR="$ROOT$GDIR"
-STATE="${STEAMARM_STATE:-$HOME/SteamARM-roots}"
+STATE="${STEAMARM_STATE:-$(d="$HOME/Developer/SteamARM-roots"; [ -d "$d" ] || [ ! -d "$HOME/SteamARM-roots" ] || d="$HOME/SteamARM-roots"; echo "$d")}"
 LOG="$STATE/logs/pipewire.log"
 
 # Ours only: the daemon and tunnels by their config path, WirePlumber by its

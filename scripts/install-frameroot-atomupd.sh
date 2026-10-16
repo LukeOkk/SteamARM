@@ -20,7 +20,7 @@
 # Run again after the root is rebuilt (scripts/setup.sh does).
 set -euo pipefail
 cd "$(dirname "$0")/.." || exit 1
-STATE="${STEAMARM_STATE:-$HOME/SteamARM-roots}"
+STATE="${STEAMARM_STATE:-$(d="$HOME/Developer/SteamARM-roots"; [ -d "$d" ] || [ ! -d "$HOME/SteamARM-roots" ] || d="$HOME/SteamARM-roots"; echo "$d")}"
 ROOT="${1:-$STATE/arm64root}"
 log() { echo "[install-frameroot-atomupd] $*"; }
 

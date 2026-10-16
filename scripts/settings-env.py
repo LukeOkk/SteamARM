@@ -19,7 +19,10 @@ import shlex
 import subprocess
 import sys
 
-STATE = os.environ.get("STEAMARM_STATE") or os.path.expanduser("~/SteamARM-roots")
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))  # scripts/steamarm_paths.py
+import steamarm_paths  # noqa: E402
+
+STATE = steamarm_paths.state_dir()
 SHIM = os.path.join(STATE, "steamroot", "usr", "lib", "lxrt-emu", "libvulkan.so.1")
 ICD_MARKER = b"STEAMARM_VK_ICD"
 OVERRIDABLE = ("display", "vsync", "synchronization", "graphicsBackend", "scalingFilter")
@@ -57,7 +60,7 @@ def file_contains(path, needle):
 def kosmickrisp_build_dir(build=None):
     """The directory of SteamARM's own KosmicKrisp build
     (scripts/build-kosmickrisp.sh), or "" if there is none."""
-    root = build or os.environ.get("STEAMARM_BUILD") or os.path.expanduser("~/SteamARM-build")
+    root = build or steamarm_paths.build_dir()
     out = os.path.join(root, "mesa-kk", "out")
     return out if os.path.isfile(os.path.join(out, "libvulkan_kosmickrisp.dylib")) else ""
 

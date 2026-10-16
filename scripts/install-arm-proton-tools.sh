@@ -4,7 +4,7 @@
 # unchanged data blocks without linking either client's writable tool state.
 set -euo pipefail
 
-STATE="${STEAMARM_STATE:-$HOME/SteamARM-roots}"
+STATE="${STEAMARM_STATE:-$(d="$HOME/Developer/SteamARM-roots"; [ -d "$d" ] || [ ! -d "$HOME/SteamARM-roots" ] || d="$HOME/SteamARM-roots"; echo "$d")}"
 SOURCE="${STEAMARM_X86_STEAMAPPS:-$STATE/steamroot/tmp/fexhome/.local/share/Steam/steamapps}"
 DEST="${STEAMARM_ARM_STEAMAPPS:-$STATE/armroot/tmp/armhome/.local/share/Steam/steamapps}"
 

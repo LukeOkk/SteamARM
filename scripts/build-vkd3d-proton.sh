@@ -22,7 +22,7 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 REPO=$PWD
-B="${STEAMARM_BUILD:-$HOME/SteamARM-build}"
+B="${STEAMARM_BUILD:-$(d="$HOME/Developer/SteamARM-build"; [ -d "$d" ] || [ ! -d "$HOME/SteamARM-build" ] || d="$HOME/SteamARM-build"; echo "$d")}"
 VKD3D_ROOT="${VKD3D_ROOT:-$B/vkd3d-proton}"
 VKD3D_COMMIT=2230755878b01993b4b82d0ac0c0624f3ab4d333
 MINGW_REL=20260922

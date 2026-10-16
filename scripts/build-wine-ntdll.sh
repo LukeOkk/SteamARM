@@ -22,7 +22,7 @@
 # as scripts/build-vkd3d-proton.sh does). Idempotent (stamp file).
 set -euo pipefail
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
-B="${STEAMARM_BUILD:-$HOME/SteamARM-build}"
+B="${STEAMARM_BUILD:-$(d="$HOME/Developer/SteamARM-build"; [ -d "$d" ] || [ ! -d "$HOME/SteamARM-build" ] || d="$HOME/SteamARM-build"; echo "$d")}"
 WINE_COMMIT=6d211aabd1d325c9990a5fd7a81b9db37caae12d
 MINGW_REL=20260922
 ROOT_DIR="$B/wine-ntdll"

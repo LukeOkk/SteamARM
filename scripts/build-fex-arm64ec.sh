@@ -64,7 +64,7 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 REPO=$PWD
-B="${STEAMARM_BUILD:-$HOME/SteamARM-build}"
+B="${STEAMARM_BUILD:-$(d="$HOME/Developer/SteamARM-build"; [ -d "$d" ] || [ ! -d "$HOME/SteamARM-build" ] || d="$HOME/SteamARM-build"; echo "$d")}"
 FEX_EC_ROOT="${FEX_EC_ROOT:-$B/fex-arm64ec}"
 FEX_COMMIT=0df84d3844bcdb87bb7d3f5b8fb0959cd009c038
 FEX_VERSION=FEX-2609-137-g0df84d3-steamarm   # Valve's build plus ours; a shallow clone has no tags to describe

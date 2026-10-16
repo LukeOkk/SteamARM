@@ -10,7 +10,7 @@
 # /usr/bin/steam wrapper, udev rules) is needed here.
 set -euo pipefail
 ROOT="${LXRT_ROOT:-/tmp/lxrt-steamroot}"
-BUILD="${STEAMARM_BUILD:-$HOME/SteamARM-build}"
+BUILD="${STEAMARM_BUILD:-$(d="$HOME/Developer/SteamARM-build"; [ -d "$d" ] || [ ! -d "$HOME/SteamARM-build" ] || d="$HOME/SteamARM-build"; echo "$d")}"
 URL="${STEAM_DEB_URL:-https://repo.steampowered.com/steam/archive/stable/steam_latest.deb}"
 DEST="$ROOT/tmp/fexhome/.local/share/Steam"
 log() { printf '[install-steam] %s\n' "$*"; }

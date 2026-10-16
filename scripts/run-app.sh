@@ -52,7 +52,7 @@
 set -u
 cd "$(dirname "$0")/.." || exit 1
 ROOT=/tmp/lxrt-steamroot
-STATE="${STEAMARM_STATE:-$HOME/SteamARM-roots}"
+STATE="${STEAMARM_STATE:-$(d="$HOME/Developer/SteamARM-roots"; [ -d "$d" ] || [ ! -d "$HOME/SteamARM-roots" ] || d="$HOME/SteamARM-roots"; echo "$d")}"
 LOGS="$STATE/logs"
 LDIR="$STATE/launcher"
 PIDFILE="$LDIR/running.pid"
@@ -217,7 +217,7 @@ android_pkg = None
 if app.get("kind") == "android":
     info = app.get("android") if isinstance(app.get("android"), dict) else {}
     pkg = str(info.get("package") or "")
-    state = os.environ.get("STEAMARM_STATE") or os.path.expanduser("~/SteamARM-roots")
+    state = os.environ.get("STEAMARM_STATE") or next((d for d in (os.path.expanduser("~/Developer/SteamARM-roots"), os.path.expanduser("~/SteamARM-roots")) if os.path.isdir(d)), os.path.expanduser("~/Developer/SteamARM-roots"))
     meta = load(os.path.join(state, "android", "packages", pkg, "meta.json"), {}) if pkg else {}
     if not isinstance(meta, dict):
         meta = {}

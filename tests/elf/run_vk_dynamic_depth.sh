@@ -5,8 +5,8 @@
 set -eu
 cd "$(dirname "$0")/../.."
 ROOT="${1:-/tmp/lxrt-arm64root}"
-STAGE="${STEAMARM_BUILD:-$HOME/SteamARM-build}/rootstage-f43"
-OWN="${STEAMARM_KK_OWN:-${STEAMARM_BUILD:-$HOME/SteamARM-build}/mesa-kk/out}"
+STAGE="${STEAMARM_BUILD:-$(d="$HOME/Developer/SteamARM-build"; [ -d "$d" ] || [ ! -d "$HOME/SteamARM-build" ] || d="$HOME/SteamARM-build"; echo "$d")}/rootstage-f43"
+OWN="${STEAMARM_KK_OWN:-${STEAMARM_BUILD:-$(d="$HOME/Developer/SteamARM-build"; [ -d "$d" ] || [ ! -d "$HOME/SteamARM-build" ] || d="$HOME/SteamARM-build"; echo "$d")}/mesa-kk/out}"
 CLANG=/opt/homebrew/opt/llvm/bin/clang
 GCCDIR=$(ls -d "$STAGE"/usr/lib/gcc/aarch64-redhat-linux/* | tail -1)
 mkdir -p "$ROOT/tmp"

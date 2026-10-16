@@ -13,8 +13,8 @@
 #   this checkout          build/lxrun (runtime), build/libvulkan.so.1 (Vulkan
 #                          shim), build/SteamARM.app (launcher)
 #   $STEAMARM_BUILD        FEX, its thunks, XQuartz, package caches
-#                          (default ~/SteamARM-build)
-#   $STEAMARM_STATE        the guest roots, logs (default ~/SteamARM-roots):
+#                          (default ~/Developer/SteamARM-build, or an older install's ~/SteamARM-build)
+#   $STEAMARM_STATE        the guest roots, logs (default ~/Developer/SteamARM-roots, or an older install's ~/SteamARM-roots):
 #     lxrt-root            aarch64 root (Fedora 43 RPMs): FEX, Xvnc, test programs
 #     x86-rootfs           FEX's Ubuntu 24.04 x86-64 rootfs
 #     steamroot            the root Steam runs in (x86-64 tree + the emulator)
@@ -23,8 +23,8 @@
 set -euo pipefail
 cd "$(dirname "$0")/.." || exit 1
 REPO="$(pwd)"
-BUILD="${STEAMARM_BUILD:-$HOME/SteamARM-build}"
-STATE="${STEAMARM_STATE:-$HOME/SteamARM-roots}"
+BUILD="${STEAMARM_BUILD:-$(d="$HOME/Developer/SteamARM-build"; [ -d "$d" ] || [ ! -d "$HOME/SteamARM-build" ] || d="$HOME/SteamARM-build"; echo "$d")}"
+STATE="${STEAMARM_STATE:-$(d="$HOME/Developer/SteamARM-roots"; [ -d "$d" ] || [ ! -d "$HOME/SteamARM-roots" ] || d="$HOME/SteamARM-roots"; echo "$d")}"
 export STEAMARM_BUILD="$BUILD" STEAMARM_STATE="$STATE"
 BREW="${BREW:-/opt/homebrew}"
 log() { printf '\n\033[1m[setup] %s\033[0m\n' "$*"; }

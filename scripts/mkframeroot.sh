@@ -56,7 +56,7 @@ set -euo pipefail
 CANON_BASE=$PWD                        # relative SRC/OUT/DIR: the caller's directory
 cd "$(dirname "$0")/.." || exit 1
 . scripts/roots.sh
-STATE="${STEAMARM_STATE:-$HOME/SteamARM-roots}"
+STATE="${STEAMARM_STATE:-$(d="$HOME/Developer/SteamARM-roots"; [ -d "$d" ] || [ ! -d "$HOME/SteamARM-roots" ] || d="$HOME/SteamARM-roots"; echo "$d")}"
 ADOPT=0 HOME_FROM=""
 while [ $# -gt 0 ]; do
     case "$1" in

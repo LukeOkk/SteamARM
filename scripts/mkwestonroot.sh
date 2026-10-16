@@ -21,8 +21,8 @@ set -euo pipefail
 CANON_BASE=$PWD
 cd "$(dirname "$0")/.." || exit 1
 . scripts/roots.sh
-BUILD="${STEAMARM_BUILD:-$HOME/SteamARM-build}"
-STATE="${STEAMARM_STATE:-$HOME/SteamARM-roots}"
+BUILD="${STEAMARM_BUILD:-$(d="$HOME/Developer/SteamARM-build"; [ -d "$d" ] || [ ! -d "$HOME/SteamARM-build" ] || d="$HOME/SteamARM-build"; echo "$d")}"
+STATE="${STEAMARM_STATE:-$(d="$HOME/Developer/SteamARM-roots"; [ -d "$d" ] || [ ! -d "$HOME/SteamARM-roots" ] || d="$HOME/SteamARM-roots"; echo "$d")}"
 OUT="${1:-$STATE/westonroot}"
 STAGE_ONLY=0
 if [ "${1:-}" = --stage-only ]; then STAGE_ONLY=1; OUT="${2:-$STATE/westonroot}"; fi

@@ -64,7 +64,7 @@
 # safe: the download is cached and the build is incremental. Needs macOS 26.
 set -euo pipefail
 
-KK_ROOT="${KK_ROOT:-${STEAMARM_BUILD:-$HOME/SteamARM-build}/mesa-kk}"
+KK_ROOT="${KK_ROOT:-${STEAMARM_BUILD:-$(d="$HOME/Developer/SteamARM-build"; [ -d "$d" ] || [ ! -d "$HOME/SteamARM-build" ] || d="$HOME/SteamARM-build"; echo "$d")}/mesa-kk}"
 BREW="${BREW:-/opt/homebrew}"
 PROJECT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 

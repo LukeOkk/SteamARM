@@ -28,7 +28,7 @@
 set -u
 cd "$(dirname "$0")/../.." || exit 1
 . scripts/roots.sh
-STATE="${STEAMARM_STATE:-$HOME/SteamARM-roots}"
+STATE="${STEAMARM_STATE:-$(d="$HOME/Developer/SteamARM-roots"; [ -d "$d" ] || [ ! -d "$HOME/SteamARM-roots" ] || d="$HOME/SteamARM-roots"; echo "$d")}"
 case "${ARMROOT:-armroot}" in
     armroot) HOSTROOT="$STATE/armroot" LINK=/tmp/lxrt-armroot ;;
     arm64root) HOSTROOT="$STATE/arm64root" LINK=/tmp/lxrt-arm64root ;;

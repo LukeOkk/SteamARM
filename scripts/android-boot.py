@@ -1116,7 +1116,7 @@ class Boot:
         # system_server's Watchdog kills it at NetworkManagementService.
         cands = [os.environ.get("R8_JAR")] + [
             os.path.join(d, "android/tools/r8-9.4.27.jar")
-            for d in (os.environ.get("STEAMARM_STATE"), os.path.expanduser("~/SteamARM-roots")) if d]
+            for d in (os.environ.get("STEAMARM_STATE"), os.path.expanduser("~/Developer/SteamARM-roots"), os.path.expanduser("~/SteamARM-roots")) if d]
         r8 = next((c for c in cands if c and os.path.exists(c)), cands[-1])
         try:
             if not os.path.exists(dex) or os.path.getmtime(dex) < max(os.path.getmtime(f) for f in srcs):

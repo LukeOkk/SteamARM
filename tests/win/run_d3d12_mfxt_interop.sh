@@ -18,7 +18,7 @@
 # The shim under test is build/libvulkan.so.1 (MFXT_SHIM overrides), bound
 # over the root's for this run's processes only (LXRT_MOUNTS), as
 # tests/win/run_mfxt_channel.sh does; nothing is installed. KosmicKrisp:
-# STEAMARM_KK_OWN, default ${STEAMARM_BUILD:-$HOME/SteamARM-build}/mesa-kk/out-test
+# STEAMARM_KK_OWN, default ${STEAMARM_BUILD:-$(d="$HOME/Developer/SteamARM-build"; [ -d "$d" ] || [ ! -d "$HOME/SteamARM-build" ] || d="$HOME/SteamARM-build"; echo "$d")}/mesa-kk/out-test
 # (the build with patch 20), copied privately for the run.
 #
 # MFXT_PFX       guest prefix (default /tmp/fexhome/mfxt-d3d12, its own)
@@ -37,11 +37,11 @@ ROOT=/tmp/lxrt-steamroot
 PFX_GUEST="${MFXT_PFX:-/tmp/fexhome/mfxt-d3d12}"
 PROTON_GUEST="/tmp/fexhome/.local/share/Steam/steamapps/common/Proton - Experimental/files"
 PROTON="$ROOT$PROTON_GUEST"
-LOGS="${STEAMARM_STATE:-$HOME/SteamARM-roots}/logs"
+LOGS="${STEAMARM_STATE:-$(d="$HOME/Developer/SteamARM-roots"; [ -d "$d" ] || [ ! -d "$HOME/SteamARM-roots" ] || d="$HOME/SteamARM-roots"; echo "$d")}/logs"
 TIMEOUT="${MFXT_TIMEOUT:-90}"
 FRAMES="${MFXT_FRAMES:-40}"
 SHIM="${MFXT_SHIM:-build/libvulkan.so.1}"
-KK_DIR="${STEAMARM_KK_OWN:-${STEAMARM_BUILD:-$HOME/SteamARM-build}/mesa-kk/out-test}"
+KK_DIR="${STEAMARM_KK_OWN:-${STEAMARM_BUILD:-$(d="$HOME/Developer/SteamARM-build"; [ -d "$d" ] || [ ! -d "$HOME/SteamARM-build" ] || d="$HOME/SteamARM-build"; echo "$d")}/mesa-kk/out-test}"
 VK_HEADERS="$(brew --prefix vulkan-headers 2>/dev/null || echo /opt/homebrew/opt/vulkan-headers)"
 mkdir -p "$LOGS"
 [ -x "$PROTON/bin/wine" ] || { echo "no Proton Experimental in the Steam root" >&2; exit 1; }

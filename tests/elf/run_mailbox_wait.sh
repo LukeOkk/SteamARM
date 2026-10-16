@@ -5,7 +5,7 @@
 set -eu
 cd "$(dirname "$0")/../.."
 ROOT="${1:-/tmp/lxrt-arm64root}"
-STAGE="${STEAMARM_BUILD:-$HOME/SteamARM-build}/rootstage-f43"
+STAGE="${STEAMARM_BUILD:-$(d="$HOME/Developer/SteamARM-build"; [ -d "$d" ] || [ ! -d "$HOME/SteamARM-build" ] || d="$HOME/SteamARM-build"; echo "$d")}/rootstage-f43"
 CLANG=/opt/homebrew/opt/llvm/bin/clang
 GCCDIR=$(ls -d "$STAGE"/usr/lib/gcc/aarch64-redhat-linux/* | tail -1)
 mkdir -p "$ROOT/tmp"
@@ -35,7 +35,7 @@ fi
 rg '^== mailbox wait .*: ok$' "$OUT/unsupported.log"
 if [ "${RUN_FEX:-0}" = 1 ]; then
     X86ROOT="${MAILBOX_X86_ROOT:-/tmp/lxrt-steamroot}"
-    SYSROOT="${STEAMARM_BUILD:-$HOME/SteamARM-build}/thunks-build/sysroot-x86_64"
+    SYSROOT="${STEAMARM_BUILD:-$(d="$HOME/Developer/SteamARM-build"; [ -d "$d" ] || [ ! -d "$HOME/SteamARM-build" ] || d="$HOME/SteamARM-build"; echo "$d")}/thunks-build/sysroot-x86_64"
     mkdir -p "$X86ROOT/tmp"
     X86OUT=$(mktemp -d "$X86ROOT/tmp/mailbox-wait.XXXXXX")
     X86GUEST="/tmp/${X86OUT##*/}/mailbox_wait"

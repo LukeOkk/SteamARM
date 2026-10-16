@@ -29,10 +29,10 @@ ROOT=/tmp/lxrt-steamroot
 PFX_GUEST="${MFXT_PFX:-/tmp/fexhome/wtest}"
 PROTON_GUEST="/tmp/fexhome/.local/share/Steam/steamapps/common/Proton - Experimental/files"
 PROTON="$ROOT$PROTON_GUEST"
-LOGS="${STEAMARM_STATE:-$HOME/SteamARM-roots}/logs"
+LOGS="${STEAMARM_STATE:-$(d="$HOME/Developer/SteamARM-roots"; [ -d "$d" ] || [ ! -d "$HOME/SteamARM-roots" ] || d="$HOME/SteamARM-roots"; echo "$d")}/logs"
 TIMEOUT="${MFXT_TIMEOUT:-120}"
 SHIM="${MFXT_SHIM:-build/libvulkan.so.1}"
-KK_DIR="${STEAMARM_KK_OWN:-${STEAMARM_BUILD:-$HOME/SteamARM-build}/mesa-kk/out}"
+KK_DIR="${STEAMARM_KK_OWN:-${STEAMARM_BUILD:-$(d="$HOME/Developer/SteamARM-build"; [ -d "$d" ] || [ ! -d "$HOME/SteamARM-build" ] || d="$HOME/SteamARM-build"; echo "$d")}/mesa-kk/out}"
 VK_HEADERS="$(brew --prefix vulkan-headers 2>/dev/null || echo /opt/homebrew/opt/vulkan-headers)"
 mkdir -p "$LOGS"
 [ -x "$PROTON/bin/wine" ] || { echo "no Proton Experimental in the Steam root" >&2; exit 1; }

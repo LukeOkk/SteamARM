@@ -13,7 +13,7 @@
 set -u
 cd "$(dirname "$0")/../.." || exit 1
 ROOT="${1:-/tmp/lxrt-steamroot}"
-OUT="${STEAMARM_BUILD:-$HOME/SteamARM-build}/thunks-build"
+OUT="${STEAMARM_BUILD:-$(d="$HOME/Developer/SteamARM-build"; [ -d "$d" ] || [ ! -d "$HOME/SteamARM-build" ] || d="$HOME/SteamARM-build"; echo "$d")}/thunks-build"
 CLANG=/opt/homebrew/opt/llvm/bin/clang
 [ -d "$OUT/sysroot-x86_64" ] && [ -d "$ROOT/tmp" ] || { echo "  skip  no x86-64 sysroot ($OUT) or root ($ROOT)"; exit 0; }
 pass=0 fail=0

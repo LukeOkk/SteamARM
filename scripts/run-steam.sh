@@ -17,7 +17,7 @@
 set -u
 cd "$(dirname "$0")/.." || exit 1
 ROOT=/tmp/lxrt-steamroot
-STATE="${STEAMARM_STATE:-$HOME/SteamARM-roots}"
+STATE="${STEAMARM_STATE:-$(d="$HOME/Developer/SteamARM-roots"; [ -d "$d" ] || [ ! -d "$HOME/SteamARM-roots" ] || d="$HOME/SteamARM-roots"; echo "$d")}"
 LOGS="$STATE/logs"
 mkdir -p "$LOGS"
 

@@ -28,7 +28,7 @@
 # checked to be lxrun running /usr/bin/weston on this socket).
 set -u
 cd "$(dirname "$0")/.." || exit 1
-STATE="${STEAMARM_STATE:-$HOME/SteamARM-roots}"
+STATE="${STEAMARM_STATE:-$(d="$HOME/Developer/SteamARM-roots"; [ -d "$d" ] || [ ! -d "$HOME/SteamARM-roots" ] || d="$HOME/SteamARM-roots"; echo "$d")}"
 ROOT="${WESTON_ROOT:-$STATE/westonroot}"
 XDG="${WESTON_XDG:-/dev/shm/steamarm-wayland}"
 SOCKET="${WESTON_SOCKET:-wayland-0}"

@@ -54,7 +54,7 @@
 set -euo pipefail
 
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
-WORK="${STEAMARM_BUILD:-$HOME/SteamARM-build}"
+WORK="${STEAMARM_BUILD:-$(d="$HOME/Developer/SteamARM-build"; [ -d "$d" ] || [ ! -d "$HOME/SteamARM-build" ] || d="$HOME/SteamARM-build"; echo "$d")}"
 SYSROOT="$WORK/sysroot-f43"
 RPMDIR="$WORK/rpms"
 SRC="$WORK/FEX"

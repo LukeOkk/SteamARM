@@ -12,7 +12,7 @@
 set -u
 cd "$(dirname "$0")/../.." || exit 1
 ROOT="${1:-/tmp/lxrt-arm64root}"
-STAGE="${STEAMARM_BUILD:-$HOME/SteamARM-build}/rootstage-f43"
+STAGE="${STEAMARM_BUILD:-$(d="$HOME/Developer/SteamARM-build"; [ -d "$d" ] || [ ! -d "$HOME/SteamARM-build" ] || d="$HOME/SteamARM-build"; echo "$d")}/rootstage-f43"
 CLANG=/opt/homebrew/opt/llvm/bin/clang
 GCCDIR=$(ls -d "$STAGE"/usr/lib/gcc/aarch64-redhat-linux/* 2>/dev/null | tail -1)
 mkdir -p "$ROOT/tmp/vktest"
@@ -44,7 +44,7 @@ done
 # (scripts/build-kosmickrisp.sh: patches/kosmickrisp-04 draws them in one
 # Metal encoder) with the merging on and off.
 exe2="$ROOT/tmp/vktest/vk_passes"
-OWN="${STEAMARM_KK_OWN:-${STEAMARM_BUILD:-$HOME/SteamARM-build}/mesa-kk/out}"
+OWN="${STEAMARM_KK_OWN:-${STEAMARM_BUILD:-$(d="$HOME/Developer/SteamARM-build"; [ -d "$d" ] || [ ! -d "$HOME/SteamARM-build" ] || d="$HOME/SteamARM-build"; echo "$d")}/mesa-kk/out}"
 if ! "$CLANG" --target=aarch64-redhat-linux-gnu --sysroot="$STAGE" --gcc-install-dir="$GCCDIR" -fuse-ld=lld \
         --ld-path=/opt/homebrew/opt/lld/bin/ld.lld -w -O2 -I/opt/homebrew/include -o "$exe2" \
         tests/elf/vk_passes.c "$ROOT/usr/lib/libvulkan.so.1"; then

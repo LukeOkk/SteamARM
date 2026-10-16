@@ -13,6 +13,10 @@ import os
 import platform
 import re
 from pathlib import Path
+import sys
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))  # scripts/steamarm_paths.py
+import steamarm_paths  # noqa: E402
 
 ICD_DIRS = ("/opt/homebrew/share/vulkan/icd.d", "/opt/homebrew/etc/vulkan/icd.d",
             "/usr/local/share/vulkan/icd.d", "/usr/local/etc/vulkan/icd.d",
@@ -106,7 +110,7 @@ def shim(state):
 
 def presentation(state, xq_root=None):
     xq = xq_root or os.environ.get("XQ_ROOT") or os.path.join(
-        os.environ.get("STEAMARM_BUILD", os.path.expanduser("~/SteamARM-build")), "xquartz")
+        steamarm_paths.build_dir(), "xquartz")
     screen_sharing = any(Path(path).exists() for path in (
         "/System/Applications/Utilities/Screen Sharing.app",
         "/System/Library/CoreServices/Applications/Screen Sharing.app"))
@@ -124,7 +128,7 @@ def opengl(state, xq_root=None):
     with its own (patches/xquartz-glx-mesa-direct.patch, recorded by
     scripts/build-xquartz.sh); without it every GL client is indirect GLX."""
     xq = xq_root or os.environ.get("XQ_ROOT") or os.path.join(
-        os.environ.get("STEAMARM_BUILD", os.path.expanduser("~/SteamARM-build")), "xquartz")
+        steamarm_paths.build_dir(), "xquartz")
     zink = all((state / "steamroot/usr/lib" / triplet / "dri/zink_dri.so").is_file()
                for triplet in ("x86_64-linux-gnu", "i386-linux-gnu"))
     marker = Path(xq) / "SteamARM-X11.app/Contents/Resources/steamarm-patches.txt"
@@ -231,7 +235,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--json", action="store_true")
     args = parser.parse_args()
-    state = Path(os.environ.get("STEAMARM_STATE", str(Path.home() / "SteamARM-roots")))
+    state = Path(steamarm_paths.state_dir())
     report = inventory(state)
     if args.json:
         print(json.dumps(report, ensure_ascii=False))

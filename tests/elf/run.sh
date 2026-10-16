@@ -32,7 +32,7 @@ LXRUN_SDK=$(otool -l build/lxrun 2>/dev/null | awk '/LC_BUILD_VERSION/{f=1} f &&
 kernel_keeps_x18() { [ -n "$LXRUN_SDK" ] && [ "${LXRUN_SDK%%.*}" -lt 13 ]; }
 
 CROSS_LD=/opt/homebrew/opt/lld/bin/ld.lld
-STAGE="${STEAMARM_BUILD:-$HOME/SteamARM-build}/rootstage-f43"
+STAGE="${STEAMARM_BUILD:-$(d="$HOME/Developer/SteamARM-build"; [ -d "$d" ] || [ ! -d "$HOME/SteamARM-build" ] || d="$HOME/SteamARM-build"; echo "$d")}/rootstage-f43"
 GCCDIR=$(ls -d "$STAGE"/usr/lib/gcc/aarch64-redhat-linux/* 2>/dev/null | tail -1)
 glibc_cc() { /opt/homebrew/opt/llvm/bin/clang --target=aarch64-redhat-linux-gnu --sysroot="$STAGE" \
                     --gcc-install-dir="$GCCDIR" -fuse-ld=lld --ld-path=$CROSS_LD -w "$@" 2>&1; }
@@ -991,7 +991,7 @@ else
 fi
 
 # M6: the runtime's vDSO (runtime/vdso). Needs the Fedora sysroot for glibc.
-SYSROOT="${STEAMARM_BUILD:-$HOME/SteamARM-build}/sysroot-f43"
+SYSROOT="${STEAMARM_BUILD:-$(d="$HOME/Developer/SteamARM-build"; [ -d "$d" ] || [ ! -d "$HOME/SteamARM-build" ] || d="$HOME/SteamARM-build"; echo "$d")}/sysroot-f43"
 if [ -d "$SYSROOT" ] && [ -d "$GUEST_ROOT/tmp" ]; then
     if err=$(/opt/homebrew/opt/llvm/bin/clang --target=aarch64-redhat-linux-gnu --sysroot="$SYSROOT" \
                  -fuse-ld=lld -O2 -o "$GUEST_ROOT/tmp/vdso_clock" tests/elf/vdso_clock.c 2>&1); then
@@ -1264,7 +1264,7 @@ if [ -f "$STAGE/usr/lib64/libc.a" ] && [ -n "$GCCDIR" ] &&
             # length in x18 (Fedora's does not): a private root with its ld.so
             # and libc when that root is on this Mac, the auxv root otherwise.
             FLB_ROOT="$AUX_ROOT" FLB_WHICH="Fedora ld.so"
-            FRAME="${STEAMARM_STATE:-$HOME/SteamARM-roots}/arm64root"
+            FRAME="${STEAMARM_STATE:-$(d="$HOME/Developer/SteamARM-roots"; [ -d "$d" ] || [ ! -d "$HOME/SteamARM-roots" ] || d="$HOME/SteamARM-roots"; echo "$d")}/arm64root"
             if [ -f "$FRAME/usr/lib/libc.so.6" ] && [ -e "$FRAME/usr/lib/ld-linux-aarch64.so.1" ]; then
                 FLB_ROOT="$PWD/build/frame-ld-root"
                 mkdir -p "$FLB_ROOT/lib" "$FLB_ROOT/usr/lib" "$FLB_ROOT/tmp" &&

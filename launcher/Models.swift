@@ -5,12 +5,21 @@ import Foundation
 enum Paths {
     static var home: URL { FileManager.default.homeDirectoryForCurrentUser }
 
-    /// ~/SteamARM-roots (or $STEAMARM_STATE, same as the scripts).
+    /// $STEAMARM_STATE; else ~/Developer/SteamARM-roots when it exists; else
+    /// ~/SteamARM-roots of an older install; else ~/Developer/SteamARM-roots for
+    /// a new install. The scripts apply the same rule.
     static var state: URL {
         if let s = ProcessInfo.processInfo.environment["STEAMARM_STATE"], !s.isEmpty {
             return URL(fileURLWithPath: s)
         }
-        return home.appendingPathComponent("SteamARM-roots")
+        let newer = home.appendingPathComponent("Developer/SteamARM-roots")
+        let older = home.appendingPathComponent("SteamARM-roots")
+        if isDirectory(newer) || !isDirectory(older) { return newer }
+        return older
+    }
+    private static func isDirectory(_ url: URL) -> Bool {
+        var isDir: ObjCBool = false
+        return FileManager.default.fileExists(atPath: url.path, isDirectory: &isDir) && isDir.boolValue
     }
     static var launcherDir: URL { state.appendingPathComponent("launcher") }
     static var logs: URL { state.appendingPathComponent("logs") }

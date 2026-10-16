@@ -9,7 +9,7 @@
 #   tests/arm64/frame_glx.sh [root]      (default $STEAMARM_STATE/arm64root)
 set -uo pipefail
 cd "$(dirname "$0")/../.." || exit 1
-STATE="${STEAMARM_STATE:-$HOME/SteamARM-roots}"
+STATE="${STEAMARM_STATE:-$(d="$HOME/Developer/SteamARM-roots"; [ -d "$d" ] || [ ! -d "$HOME/SteamARM-roots" ] || d="$HOME/SteamARM-roots"; echo "$d")}"
 ROOT="${1:-${ARMROOT:-$STATE/arm64root}}"
 echo "== tests/arm64/frame_glx"
 if ! grep -qx 'ID=steamos' "$ROOT/etc/os-release" 2>/dev/null || [ ! -f "$ROOT/.lxrt-guest-env" ]; then

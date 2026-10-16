@@ -94,8 +94,13 @@ sign-in window.
 |---|---|
 | `/Applications/SteamARM.app` | the launcher |
 | `~/Library/Application Support/SteamARM/src` | the source the app unpacked, and what setup builds in it (`build/`) |
-| `~/SteamARM-build` | FEX, its thunks, XQuartz, package caches |
-| `~/SteamARM-roots` | the Linux roots, Steam and your games (`steamroot/`), launcher settings (`launcher/`), logs (`logs/`) |
+| `~/Developer/SteamARM-build` | FEX, its thunks, XQuartz, package caches |
+| `~/Developer/SteamARM-roots` | the Linux roots, Steam and your games (`steamroot/`), launcher settings (`launcher/`), logs (`logs/`) |
+
+An install made before 0.3.74 keeps using `~/SteamARM-build` and
+`~/SteamARM-roots`; to move it, quit SteamARM and Steam and move both folders
+into `~/Developer`. `STEAMARM_BUILD` and `STEAMARM_STATE` override either
+location.
 | `/tmp/lxrt-root`, `/tmp/lxrt-steamroot` | links to the roots (re-created at each start; macOS empties `/tmp` at boot) |
 
 Nothing is installed system-wide, and nothing needs root, except what
@@ -115,11 +120,12 @@ Quit SteamARM and Steam, then:
 ```sh
 rm -rf /Applications/SteamARM.app \
        "$HOME/Library/Application Support/SteamARM" \
+       ~/Developer/SteamARM-build ~/Developer/SteamARM-roots \
        ~/SteamARM-build ~/SteamARM-roots
 rm -f /tmp/lxrt-root /tmp/lxrt-steamroot
 ```
 
-`~/SteamARM-roots` contains your installed games: move them elsewhere first
+`SteamARM-roots` contains your installed games: move them elsewhere first
 if you want to keep them. The Homebrew formulae stay; remove them with
 `brew uninstall` if you don't need them.
 

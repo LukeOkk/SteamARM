@@ -12,12 +12,12 @@
 set -u
 HERE="$(cd "$(dirname "$0")" && pwd)"
 ROOT="${LXRT_ROOT:-/tmp/lxrt-steamroot}"
-STATE="${STEAMARM_STATE:-$HOME/SteamARM-roots}"
+STATE="${STEAMARM_STATE:-$(d="$HOME/Developer/SteamARM-roots"; [ -d "$d" ] || [ ! -d "$HOME/SteamARM-roots" ] || d="$HOME/SteamARM-roots"; echo "$d")}"
 # SteamARM's own build when it is there (scripts/build-pulseaudio.sh: the
 # Mac's devices with their real latency, not PulseAudio's default 250 ms, with
 # which every guest's sound was half a second late), Homebrew's otherwise.
 # STEAMARM_BREW_PULSE=1: Homebrew's always.
-OWN_PA="${STEAMARM_BUILD:-$HOME/SteamARM-build}/pulseaudio/out/bin"
+OWN_PA="${STEAMARM_BUILD:-$(d="$HOME/Developer/SteamARM-build"; [ -d "$d" ] || [ ! -d "$HOME/SteamARM-build" ] || d="$HOME/SteamARM-build"; echo "$d")}/pulseaudio/out/bin"
 if [ -x "$OWN_PA/pulseaudio" ] && [ "${STEAMARM_BREW_PULSE:-0}" != 1 ]; then
     PA="$OWN_PA"
 else

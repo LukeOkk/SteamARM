@@ -12,16 +12,16 @@
 # STEAMARM_X11_XTEST (1, the default: the XTEST extension; 0: none).
 set -euo pipefail
 
-XQ_ROOT="${XQ_ROOT:-${STEAMARM_BUILD:-$HOME/SteamARM-build}/xquartz}"
+XQ_ROOT="${XQ_ROOT:-${STEAMARM_BUILD:-$(d="$HOME/Developer/SteamARM-build"; [ -d "$d" ] || [ ! -d "$HOME/SteamARM-build" ] || d="$HOME/SteamARM-build"; echo "$d")}/xquartz}"
 BUNDLE="$XQ_ROOT/SteamARM-X11.app"
 BIN="$BUNDLE/Contents/MacOS/X11.bin"
 BUNDLE_ID=org.steamarm.X11
-LOGDIR="${STEAMARM_STATE:-$HOME/SteamARM-roots}/logs"
+LOGDIR="${STEAMARM_STATE:-$(d="$HOME/Developer/SteamARM-roots"; [ -d "$d" ] || [ ! -d "$HOME/SteamARM-roots" ] || d="$HOME/SteamARM-roots"; echo "$d")}/logs"
 # The server's spawn service (patches/xquartz-spawn-service.patch): the
 # launcher starts an app through it (scripts/run-app.sh, tools/x11spawn), so
 # that the app runs in the X server's coalition, the one macOS Game Mode
 # favours. One per display.
-SPAWN_DIR="${STEAMARM_STATE:-$HOME/SteamARM-roots}/launcher"
+SPAWN_DIR="${STEAMARM_STATE:-$(d="$HOME/Developer/SteamARM-roots"; [ -d "$d" ] || [ ! -d "$HOME/SteamARM-roots" ] || d="$HOME/SteamARM-roots"; echo "$d")}/launcher"
 LOG="${X11_NATIVE_LOG:-$LOGDIR/x11-native.log}"
 STDIO_LOG="${LOG%.log}.stdio.log"
 XDPYINFO="$(command -v xdpyinfo || echo /opt/homebrew/bin/xdpyinfo)"

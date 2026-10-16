@@ -15,7 +15,7 @@ ok()  { echo "  ok    $1"; PASS=$((PASS + 1)); }
 bad() { echo "  FAIL  $1"; [ -n "${2:-}" ] && echo "        $2"; FAIL=$((FAIL + 1)); }
 echo "== tests/x11 (native XQuartz from a guest)"
 
-STAGE="${STEAMARM_BUILD:-$HOME/SteamARM-build}/rootstage-f43"
+STAGE="${STEAMARM_BUILD:-$(d="$HOME/Developer/SteamARM-build"; [ -d "$d" ] || [ ! -d "$HOME/SteamARM-build" ] || d="$HOME/SteamARM-build"; echo "$d")}/rootstage-f43"
 ROOT="${LXRT_ROOT:-/tmp/lxrt-arm64root}"
 GCCDIR=$(ls -d "$STAGE"/usr/lib/gcc/aarch64-redhat-linux/* 2>/dev/null | tail -1)
 [ -S /tmp/.X11-unix/X2 ] || { echo "  skip  no X server on :2"; exit 0; }

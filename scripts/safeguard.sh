@@ -40,7 +40,7 @@
 # Flush only that log: macOS sync(8) flushes every filesystem and can stall
 # game I/O at the same five-second cadence.
 set -u
-STATE="${STEAMARM_STATE:-$HOME/SteamARM-roots}"
+STATE="${STEAMARM_STATE:-$(d="$HOME/Developer/SteamARM-roots"; [ -d "$d" ] || [ ! -d "$HOME/SteamARM-roots" ] || d="$HOME/SteamARM-roots"; echo "$d")}"
 LOG="$STATE/logs/safeguard.log"
 PIDF="$STATE/safeguard.pid"
 MIN_FREE="${SAFEGUARD_MIN_FREE:-12}"

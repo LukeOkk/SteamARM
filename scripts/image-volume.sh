@@ -20,7 +20,7 @@
 # bundle takes only the space of its data, so its capacity can be the whole
 # disk; the cap keeps Steam from counting space the Mac does not have.
 set -u
-STATE="${STEAMARM_STATE:-$HOME/SteamARM-roots}"
+STATE="${STEAMARM_STATE:-$(d="$HOME/Developer/SteamARM-roots"; [ -d "$d" ] || [ ! -d "$HOME/SteamARM-roots" ] || d="$HOME/SteamARM-roots"; echo "$d")}"
 log() { echo "[image-volume] $*" >&2; }
 
 # One ensure at a time. The launcher attaches the image when it opens

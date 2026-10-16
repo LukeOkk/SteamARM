@@ -9,7 +9,7 @@ installs the staged APKs into the zero-VM Android session at launch.
   scripts/android-pm.py list
   scripts/android-pm.py info <package>
 
-Layout, under $STEAMARM_STATE (default ~/SteamARM-roots) or --state:
+Layout, under $STEAMARM_STATE (default ~/Developer/SteamARM-roots, or an older install's ~/SteamARM-roots) or --state:
   android/packages/<package>/base.apk    a copy of the APK
   android/packages/<package>/meta.json   what scripts/apk-inspect.py read, and when
   android/packages/<package>/icon.png    the launcher icon (icon.webp when it
@@ -41,6 +41,9 @@ import tempfile
 import zipfile
 from pathlib import Path
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))  # scripts/steamarm_paths.py
+import steamarm_paths  # noqa: E402
+
 HERE = Path(__file__).resolve().parent
 _spec = importlib.util.spec_from_file_location("apk_inspect", HERE / "apk-inspect.py")
 apk_inspect = importlib.util.module_from_spec(_spec)
@@ -65,7 +68,7 @@ def state_dir(arg=None):
     if arg:
         return Path(arg).expanduser()
     env = os.environ.get("STEAMARM_STATE")
-    return Path(env).expanduser() if env else Path.home() / "SteamARM-roots"
+    return Path(env).expanduser() if env else Path(steamarm_paths.state_dir())
 
 
 class Layout:
@@ -435,7 +438,7 @@ def info(layout, package):
 
 def main(argv=None):
     ap = argparse.ArgumentParser(description="Install, list and uninstall Android APKs for SteamARM (no runtime yet).")
-    ap.add_argument("--state", help="state directory (default $STEAMARM_STATE or ~/SteamARM-roots)")
+    ap.add_argument("--state", help="state directory (default $STEAMARM_STATE, ~/Developer/SteamARM-roots or ~/SteamARM-roots)")
     sub = ap.add_subparsers(dest="cmd", required=True)
     p = sub.add_parser("install", help="install or update an APK")
     p.add_argument("apk")

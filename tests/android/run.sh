@@ -48,7 +48,7 @@ X86_ROOT="${ANDROID_X86_ROOT:-/Volumes/SteamARMAndroid/root-x86_64}"
 # D8 from R8_JAR: com.android.tools:r8 from Google Maven) into
 # build/android/dex/classes.dex, and a generated JitChurn into
 # build/android/churn/classes.dex. HAVE_DEX=1 when both exist.
-R8_JAR="${R8_JAR:-${STEAMARM_STATE:-$HOME/SteamARM-roots}/android/tools/r8-9.4.27.jar}"
+R8_JAR="${R8_JAR:-${STEAMARM_STATE:-$(d="$HOME/Developer/SteamARM-roots"; [ -d "$d" ] || [ ! -d "$HOME/SteamARM-roots" ] || d="$HOME/SteamARM-roots"; echo "$d")}/android/tools/r8-9.4.27.jar}"
 HAVE_DEX=0
 if [ -f "$R8_JAR" ] && command -v javac >/dev/null; then
     mkdir -p build/android/classes build/android/dex build/android/churn/classes
@@ -582,7 +582,7 @@ out=$(xg 30 /system/bin/service list); rc=$?
 if [ -n "$ready" ] && grep -q '^Found 1 services' <<<"$out" && grep -q 'manager: \[android.os.IServiceManager\]' <<<"$out"; then
     ok "x86_64 servicemanager on /dev/binder; service list: $(grep -c ': \[' <<<"$out") service"
 else bad "x86_64 servicemanager + service list" "ready=${ready:-no} rc=$rc $(head -3 <<<"$out" | tr '\n' ' ')"; fi
-STAGE="${STEAMARM_BUILD:-$HOME/SteamARM-build}/rootstage-f43"
+STAGE="${STEAMARM_BUILD:-$(d="$HOME/Developer/SteamARM-build"; [ -d "$d" ] || [ ! -d "$HOME/SteamARM-build" ] || d="$HOME/SteamARM-build"; echo "$d")}/rootstage-f43"
 if [ -n "$ready" ] && [ -f "$STAGE/usr/include/linux/android/binder.h" ] && [ -f "$BLIBC64" ] &&
    /opt/homebrew/opt/llvm/bin/clang --target=x86_64-linux-android30 -DBIONIC_MIN -O2 -fPIE -pie -nostdlib \
        -fno-stack-protector -Itests/android -idirafter "$STAGE/usr/include" -fuse-ld=lld \
@@ -834,7 +834,7 @@ run_display() {
 # ANDROID_DISPLAY_SF=0 skips it). A private socket directory, binder hub and
 # property state; everything started is stopped.
 echo "== tests/android (display: Wayland under lxrun)"
-local wroot="${WESTON_ROOT:-${STEAMARM_STATE:-$HOME/SteamARM-roots}/westonroot}"
+local wroot="${WESTON_ROOT:-${STEAMARM_STATE:-$(d="$HOME/Developer/SteamARM-roots"; [ -d "$d" ] || [ ! -d "$HOME/SteamARM-roots" ] || d="$HOME/SteamARM-roots"; echo "$d")}/westonroot}"
 if [ ! -x "$wroot/usr/bin/weston" ]; then
     echo "  skip  no Weston root at $wroot (scripts/mkwestonroot.sh)"
     return 0
@@ -1005,7 +1005,7 @@ if [ -n "$ready" ] && [ "$rc" -eq 0 ] && grep -q '^Found 1 services' <<<"$out" &
     ok "servicemanager on /dev/binder; service list: $(tr '\n\t' '  ' <<<"$out")"
 else bad "servicemanager + service list" "ready=${ready:-no} rc=$rc $(head -3 <<<"$out")"; fi
 
-STAGE="${STEAMARM_BUILD:-$HOME/SteamARM-build}/rootstage-f43"
+STAGE="${STEAMARM_BUILD:-$(d="$HOME/Developer/SteamARM-build"; [ -d "$d" ] || [ ! -d "$HOME/SteamARM-build" ] || d="$HOME/SteamARM-build"; echo "$d")}/rootstage-f43"
 GCCDIR=$(ls -d "$STAGE"/usr/lib/gcc/aarch64-redhat-linux/* 2>/dev/null | tail -1)
 if [ -n "$ready" ] && [ -f "$STAGE/usr/include/linux/android/binder.h" ] && [ -n "$GCCDIR" ] &&
    /opt/homebrew/opt/llvm/bin/clang --target=aarch64-redhat-linux-gnu --sysroot="$STAGE" \
@@ -1150,8 +1150,8 @@ run_session() {
 # directory; the APK is Simple Solitaire Collection (F-Droid, dex only) from
 # ~/SteamARM-roots/android/apk-samples, skipped when it is not there.
 echo "== tests/android (an APK in the Android session)"
-local apk="${ANDROID_TEST_APK:-${STEAMARM_STATE:-$HOME/SteamARM-roots}/android/apk-samples/de.tobiasbielefeld.solitaire_71.apk}"
-local wroot="${WESTON_ROOT:-${STEAMARM_STATE:-$HOME/SteamARM-roots}/westonroot}"
+local apk="${ANDROID_TEST_APK:-${STEAMARM_STATE:-$(d="$HOME/Developer/SteamARM-roots"; [ -d "$d" ] || [ ! -d "$HOME/SteamARM-roots" ] || d="$HOME/SteamARM-roots"; echo "$d")}/android/apk-samples/de.tobiasbielefeld.solitaire_71.apk}"
+local wroot="${WESTON_ROOT:-${STEAMARM_STATE:-$(d="$HOME/Developer/SteamARM-roots"; [ -d "$d" ] || [ ! -d "$HOME/SteamARM-roots" ] || d="$HOME/SteamARM-roots"; echo "$d")}/westonroot}"
 if [ -n "${ANDROID_SKIP_SESSION:-}" ]; then echo "  skip  the Android session (ANDROID_SKIP_SESSION)"; return 0; fi
 if [ ! -f "$apk" ] || [ ! -x "$wroot/usr/bin/weston" ] || [ ! -x "$X86_ROOT/usr/lib/lxrt-emu/FEX" ]; then
     echo "  skip  the Android session (needs $apk, a Weston root and the x86_64 root)"

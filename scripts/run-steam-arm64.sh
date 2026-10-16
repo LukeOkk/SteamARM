@@ -37,7 +37,7 @@
 set -u
 cd "$(dirname "$0")/.." || exit 1
 . scripts/roots.sh
-STATE="${STEAMARM_STATE:-$HOME/SteamARM-roots}"
+STATE="${STEAMARM_STATE:-$(d="$HOME/Developer/SteamARM-roots"; [ -d "$d" ] || [ ! -d "$HOME/SteamARM-roots" ] || d="$HOME/SteamARM-roots"; echo "$d")}"
 # The /tmp link the runtime sees the root through. Each root has its own, as
 # scripts/env-links.sh makes them: /tmp/lxrt-armroot is the launcher's Fedora
 # root (scripts/builtin-apps.json, steam-arm64), /tmp/lxrt-arm64root its

@@ -27,7 +27,7 @@
 set -euo pipefail
 cd "$(dirname "$0")/.." || exit 1
 ROOT="${LXRT_ROOT:-/tmp/lxrt-steamroot}"
-BUILD="${STEAMARM_BUILD:-$HOME/SteamARM-build}"
+BUILD="${STEAMARM_BUILD:-$(d="$HOME/Developer/SteamARM-build"; [ -d "$d" ] || [ ! -d "$HOME/SteamARM-build" ] || d="$HOME/SteamARM-build"; echo "$d")}"
 EMU="$ROOT/usr/lib/lxrt-emu"
 THUNKS="$BUILD/thunks-build"
 ARMLIBS="${ARMLIBS:-/tmp/lxrt-root/usr/lib64}"

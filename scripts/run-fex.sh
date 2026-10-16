@@ -18,7 +18,7 @@ set -u
 cd "$(dirname "$0")/.." || exit 1
 # Recreate the volatile root links after a reboot, including direct CLI use.
 scripts/env-links.sh >/dev/null || exit 1
-mkdir -p "${STEAMARM_STATE:-$HOME/SteamARM-roots}/logs"
+mkdir -p "${STEAMARM_STATE:-$(d="$HOME/Developer/SteamARM-roots"; [ -d "$d" ] || [ ! -d "$HOME/SteamARM-roots" ] || d="$HOME/SteamARM-roots"; echo "$d")}/logs"
 # Never run a guest without the memory guard (two Mac hangs without it).
 [ -n "${STEAMARM_NO_SAFEGUARD:-}" ] || scripts/safeguard.sh start >/dev/null
 TRACE=""
@@ -30,7 +30,7 @@ export TMPDIR=/tmp
 # LD_LIBRARY_PATH is NOT exported: it leaks into the guest, whose i386 ld.so then
 # picked /lib64/libGL.so.1 (aarch64) for Steam's steamui.so ("wrong ELF class").
 unset LD_LIBRARY_PATH
-FEXSERVER_LOG="${STEAMARM_STATE:-$HOME/SteamARM-roots}/logs/fexserver.log"
+FEXSERVER_LOG="${STEAMARM_STATE:-$(d="$HOME/Developer/SteamARM-roots"; [ -d "$d" ] || [ ! -d "$HOME/SteamARM-roots" ] || d="$HOME/SteamARM-roots"; echo "$d")}/logs/fexserver.log"
 export HOME=/tmp/fexhome
 # libobjc reads this at start-up; see runtime/process.c (lxrt_execve).
 export OBJC_DISABLE_INITIALIZE_FORK_SAFETY=YES

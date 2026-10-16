@@ -11,12 +11,12 @@
 #
 # Usage: tests/kk/run.sh
 #   STEAMARM_KK_SRC  patched Mesa tree (default
-#                    ${STEAMARM_BUILD:-$HOME/SteamARM-build}/mesa-kk/mesa-26.2.4)
+#                    ${STEAMARM_BUILD:-$(d="$HOME/Developer/SteamARM-build"; [ -d "$d" ] || [ ! -d "$HOME/SteamARM-build" ] || d="$HOME/SteamARM-build"; echo "$d")}/mesa-kk/mesa-26.2.4)
 #   STEAMARM_KK_OWN  directory of the built libvulkan_kosmickrisp.dylib
-#                    (default ${STEAMARM_BUILD:-$HOME/SteamARM-build}/mesa-kk/out-test)
+#                    (default ${STEAMARM_BUILD:-$(d="$HOME/Developer/SteamARM-build"; [ -d "$d" ] || [ ! -d "$HOME/SteamARM-build" ] || d="$HOME/SteamARM-build"; echo "$d")}/mesa-kk/out-test)
 set -u
 cd "$(dirname "$0")/../.." || exit 1
-B="${STEAMARM_BUILD:-$HOME/SteamARM-build}"
+B="${STEAMARM_BUILD:-$(d="$HOME/Developer/SteamARM-build"; [ -d "$d" ] || [ ! -d "$HOME/SteamARM-build" ] || d="$HOME/SteamARM-build"; echo "$d")}"
 SRC="${STEAMARM_KK_SRC:-$B/mesa-kk/mesa-26.2.4}"
 OWN="${STEAMARM_KK_OWN:-$B/mesa-kk/out-test}"
 BRIDGE="$SRC/src/kosmickrisp/bridge"

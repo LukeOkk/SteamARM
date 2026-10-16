@@ -16,7 +16,7 @@
 # cached and the build is incremental.
 set -euo pipefail
 
-PA_ROOT="${PA_ROOT:-${STEAMARM_BUILD:-$HOME/SteamARM-build}/pulseaudio}"
+PA_ROOT="${PA_ROOT:-${STEAMARM_BUILD:-$(d="$HOME/Developer/SteamARM-build"; [ -d "$d" ] || [ ! -d "$HOME/SteamARM-build" ] || d="$HOME/SteamARM-build"; echo "$d")}/pulseaudio}"
 BREW="${BREW:-/opt/homebrew}"
 PROJECT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 

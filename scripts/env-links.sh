@@ -5,7 +5,7 @@
 #
 #   scripts/env-links.sh [roots-dir]     (default ~/SteamARM-roots)
 set -eu
-R="${1:-${STEAMARM_STATE:-$HOME/SteamARM-roots}}"
+R="${1:-${STEAMARM_STATE:-$(d="$HOME/Developer/SteamARM-roots"; [ -d "$d" ] || [ ! -d "$HOME/SteamARM-roots" ] || d="$HOME/SteamARM-roots"; echo "$d")}}"
 # ln -sfn into a real directory puts the link inside it. A /tmp/lxrt-* that
 # is a directory holding only tmp/pulse was made by scripts/audio.sh while
 # its root was missing (run-app.sh now refuses that); take it away.

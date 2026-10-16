@@ -29,7 +29,7 @@
 # /tmp/lxrt-root/usr/bin), FEXBIN (default FEX-gb), NO_ENV_LINKS=1.
 set -euo pipefail
 cd "$(dirname "$0")/.." || exit 1
-STATE="${STEAMARM_STATE:-$HOME/SteamARM-roots}"
+STATE="${STEAMARM_STATE:-$(d="$HOME/Developer/SteamARM-roots"; [ -d "$d" ] || [ ! -d "$HOME/SteamARM-roots" ] || d="$HOME/SteamARM-roots"; echo "$d")}"
 X86_LINK="${X86_LINK:-/tmp/lxrt-steamroot}"
 FEXDIR="${FEXDIR:-/tmp/lxrt-root/usr/bin}"
 FEXBIN="${FEXBIN:-FEX-gb}"
