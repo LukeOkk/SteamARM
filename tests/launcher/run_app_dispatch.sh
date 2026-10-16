@@ -117,7 +117,7 @@ expect_env STEAMARM_SYNCHRONIZATION=wineserver kk 'PROTON_NO_ESYNC=1'
 # env-links.sh fails: should it ever get past the one-app check, it stops
 # there, before the /tmp links, the X server or a session.
 T="$W/tree"; mkdir -p "$T/scripts"
-cp scripts/run-app.sh scripts/settings-env.py scripts/session.py scripts/builtin-apps.json "$T/scripts/"
+cp scripts/run-app.sh scripts/settings-env.py scripts/steamarm_paths.py scripts/session.py scripts/builtin-apps.json "$T/scripts/"
 printf '#!/bin/sh\necho "env-links stub: not in this test" >&2\nexit 1\n' > "$T/scripts/env-links.sh"
 chmod +x "$T/scripts/env-links.sh"
 B="$W/bin"; mkdir -p "$B"
