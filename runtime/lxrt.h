@@ -33,7 +33,7 @@ struct lxrt_regs {
 // A half-open address range.
 struct lxrt_range { uint64_t start, end; };
 
-// Executable-section windows of an aarch64 ELF (runtime/elfsect.c).
+// Executable-section windows of an aarch64 ELF (runtime/elfsect.rs).
 int lxrt_elf_exec_sections(int fd, uint64_t file_off, uint64_t len, uint64_t map_base,
                            struct lxrt_range *out, int max);
 int lxrt_elf_exec_sections_path(const char *path, uint64_t load_bias,
@@ -81,7 +81,7 @@ struct lxrt_rewrite_report {
     size_t tls_write_found;     // msr TPIDR_EL0, Xt
     size_t tls_rewritten;
     size_t tls_unreachable;
-    size_t tls_kept;            // reads left in place in a kept range (tls.c)
+    size_t tls_kept;            // reads left in place in a kept range (tls.rs)
     size_t ctr_found;           // mrs Xt, CTR_EL0
     size_t ctr_rewritten;
     size_t sysreg_found;        // mrs Xt, ID_AA64* / MIDR_EL1
@@ -91,7 +91,7 @@ struct lxrt_rewrite_report {
     size_t x18_unsupported;     // forms the planner refuses; poisoned
     size_t x18_unreachable;     // no pool in branch range; poisoned
 };
-// The x18 pass runs only inside executable-section windows (runtime/elfsect.c):
+// The x18 pass runs only inside executable-section windows (runtime/elfsect.rs):
 // unlike `svc`, an instruction naming register 18 is an ordinary data word.
 int lxrt_rewrite_range_code(uint64_t start, uint64_t end, const struct lxrt_range *code,
                             int ncode, struct lxrt_rewrite_report *rep, char **err);
@@ -101,7 +101,7 @@ bool lxrt_x18_enabled(void);
 uint64_t lxrt_x18_get(void);
 void lxrt_x18_set(uint64_t v);
 
-// elf.c
+// elf.rs
 int  lxrt_load_elf(const char *path, struct lxrt_image *out, char **err);
 
 // rewrite.c
@@ -145,6 +145,7 @@ static inline int lxrt_interrupted_internally(void)
     extern _Thread_local int lxrt_sig_during_syscall;
     return lxrt_sig_during_syscall == 0;
 }
+bool lxrt_interrupted_internally_ffi(void);
 // Number of syscalls that hit the ENOSYS path, and the last one seen, so a run
 // that dies reports *which* call it lacked rather than just failing.
 uint64_t lxrt_dispatch_unimplemented_count(void);
@@ -163,7 +164,7 @@ long lxrt_tgkill(int tgid, int tid, int lsig);
 // Give the calling thread a host alternate signal stack (once per thread).
 void lxrt_host_altstack_install(void);
 
-// errno_map.c -- Darwin and Linux errno numbers are different, including a
+// errno_map.rs -- Darwin and Linux errno numbers are different, including a
 // swapped pair (EAGAIN/EDEADLK). Never return a raw Darwin errno to a guest.
 int lxrt_errno_to_linux(int e);
 
@@ -177,7 +178,7 @@ bool lxrt_ntsync_ioctl(int fd, unsigned long lreq, uint64_t arg, long *ret);
 // subpage.c -- 4 KiB guest mappings on 16 KiB host pages. x86 Linux binaries
 // are linked with p_align 0x1000 and Darwin's mmap refuses a MAP_FIXED address
 // that is not 16 KiB aligned.
-uint64_t lxrt_guest_page(void);   // stack.c: AT_PAGESZ (LXRT_GUEST_PAGE)
+uint64_t lxrt_guest_page(void);   // stack.rs: AT_PAGESZ (LXRT_GUEST_PAGE)
 bool lxrt_subpage_needed(uint64_t addr, uint64_t len, uint64_t off);
 long lxrt_subpage_mmap(uint64_t addr, uint64_t len, int prot, bool anon,
                        int fd, uint64_t off);
@@ -193,14 +194,14 @@ int lxrt_subpage_describe_last(char *buf, size_t n);   // fault report: the mapp
 // uap: the faulting ucontext_t (NULL: no store emulation, flip only).
 bool lxrt_subpage_handle_fault(uint64_t pc, uint64_t fault_addr, void *uap);
 
-// privmap.c -- Linux MAP_PRIVATE semantics (see the file's updates until the
+// privmap.rs -- Linux MAP_PRIVATE semantics (see the file's updates until the
 // first store) for private mappings of shared-memory files.
 bool lxrt_privmap_eligible(int fd, uint64_t addr, uint64_t len, uint64_t off, int prot);
 long lxrt_privmap_mmap(uint64_t addr, uint64_t len, int prot, int flags, int fd, uint64_t off);
 void lxrt_privmap_forget(uint64_t addr, uint64_t len);
 void lxrt_privmap_after_mprotect(uint64_t addr, uint64_t len, int prot);
 bool lxrt_privmap_handle_fault(uint64_t fault_addr, bool is_write);
-// shmirror.c -- a read-only MAP_SHARED range that ends up in a sub-page
+// shmirror.rs -- a read-only MAP_SHARED range that ends up in a sub-page
 // composite host page keeps following its file (KUSER_SHARED_DATA).
 void     lxrt_shmirror_note(uint64_t addr, uint64_t len);
 void     lxrt_shmirror_forget(uint64_t addr, uint64_t len);
@@ -264,7 +265,7 @@ size_t lxrt_rewrite_count(uint64_t start, uint64_t end);
 #include "sysv_ipc.h"
 #include "timerfd_signalfd.h"
 
-// posixtimer.c -- Linux per-process timer IDs, independent of file descriptors.
+// posixtimer.rs -- Linux per-process timer IDs, independent of file descriptors.
 long lxrt_posix_timer_create(int clockid, const void *event, int *id_out);
 long lxrt_posix_timer_gettime(int id, void *out);
 long lxrt_posix_timer_getoverrun(int id);
@@ -284,7 +285,7 @@ long lxrt_posix_timer_delete(int id);
                        name##_fork_release);                                      \
     }
 
-// dirents.c -- getdents64, which Darwin does not have.
+// dirents.rs -- getdents64, which Darwin does not have.
 long lxrt_getdents64(int fd, void *buf, unsigned count);
 void lxrt_dirents_close(int fd);
 
@@ -296,7 +297,7 @@ void lxrt_dirents_close(int fd);
 // points at, or NULL for exe_path itself.
 void        lxrt_proc_init(const char *exe_path, const char *exe_link, int argc, char **argv);
 const char *lxrt_proc_translate(const char *path);
-// sysfs.c -- /sys/devices/system/cpu in the guest root (CPU counting).
+// sysfs.rs -- /sys/devices/system/cpu in the guest root (CPU counting).
 void lxrt_sysfs_init(void);
 const char *lxrt_proc_untranslate(const char *host, char *out, size_t n);
 const char *lxrt_proc_exe_path(void);
@@ -313,7 +314,7 @@ void lxrt_sigstats_flush(void);
 void *lxrt_remote_layer_create(uint32_t w, uint32_t h, uint32_t *ctx_id);
 int lxrt_remote_layer_resize(void *layer, uint32_t w, uint32_t h);
 void lxrt_remote_layer_release(void *layer);
-// vdso_map.c (M6)
+// vdso_map.rs (M6)
 uint64_t lxrt_vdso_setup(void);
 uint64_t lxrt_vdso_ehdr(void);
 void lxrt_vdso_refresh(void);
@@ -329,7 +330,7 @@ bool lxrt_fd_hidden(int fd);
 int lxrt_fd_dup_private(int fd);
 int lxrt_open_private(const char *path, int flags, int mode);   // procfs.c: high, hidden
 void lxrt_close_private(int fd);
-// futex_waitv.c: futex_waitv(2), and the note every FUTEX_WAKE leaves for it
+// futex_waitv.rs: futex_waitv(2), and the note every FUTEX_WAKE leaves for it
 long lxrt_futex_waitv(uint64_t waiters, uint32_t nr, uint32_t flags, uint64_t timeout, int32_t clockid);
 void lxrt_futex_waitv_notify(const void *addr);
 // epoll_eventfd.c: an eventfd that crosses SCM_RIGHTS (socket.c)
@@ -358,11 +359,11 @@ FILE *lxrt_trace_stream(void);
 FILE *lxrt_info_stream(void);   // informational lines: nowhere with LXRT_QUIET=1 (dispatch.c)
 int lxrt_trace_fd(void);
 void lxrt_host_altstack_after_fork(void);
-// Guest address base for 32-bit guests (runtime/gbase.c).
+// Guest address base for 32-bit guests (runtime/gbase.rs).
 void lxrt_gbase_set(uint64_t base);
 uint64_t lxrt_gbase(void);
 
-// arena.c: the range kept for the guest's fixed mappings (Windows programs
+// arena.rs: the range kept for the guest's fixed mappings (Windows programs
 // load at 0x140000000), reserved before the host's heap can take it.
 bool lxrt_arena_on(void);
 uint64_t lxrt_arena_reserve_heap(void);
@@ -371,13 +372,13 @@ bool lxrt_arena_free(uint64_t addr, uint64_t len);
 void lxrt_arena_mapped(uint64_t addr, uint64_t len);
 void lxrt_arena_unmapped(uint64_t addr, uint64_t len);
 // Host (non-FEX) code faulting on a guest pointer below 4 GiB: rebase the
-// load/store's base register and retry (gbase.c).
+// load/store's base register and retry (gbase.rs).
 bool lxrt_lowptr_fixup(void *uap, uint64_t fault_addr);
-// Flight recorder of address-space changes (runtime/memlog.c).
+// Flight recorder of address-space changes (runtime/memlog.rs).
 void lxrt_memlog(char op, uint64_t addr, uint64_t len, long a, long b, long ret);
 void lxrt_memlog_dump(uint64_t fault_addr, const char *why);
 void lxrt_memlog_dump_fd(int fd, uint64_t fault_addr, const char *why);
-void lxrt_fault_note(const char *fmt, ...) __attribute__((format(printf, 1, 2)));
+void lxrt_fault_note(const char *line);
 // Where the main ELF image (FEX, under the Steam work) was loaded: a fault
 // report can then say "FEX+0x..." for an offline symboliser.
 extern uint64_t lxrt_main_image_base, lxrt_main_image_span;
@@ -405,7 +406,9 @@ long lxrt_wait4(int pid, int *status, int loptions, void *rusage);
 // packs into the socket type all differ from Darwin's.
 long lxrt_socket(int ldomain, int ltype, int proto);
 void lxrt_socket_close(int fd);
-// pathfd.c: O_PATH descriptors for sockets (Darwin cannot open them)
+// pathfd.rs: O_PATH descriptors for sockets (Darwin cannot open them).
+// lxrt_pathfd_path returns a per-thread snapshot valid until that thread's
+// next call to the function.
 int lxrt_pathfd_open(int ddirfd, const char *hpath, int cloexec);
 const char *lxrt_pathfd_path(int fd);
 void lxrt_pathfd_close(int fd);
@@ -430,7 +433,7 @@ long lxrt_recvmsg(int fd, void *lmsg, int flags);
 long lxrt_setsockopt(int fd, int llevel, int lopt, const void *val, unsigned len);
 long lxrt_getsockopt(int fd, int llevel, int lopt, void *val, unsigned *len);
 
-// fsflags.c -- open() and *at() flag values differ between Linux and Darwin.
+// fsflags.rs -- open() and *at() flag values differ between Linux and Darwin.
 int  lxrt_open_flags_to_darwin(int lflags);
 int  lxrt_open_flags_to_linux(int dflags);
 int  lxrt_at_flags_to_darwin(int lflags);
@@ -442,11 +445,11 @@ int  lxrt_fcntl_lock_cmd(int lcmd, bool *is_lock);
 void lxrt_flock_to_darwin(const void *lin, struct flock *out);
 void lxrt_flock_to_linux(const struct flock *d, void *lout);
 
-// sysreg.c -- system registers Darwin traps even for its own code.
+// sysreg.rs -- system registers Darwin traps even for its own code.
 uint32_t lxrt_synthetic_ctr_el0(void);
 uint64_t lxrt_synthetic_sysreg(uint32_t insn);
 
-// tls.c -- guest thread pointer, kept in a Darwin TSD slot because TPIDR_EL0
+// tls.rs -- guest thread pointer, kept in a Darwin TSD slot because TPIDR_EL0
 // is not preserved across a context switch on Darwin.
 int           lxrt_tls_init(void);
 unsigned long lxrt_tls_slot_offset(void);
@@ -454,7 +457,7 @@ bool          lxrt_tls_ready(void);
 void          lxrt_tls_set(uint64_t v);
 uint64_t      lxrt_tls_get(void);
 // Ranges whose `mrs Xt, TPIDR_EL0` reads are left as they are, because the
-// program hashes its own code (BoringSSL's FIPS module; elfsect.c finds it):
+// program hashes its own code (BoringSSL's FIPS module; elfsect.rs finds it):
 // the hardware register is loaded with the guest's thread pointer when a
 // read there returned Darwin's value and the load through it faulted.
 void          lxrt_tlskeep_add(uint64_t start, uint64_t end, const char *why);
@@ -462,14 +465,17 @@ bool          lxrt_tlskeep_contains(uint64_t addr);
 bool          lxrt_tlskeep_fixup(int sig, void *uap);
 bool          lxrt_tlskeep_enabled(void);
 unsigned long lxrt_tlskeep_fixups(void);
+// Darwin-specific context accessor; the state fields are decoded in tls.rs.
+void         *lxrt_arm64_thread_state(void *ucontext);
 
 // thread.c -- guest threads and futexes.
 int  lxrt_gettid(void);
+int  lxrt_gettid_signal_safe(void);
 void lxrt_qos_apply(void);            // LXRT_QOS=interactive (thread.c)
 void lxrt_futex_park_enter(const void *addr);   // a thread about to park on a futex word (thread.c)
 void lxrt_futex_park_leave(const void *addr);
 void lxrt_futex_park_reset(void);               // in a fork child
-extern int lxrt_guestprof_on;                   // LXRT_GUESTPROF=1 (guestprof.c)
+extern int lxrt_guestprof_on;                   // LXRT_GUESTPROF=1 (guestprof.rs)
 void lxrt_guestprof_start(void);
 void lxrt_guestprof_note(uint64_t x28);
 long lxrt_set_tid_address(uint32_t *ctid);
@@ -512,7 +518,7 @@ long lxrt_rt_sigpending(uint64_t *uset, size_t sigsetsize);
 uint64_t lxrt_rt_mask_get(void);
 void lxrt_rt_mask_set(uint64_t m);
 
-// stack.c
+// stack.rs
 // Builds the Linux process start state: argc/argv/envp and the auxiliary
 // vector, laid out as glibc's _start expects to find it at sp.
 void *lxrt_build_stack(const struct lxrt_image *img, int argc, char **argv,

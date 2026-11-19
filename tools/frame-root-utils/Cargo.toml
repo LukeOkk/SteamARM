@@ -1,0 +1,16 @@
+[package]
+name = "steamarm-frame-root-utils"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "steamarm-frame-root-vulkan"
+path = "src/main.rs"
+
+[[bin]]
+name = "steamarm-frame-root-atomupd"
+path = "src/atomupd.rs"
+
+[[bin]]
+name = "steamarm-frame-root-build"
+path = "src/frameroot.rs"

@@ -40,10 +40,10 @@ STEAMARM_STATE="$(mktemp -d /tmp/steamarm-settings-test-XXXXXX)" /tmp/steamarm-s
 
 ## Límites y conexiones externas pendientes
 
-- La ventana persiste todos los ajustes. El entorno de juegos lo construye el scripts/settings-env.py existente; no se cambió ni se verificó mediante una sesión de juego.
-- Cuando se escribió esto no había lector de controllers.json en runtime/, scripts/ o shim/. Hoy lo lee `steamarm-inputd` (`tools/inputd/inputd.c`, arrancado por `scripts/input.sh --config`), que publica cada jugador como `/dev/input/eventN` para los juegos. Sensores de movimiento y posiciones del panel táctil siguen sin llegar a los juegos (`README.md`).
+- La ventana persiste todos los ajustes. El entorno de juegos lo construye el motor Rust `tools/settings-env`; aún no se ha verificado en una sesión de juego.
+- Cuando se escribió esto no había lector de controllers.json en runtime/, scripts/ o shim/. Hoy lo lee `steamarm-inputd` (`tools/inputd/src/main.rs`, arrancado por `scripts/input.sh --config`), que publica cada jugador como `/dev/input/eventN` para los juegos. Sensores de movimiento y posiciones del panel táctil siguen sin llegar a los juegos (`README.md`).
 - Los paneles táctiles y palancas solo se detectan si SDL expone controles equivalentes; el dibujo no implementa un transporte de datos táctiles o sensores.
-- guestFaults=false se guarda y tiene efecto: `scripts/settings-env.py` solo exporta LXRT_GUEST_FAULTS=1 con el ajuste activado, y scripts/run-steam.sh ya no lo fuerza.
+- guestFaults=false se guarda y tiene efecto: `steamarm-settings-env` solo exporta LXRT_GUEST_FAULTS=1 con el ajuste activado, y scripts/run-steam.sh ya no lo fuerza.
 - Metal HUD se alterna y guarda; el proceso ya abierto conserva su entorno hasta reiniciarse.
 - Los atajos globales necesitan Accesibilidad y las capturas necesitan el permiso de grabación de pantalla. No se cambiaron permisos del sistema.
 - No se probaron en hardware capturas, vibración, LED, sensores ni las diez identidades de mando.

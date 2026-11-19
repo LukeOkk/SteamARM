@@ -1,6 +1,6 @@
 // fork() against the page-protection lock. The runtime's fork prepare
 // handlers take its locks in the reverse of their registration order; the
-// shared-page mirror's lock (shmirror.c) was taken before the page lock
+// shared-page mirror's lock (shmirror.rs) was taken before the page lock
 // (wxsplit.c), while a thread placing a sub-page mapping holds the page lock
 // and then takes the mirror's. Steam's web helper (native arm64) deadlocked
 // that way: one thread in fork's prepare handlers, one in

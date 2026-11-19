@@ -1,0 +1,8 @@
+[package]
+name = "steamarm-vnc-control"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "steamarm-vnc-control"
+path = "src/main.rs"

@@ -1,0 +1,8 @@
+[package]
+name = "steamarm-steamroot-build"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "steamarm-steamroot-build"
+path = "src/main.rs"

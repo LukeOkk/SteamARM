@@ -109,7 +109,7 @@ databases' URLs, dates and sha256 are recorded there). Results (MEASURED):
 3. Holo packages are not a base. They lack GTK 2, carry no Steam pieces,
    are unsigned, and the preview has been frozen since 2026-07-10.
 
-`steamframe-image.py compare` now orders versions with pacman's `vercmp`,
+`steamarm-frame-image compare` now orders versions with pacman's `vercmp`,
 links renamed packages through PROVIDES/REPLACES, accepts an extracted root
 and records each database's sha256 (`tests/steamframe_image/compare.sh`).
 Re-run it for each new Frame image or Holo snapshot.

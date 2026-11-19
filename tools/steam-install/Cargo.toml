@@ -1,0 +1,8 @@
+[package]
+name = "steamarm-steam-install"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "steamarm-steam-install"
+path = "src/main.rs"

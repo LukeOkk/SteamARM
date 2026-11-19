@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Regression test for scripts/steamframe-image.py: build small btrfs images
+# Regression test for Rust `build/steamarm-frame-image`: build small btrfs images
 # the way SteamOS ships them (zstd/zlib/lzo, a default subvolume, a GPT with
 # 4096-byte sectors) and check that `extract` reproduces the source tree bit
 # for bit. Also rebuild the failure btrfs-progs `restore` hit on the Steam
@@ -11,7 +11,9 @@
 #   MKFS_BTRFS=/path/to/mkfs.btrfs BTRFS=/path/to/btrfs tests/steamframe_image/run.sh
 set -euo pipefail
 cd "$(dirname "$0")/../.."
-TOOL="$PWD/scripts/steamframe-image.py"
+TOOL="$PWD/build/steamarm-frame-image"
+REFERENCE="$PWD/tests/steamframe_image/reference_impl.py"
+[ -x "$TOOL" ] || make steamframe-image
 MKFS="${MKFS_BTRFS:-$(command -v mkfs.btrfs || true)}"
 BTRFS="${BTRFS:-$(command -v btrfs || true)}"
 [ -n "$MKFS" ] || { echo "SKIP: no mkfs.btrfs"; exit 0; }
@@ -85,10 +87,10 @@ for c in zstd:3 zlib:6 lzo; do
     n="${c%%:*}"
     truncate -s 200M "$W/$n.img"
     "$MKFS" -q -f --rootdir "$W/src" --compress "$c" -u rw:home -u default:@rootfs "$W/$n.img" >/dev/null
-    if python3 "$TOOL" extract "$W/$n.img" "$W/x_$n" >"$W/log_$n" 2>&1 \
+    if "$TOOL" extract "$W/$n.img" "$W/x_$n" >"$W/log_$n" 2>&1 \
        && same_tree "$W/src/@rootfs" "$W/x_$n"; then ok "$n: extract == source"
     else bad "$n: extract differs"; tail -5 "$W/log_$n"; fi
-    if python3 "$TOOL" diagnose "$W/$n.img" >"$W/diag_$n" 2>&1; then ok "$n: diagnose clean"
+    if "$TOOL" diagnose "$W/$n.img" >"$W/diag_$n" 2>&1; then ok "$n: diagnose clean"
     else bad "$n: diagnose"; tail -8 "$W/diag_$n"; fi
 done
 
@@ -115,14 +117,14 @@ with open(sys.argv[2], 'wb') as f:
     f.seek(SS); f.write(hdr); f.seek(2 * SS); f.write(entries)
     f.seek(lay[1] * SS); f.write(root)
 PY
-python3 "$TOOL" info "$W/gpt4k.img" >"$W/info" 2>&1
+"$TOOL" info "$W/gpt4k.img" >"$W/info" 2>&1
 grep -q 'rootfs-A  *btrfs' "$W/info" && ok "GPT/4K: rootfs-A found as btrfs" || { bad "GPT/4K info"; cat "$W/info"; }
-python3 "$TOOL" extract "$W/gpt4k.img" "$W/x_gpt" >/dev/null 2>&1 && same_tree "$W/src/@rootfs" "$W/x_gpt" \
+"$TOOL" extract "$W/gpt4k.img" "$W/x_gpt" >/dev/null 2>&1 && same_tree "$W/src/@rootfs" "$W/x_gpt" \
     && ok "GPT/4K: extract == source" || bad "GPT/4K extract"
 
 echo "== frames larger than ram_bytes (btrfs-progs: \"zstd frame incomplete\")"
 cp "$W/zstd.img" "$W/big.img"
-python3 - "$TOOL" "$W/big.img" <<'PY'
+python3 - "$REFERENCE" "$W/big.img" <<'PY'
 import importlib.util, sys, zstandard
 spec = importlib.util.spec_from_file_location('sf', sys.argv[1])
 sf = importlib.util.module_from_spec(spec); spec.loader.exec_module(sf)
@@ -149,13 +151,13 @@ if [ -n "$BTRFS" ]; then
         *) bad "btrfs restore did not report the frame error"; echo "$out" | tail -3 ;;
     esac
 fi
-python3 "$TOOL" extract "$W/big.img" "$W/x_big" >"$W/log_big" 2>&1 && same_tree "$W/src/@rootfs" "$W/x_big" \
+"$TOOL" extract "$W/big.img" "$W/x_big" >"$W/log_big" 2>&1 && same_tree "$W/src/@rootfs" "$W/x_big" \
     && ok "extract == source despite the larger frames" || { bad "extract with larger frames"; tail -4 "$W/log_big"; }
-python3 "$TOOL" diagnose "$W/big.img" 2>/dev/null | grep -q 'frame-larger-than-ram  *3' \
+"$TOOL" diagnose "$W/big.img" 2>/dev/null | grep -q 'frame-larger-than-ram  *3' \
     && ok "diagnose names the 3 larger frames" || bad "diagnose count"
 
 echo "== inventory"
-python3 "$TOOL" inventory "$W/x_zstd" --json "$W/inv.json" --md "$W/inv.md" >/dev/null
+"$TOOL" inventory "$W/x_zstd" --json "$W/inv.json" --md "$W/inv.md" >/dev/null
 python3 -c "import json,sys; j=json.load(open(sys.argv[1])); sys.exit(0 if j['os_release'].get('ID')=='steamos' else 1)" "$W/inv.json" \
     && ok "inventory reads os-release" || bad "inventory"
 
@@ -185,7 +187,7 @@ open(os.path.join(mod, 'config'), 'w').write(
 img = bytearray(64); struct.pack_into('<Q', img, 0x18, 2 << 1); img[0x38:0x3c] = b'ARM\x64'
 open(os.path.join(mod, 'vmlinuz'), 'wb').write(bytes(img))
 PY
-python3 "$TOOL" inventory "$W/x_zstd" --json "$W/inv_ld.json" --md "$W/inv_ld.md" >/dev/null
+"$TOOL" inventory "$W/x_zstd" --json "$W/inv_ld.json" --md "$W/inv_ld.md" >/dev/null
 python3 - "$W/inv_ld.json" <<'PY' && ok "inventory reports ET_EXEC, sub-16K segments and kernel page size" || bad "loading report"
 import json, sys
 j = json.load(open(sys.argv[1]))
@@ -203,7 +205,7 @@ printf '[options]\nArchitecture = auto\n[holo-core-aarch64-preview]\nInclude = /
 echo 'Server = https://mirror.invalid/$repo/os/$arch' > "$W/x_zstd/etc/pacman.d/m"
 mkdir -p "$W/x_zstd/usr/lib/holo/pacmandb/local/nss-3.117-1"
 printf '%%NAME%%\nnss\n\n%%VERSION%%\n3.117-1\n\n%%ARCH%%\naarch64\n' > "$W/x_zstd/usr/lib/holo/pacmandb/local/nss-3.117-1/desc"
-python3 "$TOOL" inventory "$W/x_zstd" --json "$W/inv2.json" --md "$W/inv2.md" >/dev/null
+"$TOOL" inventory "$W/x_zstd" --json "$W/inv2.json" --md "$W/inv2.md" >/dev/null
 grep -q 'mirror.invalid/holo-core-aarch64-preview/os/aarch64' "$W/inv2.md" && ok "inventory lists pacman repositories" || bad "pacman repositories"
 python3 - "$W/repo.db" <<'PY2'
 import io, sys, tarfile, zstandard
@@ -214,7 +216,7 @@ with tarfile.open(fileobj=buf, mode='w') as tf:
         ti = tarfile.TarInfo(f'{n}-{v}/desc'); ti.size = len(d); tf.addfile(ti, io.BytesIO(d))
 open(sys.argv[1], 'wb').write(zstandard.ZstdCompressor().compress(buf.getvalue()))
 PY2
-out="$(python3 "$TOOL" compare "$W/inv2.json" "$W/repo.db")"
+out="$("$TOOL" compare "$W/inv2.json" "$W/repo.db")"
 case "$out" in *'| nss | 3.117-1 | 3.118-1 |'*'differs'*) ok "compare finds the version difference" ;; *) bad "compare"; echo "$out" | tail -4 ;; esac
 
 echo "$pass passed, $fail failed"

@@ -49,7 +49,8 @@ TWO BUGS WORTH RECORDING, because both were silent and neither was in the plan.
    which fires only on ENOSYS, stayed dead. What the user saw was
    "pthread_create: Remote address changed".
 
-   Fixed with an explicit translation table (runtime/errno_map.c). Every return
+   Fixed with an explicit translation table (now `runtime/errno_map.rs`; first
+   implemented in C). Every return
    path now goes through it; no path returns a host errno.
 
 2. CLONE'S CHILD INHERITS THE ENTIRE REGISTER FILE.

@@ -659,8 +659,8 @@ the client redistributable.
   list entry only. Selecting it would not start a game on SteamARM.
 - SteamARM's own launcher already treats it that way. `scripts/proton-command.py`
   refuses a Proton that has `files/bin-arm64` or says ARM64 in its name
-  (`scripts/proton-command.py:37-38`), and `scripts/compat-status.py` lists
-  such a tool as not compatible (`scripts/compat-status.py:66-73`). VERIFIED
+  (`steamarm-proton-command`), and `steamarm-compat-status` lists such a tool
+  as not compatible. VERIFIED
   IN SOURCE. `docs/TROUBLESHOOTING.md` tells users the same.
 
 ### 7.2 What the entry would need even to appear
@@ -772,7 +772,7 @@ of steps 1 and 2; step 5 needs a sign-in, which was not attempted.
    (MEASURED). Keep it out of the `.dmg`. Still to do: a repository script
    for that download.
 2. Measure `p_align` of `steamrtarm64/*`, `libcef` and the client runtime
-   with `scripts/steamframe-image.py inventory` or `readelf`. Partly done:
+   with `build/steamarm-frame-image inventory` or `readelf`. Partly done:
    stage21 found the client 4 KiB-aligned and loaded it with
    `LXRT_GUEST_PAGE=4096`. Record the per-file values in `benchmarks/`.
 3. Put the host libraries of §5.4 and an aarch64 `lsof` in the ARM64 root.

@@ -192,9 +192,9 @@ PROFILES["display"] = {
         "mediaextractor",          # media.extractor and media.swcodec, which SoundPool and
         "media.swcodec",           # MediaCodec need ("extractor service not running", MEASURED);
                                    # both x86-64; mediaextractor's watchdog needs timer_create
-                                   # (runtime/posixtimer.c)
+                                   # (runtime/posixtimer.rs)
         "media",                   # mediaserver (media.player) and the OMX store, which
-        "vendor.media.omx",        # MediaCodecList asks first; both i386 (runtime/ids.c)
+        "vendor.media.omx",        # MediaCodecList asks first; both i386 (runtime/ids.rs)
         "traced",                  # perfetto's service: Traceur asks `perfetto --is_detached`
                                    # at every boot and crashed without it ("Perfetto error: 1").
                                    # (Not tombstoned: its listening SEQPACKET sockets are
@@ -650,7 +650,7 @@ class Boot:
             # input FIFOs and InputFlinger's EventHub meet there, not in the
             # shared /tmp/lxrt-input of steamarm-inputd's controllers.
             "LXRT_INPUT_DIR": self.inputdir,
-            # Ids below 65536 for every process of the stack (runtime/ids.c),
+            # Ids below 65536 for every process of the stack (runtime/ids.rs),
             # as scripts/run-android-x86.sh gives its guests: 32-bit bionic
             # keeps them in 16 bits, and binder, /proc and kill must agree.
             "LXRT_SMALL_IDS": os.environ.get("LXRT_SMALL_IDS", "1"),

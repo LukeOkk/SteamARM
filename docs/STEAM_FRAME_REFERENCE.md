@@ -30,7 +30,7 @@ SHA-256 values below are local measurements, not vendor checksums.
 | compressed archive in `~/Downloads/` | 3.8 GiB | `3a4a077f1b1f40688ab3279affcb56776bd97c54db1573e7c65fc52a97106676` | read-only |
 | raw image in `~/SteamARM-roots/reference/` | 7,516,192,768 bytes | `081a38c051e99c09db6ae91be994b67ef3347ea71f330d803ab861f0ba8cc654` | read-only |
 
-`steamframe-image.py info --hash` gave the same size and SHA-256 for the raw
+The Python predecessor's `info --hash` gave the same size and SHA-256 for the raw
 image on 2026-09-29 (MEASURED).
 
 ## GPT and filesystems
@@ -50,7 +50,7 @@ Raw image: GUID partition table, 512-byte sectors. Inspected with
 The image was not booted, its kernel was not loaded, no filesystem was
 mounted writable, and no code from the root was run. `btrfs check`
 validated the filesystem and its checksums. `btrfs restore` failed on the
-zstd extents; `scripts/steamframe-image.py` read them instead, and on
+zstd extents; the Python predecessor read them instead, and on
 2026-09-29 extracted and inventoried the whole root (MEASURED). Details:
 `docs/STEAM_FRAME_ROOTFS_AUDIT.md`; results: `docs/STEAM_FRAME_INVENTORY.md`.
 

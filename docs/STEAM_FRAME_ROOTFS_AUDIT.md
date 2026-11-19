@@ -21,12 +21,12 @@ filesystem and reported no metadata or data-checksum errors. `btrfs restore`
 tree could not be used. Logs and tools are outside the repository, in
 `~/SteamARM-roots/logs/` and `~/SteamARM-roots/reference/tools/btrfs-progs/`.
 
-**Cause, 2026-09-29 (MEASURED).** `scripts/steamframe-image.py diagnose`
+**Cause, 2026-09-29 (MEASURED).** The Python predecessor's `diagnose`
 classified all 214,760 zstd extents: 111,347 decode to more bytes than the
 extent's `ram_bytes` (the kernel stops there; btrfs-progs calls it "frame
 incomplete"), 103,413 decode exactly, 0 are damaged. The image is intact.
 
-**Extraction, 2026-09-29 (MEASURED).** `steamframe-image.py extract` wrote
+**Extraction, 2026-09-29 (MEASURED).** The Python predecessor's `extract` wrote
 the default subvolume of `rootfs-A` to a case-sensitive APFS sparsebundle
 (`/Volumes/SteamFrameRoot/rootfs`) with exit 0: 180,797 files (8.6 GiB),
 12,672 directories, 30,033 symlinks, 4,276 hard links. Ownership, xattrs and
@@ -64,4 +64,4 @@ are never published.
   `docs/ARM64_FIRST_MIGRATION.md`, steps 6-8. Not done: it writes under
   `~/SteamARM-roots` and needs the owner's go-ahead.
 - Compare the package set with `holo-core-aarch64-preview`
-  (`docs/HOLO_CORE_ARM64_AUDIT.md`): `steamframe-image.py compare`. Not run.
+  (`docs/HOLO_CORE_ARM64_AUDIT.md`): `build/steamarm-frame-image compare`. Not run.

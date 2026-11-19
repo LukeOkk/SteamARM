@@ -85,7 +85,9 @@ else
     check "OUT through the state link: the root it names is rebuilt (rc $rc)" \
         '[ $rc -eq 0 ] && [ -L "$T/state/arm64root" ] && [ ! -L "$O" ] && homeok && [ ! -e "$T/state/arm64root.new" ] && [ ! -e "$T/state/arm64root.old" ]'
     (cd "$T/vol" && STEAMARM_STATE="$T/state2" "$REPO/scripts/mkframeroot.sh" rootfs rel >"$T/mk.log" 2>&1); rc=$?
+    failures_before=$fail
     check "relative SRC and OUT are the caller's (rc $rc)" '[ $rc -eq 0 ] && [ -f "$T/vol/rel/.lxrt-frameroot" ] && [ ! -e "$REPO/rel" ]'
+    [ "$fail" -eq "$failures_before" ] || { echo "-- mk.log"; cat "$T/mk.log"; }
     mk --adopt "$S" "$T/vol"; rc=$?
     check "refuses, even with --adopt, an OUT that holds the extraction" \
         '[ $rc -ne 0 ] && grep -q "extraction is inside" "$T/mk.log" && [ ! -e "$T/vol.new" ]'
@@ -109,8 +111,10 @@ else
         env LXRT_ROOT="$T/state/arm64root" "$T/$GNAME" & G=$!
         sleep 0.5
         ROOTS_GUEST_NAME=$GNAME mk "$S" "$O"; rc=$?
+        failures_before=$fail
         check "refuses while a guest runs on the root (rc $rc)" \
             '[ $rc -ne 0 ] && grep -q "guests are running" "$T/mk.log" && homeok && [ ! -e "$O.new" ]'
+        [ "$fail" -eq "$failures_before" ] || { echo "-- mk.log"; cat "$T/mk.log"; }
         kill $G 2>/dev/null; wait $G 2>/dev/null; G=""
     else
         echo "  skip  a guest on the root (no C compiler)"

@@ -10,7 +10,7 @@
  * own copy. The same source builds both; FFX_IDENT names the build.
  *
  * Built by build.sh: KERNEL32 is the only import (no C runtime), and
- * wine-builtin-mark.py then writes the "Wine builtin DLL" marker at 0x40 and
+ * steamarm-wine-builtin-mark then writes the "Wine builtin DLL" marker at 0x40 and
  * sets Wine's prefer-native flag, as winebuild --builtin --prefer-native
  * would: Wine then takes it over a game's copy only under an override "b".
  */

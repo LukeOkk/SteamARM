@@ -542,12 +542,14 @@ struct SetupBanner: View {
             Image(systemName: "shippingbox.and.arrow.backward")
                 .font(.system(size: 30)).foregroundStyle(Theme.accent)
             VStack(alignment: .leading, spacing: 6) {
-                Text(model.needsUpdate && !model.needsFirstInstall ? "SteamARM se actualizó: falta recompilar"
+                Text(model.needsFrameRoot && !model.needsFirstInstall ? "Falta la raíz de Steam Frame"
+                     : model.needsUpdate && !model.needsFirstInstall ? "SteamARM se actualizó: falta recompilar"
                      : "Falta instalar SteamARM").font(.headline)
-                Text("El instalador compila el runtime y FEX, descarga los sistemas Linux y Steam, "
-                     + "y lo deja todo listo sin máquina virtual. Necesita las Command Line Tools "
-                     + "de Xcode, Homebrew, unos 25 GB libres y entre 20 y 60 minutos. Se abre en "
-                     + "Terminal; si se interrumpe, vuelve a pulsar Instalar y continúa.")
+                Text("El instalador prepara la raíz ARM64 desde la imagen oficial de Steam Frame, compila el runtime y FEX, "
+                     + "y configura Steam sin máquina virtual. Descarga y acepta primero la licencia de Valve; "
+                     + "deja el archivo de imagen en Descargas. Necesita Command Line Tools de Xcode, Homebrew, "
+                     + "25 GB libres y entre 20 y 60 minutos, más la extracción inicial. Se abre en Terminal; "
+                     + "si se interrumpe, vuelve a pulsar Instalar y continúa.")
                     .font(.callout).foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
                 HStack {
@@ -555,6 +557,7 @@ struct SetupBanner: View {
                     Button("Guía de instalación") {
                         NSWorkspace.shared.open(URL(string: "https://github.com/LukeOkk/SteamARM/blob/main/docs/INSTALL.md")!)
                     }
+                    Link("Imagen oficial Steam Frame", destination: URL(string: "https://store.steampowered.com/steamos/download/?ver=steamframe")!)
                 }
             }
             Spacer()
@@ -568,7 +571,7 @@ struct SetupBanner: View {
 /// "Ajustes de esta app": display, vsync, synchronization and graphics over the
 /// global settings, for an added app (AppEntry.overrides) or a built-in one
 /// (LauncherSettings.builtinOverrides). scripts/run-app.sh applies both
-/// (settings-env.py with_overrides).
+/// (steamarm-settings-env with_overrides).
 struct AppOverridesSection: View {
     @EnvironmentObject var model: LauncherModel
     @Binding var overrides: [String: String]?

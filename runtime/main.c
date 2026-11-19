@@ -335,7 +335,7 @@ static int rewrite_and_seal_image(struct lxrt_image *img, const char *what)
             rep.x18_rewritten, rep.x18_unsupported, rep.x18_unreachable);
     if (rep.tls_kept)
         fprintf(lxrt_trace_stream(), "[lxrt] rewrite: %zu TLS reads kept in place (a module that "
-                        "hashes its own code, runtime/tls.c)\n", rep.tls_kept);
+                        "hashes its own code, runtime/tls.rs)\n", rep.tls_kept);
     if (rep.hvc_or_smc_found)
         fprintf(lxrt_trace_stream(), "[lxrt] WARNING: %zu hvc/smc encodings in a userspace "
                         "image -- almost certainly literal-pool data caught by "

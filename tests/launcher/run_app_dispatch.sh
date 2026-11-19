@@ -34,7 +34,7 @@ JSON
 # android-pm.py's record of org.example.meta: the ABIs come from there when the entry has none.
 mkdir -p "$W/android/packages/org.example.meta"
 echo '{"package":"org.example.meta","abis":["x86_64"],"minSdk":21}' > "$W/android/packages/org.example.meta/meta.json"
-# A Vulkan shim that reads STEAMARM_VK_ICD (settings-env.py looks for the name).
+# A Vulkan shim that reads STEAMARM_VK_ICD (steamarm-settings-env looks for the name).
 mkdir -p "$W/steamroot/usr/lib/lxrt-emu"
 echo STEAMARM_VK_ICD > "$W/steamroot/usr/lib/lxrt-emu/libvulkan.so.1"
 echo '{"fexTSO":"fast"}' > "$W/launcher/settings.json"
@@ -116,8 +116,10 @@ expect_env STEAMARM_SYNCHRONIZATION=wineserver kk 'PROTON_NO_ESYNC=1'
 # display is brought forward. It runs from a copy of the scripts whose
 # env-links.sh fails: should it ever get past the one-app check, it stops
 # there, before the /tmp links, the X server or a session.
-T="$W/tree"; mkdir -p "$T/scripts"
-cp scripts/run-app.sh scripts/settings-env.py scripts/steamarm_paths.py scripts/session.py scripts/builtin-apps.json "$T/scripts/"
+T="$W/tree"; mkdir -p "$T/scripts" "$T/build"
+cp scripts/run-app.sh scripts/builtin-apps.json "$T/scripts/"
+cp build/steamarm-session build/steamarm-settings-env build/steamarm-app-plan \
+    build/steamarm-wine-prefix-options build/steamarm-app-runner "$T/build/"
 printf '#!/bin/sh\necho "env-links stub: not in this test" >&2\nexit 1\n' > "$T/scripts/env-links.sh"
 chmod +x "$T/scripts/env-links.sh"
 B="$W/bin"; mkdir -p "$B"

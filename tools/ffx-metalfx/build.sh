@@ -23,7 +23,7 @@
 # FFX_OUT=file       write exactly this one file instead (its name, without
 #                    .dll, is the DLL's name)
 #
-# Needs mingw-w64 (x86_64-w64-mingw32-gcc, Homebrew) and python3.
+# Needs mingw-w64 (x86_64-w64-mingw32-gcc, Homebrew) and Rust (offline crate).
 set -eu
 here=$(cd "$(dirname "$0")" && pwd)
 cd "$here/../.."
@@ -32,6 +32,13 @@ CC=${CC:-x86_64-w64-mingw32-gcc}
 command -v "$CC" >/dev/null || CC=/opt/homebrew/bin/x86_64-w64-mingw32-gcc
 tmp=$(mktemp -d)
 trap 'rm -rf "$tmp"' EXIT
+marker=${STEAMARM_WINE_BUILTIN_MARK:-build/steamarm-wine-builtin-mark}
+if [ ! -x "$marker" ]; then
+    cargo build --offline --locked --release \
+        --manifest-path tools/wine-builtin-mark/Cargo.toml \
+        --target-dir build/rust-wine-builtin-mark
+    install -m 755 build/rust-wine-builtin-mark/release/steamarm-wine-builtin-mark "$marker"
+fi
 
 build_one() {   # build_one FILE: the DLL named after FILE
     local dll=$1 name def
@@ -46,9 +53,9 @@ build_one() {   # build_one FILE: the DLL named after FILE
     if [ "${FFX_MARK:-1}" = 1 ]; then
         local flags=()
         [ "${FFX_PREFER_NATIVE:-1}" = 1 ] && flags+=(--prefer-native)
-        python3 "$here/wine-builtin-mark.py" ${flags[@]+"${flags[@]}"} "$dll"
+        "$marker" ${flags[@]+"${flags[@]}"} "$dll"
     fi
-    python3 "$here/wine-builtin-mark.py" --check "$dll"
+    "$marker" --check "$dll"
 }
 
 if [ -n "${FFX_OUT:-}" ]; then

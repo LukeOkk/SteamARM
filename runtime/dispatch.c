@@ -187,6 +187,17 @@ static const char *guest_root(void)
 }
 
 static const char *translate_one(const char *path, char *buf, size_t n);
+static _Thread_local char g_socket_alias_path[PATH_MAX];
+
+static const char *existing_socket_alias(const char *guest_path, const char *host_path)
+{
+    if (!guest_path || !host_path || strlen(host_path) < 104)
+        return NULL;
+    extern bool lxrt_socket_path_existing_alias(const char *, const char *, char *, size_t);
+    return lxrt_socket_path_existing_alias(host_path, guest_path, g_socket_alias_path,
+                                           sizeof g_socket_alias_path)
+        ? g_socket_alias_path : NULL;
+}
 
 // The canonical host spelling of a path that may not exist yet: realpath() of
 // its longest existing prefix, with the rest appended. /tmp/lxrt-steamroot
@@ -454,14 +465,16 @@ static const char *translate_one(const char *path, char *buf, size_t bufn)
     if (input)
         return input;
     // /dev/__properties__ and /dev/socket/property_service: Android's
-    // system properties, served per root by the property service (props.c).
+    // system properties, served per root by the property service (props.rs).
     const char *props = lxrt_props_translate(path, buf, bufn);
     if (props)
         return props;
     // A bind mount from a (fake) bwrap plan shadows the root prefix.
     const char *m = lxrt_mounts_translate(path, buf, bufn);
-    if (m)
-        return m;
+    if (m) {
+        const char *alias = existing_socket_alias(path, m);
+        return alias ? alias : m;
+    }
     // /dev/shm is one directory per "kernel", not per root: Chromium's
     // processes share memory through names in it, and inside a bwrap sandbox
     // the root is a scratch directory with no dev/ (steamwebhelper died with
@@ -517,7 +530,8 @@ static const char *translate_one(const char *path, char *buf, size_t bufn)
     int n = snprintf(buf, bufn, "%s%s", root, path);
     if (n <= 0 || (size_t)n >= bufn)
         return path;
-    return buf;
+    const char *alias = existing_socket_alias(path, buf);
+    return alias ? alias : buf;
 }
 uint64_t lxrt_last_guest_lr(void);
 static atomic_ullong g_unimplemented;
@@ -612,7 +626,7 @@ long lxrt_dispatch_last_unimplemented(void)
 }
 
 // Darwin reports failure as -1 plus errno; Linux returns -errno directly -- and
-// the numbers themselves differ (see errno_map.c), so the value is translated,
+// the numbers themselves differ (see errno_map.rs), so the value is translated,
 // never passed through.
 static long ret_of(long r) { return r < 0 ? -lxrt_errno_to_linux(errno) : r; }
 // For paths that already hold an errno value rather than a -1 return.
@@ -654,9 +668,14 @@ uint64_t lxrt_guest_clock_ns(long clk)
         clock_gettime(CLOCK_MONOTONIC, &ts);
         return (uint64_t)ts.tv_sec * 1000000000ull + (uint64_t)ts.tv_nsec;
     }
-    // The vDSO computes exactly this (vdso_map.c), so the two never disagree.
+    // The vDSO computes exactly this (vdso_map.rs), so the two never disagree.
     (void)g_ns_per_tick;
     return lxrt_mono_ns();
+}
+
+bool lxrt_interrupted_internally_ffi(void)
+{
+    return lxrt_interrupted_internally();
 }
 
 // close(2) as the guest sees it.
@@ -725,7 +744,7 @@ static long do_clock_gettime(long clk, uint64_t user_ts)
 #define LINUX_MAP_FIXED_NOREPLACE 0x100000
 
 // Executable code that the guest's own dynamic loader maps never passes
-// through runtime/elf.c, so it still contains raw `svc`. Map it writable,
+// through runtime/elf.rs, so it still contains raw `svc`. Map it writable,
 // rewrite it, then seal it to what the guest asked for. Getting this wrong is
 // silent (Stage 1 finding 1), so the sequence is deliberate rather than
 // opportunistic.
@@ -958,7 +977,7 @@ static long do_madvise(uint64_t addr, uint64_t len, int ladvice)
     // file on Linux (kept as it is, like the aligned part above; unwritten,
     // that IS the file) and a memset through a shared one would write zeros
     // into the file. Not shared memory under MADV_DONTNEED, which keeps its
-    // contents. A 4 KiB-offset file mapping (offmap.c) always starts partway
+    // contents. A 4 KiB-offset file mapping (offmap.rs) always starts partway
     // into a host page, so both reach here with every such mapping.
     for (int side = 0; side < 2; side++) {
         uint64_t lo = side == 0 ? addr : hend, hi = side == 0 ? hstart : end;
@@ -1040,7 +1059,7 @@ static long do_munmap_inner(uint64_t addr, uint64_t len)
     if (hstart < hend)
         lxrt_mremap_forget_shared(hstart, hend - hstart);
     // A partly covered page at either end that belongs to a 4 KiB-offset file
-    // mapping (offmap.c) holds nothing else: it goes with its last guest byte.
+    // mapping (offmap.rs) holds nothing else: it goes with its last guest byte.
     uint64_t dead[2];
     int ndead = lxrt_offmap_unmapped(addr, len, dead);
     for (int i = 0; i < ndead; i++)
@@ -1167,7 +1186,7 @@ static long do_mmap_inner(uint64_t addr, uint64_t len, long prot, long lflags,
 static long do_mmap(uint64_t addr, uint64_t len, long prot, long lflags,
                     long fd, long off)
 {
-    // In the guest's arena (arena.c) a range no guest mapping touches holds
+    // In the guest's arena (arena.rs) a range no guest mapping touches holds
     // only the runtime's reservation: an address the guest asks for there --
     // MAP_FIXED_NOREPLACE or a hint -- is free as Linux would see it, and the
     // mapping replaces the reservation.
@@ -1280,7 +1299,7 @@ static long do_mmap_inner(uint64_t addr, uint64_t len, long prot, long lflags,
     if (unknown && g_trace)
         fprintf(lxrt_trace_stream(), "[lxrt] mmap: dropping unhandled Linux flags 0x%lx\n", unknown);
 
-    // Whatever lands on a range ends its copy-on-write bookkeeping (privmap.c).
+    // Whatever lands on a range ends its copy-on-write bookkeeping (privmap.rs).
     if (flags & MAP_FIXED) {
         lxrt_subpage_tail_clear(addr, len);
         lxrt_privmap_forget(addr, len);
@@ -1297,11 +1316,11 @@ static long do_mmap_inner(uint64_t addr, uint64_t len, long prot, long lflags,
         lxrt_pe_forget(addr, len);
     }
     // Something placed into the host pages of a 4 KiB-offset file mapping
-    // makes them no longer that mapping's alone (offmap.c).
+    // makes them no longer that mapping's alone (offmap.rs).
     if ((flags & MAP_FIXED) || (lflags & LINUX_MAP_FIXED_NOREPLACE))
         lxrt_offmap_disown(addr, len);
     // A private mapping of a shared-memory file keeps seeing the file's
-    // updates until the guest writes, as on Linux (privmap.c: wine's session
+    // updates until the guest writes, as on Linux (privmap.rs: wine's session
     // objects). Aligned ranges only; the whole host pages are replaced, so the
     // sub-page records for them go too.
     if (fd >= 0 && (flags & MAP_PRIVATE) &&
@@ -1538,7 +1557,7 @@ static long do_mmap_inner(uint64_t addr, uint64_t len, long prot, long lflags,
             partial_data = false;
             lxrt_subpage_note_tail(tail, tend);     // nobody's, whatever adopts this page later
             // Read-only shared: if the host page is later shared with another
-            // guest mapping, shmirror.c keeps the copy current.
+            // guest mapping, shmirror.rs keeps the copy current.
             shmirror_candidate = (flags & MAP_SHARED) && !(prot & PROT_WRITE);
             // The whole host pages become this mapping: drop the placeholder
             // records so the sub-page bookkeeping does not route it back.
@@ -1643,7 +1662,7 @@ static long do_mmap_inner(uint64_t addr, uint64_t len, long prot, long lflags,
     // address will do: map from the host page below and return the address
     // of the offset asked for (the native arm64 webhelper's shared-memory
     // pool, grown 64 KiB at a time: its window never drew, stage22). The head
-    // of the first host page and the tail of the last are nobody's; offmap.c
+    // of the first host page and the tail of the last are nobody's; offmap.rs
     // records them so munmap frees them with the guest's last byte there.
     uint64_t head = (uint64_t)off % LXRT_HOST_PAGE;
     if (head && fd >= 0 && !(flags & MAP_FIXED) && !exec_map) {
@@ -1854,7 +1873,7 @@ static long wx_leave(uint64_t addr, uint64_t len, int prot)
     return 0;
 }
 
-// Copy-on-write pages of private shared-memory mappings (privmap.c) stay
+// Copy-on-write pages of private shared-memory mappings (privmap.rs) stay
 // unwritable on the host whatever the guest asks, until their first store.
 static long do_mprotect(uint64_t addr, uint64_t len, long prot)
 {
@@ -2081,7 +2100,7 @@ static uint64_t g_brk_base, g_brk_cur;
 
 void lxrt_dispatch_init_brk(uint64_t fallback)
 {
-    // A hole of the guest's own (arena.c): the host's heap cannot open a
+    // A hole of the guest's own (arena.rs): the host's heap cannot open a
     // region in it, and the page after the break is still free to the guest.
     uint64_t heap = lxrt_arena_reserve_heap();
     if (heap) {
@@ -2728,7 +2747,7 @@ static long do_xattr(long nr, uint64_t a0, uint64_t a1, uint64_t a2, uint64_t a3
 // Another process's memory would need its task port: EPERM, as for a
 // process one may not ptrace. Low-window guest addresses (below 4 GiB under
 // a guest base) inside the iovecs are translated as the table does for the
-// arrays themselves (gbase.c).
+// arrays themselves (gbase.rs).
 static long do_process_vm(bool write, uint64_t pid, uint64_t liov, uint64_t liovcnt,
                           uint64_t riov, uint64_t riovcnt, uint64_t flags)
 {
@@ -3274,7 +3293,7 @@ void lxrt_dispatch(struct lxrt_regs *r)
     if (__builtin_expect(lxrt_guestprof_on, 0))
         lxrt_guestprof_note(r->x[28]);
     // A 32-bit guest's pointer arguments arrive as guest addresses; the
-    // kernel is us, so we add the base (runtime/gbase.c).
+    // kernel is us, so we add the base (runtime/gbase.rs).
     // On a COPY: the argument registers are the caller's live registers, and
     // FEX issues syscalls inline from translated code with the guest's own
     // registers (EBX, ECX, ...) in x0-x5. Translating in place handed the
@@ -3589,7 +3608,7 @@ restart:
             fprintf(lxrt_trace_stream(), "[lxrt]    openat \"%s\"\n",
                     a1 ? (const char *)a1 : "(null)");
         // AT_FDCWD is -100 on Linux and -2 on Darwin.
-        // Flag values differ; see fsflags.c. Passing Linux O_APPEND straight
+        // Flag values differ; see fsflags.rs. Passing Linux O_APPEND straight
         // through would ask Darwin for O_TRUNC|O_EXCL.
         {
             const char *mp = at_through_mounts((int)a0, (const char *)a1, !((int)a2 & 0x8000));
@@ -3598,7 +3617,7 @@ restart:
                                                           : translate_follow((const char *)a1);
             int dfl = lxrt_open_flags_to_darwin((int)a2);
             int fd = openat(ddir, hp, dfl, (int)a3);
-            // O_PATH of a socket: Darwin refuses to open one (pathfd.c).
+            // O_PATH of a socket: Darwin refuses to open one (pathfd.rs).
             // /dev/input/eventN is a socket too: connect to it (evdev.c).
             if (fd < 0 && errno == EOPNOTSUPP && ((int)a2 & 0x200000))
                 fd = lxrt_pathfd_open(ddir, hp, (dfl & O_CLOEXEC) != 0);
@@ -3745,7 +3764,7 @@ restart:
         if ((a0 & 4095) || (a2 & ~7ull) || ((a2 & 1) && (a2 & 4))) { ret = LERR(EINVAL); break; }
         // FEX passes msync straight through (its allocator never sees it),
         // so a 32-bit guest's address arrives as the guest's: below 4 GiB it
-        // is base + address, as for madvise (gbase.c's rule). i386 dex2oat's
+        // is base + address, as for madvise (gbase.rs's rule). i386 dex2oat's
         // msync(MS_SYNC) of its vdex failed with ENOMEM on __PAGEZERO and
         // the compile was thrown away ("Failed to Sync() dex2dex output").
         if (lxrt_gbase() && a0 && a0 < (1ull << 32))
@@ -4052,7 +4071,7 @@ restart:
         ret = ret_of(fchmodat(lxrt_dirfd_to_darwin((int)a0),
                               translate((const char *)a1), (mode_t)a2, 0));
         break;
-    case 449:   // futex_waitv(waiters, nr, flags, timeout, clockid): futex_waitv.c
+    case 449:   // futex_waitv(waiters, nr, flags, timeout, clockid): futex_waitv.rs
         ret = lxrt_futex_waitv(a0, (uint32_t)a1, (uint32_t)a2, a3, (int32_t)a4);
         break;
     case 452:   // fchmodat2(dirfd, path, mode, flags)
@@ -4717,7 +4736,7 @@ restart:
                 lxrt_wx_moved(a0, LXRT_ALIGN_UP(a1, LXRT_HOST_PAGE), (uint64_t)ret,
                               LXRT_ALIGN_UP(a2, LXRT_HOST_PAGE));
             // The host pages moved, shrank or were replaced: none of them is
-            // a 4 KiB-offset mapping's alone any more (offmap.c).
+            // a 4 KiB-offset mapping's alone any more (offmap.rs).
             lxrt_offmap_disown(a0, a1);
             lxrt_offmap_disown((uint64_t)ret, a2);
         }
@@ -5000,7 +5019,7 @@ restart:
         // translation, GuestBaseThunk.h, as if its allocator owned it; it
         // does not). Below 4 GiB that is a guest address -- no host memory
         // lives there -- so it is the window's: base + address, as for the
-        // pointer arguments in gbase.c. Without this MADV_DONTNEED on a
+        // pointer arguments in gbase.rs. Without this MADV_DONTNEED on a
         // 32-bit guest's or a 64-bit low-window mapping was a silent no-op,
         // and ART, which clears heap regions that way, read old objects back
         // where Linux gives zeros (MEASURED with tests/android/x86_lowwin.c,
@@ -5247,7 +5266,7 @@ restart:
         lxrt_thread_exit((int)a0);
     case LNR_exit_group:
         if (getenv("LXRT_TLS_KEEP_LOG") && lxrt_tlskeep_fixups())
-            fprintf(lxrt_trace_stream(), "[lxrt] pid %d: %lu kept-TLS faults fixed (runtime/tls.c)\n",
+            fprintf(lxrt_trace_stream(), "[lxrt] pid %d: %lu kept-TLS faults fixed (runtime/tls.rs)\n",
                     (int)getpid(), lxrt_tlskeep_fixups());
         lxrt_sigstats_flush();
         lxrt_sysv_exit();

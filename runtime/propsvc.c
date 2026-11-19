@@ -2128,7 +2128,7 @@ int lxrt_property_service_main(int argc, char **argv)
     // Nobody can connect once the name is gone; whoever did in the meantime
     // is still answered, within 2 s in all (a client that finds no socket
     // starts a new service, which waits up to 10 s for this one's lock, and
-    // the runtime waits as long for this one to leave: props.c).
+    // the runtime waits as long for this one to leave: props.rs).
     unlink(sa.sun_path);
     fcntl(ls, F_SETFL, O_NONBLOCK);
     struct timespec d0, d1;

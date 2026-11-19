@@ -86,7 +86,7 @@ struct sub {
 // client (FEX hands every freed 4 KiB page back to its reservation with its
 // own mmap) and dropped records silently: an mprotect to read/write was then
 // missing from the union, the host page stayed PROT_NONE and three threads
-// retried the same fault forever (runtime/memlog.c found it).
+// retried the same fault forever (runtime/memlog.rs found it).
 static struct sub *g_subs;
 static int g_nsubs, g_cap;
 
@@ -426,7 +426,7 @@ static bool make_page_anonymous(uint64_t p)
                                      (mach_vm_address_t)(keep + g), &got);
     }
     // A read-only MAP_SHARED view in this page (KUSER_SHARED_DATA)
-    // keeps following the file through shmirror.c.
+    // keeps following the file through shmirror.rs.
     uint64_t view = lxrt_shmirror_take_view(p);
     if (mmap((void *)p, LXRT_HOST_PAGE, PROT_READ | PROT_WRITE,
              MAP_PRIVATE | MAP_ANON | MAP_FIXED, -1, 0) == MAP_FAILED)
@@ -471,9 +471,14 @@ static bool back_range(uint64_t hstart, uint64_t hend)
             before = g_region_seen;
             if (state < 0) {
                 static _Atomic int said;
-                if (atomic_fetch_add(&said, 1) < 4)
-                    lxrt_fault_note("subpage: no region answer for host page 0x%llx "
-                                    "(kern_return %d, %d tries): made anonymous", (unsigned long long)p, why, tries);
+                if (atomic_fetch_add(&said, 1) < 4) {
+                    char fault_line[512];
+                    snprintf(fault_line, sizeof fault_line,
+                             "subpage: no region answer for host page 0x%llx "
+                             "(kern_return %d, %d tries): made anonymous",
+                             (unsigned long long)p, why, tries);
+                    lxrt_fault_note(fault_line);
+                }
             }
         }
         if (kr == KERN_NO_SPACE && state != 0) {
@@ -517,9 +522,12 @@ static bool back_range(uint64_t hstart, uint64_t hend)
                     char now_s[160], before_s[160];
                     format_seen(now_s, sizeof now_s, &g_region_seen);
                     format_seen(before_s, sizeof before_s, &before);
-                    lxrt_fault_note("subpage: host page 0x%llx was writable but not readable in full "
-                                    "(file state now %d [%s]; before %d [%s], %d tries); made anonymous",
-                                    (unsigned long long)p, st2, now_s, state, before_s, tries);
+                    char fault_line[512];
+                    snprintf(fault_line, sizeof fault_line,
+                             "subpage: host page 0x%llx was writable but not readable in full "
+                             "(file state now %d [%s]; before %d [%s], %d tries); made anonymous",
+                             (unsigned long long)p, st2, now_s, state, before_s, tries);
+                    lxrt_fault_note(fault_line);
                 }
                 if (!make_page_anonymous(p))
                     return false;
@@ -609,7 +617,7 @@ static bool fast_file_interior(uint64_t addr, uint64_t len, int prot,
 // page-by-page path: a mach_vm_region per host page, a memset of all of it,
 // and an mprotect per host page, which left one kernel map entry per 16 KiB.
 // About 105,000 entries in every Wine process, a million for one game's
-// start with its services, and safeguard.sh then stopped every guest
+// start with its services, and the safeguard then stopped every guest
 // (kernel vm.objects past 1.5 million; MEASURED with zprint and vmmap). Only
 // the two edge pages need the table's care; the interior is one fresh
 // mapping, already zero.

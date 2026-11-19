@@ -22,7 +22,7 @@ start     Weston, then the boot; returns once sys.boot_completed=1 (or fails,
           on the Mac does not need (TRIM_PACKAGES: camera, gallery, music,
           clock, contacts, backup ...; `shell /system/bin/pm enable <pkg>`
           brings one back), which keeps the session near 55-60 lxrun
-          processes (scripts/safeguard.sh stops every guest past its limit).
+          processes (the Rust safeguard stops every guest past its limit).
 stop      the boot (every Android process with it), then Weston.
 install   <package>'s base and selected split APKs from $STATE/android/packages,
           or --apk, with the image's own `pm install`. Copies stored OBB data
@@ -114,7 +114,7 @@ LOGF = None
 # session root's /data; `pm enable` brings one back), Lepton-style: what a
 # phone has and a window on the Mac does not need, each started at boot as a
 # process of its own under FEX. Android is one lxrun process per service and
-# per app; the Mac's safeguard (scripts/safeguard.sh) stops every guest past
+# per app; the Mac's Rust safeguard stops every guest past
 # its process limit, and these took the first boot of a session over it
 # during its first pm install (MEASURED, benchmarks/stage28-android-apk.txt).
 # Not here: SystemUI, the launcher, the keyboard, the providers, telephony

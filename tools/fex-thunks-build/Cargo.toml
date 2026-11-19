@@ -1,0 +1,8 @@
+[package]
+name = "steamarm-fex-thunks-build"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "steamarm-fex-thunks-build"
+path = "src/main.rs"

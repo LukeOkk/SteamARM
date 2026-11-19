@@ -59,14 +59,8 @@ bool lxrt_trace_on(void);
 // EOPNOTSUPP IS NOT SPELLABLE HERE, and finding out why cost a debugging round.
 //
 // Linux makes EOPNOTSUPP and ENOTSUP the same number, 95. Darwin does not:
-// ENOTSUP is 45 and EOPNOTSUPP is 102, two distinct values. errno_map.c carries
-// only ENOTSUP -- its comment says Darwin aliases them, which is the mistake --
-// so LERR(EOPNOTSUPP) falls off the end of that table and comes back as the
-// default, Linux EIO. A guest told EIO where it expected EOPNOTSUPP treats a
-// missing feature as a failing disk.
-//
-// Until errno_map.c grows the 102 case, ENOTSUP is the spelling that produces
-// Linux 95. Every "this mode has no Darwin equivalent" path below uses it.
+// ENOTSUP is 45 and EOPNOTSUPP is 102. The Rust errno map handles both SDK
+// values as Linux 95; use ENOTSUP below for unsupported host operations.
 
 // ------------------------------------------------------------ guest pointers
 //
@@ -502,10 +496,10 @@ _Static_assert(sizeof(struct linux_open_how) == 24, "OPEN_HOW_SIZE_VER0 is 24");
 //   O_DIRECT      0x4000   0x10000     (none; F_NOCACHE after open)
 //   O_LARGEFILE   0x8000   0x20000     (none; always 64-bit)
 //
-// fsflags.c already carries the aarch64 values for the flags openat uses; this
+// fsflags.rs already carries the aarch64 values for the flags openat uses; this
 // mask exists only to decide which bits are LEGAL, which openat never has to.
 //
-// THREE BITS THE MASK ADMITS THAT fsflags.c DOES NOT KNOW. Declaring a flag
+// THREE BITS THE MASK ADMITS THAT fsflags.rs DOES NOT KNOW. Declaring a flag
 // legal and then dropping it is the silent-downgrade this call exists to avoid,
 // so each is decided here by name instead of falling off the end of
 // lxrt_open_flags_to_darwin's switch:
@@ -683,7 +677,7 @@ long lxrt_openat2(int ldirfd, const char *tpath, const void *uhow,
 
     if (how.flags & ~L_O_VALID_MASK)
         return LERR(EINVAL);
-    // O_PATH: emulated as openat emulates it (fsflags.c: O_RDONLY, O_SYMLINK
+    // O_PATH: emulated as openat emulates it (fsflags.rs: O_RDONLY, O_SYMLINK
     // with O_NOFOLLOW). The refusal described by L_O_VALID_MASK made openat
     // and openat2 disagree, and GNU tar 1.35 extracts through
     // openat2(O_PATH|O_DIRECTORY|O_NOFOLLOW, RESOLVE_BENEATH): with
@@ -1365,7 +1359,7 @@ long lxrt_fdatasync(int fd)
 //   AT_SYMLINK_FOLLOW     0x0400  0x0040
 //   AT_EMPTY_PATH         0x1000  (none)
 //
-// fsflags.c's lxrt_at_flags_to_darwin already carries the first two. It is used
+// fsflags.rs's lxrt_at_flags_to_darwin already carries the first two. It is used
 // here rather than repeating the mapping, so linkat cannot drift away from the
 // other *at() calls.
 long lxrt_linkat(int lolddirfd, const char *toldpath,

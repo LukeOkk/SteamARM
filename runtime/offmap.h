@@ -1,4 +1,4 @@
-// offmap.c -- file mappings whose offset is on a 4 KiB guest page but not on
+// offmap.rs -- file mappings whose offset is on a 4 KiB guest page but not on
 // a 16 KiB host page, and the host bytes around them that nobody can name.
 #ifndef LXRT_OFFMAP_H
 #define LXRT_OFFMAP_H

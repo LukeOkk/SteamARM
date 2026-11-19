@@ -72,7 +72,7 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Homebrew dependencies
-        run: brew install sdl2 sdl3
+        run: brew install sdl2 sdl3 rust
 
       - name: Package (scripts/make-release.sh)
         run: scripts/make-release.sh

@@ -154,7 +154,7 @@ directory, arguments, environment and descriptors 0-2 -- as its own child.
 +    sigfillset(&all);
 +    posix_spawnattr_setsigmask(&at, &none);
 +    posix_spawnattr_setsigdefault(&at, &all);
-+    /* No new session: the program (scripts/session.py) makes its own, which
++    /* No new session: the program (steamarm-session) makes its own, which
 +     * a process group leader could not. */
 +    posix_spawnattr_setflags(&at, POSIX_SPAWN_SETSIGMASK | POSIX_SPAWN_SETSIGDEF |
 +                                  POSIX_SPAWN_CLOEXEC_DEFAULT);

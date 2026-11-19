@@ -12,13 +12,18 @@ Labels: MEASURED (a command and its result, `benchmarks/stage24-fex-game-boundar
 VERIFIED IN SOURCE (file:line or function), UPSTREAM DOCUMENTED, HYPOTHESIS,
 UNKNOWN.
 
+**Rust port, 2026-11-17:** the ARM64 compatibility tool and static x86_64
+MetalFX wrapper now build from `tools/fex-proton-tool/src/main.rs`. These
+new binaries have not yet been exercised in Steam; the measurements below
+describe the previous shell implementation.
+
 **Status.**
 
 - MEASURED: invoked the way Steam launches a game with a tool (the
   client's own reaper, as the x86 client does in stage 15; the command line
   of the tool's `toolmanifest.vdf`; Steam's `STEAM_COMPAT_*` environment;
   the game's directory as working directory), from an aarch64 shell under
-  lxrun in the ARM64 root, the tool runs tests/win's D3D11 and D3D12 probes through
+  lxrun in the ARM64 root, the previous shell tool ran tests/win's D3D11 and D3D12 probes through
   x86 Proton Experimental and Steam Linux Runtime 4 at the same frame rate
   as the x86 client's own launch path (about 160 fps each), on the Fedora
   armroot and on the Steam Frame root. The tone probe's stream reaches
@@ -45,7 +50,7 @@ UNKNOWN.
  Steam client, steamrtarm64/steam                         aarch64, ARM64 root, no FEX
   └ steamrtarm64/reaper SteamLaunch AppId=<id> --         aarch64 (the client's reaper)
      └ compatibilitytools.d/steamarm-fex-proton/
-       steamarm-fex-proton waitforexitandrun <game.exe>   aarch64 bash (the root's /bin/bash)
+       steamarm-fex-proton waitforexitandrun <game.exe>   AArch64 Rust ELF
         │  checks the x86 side (one child with a bind table of its own)
         │  exec with LXRT_ROOT = the x86 Steam root, LXRT_MOUNTS = the client's paths
  ───────┼──────────────────────────────── the boundary: everything below is x86 code under FEX
@@ -61,7 +66,7 @@ The x86 client's own path, for comparison (stage 15,
 → pressure-vessel → proton → wine`, all under FEX, started by an x86 client
 that itself runs under FEX. The tool keeps everything from `_v2-entry-point`
 down exactly as the x86 client builds it, and puts an ARM64 client and an
-aarch64 script above it.
+AArch64 Rust executable above it.
 
 ## What is ARM64 and what is x86
 
@@ -69,7 +74,7 @@ aarch64 script above it.
 |---|---|---|---|---|
 | Steam client, webhelper | aarch64 | directly under lxrun | ARM64 | MEASURED (stages 22-23) |
 | reaper (`steamrtarm64/reaper`) | aarch64 | directly under lxrun | ARM64 | MEASURED: `[lxrt] /tmp/lxrt-armroot/tmp/armhome/.local/share/Steam/steamrtarm64/reaper: PIE` |
-| the tool script and its check shell | aarch64 bash of the ARM64 root | directly under lxrun | ARM64 | MEASURED: `[lxrt] /tmp/lxrt-armroot/bin/bash: PIE` |
+| the compatibility tool and its check mode | AArch64 Rust ELF in the ARM64 root | directly under lxrun | ARM64 | built; Steam runtime verification pending |
 | lxrun | arm64 Mach-O | macOS process | ARM64 | |
 | FEX, FEXServer | aarch64 Linux | under lxrun | ARM64 (the translator) | MEASURED: `/tmp/lxrt-root/usr/bin/FEX-gb` outside the container, `/usr/lib/lxrt-emu/FEX` inside |
 | Steam Linux Runtime 4 (pressure-vessel, the container's libraries) | x86-64 | under FEX | TRANSITIONAL: SLR 4 arm64's pressure-vessel under lxrun is step 12, not done | MEASURED |
@@ -77,11 +82,12 @@ aarch64 script above it.
 | the game | x86-64 / i386 | under FEX | game payload | MEASURED with probes only |
 | Vulkan below the thunks: shim, MoltenVK | aarch64 Linux / arm64 Mach-O | host side of the thunk | ARM64 | stage 10 |
 
-In one D3D11 launch through the tool, lxrun started 3 aarch64 programs of the
-ARM64 root (the test's launch shell, the reaper, the tool), 1 check shell
-whose trace is discarded, and 53 x86 programs through FEX: 24 outside the
-container (`FEX-gb`) and 29 inside it (`/usr/lib/lxrt-emu/FEX`) (MEASURED,
-the `[lxrt] ...: PIE` lines of the run's log).
+In one D3D11 launch through the previous shell tool, lxrun started 3 aarch64
+programs of the ARM64 root (the test's launch shell, the reaper, the tool), 1
+check shell whose trace is discarded, and 53 x86 programs through FEX: 24
+outside the container (`FEX-gb`) and 29 inside it
+(`/usr/lib/lxrt-emu/FEX`) (MEASURED, the `[lxrt] ...: PIE` lines of that
+run's log).
 
 ## How the ARM64 root reaches the x86 world
 
@@ -138,10 +144,11 @@ between them and the x86 root is not modified.
    |---|---|---|
    | `LXRT_ROOT`, `LXRT_MOUNTS` | the x86 root; the client's paths | above |
    | `FEX_ROOTFS`, `HOME`, `TMPDIR`, `FEX_GUESTBASE`, `FEX_SMCCHECKS`, `FEX_OUTPUTLOG`, `PATH`, `OBJC_DISABLE_INITIALIZE_FORK_SAFETY` | as `scripts/run-fex.sh` sets them | the x86 client's games get the same |
-   | `STEAM_COMPAT_TOOL_PATHS` | x86 Proton and runtime | what the x86 client passes; the tool's own directory holds only an aarch64 script |
+   | `STEAM_COMPAT_TOOL_PATHS` | x86 Proton and runtime | what the x86 client passes; the tool's own directory holds only the AArch64 executable |
    | `STEAM_COMPAT_CLIENT_INSTALL_PATH`, `_DATA_PATH`, `_INSTALL_PATH`, `_LIBRARY_PATHS`, `_SHADER_PATH`, `SteamAppId`, `SteamGameId`, `STEAMARM_RUN_ID` | kept | Proton's contract; `STEAMARM_RUN_ID` lets `scripts/run-steam-arm64.sh` find the session's processes |
    | `DISPLAY`, `PULSE_SERVER` | kept; default `:2` and `unix:/tmp/pulse/native` | the X server is the host's; the PulseAudio socket lives in the x86 root (`scripts/audio.sh`) |
-   | `LXRT_GUEST_PAGE`, `LXRT_X18_ALL_TEXT`, `LD_LIBRARY_PATH`, `STEAM_RUNTIME_LIBRARY_PATH` | removed | the client's settings for itself (4 KiB guest pages, libcef's x18 pass, aarch64 libraries) |
+   | `LXRT_GUEST_PAGE` | set to `4096` for native ARM64 FEX | FEX needs a 4 KiB Linux guest page size. LXRT maps it onto Darwin's 16 KiB host granule with `runtime/subpage.c`. |
+   | `LXRT_X18_ALL_TEXT`, `LD_LIBRARY_PATH`, `STEAM_RUNTIME_LIBRARY_PATH` | removed | libcef's x18 pass and AArch64 libraries belong to the ARM64 client, not the x86 guest. |
    | `STEAM_COMPAT_EMULATOR`, `PRESSURE_VESSEL_EMULATOR`, `STEAM_COMPAT_MACHINE_ARCHITECTURE`, `STEAM_COMPAT_GRAPHICS_PROVIDER` | removed | they would send pressure-vessel to Valve's FEX (3127680), which lacks SteamARM's patches (`docs/STEAM_FRAME_COMPAT_TOOLS.md` §7.3) |
    | `LD_PRELOAD` | removed unless `STEAMARM_FEX_KEEP_LD_PRELOAD=1` | the client's overlay libraries; whether they are x86 is UNKNOWN (no launch from the UI) |
    | the names in the ARM64 root's `.lxrt-guest-env` | removed | that root's own needs: the Steam Frame root's indirect GLX (`LIBGL_ALWAYS_INDIRECT=1` and two more, `scripts/mkframeroot.sh`) is not the x86 root's. MEASURED on the Frame root: "not passing on the ARM64 root's own guest environment: __GLX_VENDOR_LIBRARY_NAME MESA_LOADER_DRIVER_OVERRIDE LIBGL_ALWAYS_INDIRECT" |
@@ -155,7 +162,7 @@ between them and the x86 root is not modified.
 
 ## Native Linux x86 games: `steamarm-fex-linux`
 
-The same script under a second name (`tools/steamarm-fex-linux`,
+The same Rust executable under a second name (`tools/steamarm-fex-linux`,
 `from_oslist linux`, display name "SteamARM: Linux x86 via FEX
 (experimental)"). Forced on a game, the ARM64 client downloads the game's
 Linux depot and starts
@@ -166,20 +173,36 @@ Linux depot and starts
 
 with no Proton in the chain. `HOME` stays the client's (the game finds the
 running client through `~/.steam`); FEX's own files come from the x86 home
-(`FEX_APP_CONFIG_LOCATION`, `FEX_APP_DATA_LOCATION`). The tool sets
+(`FEX_APP_CONFIG_LOCATION`, `FEX_APP_DATA_LOCATION`). The tool sets a 4 KiB
+Linux guest page size through LXRT, including on Darwin's 16 KiB host granule,
+and uses the FEX guest-base and SMC settings from the Proton path. FEX logs to
+stderr while startup is being validated. It also sets
 `SDL_VIDEO_MINIMIZE_ON_FOCUS_LOSS=0`: a fullscreen SDL window that starts
-without the focus minimized itself and the game drew 10 frames a second
-(MEASURED). Counter-Strike 2's Linux build runs this way
+without focus minimized itself and the game drew 10 frames a second
+(MEASURED). Counter-Strike 2's Linux build ran this way
 (`benchmarks/stage51-cs2-linux-native.txt`). `scripts/run-app.sh` keeps the
-installed copies of both tools the script SteamARM ships.
+installed copies of both Rust executables SteamARM ships.
 
 ## Install
 
 ```sh
-scripts/install-fex-proton-tool.sh                      # the Fedora armroot's client
-scripts/install-fex-proton-tool.sh --root arm64root     # the Steam Frame root's client
+scripts/install-fex-proton-tool.sh                      # the Steam Frame/Arch root's client (default)
+scripts/install-fex-proton-tool.sh --root armroot       # the transitional Fedora root's client
 scripts/install-fex-proton-tool.sh --uninstall [--root ...]
 ```
+
+The installer is the offline Rust tool `tools/fex-proton-install`; the shell
+entrypoint is retained for existing setup commands. `arm64root` is the
+canonical client root and is derived from the Steam Frame image.
+
+`make fex-proton-tool` builds the compatibility tool from
+`tools/fex-proton-tool/src/main.rs`, with no third-party crates. The ARM64
+binary links against the canonical Steam Frame root; the x86_64 MetalFX
+wrapper is a static musl ELF. Both target binaries are bundled in the app,
+so installing the packaged app downloads neither crates nor build tools.
+Rebuilding from source uses Cargo offline and needs Rust's target standard
+libraries once: `rustup target add aarch64-unknown-linux-gnu
+x86_64-unknown-linux-musl`.
 
 It writes only `<root>/tmp/armhome/.local/share/Steam/compatibilitytools.d/steamarm-fex-proton/`:
 
@@ -187,8 +210,9 @@ It writes only `<root>/tmp/armhome/.local/share/Steam/compatibilitytools.d/steam
 |---|---|
 | `compatibilitytool.vdf` | `steamarm-fex-proton`, `install_path "."`, display name "SteamARM: Proton x86 via FEX (experimental)", `from_oslist "windows"`, `to_oslist "linux"` (Proton's own template's keys, `docs/STEAM_FRAME_COMPAT_TOOLS.md` §2.4) |
 | `toolmanifest.vdf` | `version 2`, `commandline "/steamarm-fex-proton %verb%"`, `compatmanager_layer_name "proton"`; no `require_tool_appid`, so the client wraps it in none of its own (arm64) runtimes |
-| `steamarm-fex-proton` | the aarch64 script (`tools/steamarm-fex-proton/`) |
+| `steamarm-fex-proton` | the AArch64 Rust ELF (`build/steamarm-fex-proton-arm64`) |
 | `steamarm-fex-proton.conf` | the x86 root, its home and Steam directory, Proton, the runtime its `toolmanifest.vdf` requires, FEX's directory and binary |
+| `anticheat-appids.txt` | the deny list used by the MetalFX safety check |
 
 It checks, on the host, that the chosen Proton is installed in the x86 root,
 that its Wine loader is x86 (ELF machine 62 or 3), that it is not an ARM64

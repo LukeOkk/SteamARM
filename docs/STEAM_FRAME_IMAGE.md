@@ -5,9 +5,12 @@ later for everything else, from Valve's own Steam Frame recovery image, not
 from packages collected one missing library at a time. The image is only a
 source of files. Its kernel is never booted, and no VM is involved.
 
-`scripts/steamframe-image.py` reads the image on the Mac directly: GPT,
+The Rust CLI `steamarm-frame-image` reads the image on the Mac directly: GPT,
 btrfs, zstd/zlib/lzo extents. It needs no mount and no btrfs-progs, and it
-opens the image read-only.
+opens the image read-only. Build it with `make steamframe-image`; Cargo uses
+the vendored dependencies offline. The CLI uses the host `zstd` executable
+for compressed extents. `compare` uses host `curl` for URLs and the matching
+system decompressor for compressed pacman databases; it downloads no crates.
 
 ## Why not `btrfs restore`
 
@@ -23,7 +26,7 @@ of the frame. `tests/steamframe_image/run.sh` builds that case: three extents
 whose frames decode to 16 KiB more than `ram_bytes`.
 
 - btrfs-progs 7.1 `restore` fails with exactly this message.
-- `steamframe-image.py extract` recovers every byte.
+- `steamarm-frame-image extract` recovers every byte.
 
 MEASURED on synthetic images, Linux, 2026-09-28: 12/12 checks pass.
 
@@ -46,16 +49,17 @@ directories, 30,033 symlinks, 4,276 hard links. Results:
 ```sh
 IMG=~/Downloads/steamframe-oobe-repair-20260922.5153644-0.3.0.img
 chmod a-w "$IMG"                                   # keep the reference read-only
-pip3 install zstandard                             # or: brew install zstd
-python3 scripts/steamframe-image.py info "$IMG" --hash   # partitions, btrfs, subvolumes, sha256
-python3 scripts/steamframe-image.py diagnose "$IMG" --json ~/SteamARM-roots/logs/steamframe-diagnose.json
+make steamframe-image
+TOOL="$PWD/build/steamarm-frame-image"
+"$TOOL" info "$IMG" --hash   # partitions, btrfs, subvolumes, sha256
+"$TOOL" diagnose "$IMG" --json ~/SteamARM-roots/logs/steamframe-diagnose.json
 
 # A case-sensitive volume keeps names that differ only in case (Linux trees have them).
 hdiutil create -size 40g -type SPARSEBUNDLE -fs 'Case-sensitive APFS' \
     -volname SteamFrameRoot ~/SteamARM-roots/steamframe-root.sparsebundle
 hdiutil attach ~/SteamARM-roots/steamframe-root.sparsebundle
-python3 scripts/steamframe-image.py extract "$IMG" /Volumes/SteamFrameRoot/rootfs
-python3 scripts/steamframe-image.py inventory /Volumes/SteamFrameRoot/rootfs \
+"$TOOL" extract "$IMG" /Volumes/SteamFrameRoot/rootfs
+"$TOOL" inventory /Volumes/SteamFrameRoot/rootfs \
     --json ~/SteamARM-roots/logs/steamframe-inventory.json --md ~/SteamARM-roots/logs/steamframe-inventory.md
 ```
 
@@ -73,6 +77,17 @@ Notes:
   `.steamarm-manifest.json`.
 - **What macOS cannot hold in files.** Ownership, xattrs (for example
   `security.capability`), device nodes and fifos also go to the manifest.
+
+## Frame-backed Steam root
+
+The native ARM64 base is Steam Frame's Arch-based SteamOS root. The x86 Steam
+client still needs its own x86 userspace; `steamarm-steamroot-build` composes
+that root with SteamOS libraries and FEX, then marks the result so the launcher
+can identify its Frame base. Build the Rust tool offline with `make
+steamroot-build`, then pass the x86 root, extracted Frame root, a new output
+path, and the built FEX binary. Keep input and output paths separate. The
+launcher resolves the active root through `scripts/env-links.sh` at
+`/tmp/lxrt-steamroot`.
 
 ## What the inventory answers
 
@@ -98,9 +113,9 @@ output for them before sharing it.
   until the client runs on it;
 - systemd units for Steam, FEX, Lepton and gamescope;
 - what `lxrun` can load:
-  - aarch64 `ET_EXEC` files, which `runtime/elf.c` refuses;
+  - aarch64 `ET_EXEC` files, which `runtime/elf.rs` refuses;
   - executables and `ld.so` whose segments are aligned below the 16 KiB host
-    page. Since stage 21 `runtime/elf.c` loads them through
+    page. Since stage 21 `runtime/elf.rs` loads them through
     `runtime/subpage.c` when they are 4 KiB-aligned, and refuses anything
     below 4 KiB. glibc also needs `LXRT_GUEST_PAGE=4096` to dlopen 4 KiB-aligned
     libraries (MEASURED, `benchmarks/stage21-native-arm64-client.txt`);
@@ -113,7 +128,7 @@ output for them before sharing it.
 `compare` sets the image's packages against pacman repository databases:
 
 ```sh
-scripts/steamframe-image.py compare /Volumes/SteamFrameRoot/rootfs core.db extra.db --md F --json F
+build/steamarm-frame-image compare /Volumes/SteamFrameRoot/rootfs core.db extra.db --md F --json F
 ```
 
 It orders versions the way pacman's `vercmp` does, marks pkgrel-only
@@ -127,9 +142,12 @@ prints mirrors, so a private one is redacted
 
 The image contains proprietary Valve software: the Steam client, and
 possibly Lepton and hardware services. Extract it only from the copy the
-owner downloaded, and use it locally. Never ship the extracted tree in the
-SteamARM `.dmg`. The release must download or extract it on the user's Mac,
-as it does today with Steam.
+user downloaded after accepting [Valve's Steam Frame image license](https://store.steampowered.com/steamos/download/?ver=steamframe),
+and use it locally. The license prohibits redistribution of the image, so it
+cannot be committed to GitHub, tracked in LFS, or shipped in the SteamARM
+`.dmg`. SteamARM detects the user's copy in `~/Downloads` (raw `.img` or
+`.img.bz2`), extracts it locally, then derives the ARM64 root. Set
+`STEAMARM_FRAME_IMAGE` to point at another local copy.
 
 ## Next step: using it as `LXRT_ROOT`
 
@@ -152,11 +170,16 @@ native Steam client's root:
   keeps `tmp/` (the client's home) across rebuilds, and can seed a client
   home with `--home-from DIR`. Valve's native arm64 client reaches its
   login window on it (MEASURED, `benchmarks/stage23-frame-root.txt`).
-- SteamARM's Vulkan shim (`build/libvulkan.so.1`) as the root's
-  `libvulkan.so.1`: the image has only the freedreno ICD. The image's
+- SteamARM's Vulkan shim (`build/libvulkan.so.1`) as an ICD in the root:
+  the image has only the freedreno ICD. `scripts/setup.sh frameroot` installs
+  the shim and moves the device-specific freedreno ICD aside. The image's
   `vulkaninfo` lists the Apple M4 through the shim on `LD_LIBRARY_PATH`
-  (MEASURED, stage 23 V1). It is not needed for the login window and not
-  installed yet;
+  (MEASURED, stage 23 V1);
+- the image's own `usr/lib/steam/steam.tar.zst` into the derived root's
+  `tmp/armhome/.local/share/Steam`. `tools/frame-client-install` does this
+  locally and idempotently, so the launcher's built-in Steam entry has its
+  `steamrtarm64/steam` executable on first setup. Steam can update its client
+  files on first start;
 - moving Qualcomm-only ICDs and services aside: not needed so far, not done.
 
 The image has no FEX (no FEX binaries, no `binfmt.d` rules; MEASURED), so

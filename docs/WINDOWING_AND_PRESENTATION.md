@@ -143,7 +143,7 @@ program used the GPU). MetalFX temporal is not offered: it needs the 3D
 scene's depth, motion vectors and camera jitter, which a picture handed to
 `vkQueuePresentKHR` (the interface already drawn on it) does not carry.
 
-What size to render at depends on the chip: `scripts/settings-env.py
+What size to render at depends on the chip: `steamarm-settings-env
 --upscaling` prints the recommendation (FSR 1.0's scales, from the GPU's
 core count and generation and the display's size; the M4 with 10 GPU cores
 at 1920x1080: 0.67, 1280x720), and AUTO exports it as

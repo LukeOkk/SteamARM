@@ -40,6 +40,13 @@ static _Atomic int g_xsig_sender[65536];
 #include <sys/ucontext.h>
 #include <unistd.h>
 
+void *lxrt_arm64_thread_state(void *ucontext)
+{
+    if (!ucontext)
+        return NULL;
+    return &((ucontext_t *)ucontext)->uc_mcontext->__ss;
+}
+
 bool lxrt_trace_on(void);
 
 #define LERR(e) (-lxrt_errno_to_linux(e))
@@ -239,6 +246,24 @@ static void host_handler_mask(sigset_t *m)
     sigdelset(m, SIGILL);
     sigdelset(m, SIGFPE);
     sigdelset(m, SIGTRAP);
+}
+
+// A guest's rt_sigaction can be interrupted by an asynchronous host signal.
+// host_handler also reads this table under the same mutex; blocking async
+// signals before taking it prevents the handler from re-entering the lock on
+// the interrupted thread. Synchronous faults remain deliverable.
+static void actions_lock(sigset_t *previous)
+{
+    sigset_t mask;
+    host_handler_mask(&mask);
+    pthread_sigmask(SIG_BLOCK, &mask, previous);
+    pthread_mutex_lock(&g_actions_lock);
+}
+
+static void actions_unlock(const sigset_t *previous)
+{
+    pthread_mutex_unlock(&g_actions_lock);
+    pthread_sigmask(SIG_SETMASK, previous, NULL);
 }
 // W^X window state at each pending signal delivery, innermost last. Pushed
 // when a guest handler is entered, popped by its sigreturn.
@@ -604,7 +629,7 @@ static int x18_stats_on(void)
 // The runtime's own synchronous faults, absorbed before anything is reported
 // or delivered: the x18 trampolines' sp-alignment faults, MAP_JIT and W^X
 // flips (jit.c, wxsplit.c, subpage.c), copy-on-write of private shared
-// memory (privmap.c), unbased low pointers (gbase.c). True: resume the thread.
+// memory (privmap.rs), unbased low pointers (gbase.rs). True: resume the thread.
 //
 // ONE chain, shared by host_handler and main.c's fault_report (the handler
 // until the guest installs its own action for the signal). They were two
@@ -631,9 +656,9 @@ bool lxrt_absorb_runtime_fault(int dsig, siginfo_t *dinfo, void *uap)
     // An ID register read the rewriter never saw: Darwin traps every
     // `mrs Xt, <ID_AA64*|MIDR_EL1>` and `mrs Xt, CTR_EL0` at EL0. Linux's
     // kernel emulates them under HWCAP_CPUID, and so does this, with the
-    // values the rewriter would have put there (sysreg.c): Xt set, pc past
+    // values the rewriter would have put there (sysreg.rs): Xt set, pc past
     // the instruction. With it the runtime can advertise HWCAP_CPUID
-    // (stack.c), which Wine ARM64 needs before it reads the ID registers into
+    // (stack.rs), which Wine ARM64 needs before it reads the ID registers into
     // HARDWARE\DESCRIPTION\System\CentralProcessor ("CP 4030" and the
     // rest); without them FEX's ARM64EC JIT saw every register as zero, took
     // the host for an ARMv8.0 core without CRC32 and raised #UD on the x86
@@ -653,7 +678,7 @@ bool lxrt_absorb_runtime_fault(int dsig, siginfo_t *dinfo, void *uap)
             return true;
         }
     }
-    // A thread pointer read the rewriter left in place (tls.c, kept ranges:
+    // A thread pointer read the rewriter left in place (tls.rs, kept ranges:
     // BoringSSL's FIPS module) returned Darwin's TPIDR_EL0 and the load
     // through it faulted: substitute the guest's and retry.
     if (lxrt_tlskeep_fixup(dsig, uap))
@@ -712,7 +737,7 @@ bool lxrt_absorb_runtime_fault(int dsig, siginfo_t *dinfo, void *uap)
         uint64_t fpc = u->uc_mcontext->__ss.__pc;
         uint64_t faddr = (uint64_t)(uintptr_t)dinfo->si_addr;
         // A thread faulting on the same address and pc over and over is not
-        // making progress: say once who last changed that page (memlog.c).
+        // making progress: say once who last changed that page (memlog.rs).
         static _Thread_local uint64_t last_fa, last_pc;
         static _Thread_local unsigned repeats;
         // SIGSEGV only: FEX emulates split-lock atomics from SIGBUS, and a
@@ -745,14 +770,14 @@ bool lxrt_absorb_runtime_fault(int dsig, siginfo_t *dinfo, void *uap)
         // A store into a page the guest made read-execute (wxsplit.c, lazy
         // execute): the guest's own -- FEX's self-modifying-code trap, every
         // one of them -- and none of the handlers below can own it: the page
-        // is private anonymous memory (not privmap.c's file pages), not in
+        // is private anonymous memory (not privmap.rs's file pages), not in
         // the low window (lowptr), not 4 KiB-tracked (wxsplit.c declined
         // those before it looked), and jit_report_freed only reports.
         if (lxrt_wx_take_guest_fault())
             return false;
         lxrt_jit_report_freed(fpc, faddr, uap);
         // A store into a copy-on-write page of a private shared-memory
-        // mapping (privmap.c). WnR, ESR bit 6, on a data abort.
+        // mapping (privmap.rs). WnR, ESR bit 6, on a data abort.
         uint32_t fesr = u->uc_mcontext->__es.__esr;
         bool fwrite = ((fesr >> 26) == 0x24 || (fesr >> 26) == 0x25) && (fesr & (1u << 6));
         if (lxrt_privmap_handle_fault(faddr, fwrite))
@@ -1174,11 +1199,12 @@ static void host_handler(int dsig, siginfo_t *dinfo, void *uap)
         }
     }
 
-    pthread_mutex_lock(&g_actions_lock);
+    sigset_t actions_mask;
+    actions_lock(&actions_mask);
     struct guest_sigaction act = g_actions[lsig];
     if (act.flags & LINUX_SA_RESETHAND)
         g_actions[lsig].handler = 0;
-    pthread_mutex_unlock(&g_actions_lock);
+    actions_unlock(&actions_mask);
 
     if (act.handler == 0 || act.handler == 1) {
         // Linux force_sig_fault: a SIGSEGV, SIGBUS or SIGTRAP raised by the
@@ -1190,10 +1216,11 @@ static void host_handler(int dsig, siginfo_t *dinfo, void *uap)
         bool forced = act.handler == 1 && (dsig == SIGSEGV || dsig == SIGBUS || dsig == SIGTRAP) &&
                       raised_by_instruction(dsig, dinfo, uap);
         if (forced) {
-            pthread_mutex_lock(&g_actions_lock);
+            sigset_t actions_mask;
+            actions_lock(&actions_mask);
             if (g_actions[lsig].handler == 1)
                 g_actions[lsig].handler = 0;
-            pthread_mutex_unlock(&g_actions_lock);
+            actions_unlock(&actions_mask);
             if (lxrt_trace_on())
                 fprintf(lxrt_trace_stream(), "[lxrt] ignored guest fault forced: darwin %d addr %p\n",
                         dsig, dinfo ? dinfo->si_addr : NULL);
@@ -1235,10 +1262,11 @@ static void host_handler(int dsig, siginfo_t *dinfo, void *uap)
         // delivered unblocked, the guest's SIG_DFL means its default action
         // -- terminate or stop, as Linux does when no thread blocks it; a
         // signalfd takes only blocked ones.
-        pthread_mutex_lock(&g_actions_lock);
+        sigset_t actions_mask;
+        actions_lock(&actions_mask);
         bool kept_default = act.handler == 0 && g_keep[lsig] > 0 && !default_ignores(lsig) &&
                             lsig != 9 && lsig != 19;
-        pthread_mutex_unlock(&g_actions_lock);
+        actions_unlock(&actions_mask);
         if (kept_default && !is_rt(lsig)) {
             signal(dsig, SIG_DFL);
             raise(dsig);
@@ -1421,7 +1449,7 @@ static void host_handler(int dsig, siginfo_t *dinfo, void *uap)
     if (lxrt_ids_on() && lsig != 4 && lsig != 5 && lsig != 7 &&
         lsig != 8 && lsig != 11) {
         int sender = 0;
-        int mytid = lxrt_gettid();
+        int mytid = lxrt_gettid_signal_safe();
         if (mytid >= 2 && mytid < 65536)
             sender = atomic_exchange(&g_xsig_sender[mytid], 0);
         if (!sender && dinfo && dinfo->si_pid > 0)
@@ -1436,7 +1464,7 @@ static void host_handler(int dsig, siginfo_t *dinfo, void *uap)
     // A siginfo the sender queued with it (rt_tgsigqueueinfo): that one.
     {
         struct linux_siginfo q;
-        if (qinfo_take(lxrt_gettid(), lsig, &q)) {
+        if (qinfo_take(lxrt_gettid_signal_safe(), lsig, &q)) {
             f->info = q;
             f->info.si_signo = lsig;
         }
@@ -1573,10 +1601,13 @@ static void host_handler(int dsig, siginfo_t *dinfo, void *uap)
                 mach_vm_size_t got = 0;
                 if (mach_vm_read_overwrite(mach_task_self(), saved_pc, 4, (mach_vm_address_t)(uintptr_t)&insn, &got) != KERN_SUCCESS)
                     insn = 0xffffffffu;
-                lxrt_fault_note("guest signal %d (code %d) at pc 0x%llx [%s] insn %08x, address 0x%llx, lr 0x%llx",
-                                lsig, dinfo->si_code, (unsigned long long)saved_pc, where, insn,
-                                (unsigned long long)(uintptr_t)dinfo->si_addr,
-                                (unsigned long long)saved_regs[30]);
+                char fault_line[512];
+                snprintf(fault_line, sizeof fault_line,
+                         "guest signal %d (code %d, pid %d) at pc 0x%llx [%s] insn %08x, address 0x%llx, lr 0x%llx",
+                         lsig, dinfo->si_code, (int)getpid(), (unsigned long long)saved_pc, where, insn,
+                         (unsigned long long)(uintptr_t)dinfo->si_addr,
+                         (unsigned long long)saved_regs[30]);
+                lxrt_fault_note(fault_line);
             }
         }
         if (lxrt_trace_on() && (lsig == 4 || lsig == 7 || lsig == 11)) {
@@ -1692,7 +1723,7 @@ static void host_handler(int dsig, siginfo_t *dinfo, void *uap)
                     int n = snprintf(line, sizeof line, "[lxrt] guest fault x86-64: cr2 0x%llx rax 0x%llx rdi 0x%llx rsi 0x%llx\n"
                                      "[lxrt]   x86 tid %d rip 0x%llx rsp 0x%llx stack:",
                                      (unsigned long long)g64[22], (unsigned long long)g64[13],
-                                     (unsigned long long)g64[8], (unsigned long long)g64[9], lxrt_gettid(),
+                                     (unsigned long long)g64[8], (unsigned long long)g64[9], lxrt_gettid_signal_safe(),
                                      (unsigned long long)g64[16], (unsigned long long)g64[15]);
                     uint64_t w[512] = {0};
                     if (mach_vm_read_overwrite(mach_task_self(), g64[15], sizeof w, (mach_vm_address_t)(uintptr_t)w,
@@ -1929,7 +1960,8 @@ long lxrt_rt_sigaction(int lsig, const void *uact, void *uoldact, size_t sigsets
     if (sigsetsize != 8)
         return LERR(EINVAL);   // Linux checks this; a mismatch means a bad caller
 
-    pthread_mutex_lock(&g_actions_lock);
+    sigset_t actions_mask;
+    actions_lock(&actions_mask);
     struct guest_sigaction old = g_actions[lsig];
     if (uact) {
         const struct linux_sigaction_arg *a = uact;
@@ -1938,7 +1970,7 @@ long lxrt_rt_sigaction(int lsig, const void *uact, void *uoldact, size_t sigsets
         g_actions[lsig].restorer = a->restorer;
         g_actions[lsig].mask = a->mask;
     }
-    pthread_mutex_unlock(&g_actions_lock);
+    actions_unlock(&actions_mask);
 
     if (uoldact) {
         struct linux_sigaction_arg *o = uoldact;
@@ -2000,9 +2032,10 @@ static long apply_host_action(int lsig, int dsig)
     struct sigaction sa;
     memset(&sa, 0, sizeof sa);
     // SIG_DFL or SIG_IGN, as the guest sees it.
-    pthread_mutex_lock(&g_actions_lock);
+    sigset_t actions_mask;
+    actions_lock(&actions_mask);
     bool kept = g_keep[lsig] > 0;
-    pthread_mutex_unlock(&g_actions_lock);
+    actions_unlock(&actions_mask);
     bool no_handler = g_actions[lsig].handler == 0 || g_actions[lsig].handler == 1;
     if (no_handler && kept && dsig != SIGSEGV && dsig != SIGBUS && dsig != SIGTRAP) {
         // A signalfd watches it (g_keep): the runtime's handler, so a blocked
@@ -2022,7 +2055,7 @@ static long apply_host_action(int lsig, int dsig)
     } else if (no_handler && (dsig == SIGSEGV || dsig == SIGBUS)) {
         // The runtime's own faults arrive as SIGSEGV/SIGBUS whatever the
         // guest's disposition: MAP_JIT and W^X flips (jit.c, wxsplit.c,
-        // subpage.c), copy-on-write of private shared memory (privmap.c).
+        // subpage.c), copy-on-write of private shared memory (privmap.rs).
         // With the host at SIG_DFL each of them killed the process instead:
         // every webhelper renderer (forked from the zygote, SIGBUS/SIGSEGV
         // at their default) died on its first JIT page, killed by the
@@ -2073,13 +2106,14 @@ void lxrt_signal_keep(int lsig, int delta)
     int dsig = lxrt_signo_to_darwin(lsig);
     if (!dsig || dsig == SIGKILL || dsig == SIGSTOP)
         return;
-    pthread_mutex_lock(&g_actions_lock);
+    sigset_t actions_mask;
+    actions_lock(&actions_mask);
     int before = g_keep[lsig];
     g_keep[lsig] += delta;
     if (g_keep[lsig] < 0)
         g_keep[lsig] = 0;
     bool changed = (before > 0) != (g_keep[lsig] > 0);
-    pthread_mutex_unlock(&g_actions_lock);
+    actions_unlock(&actions_mask);
     if (changed)
         apply_host_action(lsig, dsig);
 }
@@ -2493,9 +2527,10 @@ static bool sync_self_eligible(int lsig)
     if (on < 0) { const char *e = getenv("LXRT_SYNC_SELF_SIGNAL"); on = !(e && e[0] == '0'); }
     if (!on || !lxrt_sync_regs || lsig != 12 || !lxrt_signo_to_darwin(lsig))
         return false;
-    pthread_mutex_lock(&g_actions_lock);
+    sigset_t actions_mask;
+    actions_lock(&actions_mask);
     struct guest_sigaction act = g_actions[lsig];
-    pthread_mutex_unlock(&g_actions_lock);
+    actions_unlock(&actions_mask);
     return act.handler > 1 && (act.flags & LINUX_SA_SIGINFO);
 }
 

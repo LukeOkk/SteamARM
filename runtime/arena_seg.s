@@ -1,4 +1,4 @@
-// The address space kept for the guest's fixed mappings (runtime/arena.c): a
+// The address space kept for the guest's fixed mappings (runtime/arena.rs): a
 // zero-fill segment with no access, so the kernel maps it when it loads the
 // runtime -- before libmalloc, whose first regions land at a random place in
 // this same part of the address space, has run a single instruction. It

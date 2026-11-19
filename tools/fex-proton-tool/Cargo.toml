@@ -1,0 +1,8 @@
+[package]
+name = "steamarm-fex-proton-tool"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "steamarm-fex-proton-tool"
+path = "src/main.rs"

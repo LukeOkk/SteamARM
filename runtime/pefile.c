@@ -5,7 +5,7 @@
 // as the TEB pointer -- which Darwin clears. The runtime's x18 pass
 // (rewrite.c x18_site) runs only where it knows instructions are: inside
 // the code windows a mapping is told about (lxrt_elf_exec_sections) and
-// inside a registered function table (elfsect.c lxrt_elf_in_function). For
+// inside a registered function table (elfsect.rs lxrt_elf_in_function). For
 // an ELF both come from the file; a PE mapping got neither, its x18 sites
 // stayed live, and Wine's ARM64X ntdll died on [x18 + 0x60] with x18 = 0
 // (MEASURED 2026-10-06, benchmarks/stage57-wine-arm64-native.txt).

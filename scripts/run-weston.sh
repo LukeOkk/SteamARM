@@ -27,7 +27,17 @@
 # Stops only the Weston it started (the PID file in the socket directory,
 # checked to be lxrun running /usr/bin/weston on this socket).
 set -u
-cd "$(dirname "$0")/.." || exit 1
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+cd "$SCRIPT_DIR/.." || exit 1
+PROJECT_ROOT="${STEAMARM_PROJECT_ROOT:-$PWD}"
+SAFEGUARD_BIN="${STEAMARM_SAFEGUARD_BIN:-}"
+if [ ! -x "$SAFEGUARD_BIN" ]; then
+    if [ -x "$PROJECT_ROOT/build/steamarm-safeguard" ]; then
+        SAFEGUARD_BIN="$PROJECT_ROOT/build/steamarm-safeguard"
+    else
+        SAFEGUARD_BIN="$SCRIPT_DIR/../steamarm-safeguard"
+    fi
+fi
 STATE="${STEAMARM_STATE:-$(d="$HOME/Developer/SteamARM-roots"; [ -d "$d" ] || [ ! -d "$HOME/SteamARM-roots" ] || d="$HOME/SteamARM-roots"; echo "$d")}"
 ROOT="${WESTON_ROOT:-$STATE/westonroot}"
 XDG="${WESTON_XDG:-/dev/shm/steamarm-wayland}"
@@ -70,7 +80,9 @@ start)
     [ -x "$ROOT/usr/bin/weston" ] || { echo "run-weston: no Weston root at $ROOT (scripts/mkwestonroot.sh)" >&2; exit 1; }
     [ -x "$LXRUN" ] || { echo "run-weston: no $LXRUN (make lxrt)" >&2; exit 1; }
     if p=$(weston_pid); then echo "run-weston: already running (pid $p, $XDG/$SOCKET)"; exit 0; fi
-    [ -n "${STEAMARM_NO_SAFEGUARD:-}" ] || scripts/safeguard.sh start >/dev/null
+    if [ -z "${STEAMARM_NO_SAFEGUARD:-}" ] && [ -x "$SAFEGUARD_BIN" ]; then
+        STEAMARM_PROJECT_ROOT="$PROJECT_ROOT" "$SAFEGUARD_BIN" start >/dev/null
+    fi
     # Weston wants its runtime directory private (0700), as logind makes it.
     mkdir -p "$HOSTXDG" && chmod 700 "$HOSTXDG"
     backend=(--backend=x11 --width="${size%x*}" --height="${size#*x}")

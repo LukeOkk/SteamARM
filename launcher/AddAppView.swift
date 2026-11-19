@@ -48,7 +48,7 @@ struct AddAppView: View {
         if isWindows { return .legacyX86 }
         if let elf = stagedELF {
             guard let arch = elf.architecture else { return nil }
-            return arch == .aarch64 ? .armroot : .legacyX86
+            return arch == .aarch64 ? .arm64 : .legacyX86
         }
         return .legacyX86
     }
@@ -175,10 +175,10 @@ struct AddAppView: View {
             LabeledContent("Arquitectura", value: architectureDescription)
             LabeledContent("Se instalará en", value: targetEnvironment.map { "\($0.name)  ·  opt/apps" } ?? "No disponible")
             if stagedELF?.architecture == .aarch64 {
-                Text("Reconstruir la raíz ARM64 con scripts/mkarmroot.sh conserva sus apps: se queda con opt/apps y tmp/ de la raíz anterior.")
+                Text("Las apps ARM64 usan la raíz oficial de Steam Frame. Reconstruirla con scripts/mkframeroot.sh conserva opt/apps y tmp/.")
                     .font(.caption).foregroundStyle(.secondary)
-                if !FileManager.default.fileExists(atPath: Paths.armRoot.path) {
-                    Text("No hay raíz ARM64 instalada (scripts/mkarmroot.sh).")
+                if !FileManager.default.fileExists(atPath: Paths.arm64Root.path) {
+                    Text("No hay raíz de Steam Frame instalada; ejecuta Instalar en SteamARM.")
                         .font(.caption).foregroundStyle(.red)
                 }
             }

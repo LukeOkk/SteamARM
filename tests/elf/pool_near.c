@@ -4,7 +4,7 @@
 // 16 KiB) aligned address, so it takes the sub-page path. 160 MiB of
 // reservation below leaves no free page within branch range of the first
 // 32 MiB slice except the hole between LOAD0 and LOAD1, which the runtime
-// may borrow (elfsect.c lxrt_elf_gap_before_exec, rewrite.c alloc_pool_near).
+// may borrow (elfsect.rs lxrt_elf_gap_before_exec, rewrite.c alloc_pool_near).
 // Without it the svc at the start of the segment is poisoned (MEASURED on
 // libcef before the gap island: "13 svc sites, 0 rewritten, 13 poisoned").
 // The file has no section headers, so only svc/TLS sites are rewritten.

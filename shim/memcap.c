@@ -5,7 +5,7 @@
 // of the Mac's RAM. DXVK and VKD3D-Proton size their caches and the budget
 // they report to games (DXGI VideoMemory, QueryVideoMemoryInfo) from the heap
 // size and VK_EXT_memory_budget. Capping both here caps them all; DXVK also
-// gets dxgi.maxDeviceMemory from scripts/settings-env.py.
+// gets dxgi.maxDeviceMemory from steamarm-settings-env.
 #include <stdint.h>
 #include <vulkan/vulkan.h>
 

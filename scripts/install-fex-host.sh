@@ -37,15 +37,23 @@ for p in $idle_servers; do kill "$p" 2>/dev/null && log "stopped an idle FEXServ
 
 put() { # source destination backup label
     local src="$1" dst="$2" label="$3" old new
-    [ -f "$dst" ] || die "missing installed file $dst"
-    old="$(sha256 "$dst")"
     new="$(sha256 "$src")"
-    [ "$old" = "$new" ] && { log "current $dst"; return 0; }
-    mkdir -p "$BACKUP"
-    cp -p "$dst" "$BACKUP/$label"
+    if [ -f "$dst" ]; then
+        old="$(sha256 "$dst")"
+        [ "$old" = "$new" ] && { log "current $dst"; return 0; }
+        mkdir -p "$BACKUP"
+        cp -p "$dst" "$BACKUP/$label"
+    else
+        old=missing
+        mkdir -p "$(dirname "$dst")"
+    fi
     cp -p "$src" "$dst.new.$$"
     mv -f "$dst.new.$$" "$dst"
-    log "$dst: $old -> $new; previous saved as $BACKUP/$label"
+    if [ "$old" = missing ]; then
+        log "$dst: installed $new"
+    else
+        log "$dst: $old -> $new; previous saved as $BACKUP/$label"
+    fi
 }
 
 log "FEX binaries -> $LXRT_ROOT"

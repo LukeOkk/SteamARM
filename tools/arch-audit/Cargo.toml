@@ -1,0 +1,8 @@
+[package]
+name = "steamarm-arch-audit"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "steamarm-arch-audit"
+path = "src/main.rs"

@@ -6,17 +6,14 @@ follows the layout of the [Ryujinx](https://ryujinx.app) emulator's.
 
 ## The launcher
 
-- **Steam** starts the Linux Steam client (the x86 client under FEX: the
-  working route). Its windows are ordinary macOS windows (a rootless X
-  server). The card shows **Detener** while it runs.
-- **Steam ARM64 (experimental)** and **Steam ARM64 · Steam Frame
-  (experimental)** start Valve's native arm64 client with no FEX, on two
-  different ARM64 roots. It reaches its "Sign in to Steam" window
-  (MEASURED, `benchmarks/stage23-*.txt`); sign-in, the library, downloads
-  and games under it are not verified, and Proton ARM64 does not run on
-  macOS. Neither root nor the client is set up by **Instalar**: each card
-  is disabled, with the reason, until they exist
-  (`docs/STEAM_ARM64_BRINGUP.md`). Opening one asks for confirmation first.
+- **SteamARM** starts Valve's native ARM64 client from the Steam Frame
+  SteamOS/Arch root, with no FEX. Its windows are ordinary macOS windows (a
+  rootless X server). The card shows **Detener** while it runs. It reaches
+  the sign-in window, but account sign-in, downloads and games still need
+  testing; **Instalar** derives the root and installs this client from the
+  licensed image (`docs/STEAM_FRAME_IMAGE.md`).
+- The x86 Steam client under FEX remains a compatibility path for software
+  without an ARM64 route. The Frame root stays the ARM64 base.
 - **+** adds other Linux programs: a `.tar.gz`/`.zip`/AppImage you pick, or
   a known installer (Heroic, Prism Launcher). **Heroic Games Launcher
   (ARM64, experimental)** installs Heroic's linux-arm64 build into the ARM64
@@ -31,7 +28,7 @@ follows the layout of the [Ryujinx](https://ryujinx.app) emulator's.
   it as a favourite, or delete it (added apps only).
 - **+ → Añadir APK (Android)** reads an Android `.apk` (name, icon, package,
   version, SDK levels, native code, permissions, signing schemes) and
-  installs it into `~/SteamARM-roots/android/` (`scripts/android-pm.py`). An
+  installs it into `~/SteamARM-roots/android/` (`steamarm-android-pm`). An
   update keeps the app's data and is refused when the new APK is signed by
   another certificate or is an older version. **Abrir** starts SteamARM's
   Android session (Android 11 x86-64 under FEX, no VM,
@@ -64,11 +61,11 @@ affects games (the settings window reminds you).
 
 | Section | What it controls |
 |---|---|
-| **Interfaz** | The **primary Steam** (Steam ARM64 · Steam Frame by default, then Steam ARM64 on the Fedora root, then the x86_64 client under FEX: when the chosen one cannot start on this Mac the next one is used, and Settings says which); start that Steam when the launcher opens; ask before stopping; the application backend: native windows or a VNC desktop, and its resolution (Lightning JIT and Apple Hypervisor are not listed: neither exists in this tree, and an option that can never be chosen is not shown; they would appear by themselves if they ever became usable. No choice uses a virtual machine); the source folder the launcher runs scripts from |
+| **Interfaz** | The **primary Steam** (Steam ARM64 · Steam Frame by default, then the x86_64 client under FEX; when the Frame client cannot start, the x86 client is used); start that Steam when the launcher opens; ask before stopping; the application backend: native windows or a VNC desktop, and its resolution (Lightning JIT and Apple Hypervisor are not listed: neither exists in this tree, and an option that can never be chosen is not shown; they would appear by themselves if they ever became usable. No choice uses a virtual machine); the source folder the launcher runs scripts from |
 | **Entrada** | Controllers, one page per player (below) |
 | **Sistema** | Language and time zone of Linux programs; V-Sync (AUTO / ON / OFF); **DRAM** and **VRAM** limits; Proton synchronization (AUTO / default / MSync / fsync / esync / NTSYNC: MSync is disabled; fsync, esync and NTSYNC are experimental, only an explicit choice turns them on, and each needs a Proton that has it -- NTSYNC is /dev/ntsync, emulated by the runtime, used by Proton Experimental and Hotfix); what to do when a setting cannot work for an app (AUTO, ESTRICTO, PREGUNTAR) |
 | **Procesador** | FEX options: on-disk translation cache (experimental), x86 memory-ordering emulation (TSO full/fast/off), multiblock, self-modifying code detection, reduced-precision x87; the Proton and runtime tools installed |
-| **Gráficos** | The graphics engine: AUTO (MoltenVK), Vulkan (MoltenVK), Vulkan (KosmicKrisp: experimental, offered only when Homebrew's Mesa is installed and the installed Vulkan shim can load it) or OpenGL (WineD3D: experimental, Wine's own Direct3D on OpenGL from Mesa's Zink over MoltenVK; offered when Zink is in the x86 root and the native X server was built with direct GLX by `scripts/setup.sh`). Shader cache, anisotropic filtering, **edge smoothing (MSAA 2x/4x/8x, forced by DXVK on Direct3D 9 games; Direct3D 10/11/12 games choose it in-game)**, **resolution scale (experimental: Wine's display-mode emulation in the game prefixes; a lower resolution chosen in the game is drawn at that size and enlarged over the whole screen)**, **scaling filter for it (AUTO, the default: Apple MetalFX spatial where the Vulkan driver exports its Metal objects -- MoltenVK, SteamARM's KosmicKrisp -- and FSR 1.0 elsewhere, with a render size recommended for the chip by `scripts/settings-env.py --upscaling`; bilinear; AMD FidelityFX Super Resolution 1.0 with an FSR sharpness slider; Apple MetalFX spatial; whole pixels) -- Vulkan and Direct3D games through DXVK and VKD3D, and native Vulkan games, also per app**, frame-rate limit, DXVK HUD, Metal HUD |
+| **Gráficos** | The graphics engine: AUTO (MoltenVK), Vulkan (MoltenVK), Vulkan (KosmicKrisp: experimental, offered only when Homebrew's Mesa is installed and the installed Vulkan shim can load it) or OpenGL (WineD3D: experimental, Wine's own Direct3D on OpenGL from Mesa's Zink over MoltenVK; offered when Zink is in the x86 root and the native X server was built with direct GLX by `scripts/setup.sh`). Shader cache, anisotropic filtering, **edge smoothing (MSAA 2x/4x/8x, forced by DXVK on Direct3D 9 games; Direct3D 10/11/12 games choose it in-game)**, **resolution scale (experimental: Wine's display-mode emulation in the game prefixes; a lower resolution chosen in the game is drawn at that size and enlarged over the whole screen)**, **scaling filter for it (AUTO, the default: Apple MetalFX spatial where the Vulkan driver exports its Metal objects -- MoltenVK, SteamARM's KosmicKrisp -- and FSR 1.0 elsewhere, with a render size recommended for the chip by `steamarm-settings-env --upscaling`; bilinear; AMD FidelityFX Super Resolution 1.0 with an FSR sharpness slider; Apple MetalFX spatial; whole pixels) -- Vulkan and Direct3D games through DXVK and VKD3D, and native Vulkan games, also per app**, frame-rate limit, DXVK HUD, Metal HUD |
 | **Runtime** | Read-only: every backend and capability, its state and reason, and what was detected on this Mac |
 | **Sonido** | Sound on/off and volume |
 | **Atajos** | Keyboard shortcuts: screenshot (F8 by default, saved to `~/Pictures/SteamARM`), stop the running program, toggle the Metal HUD. Shortcuts while a game has focus need the Accessibility permission, and screenshots need Screen Recording |
@@ -196,7 +193,7 @@ your checkout):
 |---|---|
 | `scripts/run-steam.sh` / `--stop` | start / stop Steam |
 | `scripts/run-app.sh` | what the launcher runs for any program |
-| `scripts/safeguard.sh status` | the memory guard |
+| `build/steamarm-safeguard status` | the Rust memory guard |
 | `scripts/audio.sh status` | sound |
 | `scripts/input.sh status` | the controller service and its devices |
 | `scripts/setup.sh <step>` | re-run one setup step (`--list`) |

@@ -26,7 +26,7 @@ in `docs/APPLICATION_MANAGER.md`.
   `build/lxrun` process except Xvnc and FEXServer).
 - Steam guest command: `/bin/bash /tmp/fexhome/.local/share/Steam/steam.sh -noverifyfiles`
   with DISPLAY=:2 (native) or :1 (vnc) LXRT_ROOT=/tmp/lxrt-steamroot FEX_ROOTFS=/.
-  LXRT_GUEST_FAULTS=1 is no longer forced: `scripts/settings-env.py` sets it
+  LXRT_GUEST_FAULTS=1 is no longer forced: `steamarm-settings-env` sets it
   only while the "Informar fallos del invitado" setting is on (the default).
 - Swift 6.4 / Xcode 27. SDL2 (sdl2-compat) at /opt/homebrew/opt/sdl2
   (include/SDL2, lib/libSDL2-2.0.0.dylib). unsquashfs and bsdtar available.
@@ -46,7 +46,7 @@ in `docs/APPLICATION_MANAGER.md`.
   (`tell application id "org.steamarm.X11" to activate`); vnc mode opens
   vnc://127.0.0.1:5901. The mode is the one the app was started with
   (~/SteamARM-roots/launcher/running.display), not the current setting.
-  Poll every 2 s: a session run through scripts/session.py ends when its
+  Poll every 2 s: a session run through steamarm-session ends when its
   wrapper has exited and written running.status (or, if the wrapper was
   killed, when the program's process group is empty); what it left behind in
   its session (the native client's orphaned webhelper zygotes) is stopped by

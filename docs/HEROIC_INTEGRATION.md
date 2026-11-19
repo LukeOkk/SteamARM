@@ -1,8 +1,10 @@
 # Heroic Games Launcher on SteamARM
 
-**Status, 2026-09-29 (stage 24).** Heroic 2.22.3 runs as a **native
+**Status, 2026-09-29 (stage 24).** Heroic 2.22.3 was measured as a **native
 linux-arm64 program** under lxrun, from the Fedora ARM64 root: no FEX, no
-VM. Its window opens in about 4.5 s, its pages work, and it closes cleanly
+VM. The launcher now installs it into the Steam Frame root by default; that
+root contains its GTK, secret-service, notification and Python dependencies.
+Its original window opened in about 4.5 s, its pages worked, and it closed cleanly
 and opens again (MEASURED, `benchmarks/stage24-heroic.txt`). Signing in to a
 store, downloads and games are **not verified** (no account was used), and
 Amazon Games cannot work yet. The launcher installs it as **Heroic Games
@@ -33,8 +35,9 @@ from official release files only, each checked against a pinned sha256:
 
 1. Electron 43.1.1 linux-arm64, with `electron` renamed `heroic`;
 2. `resources/` of the official Heroic 2.22.3 linux-x64 tarball, whose
-   `app.asar` header is re-pointed from the x64 helpers to arm64 ones
-   (`scripts/heroic-asar.py`; the archive's data is copied unchanged);
+   `app.asar` header is re-pointed from the x64 helpers to arm64 ones by the
+   bundled Rust utility `steamarm-heroic-asar`; the archive's data is copied
+   unchanged;
 3. the arm64 helpers from their own releases.
 
 MEASURED: Heroic built from its source tag with its own toolchain
@@ -49,13 +52,10 @@ SteamARM downloads them; it does not bundle them.
 
 Electron's binary links `libgtk-3.so.0`; Chromium dlopens libsecret and
 libnotify; legendary and gogdl are Python zipapps (`#!/usr/bin/env python3`,
-cpython 3.14 modules). `scripts/mkarmroot.sh` now seeds `libgtk-3.so.0`,
-`libsecret-1.so.0`, `libnotify.so.4` and `python3` (Fedora 43: gtk3 3.24.52,
-python3 3.14.7): 24 packages more, all additions, same repodata (MEASURED).
-A rebuild keeps `opt/apps` and `tmp/`, so an installed Heroic and its home
-survive it. A root built before this lacks them: the installer refuses and
-the launcher shows the entry as unavailable, with the reason (VERIFIED IN
-SOURCE, `HeroicARM64.missing`). The Steam Frame root already has all four.
+cpython 3.14 modules). The Steam Frame image already contains
+`libgtk-3.so.0`, `libsecret-1.so.0`, `libnotify.so.4` and `python3`. Its
+derived root keeps `opt/apps` and `tmp/` on rebuild. The installer checks
+these files and refuses a root missing them (`HeroicARM64.missing`).
 
 The Electron images are aligned to 64 KiB, so Heroic runs with the host's
 16 KiB page (no `LXRT_GUEST_PAGE=4096`).
@@ -86,7 +86,7 @@ Electron's symbols, none in V8's embedded builtins (MEASURED).
 The launcher entry (`HeroicARM64` in `launcher/ApplicationCore.swift`):
 
 ```
-root     /tmp/lxrt-armroot                       (aarch64, no translator)
+root     /tmp/lxrt-arm64root                     (Steam Frame aarch64, no translator)
 command  /opt/apps/heroic/Heroic-2.22.3-linux-arm64/heroic
          --no-sandbox --disable-gpu
 env      HOME_IN_GUEST=/tmp/heroichome  LXRT_X18_ALL_TEXT=/opt/apps/heroic/
@@ -169,14 +169,15 @@ default build and a quiet Mac), Settings route, every process gone
 ## ARM64 plan
 
 1. Done: native arm64 Heroic from official release files, installed by the
-   launcher into the ARM64 root (this page).
+   launcher into the Steam Frame root (this page). Its startup there remains
+   experimental; the stage 24 timing was measured on Fedora.
 2. Ask upstream to publish the linux arm64 build its CI already makes (a
-   release asset instead of a 14-day artifact); the installer then takes it
-   directly and `scripts/heroic-asar.py` goes away.
+   release asset instead of a 14-day artifact); the installer can then take
+   it directly without retargeting `app.asar`.
 3. Done (stage 28): TurboFan's crash found in the runtime and fixed;
    `--no-opt` dropped.
 4. nile: a PIE build upstream, or its Python source in the root.
-5. A program-first stop in `scripts/session.py`, for every Chromium-based
+5. A program-first stop in `steamarm-session`, for every Chromium-based
    app.
 6. Games from Heroic: Wine/Proton through FEX for the x86 payload, as for
    Steam (`docs/ARM64_FIRST_MIGRATION.md`, step 13).

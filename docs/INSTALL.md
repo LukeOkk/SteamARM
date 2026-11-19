@@ -18,11 +18,17 @@ source.
 | macOS | 14 Sonoma or later |
 | Disk | about 25 GB free in your home folder (plus room for games) |
 | Tools | Xcode Command Line Tools and [Homebrew](https://brew.sh) |
-| Time | 20–60 minutes the first time: it compiles FEX and downloads Linux packages and Steam |
+| Steam Frame base | the official recovery image, downloaded by you after accepting [Valve's license](https://store.steampowered.com/steamos/download/?ver=steamframe) |
+| Time | 20–60 minutes the first time: it extracts the Steam Frame base, compiles FEX and downloads the x86 compatibility root and Steam |
 
 Install the Command Line Tools with `xcode-select --install` if you don't
 have them. For Homebrew, follow the instructions at <https://brew.sh>. The
 installer checks both for you and says what's missing.
+
+The source archive includes SteamARM's Rust crates in `vendor/`. Cargo is
+configured for offline, locked builds, so compiling SteamARM does not contact
+a crate registry. Setup still downloads Homebrew formulae, upstream projects
+such as FEX and Linux packages needed by the runtime.
 
 ## 1. Download
 
@@ -61,16 +67,29 @@ SteamARM"** with an **Instalar** button. Clicking it opens Terminal and runs
 
 1. checks the Mac (Apple Silicon, Command Line Tools, Homebrew, free space);
 2. installs the Homebrew formulae it builds with (LLVM, CMake, Ninja,
-   MoltenVK, SDL, mingw-w64, PulseAudio…);
+   KosmicKrisp/Metal 4 when supported, MoltenVK fallback, SDL, mingw-w64,
+   PulseAudio…);
 3. builds the runtime (`lxrun`), the Vulkan shim, the launcher and the
    controller service;
-4. clones and builds [FEX](https://github.com/FEX-Emu/FEX) (x86 → ARM64) and
-   its Vulkan thunks, with SteamARM's patches;
-5. builds XQuartz's X server and quartz-wm (windows for Linux programs);
-6. assembles the Linux roots: Fedora packages for the aarch64 side, Ubuntu
-   24.04 x86-64 for FEX, and the root Steam runs in;
-7. installs the Steam client (Valve's `steam_latest.deb` bootstrap);
-8. runs quick self-tests.
+4. extracts the Steam Frame image from `~/Downloads` and derives the required
+   case-sensitive ARM64 root. The image may be `.img` or `.img.bz2`; set
+   `STEAMARM_FRAME_IMAGE` to use another path;
+5. installs the native ARM64 Steam client from the same licensed image into
+   the Frame root;
+6. builds [FEX](https://github.com/FEX-Emu/FEX) (x86 → ARM64) against that
+   SteamOS/Arch root, then builds its Vulkan thunks with SteamARM's patches;
+7. builds XQuartz's X server and quartz-wm (windows for Linux programs);
+8. assembles the x86 compatibility roots from FEX's Ubuntu 24.04 image and
+   merges them with the Steam Frame base. Fedora is no longer used as the
+   ARM64 build or runtime base;
+9. installs the x86 Steam client bootstrap when the compatibility client is
+   needed;
+10. runs quick self-tests.
+
+SteamARM does not package or redistribute Valve's recovery image. Download it
+from Valve's page above, accept its license, and leave the image in Downloads.
+The installer extracts it locally and keeps the derived root in
+`~/Developer/SteamARM-roots/steamframe-root.sparsebundle`.
 
 If it stops (network error, not enough space, Terminal closed), click
 **Instalar** again. Every step skips what is already done.
@@ -95,7 +114,7 @@ sign-in window.
 | `/Applications/SteamARM.app` | the launcher |
 | `~/Library/Application Support/SteamARM/src` | the source the app unpacked, and what setup builds in it (`build/`) |
 | `~/Developer/SteamARM-build` | FEX, its thunks, XQuartz, package caches |
-| `~/Developer/SteamARM-roots` | the Linux roots, Steam and your games (`steamroot/`), launcher settings (`launcher/`), logs (`logs/`) |
+| `~/Developer/SteamARM-roots` | Steam Frame base (`steamframe-root.sparsebundle`), x86 Linux roots, Steam and your games (`steamroot/`), launcher settings (`launcher/`), logs (`logs/`) |
 
 An install made before 0.3.74 keeps using `~/SteamARM-build` and
 `~/SteamARM-roots`; to move it, quit SteamARM and Steam and move both folders
@@ -108,7 +127,9 @@ Homebrew itself installs.
 
 ## Updating
 
-Install the new .dmg over the old app. On its first start the launcher
+In **Ajustes → Actualizaciones de SteamARM**, click **Buscar actualizaciones**.
+When a newer stable release exists, click its download link, open the .dmg,
+and replace SteamARM in Applications. On its first start the launcher
 unpacks the newer source over the old copy. Then click **Instalar** (shown
 again if something needs rebuilding), or run `scripts/setup.sh` from that
 folder. Your Steam library and settings are kept.

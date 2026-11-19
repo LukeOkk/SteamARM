@@ -402,7 +402,7 @@ static void follow_window(VkSurfaceKHR surface)
 //
 // Render scale (LXRT_VK_RENDER_SCALE, 0.5-1; the game tool sets it for the
 // game only, from the launcher's render scale, "auto" being the chip's
-// recommendation, scripts/settings-env.py upscaling_policy): a game whose
+// recommendation, steamarm-settings-env upscaling_policy): a game whose
 // window covers its screen (fullscreen, borderless or not) is told an extent
 // that much smaller, renders at it, and the shim enlarges its picture to the
 // window with the scaling filter (MetalFX where the driver exports its Metal

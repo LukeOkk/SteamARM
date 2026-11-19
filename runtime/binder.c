@@ -142,7 +142,7 @@ static bool gcopy(void *dst, const void *src, size_t n)
 // -- binder_write_read's buffers, a transaction's data and offsets, a PTR
 // object's buffer -- are its own, 32 bits in 64-bit fields (Android's binder
 // ABI on a 64-bit kernel). Below 4 GiB an address is always a guest one on
-// this host (gbase.c's rule), so the base is added where this file reads or
+// this host (gbase.rs's rule), so the base is added where this file reads or
 // writes through such an address. The other way, the hub is told the
 // receive buffer's guest address (lxrt_binder_mmap), so every address it
 // hands back (BR_TRANSACTION's data, PTR buffers in the target) is the

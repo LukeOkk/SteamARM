@@ -1,0 +1,12 @@
+[package]
+name = "steamarm-heroic-asar"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+serde = "1.0.229"
+serde_json = "1.0.154"
+
+[[bin]]
+name = "steamarm-heroic-asar"
+path = "src/main.rs"

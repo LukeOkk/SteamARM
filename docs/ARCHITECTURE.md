@@ -73,7 +73,7 @@ of that come the pieces the Linux tools expect:
   becomes executable, whichever thread wrote it. FEX keeps MAP_JIT and its
   guest-requested switch (`runtime/jit.c`) (stage 23).
 - **One process group per launcher session**, with an exit status
-  (`scripts/session.py`, `docs/APPLICATION_MANAGER.md`).
+  (`build/steamarm-session`, `docs/APPLICATION_MANAGER.md`).
 - **Linux rules Electron relies on** (Heroic, stage 24): a SysV segment
   removed while attached stays attachable until its last detach (the X
   server's MIT-SHM attach); `SOCK_SEQPACKET`, a Darwin datagram pair here,
@@ -151,8 +151,9 @@ cannot present there (`docs/WINDOWING_AND_PRESENTATION.md`).
 
 ## Memory safety net
 
-Emulation can use a lot of memory quickly. `scripts/safeguard.sh` watches
-the Linux processes and the kernel's VM object count. It stops them before
+Emulation can use a lot of memory quickly. The Rust watchdog
+`build/steamarm-safeguard` watches the Linux processes and the kernel's VM
+object count. It stops them before
 the Mac runs out of memory, and the DRAM setting sets its ceiling. Since
 `e4047ef` it acts on memory pressure only when macOS reports critical
 pressure for 2 checks, or free memory stays under 12 % for 3 checks; it
@@ -161,8 +162,8 @@ more, and it records why. Up to 0.3.4 one reading under 35 % free stopped
 everything, which closed Steam on a 16 GB Mac under normal use. Its other
 limits still stop every guest at once, however much memory is free: the
 guests' total resident size above the DRAM setting (8192 MB without one),
-fseventsd above 1500 MB, more than 80 `lxrun` processes, or the kernel's
-VM objects or map entries above 1,500,000 (`scripts/safeguard.sh`).
+fseventsd above 1500 MB, more than 80 `lxrun` processes, or kernel VM objects
+and map entries above their startup baselines plus safety margins.
 
 ## Target: ARM64-first
 

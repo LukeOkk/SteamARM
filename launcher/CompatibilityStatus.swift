@@ -9,7 +9,7 @@ struct CompatibilityStatus: Decodable {
         let architecture: String
         let installed: Bool
         let supported: Bool
-        /// Compiled into its ntdll.so / wineserver (scripts/compat-status.py).
+        /// Compiled into its ntdll.so / wineserver (steamarm-compat-status).
         let esync: Bool?
         let fsync: Bool?
         let ntsync: Bool?
@@ -38,10 +38,19 @@ struct CompatibilityStatus: Decodable {
 
     static func load(project: URL) async -> CompatibilityStatus? {
         await Task.detached(priority: .utility) {
+            let bundled = Bundle.main.resourceURL?.appendingPathComponent("steamarm-compat-status")
+            let candidates = [
+                project.appendingPathComponent("build/steamarm-compat-status"),
+                bundled,
+            ].compactMap { $0 }
+            guard let executable = candidates.first(where: {
+                FileManager.default.isExecutableFile(atPath: $0.path)
+            }) else { return nil }
+
             let process = Process()
             let pipe = Pipe()
-            process.executableURL = URL(fileURLWithPath: "/usr/bin/python3")
-            process.arguments = [project.appendingPathComponent("scripts/compat-status.py").path, "--json"]
+            process.executableURL = executable
+            process.arguments = ["--json"]
             process.standardOutput = pipe
             process.standardError = FileHandle.nullDevice
             do {

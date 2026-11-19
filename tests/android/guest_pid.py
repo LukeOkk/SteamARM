@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""The guest pid of a host process under LXRT_SMALL_IDS=1 (runtime/ids.c),
+"""The guest pid of a host process under LXRT_SMALL_IDS=1 (runtime/ids.rs),
 read from the runtime's shared id table /tmp/lxrt-ids-<uid>: struct id_table
 { uint32 cursor; struct { int32 pid, thread; uint32 generation; } entries[65536]; }.
 Prints the host pid itself when the process has no small id (the mode off),

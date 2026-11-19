@@ -74,7 +74,7 @@ WHY
 
 4. LAUNCHER
   OpenGL (WineD3D) is unavailable until detected, and experimental when
-  scripts/compat-status.py finds Zink for both guest arches in the x86 root
+  steamarm-compat-status finds Zink for both guest arches in the x86 root
   and the GLX patch in the server's record, with MoltenVK and the shim
   installed. AUTO never picks it. scripts/settings-env.py sets
   PROTON_USE_WINED3D=1 and GALLIUM_DRIVER=zink for that choice (no

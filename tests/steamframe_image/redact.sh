@@ -1,12 +1,14 @@
 #!/usr/bin/env bash
-# `scripts/steamframe-image.py inventory` must never print a private pacman
+# Rust `steamarm-frame-image inventory` must never print a private pacman
 # mirror: a device image can point its repositories at a per-device path with
 # an access token (the Steam Frame 0.3.0 image does). Needs only python3, so
 # it runs on macOS as well as Linux (run.sh needs mkfs.btrfs).
 #   tests/steamframe_image/redact.sh
 set -euo pipefail
 cd "$(dirname "$0")/../.."
-TOOL="$PWD/scripts/steamframe-image.py"
+TOOL="$PWD/build/steamarm-frame-image"
+REFERENCE="$PWD/tests/steamframe_image/reference_impl.py"
+[ -x "$TOOL" ] || make steamframe-image
 W="$(mktemp -d)"
 trap 'rm -rf "$W"' EXIT
 pass=0 fail=0
@@ -31,7 +33,7 @@ Server = https://mirror.invalid/\$repo/os/\$arch
 EOF
 echo "Server = https://sub.steamos.cloud/${TOKEN}/\$repo" > "$R/etc/pacman.d/private"
 
-python3 "$TOOL" inventory "$R" --json "$W/inv.json" --md "$W/inv.md" >/dev/null
+"$TOOL" inventory "$R" --json "$W/inv.json" --md "$W/inv.md" >/dev/null
 for f in inv.json inv.md; do
     if grep -q "$TOKEN" "$W/$f"; then bad "$f leaks a private mirror"; else ok "$f has no private mirror"; fi
 done
@@ -44,7 +46,7 @@ grep -q 'holo-packages.steamos.cloud/holo-core-aarch64-preview/holo-core-aarch64
 
 # The marker rule, in memory only: the URL is built from the script's own
 # constant and never written anywhere.
-python3 - "$TOOL" <<'PY' && ok "a URL with the do-not-share marker is redacted, any host" || bad "marker rule"
+python3 - "$REFERENCE" <<'PY' && ok "a URL with the do-not-share marker is redacted, any host" || bad "marker rule"
 import importlib.util, sys
 spec = importlib.util.spec_from_file_location('sfi', sys.argv[1])
 m = importlib.util.module_from_spec(spec); spec.loader.exec_module(m)

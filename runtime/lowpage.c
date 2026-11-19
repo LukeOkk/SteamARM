@@ -2,7 +2,7 @@
 //
 // macOS keeps the low 4 GiB of every arm64 task unmapped (__PAGEZERO), and a
 // native guest cannot have memory there: nothing relocates its addresses the
-// way FEX's guest base relocates an x86 program's (gbase.c). Wine's Windows
+// way FEX's guest base relocates an x86 program's (gbase.rs). Wine's Windows
 // side needs exactly one thing down there, KUSER_SHARED_DATA, the page Windows
 // keeps at 0x7ffe0000 in every process: ntdll's user_shared_data, allocated
 // fixed by virtual_alloc_first_teb (wine exited there: "failed to map the
@@ -367,7 +367,7 @@ static bool emulate(ucontext_t *uc, uint64_t fa, uint32_t insn, const char **why
     }
     // RCpc loads and stores (FEAT_LRCPC / FEAT_LRCPC2): LDAPR Rt, [Rn] and
     // LDAPUR*/STLUR Rt, [Rn, #imm9]. FEX emits them for x86 loads and stores
-    // under TSO once the ID registers say the core has them (stack.c
+    // under TSO once the ID registers say the core has them (stack.rs
     // HWCAP_CPUID): an x64 game reading KUSER_SHARED_DATA did
     // `ldapurb w6, [x6]` on this page, and it went to the guest as a fault.
     if ((insn & 0x3FFFFC00) == 0x38BFC000) {                    // LDAPR{B,H,,}

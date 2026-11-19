@@ -1,6 +1,6 @@
 // File mappings at a 4 KiB offset that is not on a 16 KiB host page, as the
 // native arm64 webhelper makes them for its shared-memory pool (run with
-// LXRT_GUEST_PAGE=4096; runtime/dispatch.c do_mmap, runtime/offmap.c).
+// LXRT_GUEST_PAGE=4096; runtime/dispatch.c do_mmap, runtime/offmap.rs).
 //
 // The runtime maps such a request from the host page below the offset, so the
 // host range has a head before the guest's first byte and a tail after its

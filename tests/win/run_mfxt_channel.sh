@@ -18,7 +18,7 @@
 # MFXT_TIMEOUT   seconds per run (default 120); then only this run's
 #                processes are stopped (by their STEAMARM_RUN_ID)
 # KosmicKrisp: SteamARM's build in $STEAMARM_BUILD/mesa-kk/out when there is
-# one (as scripts/settings-env.py picks it), Homebrew's otherwise.
+# one (as steamarm-settings-env picks it), Homebrew's otherwise.
 #
 # Needs: the Steam root with Proton Experimental and the Vulkan thunks
 # (scripts/install-steamroot-gfx.sh), mingw-w64 and vulkan-headers (Homebrew).

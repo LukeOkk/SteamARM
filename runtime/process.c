@@ -142,7 +142,7 @@ long lxrt_fork(void)
 const char *lxrt_translate_guest_path(const char *path, char *out, size_t n);   // dispatch.c
 
 // An aarch64 ELF linked at a fixed address (ET_EXEC): it would sit inside
-// Darwin's 4 GiB __PAGEZERO and cannot be loaded (elf.c).
+// Darwin's 4 GiB __PAGEZERO and cannot be loaded (elf.rs).
 static bool unloadable_arm64(const char *gpath)
 {
     char hp[1024];
@@ -257,7 +257,7 @@ long lxrt_execve(const char *path, char *const argv[], char *const envp[])
     // LXRT_EXEC_ARGS=NAME[!PREFIX]:ARG ARG...[;...] appends arguments when a
     // program named NAME is executed (space-separated, no quoting), unless
     // one of its arguments starts with PREFIX: the launcher gives Steam's
-    // steamwebhelper Chromium switches this way (settings-env.py) instead of
+    // steamwebhelper Chromium switches this way (steamarm-settings-env) instead of
     // editing Valve's files, which the client would check and download
     // again -- to the browser process only ("steamwebhelper!--type="):
     // Chromium hands its children the switches they need, and appended to

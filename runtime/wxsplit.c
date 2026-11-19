@@ -168,7 +168,7 @@ void lxrt_wx_set_program(const char *path)
     g_enabled = !g_program_is_fex;
 }
 
-// Whether the main program is the emulator (stack.c: its AT_HWCAP).
+// Whether the main program is the emulator (stack.rs: its AT_HWCAP).
 bool lxrt_program_is_fex(void) { return g_program_is_fex; }
 
 // LXRT_NO_X18 (set by tools/steamarm-native-proton): no x18 virtualisation,
@@ -234,7 +234,7 @@ static _Atomic unsigned g_handover_seq;
 // The page-protection lock: this table, subpage.c's records, and every
 // protection change of a host page either one owns.
 static pthread_mutex_t g_lock = PTHREAD_MUTEX_INITIALIZER;
-// Across fork(), as LXRT_FORK_SAFE, and with shmirror.c's lock, which is
+// Across fork(), as LXRT_FORK_SAFE, and with shmirror.rs's lock, which is
 // taken under this one (see lxrt_shmirror_fork_lock): in that order, and
 // released the other way round.
 void lxrt_shmirror_fork_lock(void);

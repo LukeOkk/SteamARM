@@ -15,6 +15,7 @@ elf() {   # elf FILE E_MACHINE: a file with an ELF header naming that machine
     /usr/bin/python3 -c 'import sys; open(sys.argv[1],"wb").write(b"\x7fELF"+bytes(14)+int(sys.argv[2]).to_bytes(2,"little")+bytes(44))' "$1" "$2"
 }
 X="$T/x86" C="$T/x86/tmp/fexhome/.local/share/Steam/steamapps/common"
+ARM_C="$T/state/arm64root/tmp/armhome/.local/share/Steam/steamapps/common"
 proton() {   # proton NAME APPID E_MACHINE
     mkdir -p "$C/$1/files/bin"; echo '#!/usr/bin/env python3' > "$C/$1/proton"
     elf "$C/$1/files/bin/wine" "$3"
@@ -27,9 +28,17 @@ proton "Proton Mystery" 999 62
 proton "Proton Aarch" 4183110 183
 mkdir -p "$C/Proton Arm/files/bin-arm64"; proton "Proton Arm" 4183110 62
 for r in SteamLinuxRuntime_4 SteamLinuxRuntime_sniper; do mkdir -p "$C/$r"; echo x > "$C/$r/_v2-entry-point"; done
-mkdir -p "$T/fex" "$T/state/armroot/tmp/armhome/.local/share/Steam/steamrtarm64"
-echo x > "$T/fex/FEX-gb"; echo x > "$T/state/armroot/tmp/armhome/.local/share/Steam/steamrtarm64/steam"
-DEST="$T/state/armroot/tmp/armhome/.local/share/Steam/compatibilitytools.d/steamarm-fex-proton"
+mkdir -p "$T/fex" "$T/state/arm64root/etc" \
+    "$T/state/arm64root/usr/share/guestos/fex-mesa/lib" \
+    "$T/state/arm64root/tmp/armhome/.local/share/Steam/steamrtarm64" \
+    "$ARM_C/FEX-Emu/usr/bin" "$ARM_C/SteamLinuxRuntime_sniper"
+printf 'ID=steamos\n' > "$T/state/arm64root/etc/os-release"
+printf '{\n  "emulator_v0": {\n    "argv": "./usr/bin/FEX",\n    "server_argv": "./usr/bin/FEXServerManager",\n    "environment": {},\n    "container_environment": {}\n  }\n}\n' > "$ARM_C/FEX-Emu/emulator.json"
+echo x > "$ARM_C/FEX-Emu/usr/bin/FEX"
+echo x > "$ARM_C/SteamLinuxRuntime_sniper/_v2-entry-point"
+echo x > "$T/state/arm64root/usr/share/guestos/fex-mesa/lib/ld-linux-x86-64.so.2"
+echo x > "$T/fex/FEX-gb"; echo x > "$T/state/arm64root/tmp/armhome/.local/share/Steam/steamrtarm64/steam"
+DEST="$T/state/arm64root/tmp/armhome/.local/share/Steam/compatibilitytools.d/steamarm-fex-proton"
 inst() { STEAMARM_STATE="$T/state" X86_LINK="$X" FEXDIR="$T/fex" NO_ENV_LINKS=1 scripts/install-fex-proton-tool.sh "$@" >"$T/inst.log" 2>&1; }
 
 # 1. the installer
@@ -68,6 +77,10 @@ inst; rc=$?
 check "reinstalling the default is idempotent (rc $rc)" '[ $rc -eq 0 ] && grep -qx "RUNTIME=SteamLinuxRuntime_4" "$DEST/steamarm-fex-proton.conf"'
 
 # 2. the tool's dry run, from "/" (not bound: a system path) with Steam's environment
+# Run the same Rust source as a native host build; the installer artifact above
+# is the AArch64 Linux binary intended for Steam Frame.
+[ -x build/steamarm-fex-proton-host ] || make -s fex-proton-tool
+cp build/steamarm-fex-proton-host "$DEST/steamarm-fex-proton"
 G=/tmp/armhome/.local/share/Steam
 tool() {   # tool [VAR=VALUE...] -- ARGS...: the installed tool, as the client would run it
     local e=()
@@ -77,7 +90,7 @@ tool() {   # tool [VAR=VALUE...] -- ARGS...: the installed tool, as the client w
         STEAM_COMPAT_INSTALL_PATH="$G/steamapps/common/A Game" STEAM_COMPAT_LIBRARY_PATHS=$G/steamapps \
         LXRT_GUEST_PAGE=4096 LXRT_X18_ALL_TEXT=libcef.so LD_LIBRARY_PATH=$G/steamrtarm64 LD_PRELOAD=$G/o.so \
         STEAM_COMPAT_EMULATOR=/e.json SteamAppId=42 ${e[@]+"${e[@]}"} \
-        /bin/bash "$DEST/steamarm-fex-proton" "$@")
+        "$DEST/steamarm-fex-proton" "$@")
 }
 out=$(tool -- waitforexitandrun "$G/steamapps/common/A Game/game.exe" "arg 1" 2>"$T/err"); rc=$?
 S="/tmp/fexhome/.local/share/Steam/steamapps/common"
@@ -134,7 +147,7 @@ cp "$T/conf.saved" "$DEST/steamarm-fex-proton.conf"
 # 3. uninstall removes the tool's directory and nothing else
 inst --uninstall; rc=$?
 check "uninstall removes the tool, keeps the client (rc $rc)" \
-    '[ $rc -eq 0 ] && [ ! -e "$DEST" ] && [ -f "$T/state/armroot/tmp/armhome/.local/share/Steam/steamrtarm64/steam" ]'
+    '[ $rc -eq 0 ] && [ ! -e "$DEST" ] && [ -f "$T/state/arm64root/tmp/armhome/.local/share/Steam/steamrtarm64/steam" ]'
 
 echo "== $pass passed, $fail failed"
 [ "$fail" -eq 0 ]

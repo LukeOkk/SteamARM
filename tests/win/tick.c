@@ -1,6 +1,6 @@
 // Wine's clocks as a Windows program reads them: GetTickCount and
 // GetTickCount64 come from KUSER_SHARED_DATA, a page wineserver keeps
-// updating (runtime/shmirror.c); QueryPerformanceCounter and the system time
+// updating (runtime/shmirror.rs); QueryPerformanceCounter and the system time
 // do not. All four must advance by about a second across Sleep(1000).
 #include <windows.h>
 #include <stdio.h>

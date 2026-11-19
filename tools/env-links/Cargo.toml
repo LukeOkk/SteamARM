@@ -1,0 +1,8 @@
+[package]
+name = "steamarm-env-links"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "steamarm-env-links"
+path = "src/main.rs"

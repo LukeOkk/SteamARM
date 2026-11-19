@@ -23,12 +23,18 @@ UPSTREAM DOCUMENTED, HYPOTHESIS, UNKNOWN.
 | piece | where | state | evidence |
 |---|---|---|---|
 | APK reader: manifest, label, icon, ABIs, splits, signing, bundles | `scripts/apk-inspect.py` (Python 3.9+, standard library only) | bundle selection added | MEASURED: 10 real F-Droid APKs agree with F-Droid's `index-v2.json` on the 9 compared fields; synthetic unit tests cover XAPK, APKS, APKM, a plain APK bag and refusal cases; a real XAPK (an F-Droid base re-signed with apksigner, plus a `config.xhdpi` split built with aapt2 and signed with the same key) is read and its split chosen (stage 29). |
-| Package manager | `scripts/android-pm.py` | split and OBB staging added | MEASURED on real single APKs in a scratch state: install, update with data kept, downgrade refused, uninstall with and without data. Synthetic unit tests cover split and OBB storage; the real XAPK above was stored with its split (stage 29). |
+| Package manager | `tools/android-pm/src/main.rs` (`steamarm-android-pm`) | Rust CLI; behavior ported, parity still to be revalidated | The previous Python version was measured on real APKs and synthetic XAPK/APKS/APKM fixtures; those results are not yet a verification of the Rust port. |
 | Library card, filter, context menu, disabled launch | `launcher/AddAppView.swift`, `HomeView.swift`, `LauncherModel.swift`, `ApplicationCore.swift` (`AndroidApps`, `AndroidABI`) | built; the model path was driven with real APKs; the sheet itself was not clicked | MEASURED (a harness that calls `LauncherModel`, stage 25 section E); core tests |
 | `run-app.sh` runs Android entries in the session, or refuses them with the reason | `scripts/run-app.sh` | done | `tests/launcher/run_app_dispatch.sh` (12 Android checks) |
 | Running an app | `scripts/android-session.py` (x86_64 Android under FEX) | dex-only and x86_64 apps; split install path added | MEASURED: a single F-Droid APK installed (`pm install` Success) and started (`am start` ok), its window focused and in the macOS window (`benchmarks/stage28-android-apk.txt`); `tests/android/run.sh` does it headless. The real XAPK installed in one `pm install` session with its split ("Success" in 2.6 s; `pm path` lists `base.apk` and `split_config.xhdpi.apk`) and started with its window focused (stage 29, `benchmarks/stage29-android-input-network.txt`). OBB copy in a real session is UNTESTED. |
 
 ## Reading an APK (`scripts/apk-inspect.py`)
+
+Package installation is handled by the Rust `steamarm-android-pm` executable,
+which the launcher bundles. APK manifest, signer and icon parsing still runs
+through `scripts/apk-inspect.py`; that parser remains to be migrated.
+The old `scripts/android-pm.py` module remains temporarily for the current
+Python fixture suite, but the launcher no longer calls it.
 
 ```sh
 scripts/apk-inspect.py app.apk                    # JSON
@@ -196,13 +202,13 @@ The digests over the APK contents are not checked either. The report says
 which certificate an APK names, not that the APK was really signed with
 it.
 
-## Installing (`scripts/android-pm.py`)
+## Installing (`steamarm-android-pm`)
 
 ```sh
-scripts/android-pm.py install [--force] [--allow-downgrade] app.apk
-scripts/android-pm.py uninstall [--keep-data] <package>
-scripts/android-pm.py list
-scripts/android-pm.py info <package>
+build/steamarm-android-pm install [--force] [--allow-downgrade] app.apk
+build/steamarm-android-pm uninstall [--keep-data] <package>
+build/steamarm-android-pm list
+build/steamarm-android-pm info <package>
 ```
 
 The state lives under `$STEAMARM_STATE` (default `~/SteamARM-roots`) or

@@ -87,7 +87,7 @@
 // guest_page_bytes() is the unit the GUEST divides by. Linux's
 // /proc/self/stat and /proc/self/statm report memory in PAGES, the guest
 // converts with sysconf(_SC_PAGESIZE), that comes from AT_PAGESZ, and
-// AT_PAGESZ is whatever stack.c published -- LXRT_HOST_PAGE, lxrt.h:18. Every
+// AT_PAGESZ is whatever stack.rs published -- LXRT_HOST_PAGE, lxrt.h:18. Every
 // page COUNT in this file has to be in those units or the guest's own
 // arithmetic turns it into the wrong number of bytes.
 //
@@ -601,7 +601,7 @@ static size_t gen_meminfo(char *b, size_t cap)
 
 // ------------------------------------------------------------ /proc/cpuinfo
 
-// The CPU identity is taken from the same synthetic MIDR_EL1 that sysreg.c
+// The CPU identity is taken from the same synthetic MIDR_EL1 that sysreg.rs
 // hands back for `mrs Xt, MIDR_EL1` (0xd5380000: op0=3 op1=0 CRn=0 CRm=0
 // op2=0, which is the encoding that switch matches). Deriving it here instead
 // of hardcoding means /proc/cpuinfo and the register the guest can read on any
@@ -651,11 +651,11 @@ static size_t gen_cpuinfo(char *b, size_t cap)
         sbf(&s, "BogoMIPS\t: %llu.%02llu\n", (unsigned long long)bogo_int,
             (unsigned long long)bogo_frac);
         // This list is not the hardware's full capability set: it is exactly
-        // the HWCAP bits stack.c puts in AT_HWCAP. glibc reads one and Steam's
+        // the HWCAP bits stack.rs puts in AT_HWCAP. glibc reads one and Steam's
         // hardware survey reads the other, and a capability named here but
         // absent from AT_HWCAP is how an ifunc gets selected for an
         // instruction the runtime never agreed to support. `cpuid` follows
-        // HWCAP_CPUID (stack.c): ID register reads are answered, rewritten
+        // HWCAP_CPUID (stack.rs): ID register reads are answered, rewritten
         // or emulated from SIGILL.
         sbf(&s, "Features\t: fp asimd aes pmull sha1 sha2 crc32 atomics%s"
                 " asimdrdm\n", lxrt_hwcap_cpuid() ? " cpuid" : "");
@@ -894,7 +894,7 @@ static size_t gen_loadavg(char *b, size_t cap)
 
 // Darwin's time_value_t is seconds plus microseconds; Linux's stat fields are
 // in clock ticks. sysconf(_SC_CLK_TCK) is 100 on both (measured), and it is
-// also what stack.c publishes as AT_CLKTCK, so a guest calling
+// also what stack.rs publishes as AT_CLKTCK, so a guest calling
 // sysconf(_SC_CLK_TCK) to divide these gets a consistent answer.
 #define LXRT_CLK_TCK 100
 
@@ -1122,14 +1122,14 @@ static size_t gen_self_statm(char *b, size_t cap)
 
 // -------------------------------------------------------- /proc/self/auxv
 
-// Auxiliary vector types, matching stack.c's enum. Duplicated rather than
-// shared because stack.c does not export them, and they are fixed ABI.
+// Auxiliary vector types, matching stack.rs's enum. Duplicated rather than
+// shared because stack.rs does not export them, and they are fixed ABI.
 enum {
     AX_NULL = 0, AX_PAGESZ = 6, AX_UID = 11, AX_EUID = 12, AX_GID = 13,
     AX_EGID = 14, AX_HWCAP = 16, AX_CLKTCK = 17, AX_SECURE = 23, AX_HWCAP2 = 26,
 };
 
-// Must stay equal to the AT_HWCAP stack.c publishes. A guest that reads
+// Must stay equal to the AT_HWCAP stack.rs publishes. A guest that reads
 // getauxval(AT_HWCAP) after a re-exec gets it from this file rather than from
 // the stack, so a divergence between the two shows up only in re-executed
 // children -- the late, symptomless failure this codebase keeps meeting.
@@ -1138,7 +1138,7 @@ enum {
                           (1u << 12) | (lxrt_hwcap_cpuid() ? (1u << 11) : 0))
 
 // The real vector, if the integrator handed it over. 64 pairs is generous:
-// stack.c writes 17.
+// stack.rs writes 17.
 //
 // The copy is staged in a local and committed only once the whole vector has
 // been read successfully. Writing straight into g_auxv[] meant a mid-vector
@@ -1196,10 +1196,10 @@ long lxrt_proc_ext_set_auxv(const void *auxv)
 // hook has not been called the file still has to exist, because glibc's
 // getauxval() falls back to reading it and returning ENOENT there turns into
 // "this machine has no HWCAP" rather than into an error. The fallback set is
-// the measurable minimum -- page size, the HWCAP stack.c agrees to, the clock
+// the measurable minimum -- page size, the HWCAP stack.rs agrees to, the clock
 // tick, and the four credential entries -- and deliberately omits AT_PHDR,
 // AT_BASE, AT_ENTRY and AT_RANDOM, which cannot be reconstructed from outside
-// stack.c and would be actively harmful if guessed: AT_RANDOM in particular is
+// stack.rs and would be actively harmful if guessed: AT_RANDOM in particular is
 // the address of the stack canary seed.
 static size_t gen_auxv(char *b, size_t cap)
 {

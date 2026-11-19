@@ -1,5 +1,4 @@
 """Windows launch planning: real manifest format, paths and missing runtimes."""
-import importlib.util
 import json
 import os
 from pathlib import Path
@@ -8,9 +7,19 @@ import tempfile
 import unittest
 
 REPO = Path(__file__).resolve().parents[1]
-spec = importlib.util.spec_from_file_location("proton_command", REPO / "scripts/proton-command.py")
-proton = importlib.util.module_from_spec(spec)
-spec.loader.exec_module(proton)
+STEAM = "/tmp/fexhome/.local/share/Steam"
+PROTON_BIN = REPO / "build/steamarm-proton-command"
+
+
+def resolve(app, root):
+    result = subprocess.run(
+        [str(PROTON_BIN), "--json-stdin"],
+        input=json.dumps({"app": app, "root": str(root)}),
+        capture_output=True, text=True)
+    if result.returncode:
+        raise ValueError(result.stderr.strip())
+    plan = json.loads(result.stdout)
+    return plan["argv"], plan["environment"]
 
 
 class ProtonLaunchTests(unittest.TestCase):
@@ -19,7 +28,7 @@ class ProtonLaunchTests(unittest.TestCase):
         self.addCleanup(self.tmp.cleanup)
         self.state = Path(self.tmp.name)
         self.root = self.state / "steamroot"
-        self.common = self.root / proton.STEAM.lstrip("/") / "steamapps/common"
+        self.common = self.root / STEAM.lstrip("/") / "steamapps/common"
         self.tool = self.common / "Proton - Experimental"
         (self.tool / "files/bin").mkdir(parents=True)
         (self.tool / "files/bin/wine").touch()
@@ -33,7 +42,7 @@ class ProtonLaunchTests(unittest.TestCase):
                     "protonTool": self.tool.name}
 
     def test_preserves_arguments_and_isolates_prefix(self):
-        argv, env = proton.resolve(self.app, self.root)
+        argv, env = resolve(self.app, self.root)
         self.assertEqual(argv[-3:], self.app["command"])
         self.assertIn("--verb=waitforexitandrun", argv)
         self.assertEqual(env["STEAM_COMPAT_DATA_PATH"], "/tmp/fexhome/.steamarm/prefixes/app-one")
@@ -42,36 +51,36 @@ class ProtonLaunchTests(unittest.TestCase):
     def test_missing_or_unknown_runtime_fails_before_launch(self):
         self.runtime.unlink()
         with self.assertRaisesRegex(ValueError, "Instala SteamLinuxRuntime_4"):
-            proton.resolve(self.app, self.root)
+            resolve(self.app, self.root)
         (self.tool / "toolmanifest.vdf").write_text('"require_tool_appid" "999"')
         with self.assertRaisesRegex(ValueError, "999"):
-            proton.resolve(self.app, self.root)
+            resolve(self.app, self.root)
 
     def test_arm64_and_path_escape_are_not_silently_replaced(self):
         for changes in ({"protonTool": "Proton 11.0 (ARM64)"}, {"protonTool": "../other"}, {"id": "../prefix"}):
             with self.subTest(changes=changes), self.assertRaises(ValueError):
-                proton.resolve({**self.app, **changes}, self.root)
+                resolve({**self.app, **changes}, self.root)
 
     def test_community_tool_from_compatibilitytools_d_resolves(self):
-        tool = self.root / proton.STEAM.lstrip("/") / "compatibilitytools.d/GE-Proton"
+        tool = self.root / STEAM.lstrip("/") / "compatibilitytools.d/GE-Proton"
         (tool / "files/bin").mkdir(parents=True)
         (tool / "files/bin/wine").touch()
         (tool / "proton").touch()
         (tool / "compatibilitytool.vdf").write_text(
             '"compatibilitytools" { "compat_tools" { "GE-Proton" '
             '{ "require_tool_appid" "4183110" } } }')
-        argv, _env = proton.resolve({**self.app, "protonTool": "GE-Proton"}, self.root)
-        self.assertIn(proton.STEAM + "/compatibilitytools.d/GE-Proton/proton", argv)
+        argv, _env = resolve({**self.app, "protonTool": "GE-Proton"}, self.root)
+        self.assertIn(STEAM + "/compatibilitytools.d/GE-Proton/proton", argv)
         self.assertTrue(any("SteamLinuxRuntime_4/_v2-entry-point" in arg for arg in argv))
 
     def test_custom_arm64_tool_is_found_but_never_sent_through_x86_fex(self):
-        tool = self.root / proton.STEAM.lstrip("/") / "compatibilitytools.d/Bannerlator Proton (ARM64)"
+        tool = self.root / STEAM.lstrip("/") / "compatibilitytools.d/Bannerlator Proton (ARM64)"
         (tool / "files/bin-arm64").mkdir(parents=True)
         (tool / "files/bin-arm64/wine").touch()
         (tool / "proton").touch()
         (tool / "compatibilitytool.vdf").write_text('"compatibilitytools" {}')
         with self.assertRaisesRegex(ValueError, "Proton ARM64"):
-            proton.resolve({**self.app, "protonTool": tool.name}, self.root)
+            resolve({**self.app, "protonTool": tool.name}, self.root)
 
     def test_launcher_dry_run_resolves_persistent_root_before_bootstrap(self):
         launcher = self.state / "launcher"

@@ -1388,7 +1388,7 @@ static VkResult present_mailboxes(VkQueue q, const VkPresentInfoKHR *pi)
     return worst;
 }
 
-// LXRT_VK_FPS_LIMIT=<fps> (launcher "Límite de FPS", scripts/settings-env.py):
+// LXRT_VK_FPS_LIMIT=<fps> (launcher "Límite de FPS", steamarm-settings-env):
 // presents paced to that rate in every Vulkan program. DXVK and VKD3D have a
 // limiter of their own; a native Vulkan game (Counter-Strike 2) had none and
 // the setting did nothing there (the user, 2026-10-04). The wait comes before

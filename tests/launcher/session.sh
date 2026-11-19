@@ -1,14 +1,14 @@
 #!/bin/bash
-# scripts/session.py: one process group and an exit status per launcher
+# build/steamarm-session: one process group and an exit status per launcher
 # session (docs/APPLICATION_MANAGER.md). Real processes, no guest: fake
 # runners stand in for run-native.sh/run-fex.sh. Runs on macOS and Linux.
 #
 #   tests/launcher/session.sh
 set -u
 cd "$(dirname "$0")/../.." || exit 1
-S=scripts/session.py
-# How the scripts start it (run-app.sh, run-fex.sh, safeguard.sh).
-PY=(env PYTHONCOERCECLOCALE=0 STEAMARM_SESSION_PY=1 python3 "$S")
+S=build/steamarm-session
+# How the scripts start it (run-app.sh, run-fex.sh, steamarm-safeguard).
+PY=(env PYTHONCOERCECLOCALE=0 STEAMARM_SESSION_PY=1 "$S")
 W="$(mktemp -d "${TMPDIR:-/tmp}/session-test.XXXXXX")"
 pass=0 fail=0
 ok()  { pass=$((pass + 1)); echo "  ok    $1"; }
@@ -87,7 +87,7 @@ e=$(elapsed $t0); [ "$e" -ge 2 ] && [ "$e" -le 6 ] && ok "killed after the grace
 echo "== stop with nothing recorded, or a stale group, is a no-op"
 fresh
 "${PY[@]}" stop "$W/ldir" && ok "no pgid file: exit 0" || bad "stop without pgid"
-echo 1 > "$W/ldir/running.pgid"        # pid 1 is not a session.py wrapper
+echo 1 > "$W/ldir/running.pgid"        # pid 1 is not a steamarm-session wrapper
 "${PY[@]}" stop "$W/ldir" && ok "stale pgid (pid 1): not signalled, exit 0" || bad "stale pgid"
 
 echo "== already a group leader: a child takes the new session"
@@ -109,7 +109,7 @@ fi
 
 echo "== what the program inherits from the wrapper"
 fresh
-env -i PATH="$PATH" HOME="$HOME" PYTHONCOERCECLOCALE=0 STEAMARM_SESSION_PY=1 python3 "$S" run "$W/ldir" \
+env -i PATH="$PATH" HOME="$HOME" PYTHONCOERCECLOCALE=0 STEAMARM_SESSION_PY=1 "$S" run "$W/ldir" \
     /bin/sh -c 'echo "ctype=${LC_CTYPE-unset} coerce=${PYTHONCOERCECLOCALE-unset} marker=${STEAMARM_SESSION_PY-unset}"' \
     >"$W/log6" 2>&1
 grep -q "ctype=unset coerce=unset marker=unset" "$W/log6" \
@@ -203,7 +203,9 @@ t0=$(date +%s)
 STEAMARM_STATE="$R" scripts/run-app.sh --reap "$sid" >"$W/log11" 2>&1
 [ -z "$(zygote)" ] && ok "--reap: the session's helper is gone (SIGKILL after SIGTERM)" || bad "--reap left $(zygote)"
 e=$(elapsed $t0); [ "$e" -le 5 ] && ok "--reap took ${e}s" || bad "--reap took ${e}s"
-grep -q "left behind: $z" "$W/log11" && ok "--reap names what it stopped" || { bad "--reap output"; cat "$W/log11"; }
+grep -q "stopping guest processes left by session $sid:.*$z" "$W/log11" \
+    && ok "--reap names stopped guest processes" \
+    || { bad "--reap output"; cat "$W/log11"; }
 kill -0 "$other" 2>/dev/null && ok "another session's guest untouched" || bad "another session's guest was stopped"
 
 echo "== --reap waits for the wrapper; the session's watcher reaps after it"

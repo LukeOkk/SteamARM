@@ -233,6 +233,7 @@ bool lxrt_main_guest_thread(pthread_t *out)
 static pthread_key_t g_gt_key;
 static pthread_once_t g_once = PTHREAD_ONCE_INIT;
 static atomic_int g_next_tid;
+static atomic_bool g_gt_ready;
 static void gt_init(void);
 
 // Is the calling thread a guest thread (one that has run guest code or is
@@ -240,7 +241,8 @@ static void gt_init(void);
 // Darwin's frameworks start are not. Async-signal-safe (a TSD read).
 bool lxrt_thread_is_guest(void)
 {
-    pthread_once(&g_once, gt_init);
+    if (!atomic_load_explicit(&g_gt_ready, memory_order_acquire))
+        return false;
     return pthread_getspecific(g_gt_key) != NULL;
 }
 
@@ -316,6 +318,7 @@ static void gt_init(void)
 {
     pthread_key_create(&g_gt_key, gt_free);
     atomic_store(&g_next_tid, 1);
+    atomic_store_explicit(&g_gt_ready, true, memory_order_release);
 }
 
 static struct guest_thread *gt_self(void)
@@ -364,6 +367,17 @@ int lxrt_gettid(void)
 {
     struct guest_thread *gt = gt_self();
     return gt ? gt->tid : lxrt_ids_pid();
+}
+
+// A signal handler must only read the current thread's existing state. In
+// particular, it must not lazily register a thread: pthread_self() can trap
+// when the interrupted thread has no valid Darwin pthread identity yet.
+int lxrt_gettid_signal_safe(void)
+{
+    if (!atomic_load_explicit(&g_gt_ready, memory_order_acquire))
+        return 0;
+    struct guest_thread *gt = pthread_getspecific(g_gt_key);
+    return gt ? gt->tid : 0;
 }
 
 long lxrt_set_tid_address(uint32_t *ctid)

@@ -131,7 +131,7 @@ struct ApplicationCoreTests {
         check(SessionLiveness.alive(orphansOnly, wrapped: false), "adopted Steam without a wrapper: any guest keeps it")
         check(!SessionLiveness.alive(Probe(leaderAlive: false, statusWritten: false, groupAlive: false, anyGuest: false), wrapped: false),
               "adopted Steam: no guest left")
-        check(SessionLiveness.isLeader(command: "/usr/bin/python3 scripts/session.py run /x/launcher scripts/run-native.sh", wrapped: true),
+        check(SessionLiveness.isLeader(command: "/x/build/steamarm-session run /x/launcher scripts/run-native.sh", wrapped: true),
               "the wrapper leads")
         check(!SessionLiveness.isLeader(command: "/Applications/Other.app/Contents/MacOS/Other", wrapped: true),
               "a reused PID is not the session")
@@ -236,7 +236,7 @@ struct ApplicationCoreTests {
         check(caps.effectiveSynchronization(.msync) == .wineserver, "requested MSync falls back to wineserver")
         check(caps.effectiveSynchronization(.esync) == .esync, "esync usable (experimental)")
         check(caps.effectiveSynchronization(.auto) == .wineserver, "AUTO picks only a ready fast path: none yet")
-        // Graphics: KosmicKrisp and WineD3D are not integrated, so fallback lands on MoltenVK or nothing.
+        // With no detected KosmicKrisp, AUTO falls back to MoltenVK.
         check(caps.graphicsFallback(after: .vulkanKosmicKrisp) == .vulkanMoltenVK, "KosmicKrisp falls back to MoltenVK")
         check(caps.graphicsFallback(after: .auto) == .vulkanMoltenVK, "AUTO starts at MoltenVK today")
         check(caps.graphicsFallback(after: .vulkanMoltenVK) == nil, "no WineD3D fallback yet")
@@ -268,7 +268,7 @@ struct ApplicationCoreTests {
         check(caps.status(of: .lightningJIT).usable && !caps.status(of: .appleHypervisor).usable, "JIT preset usable, VM preset not")
         check(!caps.status(of: .appleHypervisor).reason.isEmpty, "Apple Hypervisor says why")
 
-        // Detection (scripts/compat-status.py --json) refines the table, never beyond it.
+        // Detection (steamarm-compat-status --json) refines the table, never beyond it.
         let json = #"""
         {"moltenvk":{"path":"/opt/homebrew/lib/libMoltenVK.dylib","version":"1.4.2","vulkan":"1.4.357"},
          "fex":{"patchedInstalled":true,"steamInstalled":false},
@@ -308,7 +308,7 @@ struct ApplicationCoreTests {
         probe.shim?.icdSelection = true
         d = RuntimeCapabilities.detect(from: probe)
         check(d.graphics[.vulkanKosmicKrisp]?.state == .experimental, "KosmicKrisp with an ICD-selecting shim: experimental")
-        check(d.effectiveGraphics(.auto) == .vulkanMoltenVK && d.effectiveGraphics(.vulkanKosmicKrisp) == .vulkanKosmicKrisp, "AUTO stays on MoltenVK")
+        check(d.effectiveGraphics(.auto) == .vulkanKosmicKrisp && d.effectiveGraphics(.vulkanKosmicKrisp) == .vulkanKosmicKrisp, "AUTO prefers detected Metal 4 KosmicKrisp")
         probe.kosmickrisp?.osOK = false
         check(RuntimeCapabilities.detect(from: probe).graphics[.vulkanKosmicKrisp]?.state == .unavailable, "KosmicKrisp needs macOS 26")
         probe.kosmickrisp = .init(foundElsewhere: "/opt/mesa-src/lib/libvulkan_kosmickrisp.dylib")
@@ -322,7 +322,7 @@ struct ApplicationCoreTests {
         check(RuntimeCapabilities.detect(from: probe).graphics[.vulkanKosmicKrisp]?.reason.contains("no está instalado") == true, "no KosmicKrisp")
         let undetected = RuntimeCapabilities.undetected
         check(undetected.graphics[.vulkanKosmicKrisp]?.usable == false
-              && undetected.graphics[.vulkanKosmicKrisp]?.reason.contains("compat-status.py") == true, "no answer: says so")
+              && undetected.graphics[.vulkanKosmicKrisp]?.reason.contains("steamarm-compat-status") == true, "no answer: says so")
         probe.protons = [.init(name: "Proton - Experimental", fsync: true, ntsync: true)]
         probe.moltenvk = .init(path: "", version: "no instalado")
         probe.presentation = .init(nativeX: false, xvnc: true, screenSharing: false)
@@ -348,7 +348,7 @@ struct ApplicationCoreTests {
         check(FallbackPolicy.auto.decision(for: bad) == .proceed && FallbackPolicy.strict.decision(for: bad) == .refuse
               && FallbackPolicy.ask.decision(for: bad) == .ask, "policy decisions")
         check(FallbackPolicy.strict.decision(for: []) == .proceed, "no issue: every policy launches")
-        // Every announced fallback reaches run-app.sh (settings-env.py fallback_overrides).
+        // Every announced fallback reaches run-app.sh (steamarm-settings-env fallback_overrides).
         check(FallbackPolicy.environment(for: bad) == ["STEAMARM_SYNCHRONIZATION": "wineserver",
                                                         "STEAMARM_GRAPHICS_BACKEND": "vulkanMoltenVK"], "fallbacks as variables")
         check(FallbackPolicy.environment(for: vncArm) == ["STEAMARM_DISPLAY": "native"], "display fallback")
@@ -377,7 +377,7 @@ struct ApplicationCoreTests {
               "invalid display ranges never become VRR")
         check(DisplayRefreshRange(minimumInterval: 0.01, maximumInterval: 0.010000001)?.variable == false,
               "floating-point noise is not VRR")
-        // "Escalado del juego": MetalFX (AUTO) unless "fsr" is stored (settings-env.py game_upscaler).
+        // "Escalado del juego": MetalFX (AUTO) unless "fsr" is stored (steamarm-settings-env game_upscaler).
         check(SettingsMigration.gameUpscaler(stored: nil) == "auto", "old settings.json -> AUTO")
         check(SettingsMigration.gameUpscaler(stored: "fsr") == "fsr", "stored fsr wins")
         check(SettingsMigration.gameUpscaler(stored: "bogus") == "auto" && SettingsMigration.gameUpscaler(stored: "") == "auto", "not a choice -> AUTO")
@@ -425,7 +425,7 @@ struct ApplicationCoreTests {
         let heroicPlan = try LaunchPlanner.plan(architecture: GuestArchitecture.aarch64.rawValue,
                                                 environmentID: HeroicARM64.root.id)
         check(heroicPlan.runner == .native && !heroicPlan.usesVirtualMachine, "Heroic ARM64 runs natively")
-        check(HeroicARM64.root.guestRoot == "/tmp/lxrt-armroot", "Heroic lives in the Fedora ARM64 root")
+        check(HeroicARM64.root.guestRoot == "/tmp/lxrt-arm64root", "Heroic lives in the Steam Frame ARM64 root")
         check(HeroicARM64.command() == ["/opt/apps/heroic/Heroic-2.22.3-linux-arm64/heroic", "--no-sandbox", "--disable-gpu"],
               "Heroic command line")
         check(HeroicARM64.env["HOME_IN_GUEST"] == "/tmp/heroichome" && HeroicARM64.env["LXRT_X18_ALL_TEXT"] == "/opt/apps/heroic/",

@@ -1,0 +1,10 @@
+[package]
+name = "steamarm-session"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "steamarm-session"
+path = "src/main.rs"
+
+[dependencies]

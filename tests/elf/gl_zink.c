@@ -114,7 +114,7 @@ int main(void)
         return 1;
     }
     // The highest core context the driver gives: 4.5 (Zink on MoltenVK with
-    // the two extensions scripts/settings-env.py announces), 3.3, else 3.2
+    // the two extensions steamarm-settings-env announces), 3.3, else 3.2
     // (Zink on MoltenVK as it is).
     static const struct { int major, minor; const char *glsl; } want[] = {
         { 4, 5, "#version 450 core\n" }, { 3, 3, "#version 330 core\n" }, { 3, 2, "#version 150 core\n" },

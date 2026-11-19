@@ -1,0 +1,15 @@
+[package]
+name = "steamarm-inputd"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "steamarm-inputd"
+path = "src/main.rs"
+
+[[bin]]
+name = "steamarm-inputctl"
+path = "src/ctl.rs"
+
+[dependencies]
+serde_json = "1"

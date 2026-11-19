@@ -1,0 +1,10 @@
+[package]
+name = "steamarm-safeguard"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "steamarm-safeguard"
+path = "src/main.rs"
+
+[dependencies]

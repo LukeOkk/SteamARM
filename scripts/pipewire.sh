@@ -3,7 +3,7 @@
 # to the Mac's PulseAudio server (scripts/audio.sh) and WirePlumber, run as
 # guest processes of the ARM64 root. The Steam client uses PipeWire for its
 # own audio settings and voice (wpctl); games keep PulseAudio
-# (scripts/settings-env.py). scripts/run-app.sh starts this for an ARM64
+# (steamarm-settings-env). scripts/run-app.sh starts this for an ARM64
 # Steam client; run-app.sh --stop takes it down with the other guests.
 #
 #   scripts/pipewire.sh start [ROOT]    ROOT: the ARM64 root (default

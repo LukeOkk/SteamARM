@@ -1,0 +1,8 @@
+[package]
+name = "steamarm-ffx-metalfx-install"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "steamarm-ffx-metalfx-install"
+path = "src/main.rs"

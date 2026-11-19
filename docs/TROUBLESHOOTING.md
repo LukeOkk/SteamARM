@@ -66,9 +66,17 @@ the macOS-patched FEX and x86 Proton, with no VM. Letting the x86 client see
 FEX's CPUID leaves only makes it pick those ARM64 tools; it does not make
 them run. There is no virtual-machine option to fall back on.
 
+**CS2 closes when launched through the Steam Frame client**
+The Steam Frame root can install the x86-64 game, but its FEX emulator needs
+4 KiB host pages. This Mac reports 16 KiB pages, which the bundled FEX
+release does not support. SteamARM passes the macOS host page size to its
+Rust compatibility tool and refuses this launch before FEX crashes. This is
+an FEX host limitation, separate from the runtime's support for 4 KiB guest
+maps inside 16 KiB host pages. See [FEX issue #3496](https://github.com/FEX-Emu/FEX/issues/3496).
+
 **Procesador → Compatibilidad instalada** lists the installed tools and their
-status. `python3 scripts/compat-status.py` provides the same inventory and
-scans both `steamapps/common` and Steam's `compatibilitytools.d` folders. A
+status. `build/steamarm-compat-status` provides the same inventory and scans
+both `steamapps/common` and Steam's `compatibilitytools.d` folders. A
 community tool such as Bannerlator appears after it is installed there; ARM64
 tools remain listed as incompatible with this macOS runtime. This is an
 installation check, not a promise that every game will run.
@@ -104,7 +112,7 @@ the full mode if you changed it, and **Sistema → esync/fsync** off.
 ## Memory
 
 **"Steam terminó con la señal 9" / "El guardián de memoria detuvo Steam"**
-The memory guard (`scripts/safeguard.sh`) stopped the Linux programs before
+The Rust memory guard (`build/steamarm-safeguard`) stopped the Linux programs before
 the Mac ran out of memory. The launcher now says so and gives the reason;
 `~/SteamARM-roots/logs/safeguard.log` has a `STOP` or `KILL` line with it.
 It checks every second and stops programs for two kinds of reason:
@@ -118,9 +126,13 @@ It checks every second and stops programs for two kinds of reason:
 - **Hard limits**, whatever the free memory: all the Linux programs
   together use more than **Sistema → DRAM** (8 GB if the launcher has not
   written that limit yet), fseventsd uses more than 1500 MB, more than 80
-  Linux processes run, or the kernel's VM objects or map entries pass
-  1,500,000. Then it stops every Linux program at once, Steam included (a
-  `KILL:` line with the limit).
+  Linux processes run, or the kernel's VM objects or map entries exceed
+  their limit. The VM-object limit is the greater of 1,500,000 and the
+  startup baseline plus 500,000; the map-entry limit is the greater of
+  1,500,000 and its startup baseline plus 1,000,000. The first line in
+  `safeguard.log` records the baseline and effective limits. Then the guard
+  stops every Linux program at once, Steam included (a `KILL:` line with the
+  limit).
 
 Close other apps, or raise **Sistema → DRAM** (at most the maximum the list
 offers). A signal 9 without such a line in `safeguard.log` came from

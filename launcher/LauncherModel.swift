@@ -22,10 +22,10 @@ final class LauncherModel: ObservableObject {
     @Published var stats: [String: AppStats] = [:] {
         didSet { if stats != oldValue { Store.save(stats, to: Paths.libraryFile, dates: .iso8601) } }
     }
-    /// What this Mac can run: the static table until scripts/compat-status.py answers.
+    /// What this Mac can run: the static table until steamarm-compat-status answers.
     @Published private(set) var capabilities = RuntimeCapabilities.current
     @Published private(set) var compatibility: CompatibilityStatus?
-    /// scripts/compat-status.py has not answered yet: a launch waits for it.
+    /// steamarm-compat-status has not answered yet: a launch waits for it.
     private var detection: Task<Void, Never>?
     private var detectionRun = 0
     /// A launch is waiting for that answer.
@@ -36,6 +36,9 @@ final class LauncherModel: ObservableObject {
     @Published private(set) var runningArch: RunningArch?
     @Published private(set) var logPath: String?
     @Published var alert: String?
+    @Published private(set) var releaseCheckMessage: String?
+    @Published private(set) var latestReleaseVersion: String?
+    @Published private(set) var releaseCheckInProgress = false
     /// Bumped when a disk image the roots live on was attached: the cards
     /// re-check their roots.
     @Published private(set) var volumesRevision = 0
@@ -127,7 +130,7 @@ final class LauncherModel: ObservableObject {
         }
     }
 
-    /// Re-reads what is installed (scripts/compat-status.py, in a subprocess).
+    /// Re-reads what is installed (steamarm-compat-status, in a subprocess).
     /// Launches wait for the answer: the fallback policy is decided on what
     /// this Mac has, never on the static table (whose KosmicKrisp, say, is
     /// "not detected yet").
@@ -201,7 +204,12 @@ final class LauncherModel: ObservableObject {
         let fm = FileManager.default
         return !fm.fileExists(atPath: projectDir.appendingPathComponent("build/lxrun").path) ||
             !fm.fileExists(atPath: Paths.steamRoot.appendingPathComponent("tmp/fexhome/.local/share/Steam/steam.sh").path) ||
+            needsFrameRoot ||
             needsUpdate
+    }
+
+    var needsFrameRoot: Bool {
+        !FileManager.default.fileExists(atPath: Paths.arm64Root.appendingPathComponent(".lxrt-frameroot").path)
     }
 
     var needsFirstInstall: Bool {
@@ -222,10 +230,22 @@ final class LauncherModel: ObservableObject {
     func runSetup() {
         let script = Self.supportDir.appendingPathComponent("install.command")
         let q = "'" + projectDir.path.replacingOccurrences(of: "'", with: "'\\''") + "'"
+        let frameInstallerPath = Bundle.main.resourceURL?.appendingPathComponent("steamarm-frame-client-install").path ?? ""
+        let frameInstaller = "'" + frameInstallerPath.replacingOccurrences(of: "'", with: "'\\''") + "'"
+        let settingsEnginePath = Bundle.main.resourceURL?.appendingPathComponent("steamarm-settings-env").path ?? ""
+        let settingsEngine = "'" + settingsEnginePath.replacingOccurrences(of: "'", with: "'\\''") + "'"
+        let winePrefixToolPath = Bundle.main.resourceURL?.appendingPathComponent("steamarm-wine-prefix-options").path ?? ""
+        let winePrefixTool = "'" + winePrefixToolPath.replacingOccurrences(of: "'", with: "'\\''") + "'"
+        let setupPath = Bundle.main.resourceURL?.appendingPathComponent("steamarm-setup").path ?? ""
+        let setupBin = "'" + setupPath.replacingOccurrences(of: "'", with: "'\\''") + "'"
         let body = """
         #!/bin/bash
         # SteamARM: build everything and install Steam (scripts/setup.sh).
         cd \(q) || exit 1
+        if [ -x \(setupBin) ]; then export STEAMARM_SETUP_BIN=\(setupBin); fi
+        if [ -x \(frameInstaller) ]; then export STEAMARM_FRAME_CLIENT_INSTALLER=\(frameInstaller); fi
+        if [ -x \(settingsEngine) ]; then export STEAMARM_SETTINGS_ENV_BIN=\(settingsEngine); fi
+        if [ -x \(winePrefixTool) ]; then export STEAMARM_WINE_PREFIX_OPTIONS_BIN=\(winePrefixTool); fi
         if [ ! -x /opt/homebrew/bin/brew ]; then
             echo "SteamARM necesita Homebrew (https://brew.sh). Instálalo con:"
             echo '  /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"'
@@ -247,6 +267,61 @@ final class LauncherModel: ObservableObject {
             NSWorkspace.shared.open(script)
         } catch {
             alert = "No se pudo abrir el instalador: \(error.localizedDescription)"
+        }
+    }
+
+    func checkForUpdates() {
+        guard !releaseCheckInProgress else { return }
+        guard let checker = Bundle.main.resourceURL?.appendingPathComponent("steamarm-release-check"),
+              FileManager.default.isExecutableFile(atPath: checker.path) else {
+            releaseCheckMessage = "El comprobador de actualizaciones no está incluido en esta app. Descarga la versión más reciente desde GitHub."
+            return
+        }
+        let current = (Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String) ?? "0"
+        releaseCheckInProgress = true
+        releaseCheckMessage = nil
+        latestReleaseVersion = nil
+        Task.detached(priority: .utility) {
+            let process = Process()
+            process.executableURL = checker
+            process.arguments = [current]
+            let stdout = Pipe()
+            let stderr = Pipe()
+            process.standardOutput = stdout
+            process.standardError = stderr
+            var result: (String?, String?, String?)
+            do {
+                try process.run()
+                let output = stdout.fileHandleForReading.readDataToEndOfFile()
+                let error = stderr.fileHandleForReading.readDataToEndOfFile()
+                process.waitUntilExit()
+                let fields = String(decoding: output, as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines).components(separatedBy: "\t")
+                if process.terminationStatus == 0, fields.count == 2 {
+                    switch fields[0] {
+                    case "update": result = (fields[1], nil, nil)
+                    case "current": result = (nil, fields[1], nil)
+                    case "development": result = (nil, nil, "Esta compilación es posterior a la última versión estable publicada (\(fields[1])).")
+                    default: result = (nil, nil, "GitHub devolvió una respuesta de versión no reconocida.")
+                    }
+                } else {
+                    let detail = String(decoding: error, as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines)
+                    result = (nil, nil, "No se pudo comprobar la última versión. " + (detail.isEmpty ? "Revisa la conexión e inténtalo de nuevo." : detail))
+                }
+            } catch {
+                result = (nil, nil, "No se pudo comprobar la última versión: \(error.localizedDescription)")
+            }
+            let available = result.0
+            let stable = result.1
+            let failure = result.2
+            await MainActor.run {
+                self.latestReleaseVersion = available
+                if let latest = stable {
+                    self.releaseCheckMessage = "SteamARM \(current) ya es la última versión estable (\(latest))."
+                } else {
+                    self.releaseCheckMessage = failure
+                }
+                self.releaseCheckInProgress = false
+            }
         }
     }
 
@@ -404,8 +479,8 @@ final class LauncherModel: ObservableObject {
         if app.kind == "heroic", app.architecture == GuestArchitecture.aarch64.rawValue {
             let missing = HeroicARM64.missing(inRoot: host.path) { FileManager.default.fileExists(atPath: $0) }
             if !missing.isEmpty {
-                return "a la raíz ARM64 le falta \(missing.joined(separator: ", ")) (Electron y los ayudantes de Heroic); "
-                    + "reconstrúyela con scripts/mkarmroot.sh, que conserva opt/apps y tmp/"
+                return "a la raíz de Steam Frame le falta \(missing.joined(separator: ", ")) (Electron y los ayudantes de Heroic); "
+                    + "restáurala con scripts/mkframeroot.sh desde la imagen oficial; conserva opt/apps y tmp/"
             }
         }
         return nil
@@ -437,7 +512,11 @@ final class LauncherModel: ObservableObject {
     // MARK: Android apps (docs/APK_SUPPORT.md)
 
     var apkInspectScript: URL { projectDir.appendingPathComponent("scripts/apk-inspect.py") }
-    var androidPMScript: URL { projectDir.appendingPathComponent("scripts/android-pm.py") }
+    var androidPMTool: URL {
+        if let bundled = Bundle.main.resourceURL?.appendingPathComponent("steamarm-android-pm"),
+           FileManager.default.isExecutableFile(atPath: bundled.path) { return bundled }
+        return projectDir.appendingPathComponent("build/steamarm-android-pm")
+    }
 
     /// scripts/apk-inspect.py on `apk`, with its icon extracted to `icon`.
     /// The error text is in Spanish.
@@ -463,13 +542,14 @@ final class LauncherModel: ObservableObject {
         return (meta["versionName"] as? String, meta["versionCode"] as? Int)
     }
 
-    /// android-pm.py install, then the library card. The error is in Spanish.
+    /// Install through the Rust Android package manager, then add the library card.
     func installAPK(_ apk: URL, info: AndroidPackageInfo) async -> (entry: AppEntry?, error: String?) {
-        let r = await Shell.run("/usr/bin/python3", [androidPMScript.path, "install", apk.path],
-                                cwd: projectDir, env: ["STEAMARM_STATE": Paths.state.path])
+        let r = await Shell.run(androidPMTool.path, ["install", apk.path],
+                                cwd: projectDir, env: ["STEAMARM_STATE": Paths.state.path,
+                                                       "STEAMARM_PROJECT_ROOT": projectDir.path])
         guard let payload = AndroidApps.jsonPayload(r.output),
               let result = try? JSONDecoder().decode(AndroidPMResult.self, from: payload) else {
-            return (nil, "android-pm.py falló (código \(r.status)).\n\n" + r.output.suffix(800))
+            return (nil, "steamarm-android-pm falló (código \(r.status)).\n\n" + r.output.suffix(800))
         }
         guard result.ok, let card = AndroidApps.card(result: result, info: info) else {
             return (nil, AndroidApps.errorMessage(code: result.code, detail: result.error))
@@ -482,14 +562,15 @@ final class LauncherModel: ObservableObject {
         return (entry, nil)
     }
 
-    /// android-pm.py uninstall [--keep-data], then the card goes.
+    /// Remove an installed Android app with the Rust package manager, then its card.
     func uninstallAndroid(_ app: AppEntry, keepData: Bool) {
         guard app.isAndroid, let package = app.android?.package, AndroidApps.isValidPackage(package) else { return }
-        let script = androidPMScript.path, cwd = projectDir
+        let tool = androidPMTool.path, cwd = projectDir
         Task {
-            let r = await Shell.run("/usr/bin/python3",
-                                    [script, "uninstall"] + (keepData ? ["--keep-data"] : []) + [package],
-                                    cwd: cwd, env: ["STEAMARM_STATE": Paths.state.path])
+            let r = await Shell.run(tool,
+                                    ["uninstall"] + (keepData ? ["--keep-data"] : []) + [package],
+                                    cwd: cwd, env: ["STEAMARM_STATE": Paths.state.path,
+                                                   "STEAMARM_PROJECT_ROOT": projectDir.path])
             let result = AndroidApps.jsonPayload(r.output).flatMap { try? JSONDecoder().decode(AndroidPMResult.self, from: $0) }
             // Already gone (removed by hand, or from the command line): the card goes too.
             guard result?.ok == true || result?.code == "not-installed" else {
@@ -552,7 +633,7 @@ final class LauncherModel: ObservableObject {
     private func launch(_ app: AppEntry, waitedForDetection: Bool) {
         guard session.canLaunch, !launchQueued else { return }
         // The fallback policy below is decided on what this Mac has: wait for
-        // scripts/compat-status.py (a launchSteamOnStart launch always comes
+        // steamarm-compat-status (a launchSteamOnStart launch always comes
         // before it has answered), 10 s at most.
         if detection != nil && !waitedForDetection {
             launchQueued = true
@@ -594,7 +675,19 @@ final class LauncherModel: ObservableObject {
         }
         // Every fallback goes to run-app.sh, which puts it over the settings:
         // what the policy announced is what runs.
-        let env = FallbackPolicy.environment(for: issues)
+        var env = FallbackPolicy.environment(for: issues)
+        if let appRunner = Bundle.main.resourceURL?.appendingPathComponent("steamarm-app-runner"),
+           FileManager.default.isExecutableFile(atPath: appRunner.path) {
+            env["STEAMARM_APP_RUNNER_BIN"] = appRunner.path
+        }
+        if let settingsEngine = Bundle.main.resourceURL?.appendingPathComponent("steamarm-settings-env"),
+           FileManager.default.isExecutableFile(atPath: settingsEngine.path) {
+            env["STEAMARM_SETTINGS_ENV_BIN"] = settingsEngine.path
+        }
+        if let winePrefixTool = Bundle.main.resourceURL?.appendingPathComponent("steamarm-wine-prefix-options"),
+           FileManager.default.isExecutableFile(atPath: winePrefixTool.path) {
+            env["STEAMARM_WINE_PREFIX_OPTIONS_BIN"] = winePrefixTool.path
+        }
         var mode = requestedDisplay(app)
         if let display = env["STEAMARM_DISPLAY"], let fallback = DisplayMode(rawValue: display) { mode = fallback }
         // The lock, before any process exists.
@@ -760,7 +853,7 @@ final class LauncherModel: ObservableObject {
     private func adoptRunningApp() {
         let id: String
         var start: Date?
-        // session.py writes running.pgid, which an adopted run-steam.sh lacks.
+        // steamarm-session writes running.pgid, which adopted run-steam.sh lacks.
         let wrapped = FileManager.default.fileExists(atPath: Paths.pgidFile.path)
         if let pid = Shell.readPID(Paths.pidFile), Shell.isAlive(pid),
            SessionLiveness.isLeader(command: Shell.command(of: pid), wrapped: wrapped) {
@@ -844,7 +937,7 @@ final class LauncherModel: ObservableObject {
         guard session.phase == .running || session.phase == .stopping else { return }
         timer?.invalidate()
         timer = nil
-        // scripts/session.py records how the program ended: "N" for exit code
+        // steamarm-session records how the program ended: "N" for exit code
         // N, "N signal S" for a death by signal S. Without it (a run adopted
         // from run-steam.sh), the only sign of a crash is that it was gone
         // within 15 s.
@@ -885,7 +978,7 @@ final class LauncherModel: ObservableObject {
         runtimeUnknown = false
     }
 
-    /// scripts/safeguard.sh writes "<epoch> <reason>" to logs/safeguard.last
+    /// steamarm-safeguard writes "<epoch> <reason>" to logs/safeguard.last
     /// whenever it kills guests. A SIGKILL within a minute of that is its doing.
     static func recentGuardStop(now: Date = Date()) -> String? {
         guard let s = try? String(contentsOf: Paths.logs.appendingPathComponent("safeguard.last"),

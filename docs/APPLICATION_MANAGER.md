@@ -22,7 +22,7 @@ post-merge check in `benchmarks/README.md`).
   `lxrun` (`scripts/run-app.sh`, `stop_guests`).
 - **`run-app.sh`.** It resolves the entry: Steam from a dict inside the
   script, everything else from `$STATE/launcher/apps.json`. It merges the
-  entry's env with `settings-env.py`, starts the X server, PulseAudio and
+  entry's env with `steamarm-settings-env`, starts the X server, PulseAudio and
   `steamarm-inputd`, then starts the program. **Until this change, every
   program went through `scripts/run-fex.sh`, whatever its ISA.**
 - **Tracking.**
@@ -55,8 +55,8 @@ post-merge check in `benchmarks/README.md`).
 | ARM64-first launch plan | `LaunchPlanner`: aarch64 runs natively only, never through FEX; x86_64/i386 run through FEX only; `usesVirtualMachine` is always false | done, tested |
 | Runner per ISA | `run-app.sh` sends aarch64 entries to the new `scripts/run-native.sh` (`build/lxrun <program>`, no `FEX_*` variables). It writes `running.arch` = `<arch> <translator>`, and refuses an aarch64 entry in the x86 root or an x86 entry in the ARM64 base, as `LaunchPlanner` does | done, dry-run tested |
 | Session state machine | `SessionMachine`: `idle → starting → running → stopping → cleanup → idle`, `starting → failed → cleanup → idle`, `running → crashed / exited → cleanup → idle`. The lock is taken before any process exists | done, tested; `LauncherModel` uses it instead of its own phase since `774f590` |
-| Backends, session mode and capabilities | `ApplicationCore.swift`: `PresentationMode` (native windows / VNC) is separate from `ExecutionBackend` (lxrun / Lightning JIT / Apple Hypervisor). `ApplicationBackendPreset` maps the four presets onto them. `SessionVirtualizationMode` is `VM — Apple Hypervisor` only for that backend, and no fallback ever returns it. `RuntimeCapabilities.current` states what exists today, with its evidence: native windows ready; VNC experimental; lxrun ready; Lightning JIT and Apple Hypervisor unavailable (neither exists in the tree, so Settings and the Runtime page do not list them: `offered(in:)`); esync experimental (an eventfd crosses SCM_RIGHTS as the same eventfd, `tests/elf/eventfd_scm.c`); fsync experimental (lxrun implements `futex_waitv`, runtime/futex_waitv.c; unavailable when no installed Proton has fsync); MSync unavailable; MoltenVK ready; KosmicKrisp and WineD3D/OpenGL unavailable until detected. `RuntimeCapabilities.detect(from:)` refines that table with what `scripts/compat-status.py` finds on the Mac: KosmicKrisp becomes experimental when it is installed, on macOS 26 or later, loads as an ICD and the installed shim reads `STEAMARM_VK_ICD`; esync is experimental only with an esync Proton (`1de9fd1`); OpenGL (WineD3D) becomes experimental with Zink in the x86 root, the native X server built with `patches/xquartz-glx-mesa-direct.patch`, MoltenVK and the shim (stage 38) | done, tested; the Settings window and its read-only Runtime page read it, and disabled options show their reason (`774f590`) |
-| One process group and an exit status per session | `scripts/session.py run` (started by `run-app.sh`) puts the program and what it forks in a group of its own (`running.pgid`). A process that starts its own session (setsid: wineserver, daemons) leaves that group; `--stop`'s `kill -9` of leftover guests still catches it. How the program ended goes to `running.status`: `N` for an exit code, `N signal S` for a signal. Leftovers get 5 s, then SIGTERM, then SIGKILL. `--stop` signals the group first (`session.py stop`). FEXServer and `safeguard.sh` start in their own sessions (`session.py detach`), so a stop never takes them down. The program gets the caller's environment and signal dispositions, not Python's: no coerced `LC_CTYPE`, default SIGPIPE, and nohup's ignored SIGHUP kept. The launcher reports the status ("terminó con el código N / la señal S") and keeps the 15 s guess only for a run it adopted without a wrapper | done; `tests/launcher/session.sh` 24/24 on Linux; macOS CI 23/23 + 1 skip (`benchmarks/stage20-ci-macos-runner.txt`) |
+| Backends, session mode and capabilities | `ApplicationCore.swift`: `PresentationMode` (native windows / VNC) is separate from `ExecutionBackend` (lxrun / Lightning JIT / Apple Hypervisor). `ApplicationBackendPreset` maps the four presets onto them. `SessionVirtualizationMode` is `VM — Apple Hypervisor` only for that backend, and no fallback ever returns it. `RuntimeCapabilities.current` states what exists today, with its evidence: native windows ready; VNC experimental; lxrun ready; Lightning JIT and Apple Hypervisor unavailable (neither exists in the tree, so Settings and the Runtime page do not list them: `offered(in:)`); esync experimental (an eventfd crosses SCM_RIGHTS as the same eventfd, `tests/elf/eventfd_scm.c`); fsync experimental (lxrun implements `futex_waitv`, runtime/futex_waitv.c; unavailable when no installed Proton has fsync); MSync unavailable; MoltenVK ready; KosmicKrisp and WineD3D/OpenGL unavailable until detected. `RuntimeCapabilities.detect(from:)` refines that table with what `steamarm-compat-status` finds on the Mac: KosmicKrisp becomes experimental when it is installed, on macOS 26 or later, loads as an ICD and the installed shim reads `STEAMARM_VK_ICD`; esync is experimental only with an esync Proton (`1de9fd1`); OpenGL (WineD3D) becomes experimental with Zink in the x86 root, the native X server built with `patches/xquartz-glx-mesa-direct.patch`, MoltenVK and the shim (stage 38) | done, tested; the Settings window and its read-only Runtime page read it, and disabled options show their reason (`774f590`) |
+| One process group and an exit status per session | `build/steamarm-session run` puts the program and its children in a group of its own (`running.pgid`). FEXServer and `steamarm-safeguard` detach through `steamarm-session`, so stopping an app leaves the watchdog alive. The launcher records exit codes/signals in `running.status` and reports them | Rust implementation |
 
 Steam and Prism are marked `x86_64`, so they behave exactly as before.
 Steam's entry is labelled TRANSITIONAL_COMPATIBILITY. Since stage 24 the
@@ -67,7 +67,7 @@ ARM64 root and writes an `aarch64`, experimental entry
 through FEX until it is deleted.
 
 Since stage 25 there is a third kind of entry, `kind: "android"`: an APK
-installed by `scripts/android-pm.py` (`docs/APK_SUPPORT.md`). Such an entry
+installed by the Rust `steamarm-android-pm` tool (`docs/APK_SUPPORT.md`). Such an entry
 has no command. Its `architecture` is that of its native code
 (`AndroidABI`), and its details are in the Optional field
 `AppEntry.android`. There is no Android runtime, so it never starts:
@@ -90,7 +90,7 @@ It runs (Makefile target `test-launcher-core`):
 - `tests/launcher/run_app_dispatch.sh`: `run-app.sh --dry-run` for
   aarch64/x86_64/i386/Steam/invalid entries, the root rule and the built-in
   entries (25 passed at `9468028`);
-- `tests/launcher/session.sh`: `scripts/session.py` with real processes
+- `tests/launcher/session.sh`: `steamarm-session` with real processes
   (about 20 s);
 - `tests/launcher/safeguard.sh`: the memory guard with fake guests;
 - `tests/launcher/guest_env.sh`: a root's `.lxrt-guest-env` and
@@ -122,12 +122,12 @@ says so.
    entry whose root or program is missing is shown as unavailable with the
    reason, not as failing (`launcher/LauncherModel.swift:255-277`).
 3. **Exit status and a process group per session.** Done in
-   `scripts/session.py` (see the table above). On the Mac,
+   `steamarm-session` (see the table above). On the Mac,
    `tests/launcher/session.sh` passes (23/0 in stage 23's
    `make test-launcher-core`), and a stop of the native arm64 client
    through the launcher left 0 steam, steamwebhelper or other guest
    processes (MEASURED, stage 23 L1-L10 and the post-merge check). The same
-   check for the x86 client is not recorded. `safeguard.sh` could later
+   check for the x86 client is not recorded. The Rust safeguard could later
    kill the recorded group before every `lxrun`.
 4. **Wire `SessionMachine` into `LauncherModel`.** DONE in `774f590`
    (VERIFIED IN SOURCE, built; the lock is taken before `run-app.sh` starts
@@ -187,6 +187,6 @@ unsupported. It is never answered by proposing or starting a VM.
 - **ISA of scripts.** `steam.sh`, AppImage `AppRun` and Heroic's wrapper only
   reveal their ISA through the ELF they exec. Today such an entry stays
   x86_64 unless its definition says otherwise.
-- **Settings scoped to the payload.** `settings-env.py` still exports `FEX_*`
+- **Settings scoped to the payload.** `steamarm-settings-env` still exports `FEX_*`
   for every app. `run-app.sh` now drops them for aarch64 entries; the Settings
   page should say that the Processor section applies to x86 programs.

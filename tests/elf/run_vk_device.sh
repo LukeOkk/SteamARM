@@ -60,7 +60,7 @@ for arch in x86_64 i386; do
     if ! "$CLANG" "${flags[@]}" -fuse-ld=lld -O2 -o "$gexe" tests/elf/gl_zink.c -ldl; then
         printf '  FAIL  gl_zink   %-6s (build)\n' "$arch"; fail=$((fail + 1)); continue
     fi
-    # With the two extensions scripts/settings-env.py announces for WineD3D
+    # With the two extensions steamarm-settings-env announces for WineD3D
     # (OpenGL 4.5 instead of 3.2; stage 39).
     LXRT_ROOT="$ROOT" FEX_ROOTFS=/ STEAMARM_VK_ICD=moltenvk EGL_PLATFORM=surfaceless GALLIUM_DRIVER=zink \
         MESA_EXTENSION_OVERRIDE="+GL_ARB_vertex_type_2_10_10_10_rev +GL_ARB_texture_buffer_object_rgb32" \

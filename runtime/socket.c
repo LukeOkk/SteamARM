@@ -176,22 +176,23 @@ static int addr_to_darwin(const void *lsa, unsigned llen, struct sockaddr_storag
             return (int)sizeof(*du);
         }
         size_t n = strnlen(lu->sun_path, pathmax);
-        // A filesystem socket path is a guest path: it resolves like every
-        // other one -- binds of a bwrap sandbox, then LXRT_ROOT (Xvnc's
-        // /tmp/.X11-unix/X1 failed to bind with ENOENT until the root was
-        // applied; Chromium's SingletonSocket under a sandbox's /tmp until the
-        // binds were). Darwin's sun_path is 104 bytes.
-        extern const char *lxrt_translate_guest_path(const char *, char *, size_t);
-        char guest[sizeof lu->sun_path + 1], host[1024];
+        // The Rust path layer applies pressure-vessel mounts and aliases paths
+        // that exceed Darwin's sockaddr_un.sun_path limit.
+        extern int lxrt_socket_path_for_darwin(const char *, char *, size_t);
+        char guest[sizeof lu->sun_path + 1], socket_path[sizeof du->sun_path];
         memcpy(guest, lu->sun_path, n);
         guest[n] = '\0';
-        const char *h = n && guest[0] == '/' ? lxrt_translate_guest_path(guest, host, sizeof host) : guest;
-        size_t hl = strlen(h);
-        if (hl >= sizeof(du->sun_path)) {
+        int error = lxrt_socket_path_for_darwin(guest, socket_path, sizeof socket_path);
+        if (error) {
+            errno = error;
+            return -1;
+        }
+        size_t socket_path_len = strnlen(socket_path, sizeof socket_path);
+        if (socket_path_len >= sizeof du->sun_path) {
             errno = ENAMETOOLONG;
             return -1;
         }
-        memcpy(du->sun_path, h, hl + 1);
+        memcpy(du->sun_path, socket_path, socket_path_len + 1);
         du->sun_len = (uint8_t)(sizeof(*du));
         return (int)sizeof(*du);
     }
@@ -247,6 +248,15 @@ static void addr_to_linux(const struct sockaddr *dsa, socklen_t dlen,
         if (lim > sizeof du->sun_path) lim = sizeof du->sun_path;
         size_t n = strnlen(du->sun_path, lim);
         const char *src = du->sun_path;
+        extern bool lxrt_socket_path_unalias(const char *, char *, size_t);
+        char restored[sizeof lu.sun_path];
+        if (n && lxrt_socket_path_unalias(src, restored, sizeof restored)) {
+            size_t restored_len = strnlen(restored, sizeof restored);
+            memcpy(lu.sun_path, restored, restored_len + 1);
+            used = (uint32_t)(2 + restored_len + 1);
+            memcpy(&out, &lu, sizeof lu);
+            break;
+        }
         // One of the runtime's materialised abstract names: the guest's
         // abstract address again (leading NUL, the decoded name, no
         // terminator; the length says where it ends).
@@ -568,12 +578,13 @@ long lxrt_connect(int fd, const void *lsa, unsigned llen)
     if (is_netlink(fd))
         return 0;               // to the kernel: the only peer there is
     struct sockaddr_storage ss;
+    errno = 0;
     int n = addr_to_darwin(lsa, llen, &ss);
     if (n < 0)
-        return LERR(EINVAL);
+        return LERR(errno ? errno : EINVAL);
     long rc = connect(fd, (struct sockaddr *)&ss, (socklen_t)n) != 0 ? LERR(errno) : 0;
     // Android's property service is started on demand and leaves when idle
-    // (props.c, propsvc.c): a setprop that finds nobody listening starts it
+    // (props.rs, propsvc.c): a setprop that finds nobody listening starts it
     // and tries once more. Linux ENOENT 2, ECONNREFUSED 111.
     if ((rc == -2 || rc == -111) && ss.ss_family == AF_UNIX && llen > 2) {
         const struct linux_sockaddr_un *lu = lsa;
@@ -632,9 +643,10 @@ long lxrt_bind(int fd, const void *lsa, unsigned llen)
         return 0;
     }
     struct sockaddr_storage ss;
+    errno = 0;
     int n = addr_to_darwin(lsa, llen, &ss);
     if (n < 0)
-        return LERR(EINVAL);
+        return LERR(errno ? errno : EINVAL);
     // A stale socket file survives a crash, where an abstract socket would
     // not. Unlink before binding so a restart is not blocked by the last run.
     if (((struct sockaddr *)&ss)->sa_family == AF_UNIX)
@@ -1055,9 +1067,10 @@ long lxrt_sendto(int fd, const void *buf, size_t len, int lflags, const void *la
         return r < 0 ? LERR(errno) : (long)r;
     }
     struct sockaddr_storage ss;
+    errno = 0;
     int dlen = addr_to_darwin(laddr, lalen, &ss);
     if (dlen < 0)
-        return LERR(EINVAL);
+        return LERR(errno ? errno : EINVAL);
     ssize_t r = sendto(fd, buf, len, df, (struct sockaddr *)&ss, (socklen_t)dlen);
     return r < 0 ? LERR(errno) : (long)r;
 }
@@ -1240,10 +1253,11 @@ long lxrt_sendmsg(int fd, const void *lmsg, int flags)
     memset(&dm, 0, sizeof dm);
     struct sockaddr_storage ss;
     if (lm->msg_name && lm->msg_namelen) {
+        errno = 0;
         int n = addr_to_darwin((const void *)(uintptr_t)lm->msg_name,
                                lm->msg_namelen, &ss);
         if (n < 0)
-            return LERR(EINVAL);
+            return LERR(errno ? errno : EINVAL);
         dm.msg_name = &ss;
         dm.msg_namelen = (socklen_t)n;
     }

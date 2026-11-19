@@ -1,5 +1,5 @@
 #!/bin/bash
-# scripts/safeguard.sh memory rule, with fake guests (a tiny program built
+# build/steamarm-safeguard memory rule, with fake guests (a tiny program built
 # here -- macOS kills relocated copies of its own binaries -- under a name of
 # its own, SAFEGUARD_GUEST_NAME, so real lxrun guests are never touched) and
 # a free-memory threshold forced above the real level:
@@ -28,7 +28,7 @@ alive() { kill -0 "$1" 2>/dev/null; }
 count() { local n=0 p; for p in "$@"; do alive "$p" && n=$((n+1)); done; echo $n; }
 STEAMARM_STATE="$T/state" SAFEGUARD_GUEST_NAME="$NAME" SAFEGUARD_MIN_FREE=101 \
     SAFEGUARD_LOW_SECS=2 SAFEGUARD_GRACE_SECS=4 \
-    scripts/safeguard.sh run >"$T/sg.log" 2>&1 & SG=$!
+    build/steamarm-safeguard run >"$T/sg.log" 2>&1 & SG=$!
 sleep 3.5
 check "one guest stopped first" '[ "$(count $A $B)" -eq 1 ]'
 check "STOP line in the guard log" 'grep -q "STOP largest guest: free memory" "$T/sg.log"'
@@ -48,15 +48,18 @@ kill "$SG" 2>/dev/null; wait "$SG" 2>/dev/null; SG=""
 sleep 1
 STEAMARM_STATE="$T/state2" SAFEGUARD_GUEST_NAME="$NAME" SAFEGUARD_MIN_FREE=101 \
     SAFEGUARD_LOW_SECS=2 SAFEGUARD_GRACE_SECS=60 SAFEGUARD_MAX_PROCS=2 \
-    scripts/safeguard.sh run >"$T/sg2.log" 2>&1 & SG2=$!
+    build/steamarm-safeguard run >"$T/sg2.log" 2>&1 & SG2=$!
 sleep 3.5
 check "grace period: one guest stopped first" '[ "$(count $C $D)" -eq 1 ]'
 "$T/bin/$NAME" 60 & E=$!
 "$T/bin/$NAME" 60 & F=$!
 sleep 3
+before=$fail
 check "a process-count limit crossed in the grace period stops every guest" \
     '[ "$(count $C $D $E $F)" -eq 0 ]'
-check "its KILL line names the process count" 'grep -q "KILL: 3 lxrun processes > 2" "$T/sg2.log"'
+[ "$fail" -eq "$before" ] || { echo "-- sg2.log"; cat "$T/sg2.log"; }
+check "its KILL line names the process count" \
+    'grep -q "KILL: 3 $NAME processes > 2" "$T/sg2.log"'
 kill "$SG2" 2>/dev/null; wait "$SG2" 2>/dev/null; SG2=""
 
 # 6. An Android session (scripts/android-session.py's session.json naming a
@@ -67,7 +70,7 @@ sleep 60 & BOOT=$!
 echo "{\"bootPid\": $BOOT, \"root\": \"/x\"}" > "$T/state3/android/session.json"
 G1=""; for _ in 1 2 3 4; do "$T/bin/$NAME" 60 & G1="$G1 $!"; done
 STEAMARM_STATE="$T/state3" SAFEGUARD_GUEST_NAME="$NAME" SAFEGUARD_MAX_PROCS=2 SAFEGUARD_ANDROID_PROCS=3 \
-    scripts/safeguard.sh run >"$T/sg3.log" 2>&1 & SG3=$!
+    build/steamarm-safeguard run >"$T/sg3.log" 2>&1 & SG3=$!
 sleep 2.5
 # shellcheck disable=SC2086
 check "an Android session: 4 guests under 2 + 3 keep running" '[ "$(count $G1)" -eq 4 ]'
@@ -75,7 +78,11 @@ check "an Android session: 4 guests under 2 + 3 keep running" '[ "$(count $G1)" 
 "$T/bin/$NAME" 60 & G6=$!
 sleep 2.5
 # shellcheck disable=SC2086
-check "... and a sixth crosses the raised limit" '[ "$(count $G1 $G5 $G6)" -eq 0 ] && grep -q "KILL: 6 lxrun processes > 5" "$T/sg3.log"'
+before=$fail
+check "a sixth crosses the raised limit and stops every guest" '[ "$(count $G1 $G5 $G6)" -eq 0 ]'
+[ "$fail" -eq "$before" ] || { echo "-- sg3.log"; cat "$T/sg3.log"; }
+check "the KILL line names the raised limit" \
+    'grep -q "KILL: 6 $NAME processes > 5" "$T/sg3.log"'
 kill "$SG3" "$BOOT" 2>/dev/null; wait "$SG3" "$BOOT" 2>/dev/null
 echo "$pass passed, $fail failed"
 [ $fail -eq 0 ]

@@ -60,9 +60,10 @@ Result (MEASURED):
   probe:   connected 1, A down 1, A up 1, left stick 1, rumble 1
   daemon:  rumble strong=40000 weak=20000 (XInputSetState(40000, 20000))
 
-The real daemon (tools/inputd/inputd.c, built by `make inputd`, started by
-scripts/input.sh with Steam and with launcher apps), driven by --fake TYPE
---script (no hardware), same probe through Steam's launch path (MEASURED):
+Historical C-daemon measurement before the Rust port; the Rust daemon now lives
+in tools/inputd/src/main.rs and is built by `make inputd`. The earlier build was
+started by scripts/input.sh with Steam and launcher apps, driven by --fake TYPE
+--script (no hardware), with the same probe through Steam's launch path (MEASURED):
   xbox360    connected 1, A down 1, A up 1, left stick 1, rumble 1
   dualsense  same (winebus: vid 054c pid 0ce6, is_gamepad 1)
   switchpro  connected 1, left stick 1, rumble 1, and the south button arrives

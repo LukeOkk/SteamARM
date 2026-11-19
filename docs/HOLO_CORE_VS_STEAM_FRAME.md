@@ -66,7 +66,7 @@ Nothing downloaded is committed or installed.
 Command (the `compare` fixes it needed are below):
 
 ```sh
-scripts/steamframe-image.py compare /Volumes/SteamFrameRoot/rootfs core.db extra.db \
+build/steamarm-frame-image compare /Volumes/SteamFrameRoot/rootfs core.db extra.db \
     --md compare.md --json compare.json
 ```
 
@@ -272,7 +272,7 @@ What would change this:
 
 ## `compare` fixes (VERIFIED IN SOURCE, tested)
 
-`scripts/steamframe-image.py compare` gave only "same / differs /
+The Python predecessor's `compare` command gave only "same / differs /
 image-only / repo-only" from string equality. The fixes, each covered by
 `tests/steamframe_image/compare.sh` (27 checks; python3 only, so it runs on
 macOS):

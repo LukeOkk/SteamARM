@@ -37,6 +37,8 @@ git diff --quiet HEAD -- ||
 # make launcher also reads wildcard Swift sources and bundled resources.
 [ -z "$(git ls-files --others --exclude-standard -- launcher resources)" ] ||
     { echo 'make-release: untracked launcher inputs would differ from the source archive' >&2; exit 1; }
+[ -z "$(git ls-files --others --exclude-standard -- .cargo vendor tools)" ] ||
+    { echo 'make-release: commit Cargo configuration, vendored crates, and Rust tools before packaging' >&2; exit 1; }
 mkdir -p "$(dirname "$OUT")"
 mkdir "$OUT"
 
@@ -46,8 +48,17 @@ mkdir "$OUT"
 grep -q '^LXRT_KEEP_X18 ?= 1$' Makefile ||
     { echo "make-release: the Makefile no longer defaults to LXRT_KEEP_X18=1; refusing" >&2; exit 1; }
 
+cargo build --offline --locked --release --manifest-path tools/release-check/Cargo.toml --target-dir build/rust-release-check
+cargo build --offline --locked --release --manifest-path tools/setup/Cargo.toml --target-dir build/rust-setup
 make launcher >/dev/null
 cp -R build/SteamARM.app "$APP"
+# The Steam Frame client installer is compiled for the release and shipped
+# with the app; users do not need Rust just to install the ARM64 client.
+cargo build --offline --locked --release --manifest-path tools/frame-client-install/Cargo.toml --target-dir build/rust-frame-client-install
+install -m 755 build/rust-frame-client-install/release/steamarm-frame-client-install \
+    "$APP/Contents/Resources/steamarm-frame-client-install"
+install -m 755 build/rust-setup/release/steamarm-setup \
+    "$APP/Contents/Resources/steamarm-setup"
 # No checkout path in a distributed app: the launcher falls back to the
 # unpacked source.
 /usr/libexec/PlistBuddy -c "Set :SteamARMProjectDir ''" "$APP/Contents/Info.plist"

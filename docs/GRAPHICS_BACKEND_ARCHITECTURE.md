@@ -80,7 +80,7 @@ stream output fails or draws wrong (HYPOTHESIS: few games do;
 - **driverVersion is passed through unchanged** (`AGENTS.md`). MoltenVK
   reports `10402`; Steam decodes it as a Vulkan packed version and shows
   "0.2.2210". The launcher's "MoltenVK instalado" asks the library itself
-  (`vkGetVersionStringsMVK` in `scripts/compat-status.py`, same search order
+  (`vkGetVersionStringsMVK` in `steamarm-compat-status`, same search order
   as the shim) and shows 1.4.2 (MEASURED).
 
 ## KosmicKrisp
@@ -91,7 +91,7 @@ Mesa's Vulkan-on-Metal driver.
   `scripts/setup.sh`): Mesa 26.2.4's driver alone, with
   `patches/kosmickrisp-*.patch`, at
   `~/SteamARM-build/mesa-kk/out/libvulkan_kosmickrisp.dylib`. When it exists
-  `scripts/settings-env.py` gives the shim its directory (`STEAMARM_KK_DIR`)
+  `steamarm-settings-env` gives the shim its directory (`STEAMARM_KK_DIR`)
   and the shim loads it instead of Homebrew's; the name stays `kosmickrisp`.
   The patches are what Source 2 needed (MEASURED,
   `benchmarks/stage51-cs2-linux-native.txt`):
@@ -149,10 +149,10 @@ Mesa's Vulkan-on-Metal driver.
   (`launcher/ApplicationCore.swift:538`); `experimental` once detection
   finds KosmicKrisp installed, macOS 26 or later, loadable as an ICD, and
   an installed shim that contains `STEAMARM_VK_ICD`
-  (`launcher/ApplicationCore.swift:554-565`, `scripts/compat-status.py`).
+  (`launcher/ApplicationCore.swift:554-565`, `steamarm-compat-status`).
   Then **Configuración → Gráficos → Motor → Vulkan (KosmicKrisp)** makes
-  `scripts/settings-env.py` export `STEAMARM_VK_ICD=kosmickrisp`
-  (`scripts/settings-env.py:143-147`). `scripts/setup.sh` installs the
+  `steamarm-settings-env` export `STEAMARM_VK_ICD=kosmickrisp`
+  (`steamarm-settings-env`). `scripts/setup.sh` installs the
   shim this checkout builds (`scripts/install-steamroot-gfx.sh`); KosmicKrisp
   itself comes from Homebrew's `mesa`, which setup does not install.
 
@@ -188,15 +188,15 @@ Mesa's Vulkan-on-Metal driver.
 - OpenGL 4.5 for WineD3D (`benchmarks/stage39-wined3d-gl45.txt`): Zink on
   MoltenVK misses only `GL_ARB_vertex_type_2_10_10_10_rev` (no
   non-normalized 10:10:10:2 vertex formats in Metal) for 3.3 and
-  `GL_ARB_texture_buffer_object_rgb32` for 4.0. `scripts/settings-env.py`
+  `GL_ARB_texture_buffer_object_rgb32` for 4.0. `steamarm-settings-env`
   announces both (`MESA_EXTENSION_OVERRIDE`) for the WineD3D choice:
   OpenGL 4.5, and WineD3D's context, which failed at 3.2 after an X server
   restart, works. Only programs using those two formats can misdraw.
 - Launcher state: unavailable until detected; experimental when Zink is in
   the x86 root, the native X server was built with the GLX patch
-  (`scripts/compat-status.py` reads the patch list `scripts/build-xquartz.sh`
+  (`steamarm-compat-status` reads the patch list `scripts/build-xquartz.sh`
   records), and MoltenVK and the shim are installed. AUTO never picks it.
-  `scripts/settings-env.py` sets `PROTON_USE_WINED3D=1`,
+  `steamarm-settings-env` sets `PROTON_USE_WINED3D=1`,
   `GALLIUM_DRIVER=zink` and the extension override for that choice.
 
 ## Present modes and V-Sync
@@ -214,7 +214,7 @@ Mesa's Vulkan-on-Metal driver.
   IMMEDIATE on both drivers; VKD3D-Proton's D3D12 probe FIFO on MoltenVK
   and IMMEDIATE on KosmicKrisp (why they differ: UNKNOWN). The effective
   Metal state (`CAMetalLayer.displaySyncEnabled`) is still not reported.
-- The V-Sync setting (`scripts/settings-env.py:100-107`):
+- The V-Sync setting (`steamarm-settings-env`):
   - DXVK: `dxgi.syncInterval` and `d3d9.presentInterval`, options that exist
     in Proton's DXVK (MEASURED, `strings`).
   - VKD3D-Proton: `VKD3D_SWAPCHAIN_PRESENT_MODE`, written as `FIFO` /

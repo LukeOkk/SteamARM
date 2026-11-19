@@ -1,0 +1,16 @@
+[package]
+name = "steamarm-fex-proton-install"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "steamarm-fex-proton-install"
+path = "src/main.rs"
+
+[[bin]]
+name = "steamarm-fexserver-manager"
+path = "src/fexserver_manager.rs"
+
+[[bin]]
+name = "steamarm-fex"
+path = "src/fex_wrapper.rs"

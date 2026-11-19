@@ -1,0 +1,12 @@
+[package]
+name = "steamarm-release-check"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+serde_json = "1"
+
+[[bin]]
+name = "steamarm-release-check"
+path = "src/main.rs"

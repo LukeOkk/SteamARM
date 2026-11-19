@@ -45,7 +45,7 @@ bool lxrt_trace_on(void);
 #define INSN_MRS_TPIDR 0xD53BD040u
 #define INSN_MSR_TPIDR 0xD51BD040u
 // mrs Xt, CTR_EL0. Darwin traps this at EL0 even for its own code, and every
-// icache flush does one -- see runtime/sysreg.c.
+// icache flush does one -- see runtime/sysreg.rs.
 #define INSN_MRS_CTR   0xD53B0020u
 // mrs Xt, <op0=3, op1=0, CRn=0, ...> -- the whole ID register space, MIDR_EL1
 // included. Darwin traps every one of them at EL0.
@@ -459,7 +459,7 @@ static size_t count_sites(uint64_t start, uint64_t end,
         case SITE_TLS_READ:
             rep->tls_read_found++;
             if (lxrt_tlskeep_contains((uint64_t)&w[i]))
-                break;              // left in place (tls.c, kept ranges)
+                break;              // left in place (tls.rs, kept ranges)
             bytes += (size_t)lxrt_tlsrd_size;
             break;
         case SITE_TLS_WRITE:
@@ -566,7 +566,7 @@ static size_t rewrite_count_inner(uint64_t start, uint64_t end)
         if ((k == SITE_TLS_READ || k == SITE_TLS_WRITE) && !lxrt_tls_ready())
             continue;               // rewrite_chunk_code leaves these alone too
         if (k == SITE_TLS_READ && lxrt_tlskeep_contains((uint64_t)(uintptr_t)&w[i]))
-            continue;               // and these (kept ranges, tls.c)
+            continue;               // and these (kept ranges, tls.rs)
         n++;
     }
     // x18 sites in the code of a PE image the guest mapped (pefile.c): the
@@ -705,7 +705,7 @@ static int rewrite_chunk_code_inner(uint64_t start, uint64_t end,
             continue;
         if (kind == SITE_TLS_READ && lxrt_tlskeep_contains(site)) {
             // A program that hashes its own code (BoringSSL's FIPS module):
-            // the read stays, and tls.c gives the hardware register the
+            // the read stays, and tls.rs gives the hardware register the
             // guest's thread pointer when a load through Darwin's value
             // faults (lxrt_tlskeep_fixup).
             rep->tls_kept++;
@@ -715,7 +715,7 @@ static int rewrite_chunk_code_inner(uint64_t start, uint64_t end,
             // No TSD slot: leave the instruction alone. That is wrong -- the
             // guest will lose its thread pointer on the first context switch --
             // but it is what LXRT_NO_TLS_REWRITE exists to demonstrate, and
-            // tls.c has already said so on stderr.
+            // tls.rs has already said so on stderr.
             continue;
         }
 

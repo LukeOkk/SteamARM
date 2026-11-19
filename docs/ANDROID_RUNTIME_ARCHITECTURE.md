@@ -540,14 +540,14 @@ LXRT_BINDER_LOG=1 ...             # the hub logs every transaction to <dir>/hub.
 Android's property state lives in memory that init writes and every
 process maps read-only; here the writer is a host process, the **property
 service** (`runtime/propsvc.c`, `lxrun --property-service <dir> <root>`),
-one per Android root, and the guest side is `runtime/props.c`.
+one per Android root, and the guest side is `runtime/props.rs`.
 
 | piece | what | where |
 |---|---|---|
-| directory | `LXRT_PROPERTY_DIR`, else `/tmp/lxrt-props-<uid>-<hash of the root's real path>`; the user's own, mode 0700, or no property service is offered | `runtime/props.c` |
+| directory | `LXRT_PROPERTY_DIR`, else `/tmp/lxrt-props-<uid>-<hash of the root's real path>`; the user's own, mode 0700, or no property service is offered | `runtime/props.rs` |
 | guest paths | `/dev/__properties__[/...]` and `/dev/socket/property_service` lead into it; everything else under `/dev/socket` stays in the root | `runtime/dispatch.c` `translate_one` |
-| start | the first process that finds no `property_info` starts the service (its first process boots, binds the socket, forks the service and exits, so the areas exist when the spawner's `waitpid` returns); a `connect()` to the socket that finds nobody listening starts it and retries once | `runtime/props.c`, `runtime/socket.c` |
-| ownership | bionic maps an area only if `fstat` says uid 0, gid 0 (`prop_area.cpp` `map_fd_ro`); `fstat`, `stat` and `statx` of the directory and its files answer that | `runtime/props.c` `lxrt_props_fix_stat` |
+| start | the first process that finds no `property_info` starts the service (its first process boots, binds the socket, forks the service and exits, so the areas exist when the spawner's `waitpid` returns); a `connect()` to the socket that finds nobody listening starts it and retries once | `runtime/props.rs`, `runtime/socket.c` |
+| ownership | bionic maps an area only if `fstat` says uid 0, gid 0 (`prop_area.cpp` `map_fd_ro`); `fstat`, `stat` and `statx` of the directory and its files answer that | `runtime/props.rs` `lxrt_props_fix_stat` |
 | boot | property_info (libpropertyinfoserializer's format), the areas, then init's values: `LXRT_PROPERTY_BOOTARGS` as the kernel command line (`androidboot.x=y`, empty by default), `ExportKernelBootProps`' defaults, the `.prop` files, the derived properties, `ro.property_service.version=2`, `/data/local.prop` (debuggable build), the persistent ones, `ro.persistent_properties.ready`; built in `__properties__.new` and renamed into place | `runtime/propsvc.c` |
 | writes | the service's own `MAP_SHARED` mapping of the files; bionic's `Update` step for step (dirty bit, backup area, release fences, serial), then `__ulock_wake(UL_COMPARE_AND_WAIT_SHARED)` on the property's serial and on the global one: the queue a guest's `FUTEX_WAIT` in a shared mapping parks on (`runtime/futex_ops.c`); two unrelated processes meet there (MEASURED) | `runtime/propsvc.c` |
 | setprop | `PROP_MSG_SETPROP2` and the old `PROP_MSG_SETPROP`; legal name and value, the type check, `ro.*` once, `persist.*` stored, `ctl.*` refused; the peer must be this user | `runtime/propsvc.c` |
@@ -872,13 +872,13 @@ scripts/run-weston.sh stop
 | descriptors in flight stay referenced; the hub acknowledges each thread channel (a new one otherwise) | a new binder thread channel arrived closed at the hub: "Bad file descriptor", system_server died 0-5 times a boot; with the first fix a thread could wait forever instead | `runtime/binder.c`, `runtime/binder_hub.c` |
 | virtual ownership, user. xattrs, process_vm_readv, `/proc/<pid>/status` ids, alarm timerfd clocks, a futex deadline past 64-bit ns, SO_DOMAIN, empty SCM_RIGHTS, MSG_TRUNC | installd's owner checks, UserDataPreparer's user.serial, ART's fault handler (NullPointerException from compiled code), ActivityManager's pid-to-uid, AlarmManager, audioserver's TimeCheck, the zygote's accept, libbase's descriptor receive | runtime (the stage's WIP, reviewed and tested) |
 | binder stand-ins (netd, dnsresolver, vold, storaged), the audio HAL passthrough, init_user0, host properties | system_server waits for netd and vold forever and reboots on a null vold; no block devices, FUSE, netlink or BPF here | `scripts/android-boot.py`, `scripts/android/java` |
-| 14 of the image's apps disabled once per session root; the safeguard allows 100 more processes during a session | Android is one lxrun process per service and app; the safeguard stopped every guest at 81 > 80 | `scripts/android-session.py`, `scripts/safeguard.sh` |
+| 14 of the image's apps disabled once per session root; the Rust safeguard allows 100 more processes during a session | Android is one lxrun process per service and app; the safeguard stopped every guest at 81 > 80 | `scripts/android-session.py`, `tools/safeguard/src/main.rs` |
 
 ### How to run it
 
 ```sh
 make lxrt
-scripts/android-pm.py install app.apk                 # into ~/SteamARM-roots/android/packages
+build/steamarm-android-pm install app.apk              # into ~/SteamARM-roots/android/packages
 scripts/android-session.py launch <package>           # X server on :2, Weston, boot, install, am start
 scripts/android-session.py xwd /tmp/android.xwd       # the window's pixels
 scripts/android-session.py shell /system/bin/dumpsys window   # any guest program, as root
@@ -972,7 +972,7 @@ Also found (VERIFIED IN SOURCE, MEASURED): FEXServer started with
 start it, never exits when idle -- FEX's `ProcessPipe.cpp` waits with no
 timeout when Foreground is set, whatever `--persistent` says. Three servers
 of this stage's loops were still there after 7-10 idle minutes. Every one
-left counts toward `scripts/safeguard.sh`'s 80 lxrun processes, past which
+left counts toward the Rust safeguard's 80 lxrun processes, past which
 it kills every guest on the Mac; `scripts/run-android-x86.sh --server-stop`
 stops a root's.
 
@@ -990,7 +990,7 @@ mode at stage 27. What each one needed, measured one after the other:
 | FEX's 32-bit allocator ignored free mmap hints: ART's boot image did not map at its address, then an imageless start (6 s for a hello world, 1.6 s with the image) | the patch (MemAllocator32Bit: a free hint is taken; a shared mapping only when the 16 KiB host pages it touches are free as a whole, else the runtime would place a private copy) |
 | x32 `setsockopt`/`getsockopt` used the guest's `optval` without the base (the zygote's SO_RCVTIMEO on every connection) | the patch (x32 socket) |
 | `msync` of a 32-bit guest's address (dex2oat32's vdex), SO_DOMAIN/SO_PROTOCOL, SO_RCVTIMEO_NEW/SNDTIMEO_NEW, MSG_TRUNC/MSG_CTRUNC echoed back by XNU, an empty SCM_RIGHTS | `runtime/dispatch.c`, `runtime/socket.c` |
-| binder from a 32-bit guest: its addresses (the ioctl argument, the read/write buffers, a transaction's data and offsets, PTR buffers) are its own, below 4 GiB | `runtime/gbase.c`, `runtime/binder.c` (based where read or written; the hub is given the guest's view of the receive buffer) |
+| binder from a 32-bit guest: its addresses (the ioctl argument, the read/write buffers, a transaction's data and offsets, PTR buffers) are its own, below 4 GiB | `runtime/gbase.rs`, `runtime/binder.c` (based where read or written; the hub is given the guest's view of the receive buffer) |
 
 With them (MEASURED, `tests/android/run.sh` and
 `tests/android/i386_bionic.c`, one check per fix): an i386 program linked
@@ -1162,7 +1162,7 @@ system_server stops at the display in these boots.
   audioserver gets `ALSA_PLUGIN_DIR=/vendor/lib64/hw`, alsa-lib's own
   override. `STEAMARM_ANDROID_SOUND=0` leaves the session silent.
 
-### 16-bit ids for the Android stack (`runtime/ids.c`)
+### 16-bit ids for the Android stack (`runtime/ids.rs`)
 
 32-bit bionic keeps process and thread ids in 16 bits: it refused to start
 when the Mac's pid was above 65535 ("32 bit bionic libc only accepts pid <=
@@ -1245,7 +1245,7 @@ directories in either mode (`toybox ps` shows nothing): not changed here.
    SwiftShader.
    audioserver's i386 audio HAL, zygote_secondary and dex2oat32 run since
    stage 28 (with `--linkerconfig`); 32-bit bionic's 16-bit thread ids,
-   the limit there, are met since stage 29 (`runtime/ids.c`).
+   the limit there, are met since stage 29 (`runtime/ids.rs`).
 5. The rebuilt ART for arm64-v8a APKs in the native root.
 
 ## Tests and records

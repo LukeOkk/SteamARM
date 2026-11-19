@@ -1,0 +1,59 @@
+diff --git a/Source/Common/Linux/SBRKAllocations.cpp b/Source/Common/Linux/SBRKAllocations.cpp
+index ae366eed9..1fd31519d 100644
+--- a/Source/Common/Linux/SBRKAllocations.cpp
++++ b/Source/Common/Linux/SBRKAllocations.cpp
+@@ -5,9 +5,25 @@
+ #include <FEXCore/Utils/MathUtils.h>
+ #include <FEXCore/Utils/TypeDefines.h>
+ 
++#include <cstdlib>
+ #include <sys/mman.h>
+ 
+ namespace FEX::SBRKAllocations {
++static size_t SBRKGuardPageSize() {
++  const char* HostPageStr = getenv("LXRT_HOST_PAGE_SIZE");
++  if (!HostPageStr || !*HostPageStr) {
++    return FEXCore::Utils::FEX_PAGE_SIZE;
++  }
++
++  char* End {};
++  const unsigned long long HostPage = strtoull(HostPageStr, &End, 10);
++  if (*End != '\0' || HostPage < FEXCore::Utils::FEX_PAGE_SIZE ||
++      (HostPage & (HostPage - 1)) != 0 || HostPage % FEXCore::Utils::FEX_PAGE_SIZE != 0) {
++    return FEXCore::Utils::FEX_PAGE_SIZE;
++  }
++  return static_cast<size_t>(HostPage);
++}
++
+ // This function disables glibc's ability to allocate memory through the `sbrk` interface.
+ // This is run early in the lifecycle of FEX in order to make sure no 64-bit pointers can make it to the guest 32-bit application.
+ //
+@@ -24,12 +40,14 @@ void* DisableSBRKAllocations() {
+     return INVALID_PTR;
+   }
+ 
+-  // Now allocate the next page after the sbrk address to ensure it can't grow.
+-  // In most cases at the start of `main` this will already be page aligned, which means subsequent `sbrk`
+-  // calls won't allocate any memory through that.
+-  void* AlignedBRK = reinterpret_cast<void*>(FEXCore::AlignUp(reinterpret_cast<uintptr_t>(StartingSBRK), FEXCore::Utils::FEX_PAGE_SIZE));
++  // Darwin backs memory in 16 KiB host pages while Linux/FEX uses 4 KiB
++  // pages. A 4 KiB guard can share a host page already used by brk, where
++  // LXRT cannot reserve it with MAP_FIXED_NOREPLACE. Align to LXRT's host page;
++  // FEX drains any remaining sbrk space up to that guard below.
++  const size_t GuardPageSize = SBRKGuardPageSize();
++  void* AlignedBRK = reinterpret_cast<void*>(FEXCore::AlignUp(reinterpret_cast<uintptr_t>(StartingSBRK), GuardPageSize));
+   void* AfterBRK =
+-    ::mmap(AlignedBRK, FEXCore::Utils::FEX_PAGE_SIZE, PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED_NOREPLACE | MAP_NORESERVE, -1, 0);
++    ::mmap(AlignedBRK, GuardPageSize, PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED_NOREPLACE | MAP_NORESERVE, -1, 0);
+   if (AfterBRK == INVALID_PTR) {
+     // Couldn't allocate the page after the aligned brk? This should never happen.
+     // FEXCore::LogMan isn't configured yet so we just need to print the message.
+@@ -52,7 +70,7 @@ void* DisableSBRKAllocations() {
+ void ReenableSBRKAllocations(void* Ptr) {
+   const void* INVALID_PTR = reinterpret_cast<void*>(~0ULL);
+   if (Ptr != INVALID_PTR) {
+-    munmap(Ptr, FEXCore::Utils::FEX_PAGE_SIZE);
++    munmap(Ptr, SBRKGuardPageSize());
+   }
+ }
+ } // namespace FEX::SBRKAllocations

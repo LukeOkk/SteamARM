@@ -17,6 +17,10 @@ de ahí a Metal (MoltenVK).
   [Homebrew](https://brew.sh).
 - Unos 25 GB libres y entre 20 y 60 minutos para la primera instalación.
 
+Los crates de Rust van incluidos en `vendor/` y Cargo compila en modo offline:
+no se descargan desde un registro. La instalación sí puede descargar fórmulas
+de Homebrew, proyectos externos y paquetes Linux que necesita el runtime.
+
 ## Instalar
 
 1. Descarga `SteamARM-<versión>-macOS-arm64.dmg` desde

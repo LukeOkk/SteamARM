@@ -5,7 +5,8 @@ Goal: a Windows game's x86-64 code is the only thing FEX translates; Wine,
 wineserver, DXVK and vkd3d-proton run as native ARM64 / ARM64EC code
 (docs: the user's architecture directive of 2026-10-05). Valve already ships
 exactly that stack for the Steam Frame: Proton Experimental (ARM64), build
-experimental-11.0-20261001-arm64 (scripts/arch-audit.py, MEASURED):
+experimental-11.0-20261001-arm64 (measured with the original Python audit;
+the Rust replacement is `build/steamarm-arch-audit`):
   files/bin-arm64/wine, wineserver               ELF aarch64
   lib/wine/aarch64-unix/ntdll.so                 ELF aarch64
   lib/wine/aarch64-windows/ntdll, kernel32,

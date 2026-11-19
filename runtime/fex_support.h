@@ -47,7 +47,7 @@ long lxrt_memfd_fcntl(int fd, int lcmd, unsigned long arg, bool *handled);
 //                                       have no case and return -ENOSYS)
 //   lxrt_memfd_check_mmap       WIRED  (every fd-backed mmap, dispatch.c:944)
 //   lxrt_memfd_is               NOT WIRED -- no caller anywhere in the tree;
-//                                       privmap.c:51 calls lxrt_memfd_path_is
+//                                       privmap.rs:51 calls lxrt_memfd_path_is
 //
 // So F_SEAL_WRITE stops write(), writev(), pwrite64(), ftruncate() and a
 // writable shared mmap of the memfd.

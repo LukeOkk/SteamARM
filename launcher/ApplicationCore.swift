@@ -256,7 +256,7 @@ struct SessionMachine {
     }
 }
 
-/// The files scripts/run-app.sh and scripts/session.py leave in
+/// The files scripts/run-app.sh and build/steamarm-session leave in
 /// $STATE/launcher for the running session.
 enum SessionFiles {
     /// running.status: "N" for exit code N, "N signal S" for a death by signal S.
@@ -289,7 +289,7 @@ enum SessionFiles {
 
 /// How scripts/run-app.sh answered a launch.
 enum LaunchKind: String {
-    /// A new session under scripts/session.py (running.pgid, running.status).
+    /// A new Rust-managed session (running.pgid, running.status).
     case started
     /// This app was already running in a session: shown again, not launched.
     case reshown
@@ -299,7 +299,7 @@ enum LaunchKind: String {
 }
 
 /// When a running session is over. A session started by run-app.sh is its
-/// wrapper (scripts/session.py run, running.pid): the wrapper waits for the
+/// wrapper (steamarm-session run, running.pid): the wrapper waits for the
 /// program, writes running.status, clears the program's process group and
 /// exits. That is the end, whatever else runs on the Mac: the native
 /// client's webhelper zygotes, for one, leave the group and outlive the
@@ -333,7 +333,11 @@ enum SessionLiveness {
     /// command line that could not be read counts as the leader.
     static func isLeader(command: String?, wrapped: Bool) -> Bool {
         guard let command, !command.isEmpty else { return true }
-        return command.contains(wrapped ? "session.py run" : "build/lxrun")
+        if wrapped {
+            return command.contains("steamarm-session run")
+                || command.contains("steamarm-session __run-isolated")
+        }
+        return command.contains("build/lxrun")
     }
 }
 
@@ -472,7 +476,7 @@ enum GraphicsBackend: String, Codable, CaseIterable {
         case .auto: return "AUTO"
         case .openGLWineD3D: return "OpenGL (WineD3D)"
         case .vulkanMoltenVK: return "Vulkan (MoltenVK)"
-        case .vulkanKosmicKrisp: return "Vulkan (KosmicKrisp)"
+        case .vulkanKosmicKrisp: return "Metal 4 (KosmicKrisp / Vulkan)"
         }
     }
 }
@@ -503,7 +507,7 @@ enum FallbackPolicy: String, Codable, CaseIterable {
     }
 
     /// The variables through which scripts/run-app.sh takes each fallback
-    /// over the settings (scripts/settings-env.py fallback_overrides): the
+    /// over the settings (steamarm-settings-env fallback_overrides): the
     /// scripts never decide a fallback of their own that the launcher did
     /// not announce, and never skip one it announced.
     static let environmentVariables = [
@@ -603,7 +607,7 @@ struct CapabilityIssue: Equatable {
     var summary: String      // for the user, in Spanish
 }
 
-/// What scripts/compat-status.py --json found on this Mac (the subset the
+/// What steamarm-compat-status --json found on this Mac (the subset the
 /// capability table needs). Read in a subprocess so no driver is loaded into
 /// the launcher itself.
 struct RuntimeProbe: Decodable, Equatable {
@@ -670,7 +674,7 @@ struct RuntimeProbe: Decodable, Equatable {
     }
 
     /// OpenGL for WineD3D: Zink in the x86 root, and a native X server with
-    /// GLX fbconfigs Mesa can render direct to (scripts/compat-status.py).
+    /// GLX fbconfigs Mesa can render direct to (steamarm-compat-status).
     struct OpenGL: Decodable, Equatable {
         var zink: Bool
         var glxDirect: Bool
@@ -685,7 +689,7 @@ struct RuntimeProbe: Decodable, Equatable {
     var opengl: OpenGL?
     var runtime: Runtime?
 
-    /// What the installed runtime itself offers (scripts/compat-status.py).
+    /// What the installed runtime itself offers (steamarm-compat-status).
     struct Runtime: Decodable, Equatable {
         var ntsync: Bool
     }
@@ -725,12 +729,12 @@ struct RuntimeCapabilities {
             .openGLWineD3D: .init(state: .unavailable, reason: "sin detectar: necesita Zink en la raíz x86 y el servidor X nativo con GLX directo (patches/xquartz-glx-mesa-direct.patch)"),
         ])
 
-    /// The static table when scripts/compat-status.py gave no answer: what
+    /// The static table when steamarm-compat-status gave no answer: what
     /// only detection can establish stays unavailable, and says why.
     static var undetected: RuntimeCapabilities {
         var caps = current
         caps.graphics[.vulkanKosmicKrisp] = .init(state: .unavailable,
-                                                  reason: "no se pudo comprobar: scripts/compat-status.py no respondió")
+                                                  reason: "no se pudo comprobar: steamarm-compat-status no respondió")
         return caps
     }
 
@@ -829,12 +833,12 @@ struct RuntimeCapabilities {
         return .wineserver
     }
 
-    /// AUTO resolved to a concrete graphics backend: the first ready one
-    /// (MoltenVK today). A requested one that is not usable falls back.
+    /// AUTO prefers the experimental Metal 4 driver when detected, then the
+    /// ready MoltenVK path. A requested backend that is not usable falls back.
     func effectiveGraphics(_ requested: GraphicsBackend) -> GraphicsBackend {
         if requested == .auto {
-            return [GraphicsBackend.vulkanMoltenVK, .vulkanKosmicKrisp, .openGLWineD3D]
-                .first { graphics[$0]?.state == .ready } ?? .vulkanMoltenVK
+            return [GraphicsBackend.vulkanKosmicKrisp, .vulkanMoltenVK, .openGLWineD3D]
+                .first { graphics[$0]?.usable == true } ?? .vulkanMoltenVK
         }
         if graphics[requested]?.usable == true { return requested }
         return graphicsFallback(after: requested) ?? .vulkanMoltenVK
@@ -914,7 +918,7 @@ enum SettingsMigration {
     /// "Escalado del juego" (gameUpscaler): a stored choice, else
     /// Automático -- nothing stored (a settings.json from before the setting)
     /// included, since the user's rule is MetalFX by default.
-    /// settings-env.py game_upscaler() is the same rule.
+    /// steamarm-settings-env game_upscaler() is the same rule.
     static func gameUpscaler(stored: String?) -> String {
         stored.flatMap { value in GameUpscalerChoice.options.contains { $0.0 == value } ? value : nil } ?? "auto"
     }
@@ -1022,18 +1026,18 @@ enum Library {
 
 // MARK: - Heroic Games Launcher (linux-arm64)
 
-/// Heroic in the Fedora ARM64 root (docs/HEROIC_INTEGRATION.md). Upstream
+/// Heroic in the Steam Frame ARM64 root (docs/HEROIC_INTEGRATION.md). Upstream
 /// publishes Linux x64 builds only; scripts/install-heroic-arm64.sh assembles
 /// the arm64 one from official release files (the same files an
 /// `electron-builder --linux dir --arm64` build of the source tag produces,
-/// MEASURED in benchmarks/stage24-heroic.txt) into <armroot>/opt/apps/heroic.
+/// MEASURED in benchmarks/stage24-heroic.txt) into <arm64root>/opt/apps/heroic.
 enum HeroicARM64 {
     static let version = "2.22.3"
     static let directory = "Heroic-\(version)-linux-arm64"
     static let program = "/opt/apps/heroic/\(directory)/heroic"
     /// Its home in the guest: <root>/tmp/heroichome, which a root rebuild keeps.
     static let homeInGuest = "/tmp/heroichome"
-    static let root = LinuxBaseEnvironment.armroot
+    static let root = LinuxBaseEnvironment.arm64
     /// --no-sandbox: Chromium's sandbox needs namespaces and seccomp, which
     /// lxrun does not provide (as for Steam's webhelper). --disable-gpu: its
     /// GPU process cannot initialise GL here (ANGLE over indirect GLX) and
@@ -1052,7 +1056,7 @@ enum HeroicARM64 {
         "HOME_IN_GUEST": homeInGuest,
         "LXRT_X18_ALL_TEXT": "/opt/apps/heroic/",
     ]
-    /// What the root must have (scripts/mkarmroot.sh seeds them): Electron's
+    /// What the Steam Frame root must have: Electron's
     /// libgtk-3 (DT_NEEDED), the libsecret and libnotify Chromium dlopens,
     /// and python3 for the legendary and gogdl zipapps.
     static let requiredRootFiles = ["usr/lib64/libgtk-3.so.0", "usr/lib64/libsecret-1.so.0",
@@ -1293,7 +1297,7 @@ struct AndroidPackageInfo: Decodable, Equatable {
     }
 }
 
-/// android-pm.py's JSON answer to install and uninstall.
+/// steamarm-android-pm's JSON answer to install and uninstall.
 /// It describes what was installed, read again from the file at install
 /// time: the card is built from it first, so a file replaced after the
 /// preview never gets the preview's details.
@@ -1584,9 +1588,9 @@ enum RenderScaleChoice {
 
 /// Settings "Filtro de escalado": how a game's picture smaller than its window
 /// ("Escala de resolución", "Escala de render") is enlarged by SteamARM.
-/// scripts/settings-env.py passes it to the Vulkan shim as LXRT_VK_SCALER
+/// steamarm-settings-env passes it to the Vulkan shim as LXRT_VK_SCALER
 /// (shim/scaler.c). "auto", the default: FSR 1.0, the fastest measured
-/// (settings-env.py upscaling_policy). A game's own FSR is not this
+/// (steamarm-settings-env upscaling_policy). A game's own FSR is not this
 /// setting's: GameUpscalerChoice.
 enum ScalingFilterChoice {
     static let options: [(String, String)] = [
@@ -1623,7 +1627,7 @@ enum ScalingFilterChoice {
 
 /// Settings "Escalado del juego" (gameUpscaler): what happens to a game's own
 /// upscaler, apart from the "Filtro de escalado" of SteamARM's own picture.
-/// scripts/settings-env.py: "auto" (the default) sets KK_FSR_METALFX=1 -- a
+/// steamarm-settings-env: "auto" (the default) sets KK_FSR_METALFX=1 -- a
 /// game's FSR 1 drawn by MetalFX's spatial scaler in SteamARM's KosmicKrisp
 /// (patches/kosmickrisp-14, -16, -17) -- and, on KosmicKrisp only,
 /// STEAMARM_WIN_UPSCALER=metalfx, which the FidelityFX DLLs for Windows games

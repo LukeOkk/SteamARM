@@ -311,30 +311,35 @@ enum Installer {
         return try await d.start(url)
     }
 
-    /// Heroic Games Launcher for linux-arm64, native in the Fedora ARM64 root
+    /// Heroic Games Launcher for linux-arm64, native in the Steam Frame root
     /// (docs/HEROIC_INTEGRATION.md). Heroic publishes Linux x64 builds only;
     /// scripts/install-heroic-arm64.sh assembles the arm64 one from official
     /// release files (sha256-pinned) and installs it into
-    /// <armroot>/opt/apps/heroic. The x64 build under FEX is no longer
+    /// <arm64root>/opt/apps/heroic. The x64 build under FEX is no longer
     /// installed: an ARM64 build exists, so it is the one used (ARM64-first).
     /// Experimental: the window, its pages and a clean close/reopen are
     /// measured; store sign-in, downloads and games are not, and Amazon's
     /// helper (nile) cannot run (a non-PIE binary).
     static func installHeroic(project: URL, report: @escaping Report) async throws -> AppEntry {
-        let root = Paths.armRoot
+        let root = Paths.arm64Root
         let missing = HeroicARM64.missing(inRoot: root.path) { FileManager.default.fileExists(atPath: $0) }
         guard FileManager.default.fileExists(atPath: root.path) else {
-            throw InstallError("Falta la raíz ARM64 (\((root.path as NSString).abbreviatingWithTildeInPath)); créala con scripts/mkarmroot.sh")
+            throw InstallError("Falta la raíz de Steam Frame (\((root.path as NSString).abbreviatingWithTildeInPath)); ejecuta Instalar en SteamARM para crearla desde la imagen oficial")
         }
         guard missing.isEmpty else {
-            throw InstallError("A la raíz ARM64 le falta \(missing.joined(separator: ", ")): reconstrúyela con scripts/mkarmroot.sh (conserva opt/apps y tmp/)")
+            throw InstallError("A la raíz de Steam Frame le falta \(missing.joined(separator: ", ")): restáurala con scripts/mkframeroot.sh desde la imagen oficial")
         }
         let script = project.appendingPathComponent("scripts/install-heroic-arm64.sh")
         guard FileManager.default.isExecutableFile(atPath: script.path) else {
             throw InstallError("No se encontró \(script.path)")
         }
         await report("Preparando Heroic \(HeroicARM64.version) para ARM64…", nil)
-        let r = await runStreaming(script.path, [], cwd: project) { line in
+        var environment: [String: String] = [:]
+        if let asarTool = Bundle.main.resourceURL?.appendingPathComponent("steamarm-heroic-asar"),
+           FileManager.default.isExecutableFile(atPath: asarTool.path) {
+            environment["STEAMARM_HEROIC_ASAR_BIN"] = asarTool.path
+        }
+        let r = await runStreaming(script.path, [], cwd: project, environment: environment) { line in
             guard let p = HeroicARM64.progress(line) else { return }
             Task { @MainActor in report(p.text, Double(p.step - 1) / Double(p.of)) }
         }
@@ -358,6 +363,7 @@ enum Installer {
     /// comes; the whole output is in the result. Cancelling the task
     /// terminates the process (the install script cleans up after itself).
     static func runStreaming(_ exe: String, _ args: [String], cwd: URL,
+                             environment: [String: String] = [:],
                              onLine: @escaping @Sendable (String) -> Void) async -> Shell.Result {
         let p = Process()
         p.executableURL = URL(fileURLWithPath: exe)
@@ -365,6 +371,7 @@ enum Installer {
         p.currentDirectoryURL = cwd
         var env = ProcessInfo.processInfo.environment
         env["PATH"] = Shell.path
+        environment.forEach { env[$0.key] = $0.value }
         p.environment = env
         let pipe = Pipe()
         p.standardOutput = pipe

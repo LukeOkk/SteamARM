@@ -2,7 +2,7 @@
 // under FEX (tests/elf/run_fex_rules.sh), each start of which is a new
 // process with a new place for the host's heap:
 //  - MAP_FIXED at 0x140000000, where every 64-bit Windows program is linked
-//    to load: the runtime keeps that range for the guest (runtime/arena.c);
+//    to load: the runtime keeps that range for the guest (runtime/arena.rs);
 //    the host's malloc sat there in one start in eight and Wine ran a
 //    program that was never mapped;
 //  - MAP_FIXED_NOREPLACE just above 4 GiB, where Wine starts looking for

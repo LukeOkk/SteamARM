@@ -6,7 +6,7 @@
 #   output  : $KK_ROOT/out/libvulkan_kosmickrisp.dylib
 #
 # The launcher points the Vulkan shim at the output when it exists
-# (STEAMARM_KK_DIR, scripts/settings-env.py); Homebrew's unpatched driver is
+# (STEAMARM_KK_DIR, steamarm-settings-env); Homebrew's unpatched driver is
 # what the shim loads otherwise. The patches are what Counter-Strike 2 needed
 # (benchmarks/stage51-cs2-linux-native.txt):
 #   01  command allocators borrowed from the device and returned when the GPU

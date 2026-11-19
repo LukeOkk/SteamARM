@@ -1,8 +1,7 @@
 #!/usr/bin/env bash
-# `scripts/steamframe-image.py compare`: image packages against pacman
-# repository databases. Needs only python3 (the databases here are xz and
-# gzip, as holo-core-aarch64-preview publishes them), so it runs on macOS as
-# well as Linux; run.sh has the btrfs part and needs mkfs.btrfs. No network.
+# Rust `steamarm-frame-image compare`: image packages against pacman
+# repository databases. `make steamframe-image` builds it offline; Python is
+# used only for fixture generation and reference cross-checks. No network.
 #   tests/steamframe_image/compare.sh
 #
 # What it guards (each was wrong or missing before 0.3.5+):
@@ -18,7 +17,9 @@
 #     written before PROVIDES/REPLACES were recorded still compares
 set -euo pipefail
 cd "$(dirname "$0")/../.."
-TOOL="$PWD/scripts/steamframe-image.py"
+TOOL="$PWD/build/steamarm-frame-image"
+REFERENCE="$PWD/tests/steamframe_image/reference_impl.py"
+[ -x "$TOOL" ] || make steamframe-image
 W="$(mktemp -d)"
 trap 'rm -rf "$W"' EXIT
 pass=0 fail=0
@@ -26,7 +27,7 @@ ok()  { echo "  ok    $*"; pass=$((pass + 1)); }
 bad() { echo "  FAIL  $*"; fail=$((fail + 1)); }
 
 echo "== vercmp (pacman's test/util/vercmptest.sh cases, both directions)"
-python3 - "$TOOL" <<'PY' && ok "vercmp agrees with pacman on 49 pairs" || bad "vercmp"
+python3 - "$REFERENCE" <<'PY' && ok "vercmp agrees with pacman on 49 pairs" || bad "vercmp"
 import importlib.util, sys
 spec = importlib.util.spec_from_file_location('sf', sys.argv[1])
 sf = importlib.util.module_from_spec(spec); spec.loader.exec_module(sf)
@@ -164,7 +165,7 @@ db(os.path.join(w, 'extra.db'), 'w:gz', [
 ])
 PY
 out="$W/cmp.md"
-python3 "$TOOL" compare "$R" "$W/core.db" "$W/extra.db" --md "$out" --json "$W/cmp.json" >"$W/cmp.log" 2>&1 \
+"$TOOL" compare "$R" "$W/core.db" "$W/extra.db" --md "$out" --json "$W/cmp.json" >"$W/cmp.log" 2>&1 \
     && ok "compare accepts an extracted root (exit 0)" || { bad "compare on a root"; cat "$W/cmp.log"; }
 row() { grep -F -- "| $1 |" "$out" | head -1; }
 expect_row() {  # package, the rest of the row as it must read
@@ -204,13 +205,13 @@ sys.exit(0 if len(rows) == 19 and rows['nss']['state'] == 'same' and rows['nss']
          and j['counts']['differs:pkgrel'] == 1 and [s['repo'] for s in j['repositories']] == ['core', 'extra']
          else 1)
 PY
-python3 "$TOOL" compare "$R" "$W/core.db" "$W/extra.db" --states repo-only > "$W/only.md"
+"$TOOL" compare "$R" "$W/core.db" "$W/extra.db" --states repo-only > "$W/only.md"
 grep -qF '| mesa |' "$W/only.md" && ! grep -qF '| glibc |' "$W/only.md" && ok "--states lists only the states asked for" || bad "--states"
-python3 "$TOOL" compare "$R" "$W/core.db" --states nonsense >/dev/null 2>&1 && bad "an unknown state is accepted" || ok "an unknown state is refused"
+"$TOOL" compare "$R" "$W/core.db" --states nonsense >/dev/null 2>&1 && bad "an unknown state is accepted" || ok "an unknown state is refused"
 
 echo "== compare: an inventory JSON, including one written before PROVIDES/REPLACES"
-python3 "$TOOL" inventory "$R" --json "$W/inv.json" --md "$W/inv.md" >/dev/null
-python3 "$TOOL" compare "$W/inv.json" "$W/core.db" "$W/extra.db" --md "$W/cmp2.md" >/dev/null
+"$TOOL" inventory "$R" --json "$W/inv.json" --md "$W/inv.md" >/dev/null
+"$TOOL" compare "$W/inv.json" "$W/core.db" "$W/extra.db" --md "$W/cmp2.md" >/dev/null
 diff <(sed 1,4d "$out") <(sed 1,4d "$W/cmp2.md") >/dev/null && ok "inventory JSON and root give the same report" || bad "JSON vs root"
 python3 - "$W/inv.json" "$W/old.json" <<'PY'
 import json, sys
@@ -220,12 +221,12 @@ for p in j['packages']:
         p.pop(k, None)
 json.dump(j, open(sys.argv[2], 'w'))
 PY
-python3 "$TOOL" compare "$W/old.json" "$W/core.db" "$W/extra.db" --md "$W/cmp3.md" >/dev/null \
+"$TOOL" compare "$W/old.json" "$W/core.db" "$W/extra.db" --md "$W/cmp3.md" >/dev/null \
     && grep -qF '| sdl2 | 2.30.2-1 |  |  | aarch64 | image-only |  | repo: sdl2-compat 2.32.58-1.2 (provides this) |' "$W/cmp3.md" \
     && ok "an old inventory still compares (the repository side still names counterparts)" || bad "old inventory"
 
 echo "== how a database source is named"
-python3 - "$TOOL" <<'PY' && ok "URLs as redact_url prints them, files by base name" || bad "source_label"
+python3 - "$REFERENCE" <<'PY' && ok "URLs as redact_url prints them, files by base name" || bad "source_label"
 import importlib.util, sys
 spec = importlib.util.spec_from_file_location('sf', sys.argv[1])
 sf = importlib.util.module_from_spec(spec); spec.loader.exec_module(sf)
@@ -242,7 +243,7 @@ PY
 
 echo "== zstd database"
 if python3 -c 'import zstandard' 2>/dev/null || command -v zstd >/dev/null; then
-    python3 - "$TOOL" "$W/core.db" <<'PY' && ok "a zstd database decodes (module, or the zstd command without it)" || bad "zstd database"
+    python3 - "$REFERENCE" "$W/core.db" <<'PY' && ok "a zstd database decodes (module, or the zstd command without it)" || bad "zstd database"
 import importlib.util, lzma, shutil, subprocess, sys
 spec = importlib.util.spec_from_file_location('sf', sys.argv[1])
 sf = importlib.util.module_from_spec(spec); spec.loader.exec_module(sf)

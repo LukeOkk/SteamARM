@@ -9,7 +9,7 @@
 //                      the image's property_contexts and .prop files, as
 //                      init's property service does, and serves
 //                      /dev/socket/property_service (setprop);
-//   runtime/props.c    in every lxrun process: those two guest paths lead to
+//   runtime/props.rs   in every lxrun process: those two guest paths lead to
 //                      the service's directory, the service is started on
 //                      demand, and the area files look root-owned to fstat
 //                      (bionic maps nothing else).

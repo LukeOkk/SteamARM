@@ -34,7 +34,7 @@ enum Paths {
     static var statusFile: URL { launcherDir.appendingPathComponent("running.status") } // "N" or "N signal S"
     static var vncPasswordFile: URL { state.appendingPathComponent("vncpasswd.txt") }
 
-    /// scripts/android-pm.py's tree: packages/<package>/ (base.apk, meta.json,
+    /// steamarm-android-pm's tree: packages/<package>/ (base.apk, meta.json,
     /// icon.png) and data/<package>/ (docs/APK_SUPPORT.md).
     static var androidRoot: URL { state.appendingPathComponent("android") }
     static func androidPackageDir(_ package: String) -> URL {
@@ -128,7 +128,7 @@ struct AppEntry: Codable, Identifiable, Hashable {
     var readiness: String? = nil
     /// This app's own display / vsync / synchronization / graphicsBackend
     /// (settings keys and values); scripts/run-app.sh puts them over the
-    /// global settings (scripts/settings-env.py with_overrides).
+    /// global settings (steamarm-settings-env with_overrides).
     var overrides: [String: String]? = nil
     /// kind "android": what scripts/apk-inspect.py and android-pm.py found
     /// (docs/APK_SUPPORT.md). Such an entry has no command: SteamARM has no
@@ -173,7 +173,7 @@ struct LauncherSettings: Codable, Equatable {
     var metalHud: Bool = false
     var display: DisplayMode = .native
     /// ExecutionBackend raw value: "auto", or "lightningJIT" (FEX's JIT set
-    /// for speed, scripts/settings-env.py) with native windows.
+    /// for speed, steamarm-settings-env) with native windows.
     var execution: String = "auto"
     var resolution: String = "1600x900"
     var projectDir: String? = nil
@@ -214,7 +214,7 @@ struct LauncherSettings: Codable, Equatable {
     var gameUpscaler: String = "auto"  // a game's own FSR (GameUpscalerChoice): auto (MetalFX where it can take it), fsr (the game's, untouched)
     var metalfxNativeAA: Bool = false  // MetalFX temporal at 100 %: a temporal pass at the native size (softens; opt-in)
     var renderScale: String = "1.0"    // games covering the screen render at this scale, the shim enlarges: 1.0 (native, the default), 0.77, 0.67, 0.59, 0.5, 0.33; an old "auto" is native
-    var steamUIAcceleration: Bool = true // ARM64 Steam's webhelper on ANGLE/Vulkan (LXRT_EXEC_ARGS)
+    var steamUIAcceleration: Bool = false // XQuartz CEF uses software composition; game rendering is unchanged
     var frameRateLimit: Int = 0
     var dxvkHud: String = "off"
     var audioBackend: String = "coreaudio"
@@ -281,7 +281,7 @@ struct LauncherSettings: Codable, Equatable {
             stored: try c.decodeIfPresent(String.self, forKey: .gameUpscaler))
         renderScale = try c.decodeIfPresent(String.self, forKey: .renderScale) ?? "1.0"
         if renderScale == "auto" { renderScale = "1.0" }   // was 59 % on an M4: the whole picture blurred
-        steamUIAcceleration = try c.decodeIfPresent(Bool.self, forKey: .steamUIAcceleration) ?? true
+        steamUIAcceleration = try c.decodeIfPresent(Bool.self, forKey: .steamUIAcceleration) ?? false
         frameRateLimit = try c.decodeIfPresent(Int.self, forKey: .frameRateLimit) ?? 0
         dxvkHud = try c.decodeIfPresent(String.self, forKey: .dxvkHud) ?? "off"
         audioBackend = try c.decodeIfPresent(String.self, forKey: .audioBackend) ?? "coreaudio"

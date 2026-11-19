@@ -8,8 +8,8 @@ with "Restablecer la configuración" (enabled only while the checkbox
 `$STEAMARM_STATE/launcher/settings.json` (~/SteamARM-roots) on Aplicar/Aceptar
 (Cancelar discards). All labels in Spanish.
 
-Every control below is wired to something real. `scripts/settings-env.py`
-turns settings.json into the environment of every program SteamARM starts
+Every control below is wired to something real. The Rust settings engine
+(`tools/settings-env`) turns settings.json into the environment of every program SteamARM starts
 (apps started by the launcher and Steam; games inherit Steam's environment, so
 Steam must be restarted for changes to reach games — say so under the bottom
 bar when Steam is running). Controls marked "disabled" have no real backend in
@@ -18,7 +18,7 @@ this stack: show them greyed out with the reason as help text, never fake.
 ## settings.json (new keys; existing ones kept: metalHud, display,
 ## resolution, projectDir, extraEnv)
 
-| key | type / values | default | effect (implemented in settings-env.py etc.) |
+| key | type / values | default | effect (implemented in the Rust settings engine and related components) |
 |---|---|---|---|
 | launchSteamOnStart | bool | false | launcher starts Steam when it opens |
 | confirmStop | bool | true | ask before stopping a running app |
@@ -34,8 +34,10 @@ this stack: show them greyed out with the reason as help text, never fake.
 | fexMultiblock | bool | true | FEX_MULTIBLOCK |
 | fexSMC | "none" \| "mtrack" \| "full" | "mtrack" | FEX_SMCCHECKS 0/1/2 |
 | fexX87Reduced | bool | false | FEX_X87REDUCEDPRECISION |
-| graphicsBackend | "auto" \| "vulkanMoltenVK" \| "vulkanKosmicKrisp" \| "openGLWineD3D" | "auto" | AUTO and MoltenVK: nothing set (the shim loads MoltenVK). KosmicKrisp: STEAMARM_VK_ICD=kosmickrisp, enabled only when scripts/compat-status.py finds it (ICD manifest, macOS ≥ 26, loads as an ICD) and the installed shim contains the string STEAMARM_VK_ICD; settings-env.py checks the shim again before exporting. OpenGL (WineD3D): disabled, unsupported (guest GL is software llvmpipe, no GL thunk). The old value "vulkan" reads as "vulkanMoltenVK" |
+| graphicsBackend | "auto" \| "vulkanMoltenVK" \| "vulkanKosmicKrisp" \| "openGLWineD3D" | "auto" | AUTO prefers the experimental KosmicKrisp Vulkan driver on Metal 4 when detected (macOS ≥ 26 and the installed shim accepts ICD selection); otherwise it uses MoltenVK. Explicit KosmicKrisp sets STEAMARM_VK_ICD=kosmickrisp. OpenGL (WineD3D): disabled, unsupported (guest GL is software llvmpipe, no GL thunk). The old value "vulkan" reads as "vulkanMoltenVK" |
 | shaderCache | bool | true | DXVK/VKD3D shader cache (DXVK_SHADER_CACHE=0 / VKD3D_SHADER_CACHE_PATH=0 when false) |
+| steamUIAcceleration | bool | false | ARM64 Steam webhelper ANGLE/Vulkan acceleration; off by default on XQuartz, which needs CEF software compositing (`--disable-gpu`). Does not change the game's graphics backend. |
+| steamUIAcceleration | bool | false | ARM64 Steam webhelper ANGLE/Vulkan acceleration; off by default because XQuartz cannot initialize CEF's EGL visual. Game graphics backend is unchanged. |
 | anisotropy | 0 (automático) \| 2 \| 4 \| 8 \| 16 | 0 | DXVK d3d11.samplerAnisotropy and d3d9.samplerAnisotropy |
 | frameRateLimit | 0 (sin límite) \| 30 \| 60 \| 90 \| 120 \| 144 | 0 | DXVK dxgi.maxFrameRate / d3d9.maxFrameRate, VKD3D_FRAME_RATE |
 | dxvkHud | "off" \| "fps" \| "full" | "off" | DXVK_HUD (fps / full) |
@@ -84,7 +86,7 @@ M. Stored as 0 for automático.
 10. Runtime — read-only: every capability of RuntimeCapabilities
     (presentation, execution, synchronization, graphics) with its state
     (Listo / Experimental / No soportado / No disponible) and reason, and
-    what scripts/compat-status.py detected on this Mac (MoltenVK,
+    what steamarm-compat-status detected on this Mac (MoltenVK,
     KosmicKrisp, the shim's ICD selection, esync/fsync/ntsync per Proton,
     native X / Xvnc / Screen Sharing), with "Volver a comprobar".
 
@@ -92,9 +94,9 @@ M. Stored as 0 for automático.
 
 A user app (not the built-ins) may carry `"overrides": {key: value}` for
 display, vsync, synchronization and graphicsBackend, edited in "Ajustes de
-esta app" of its edit sheet ("Global" removes the key). scripts/run-app.sh
-merges them into the settings with settings-env.py `with_overrides()`
-before the environment is computed; other keys are ignored. Games started
+esta app" of its edit sheet ("Global" removes the key). `scripts/run-app.sh`
+passes them to the Rust settings engine before the environment is computed;
+other keys are ignored. Games started
 by Steam inherit Steam's environment, so they follow the global settings.
 
 ## Library state (library.json)

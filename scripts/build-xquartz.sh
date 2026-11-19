@@ -168,7 +168,7 @@ if [ ! -x "$QWM/src/quartz-wm" ] || [ "$(cat "$QWM/.steamarm-patches" 2>/dev/nul
     echo "$QWM_STAMP" > "$QWM/.steamarm-patches"
 fi
 
-# The patches this server was built with, for scripts/compat-status.py: the
+# The patches this server was built with, for steamarm-compat-status: the
 # GLX fbconfig one decides whether Mesa can render direct (Zink, llvmpipe) or
 # every GL client falls back to Apple's indirect OpenGL 2.1.
 if [ -d "$XQ_ROOT/SteamARM-X11.app/Contents" ]; then

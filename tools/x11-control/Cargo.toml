@@ -1,0 +1,8 @@
+[package]
+name = "steamarm-x11-control"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "steamarm-x11-control"
+path = "src/main.rs"

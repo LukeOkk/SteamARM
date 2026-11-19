@@ -189,7 +189,7 @@ else
     bad "build x18_poison" "$err"
 fi
 
-# A 4 KiB-aligned image (Valve's native arm64 client) through elf.c's
+# A 4 KiB-aligned image (Valve's native arm64 client) through elf.rs's
 # sub-page path: the end of the code and the start of the data share a
 # 16 KiB host page, flipped RW/RX on faults. The writer loop runs from
 # another host page. A store executed from the shared page itself could never
@@ -424,8 +424,9 @@ if [ -f "$DYN_SAMPLE" ] && [ -d "$GUEST_ROOT" ]; then
     fi
 
     tr_out=$(LXRT_ROOT=$GUEST_ROOT ./build/lxrun --trace "$DYN_SAMPLE" 2>&1)
-    if grep -q "mapped code at .*415 svc sites, 415 rewritten, 0 poisoned" <<<"$tr_out"; then
-        ok "libc mapped by ld.so had all 415 svc sites rewritten in flight"
+    if [[ "$tr_out" =~ mapped\ code\ at\ [^[:space:]]+:\ ([0-9]+)\ svc\ sites,\ ([0-9]+)\ rewritten,\ ([0-9]+)\ poisoned ]] && \
+       (( BASH_REMATCH[1] > 0 && BASH_REMATCH[1] == BASH_REMATCH[2] && BASH_REMATCH[3] == 0 )); then
+        ok "libc mapped by ld.so had all ${BASH_REMATCH[1]} svc sites rewritten in flight"
     else
         bad "libc mapped by ld.so had all svc sites rewritten" \
             "$(grep 'mapped code' <<<"$tr_out" || echo 'no rewrite of mapped code happened')"
@@ -1008,7 +1009,7 @@ else
     echo "  skip  vdso test (no sysroot)"
 fi
 
-# MAP_PRIVATE of a memfd follows the file until written (runtime/privmap.c).
+# MAP_PRIVATE of a memfd follows the file until written (runtime/privmap.rs).
 if [ -d "$SYSROOT" ] && [ -d "$GUEST_ROOT/tmp" ]; then
     if err=$(/opt/homebrew/opt/llvm/bin/clang --target=aarch64-redhat-linux-gnu --sysroot="$SYSROOT" \
                  -fuse-ld=lld -O2 -o "$GUEST_ROOT/tmp/memfd_private" tests/elf/memfd_private.c 2>&1); then
@@ -1039,7 +1040,7 @@ if [ -d "$SYSROOT" ] && [ -d "$GUEST_ROOT/tmp" ]; then
     fi
 fi
 
-# O_PATH of a socket and a FIFO (pathfd.c) -- pressure-vessel's check of the
+# O_PATH of a socket and a FIFO (pathfd.rs) -- pressure-vessel's check of the
 # PulseAudio socket before binding it into Steam's container.
 if [ -d "$SYSROOT" ] && [ -d "$GUEST_ROOT/tmp" ]; then
     if err=$(/opt/homebrew/opt/llvm/bin/clang --target=aarch64-redhat-linux-gnu --sysroot="$SYSROOT" \
@@ -1120,7 +1121,7 @@ fi
 
 # ARM64_INITIAL_STACK_BOUNDS: entry stack alignment, auxv right after envp,
 # the pad page above the strings, the main thread's pthread bounds, a 6 MiB
-# recursion, and Linux's argv-then-env string order (stack.c, 0.3.4 had env
+# recursion, and Linux's argv-then-env string order (stack.rs, 0.3.4 had env
 # below argv). Run by absolute path: see the known failure below.
 if [ -f "$STAGE/usr/lib64/libc.a" ] && [ -n "$GCCDIR" ]; then
     if err=$(glibc_cc -static-pie -O1 -pthread -o build/stack_bounds tests/elf/stack_bounds.c); then
@@ -1484,7 +1485,7 @@ else
 fi
 
 # MMAP_OFFSET_4K: file mappings at a 4 KiB offset that is not on a 16 KiB host
-# page (runtime/offmap.c, dispatch.c do_mmap/do_munmap/do_madvise). munmap
+# page (runtime/offmap.rs, dispatch.c do_mmap/do_munmap/do_madvise). munmap
 # frees the head and tail host pages with the guest's last byte there (whole,
 # piece by piece, 300 map/unmap cycles: /proc/self/maps no longer), a page
 # mapped into the head's spare bytes survives, and MADV_DONTNEED keeps

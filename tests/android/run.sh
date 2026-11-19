@@ -128,7 +128,7 @@ if [ "$rc" -eq 0 ] && [ "$(tr '\n' ' ' <<<"$out")" = "42 sub 100 " ]; then
     ok "sh -c: arithmetic, \$(...) fork, a toybox pipe"
 else bad "sh -c" "rc=$rc $(tr '\n' ' ' <<<"$out")"; fi
 
-# 4. Properties (runtime/props.c, runtime/propsvc.c; benchmarks/stage26-
+# 4. Properties (runtime/props.rs, runtime/propsvc.c; benchmarks/stage26-
 # android-properties.txt): /dev/__properties__ built from the image's own
 # property_contexts and .prop files as init builds it, read by bionic itself;
 # setprop through /dev/socket/property_service. Without the service (the
@@ -623,7 +623,7 @@ else
 fi
 # The same service built for i386 (32-bit bionic under FEX's 32-bit mode): its
 # binder structures carry 32-bit addresses the runtime gives the guest base
-# (runtime/binder.c, gp(); gbase.c for the ioctl argument), and the hub hands
+# (runtime/binder.c, gp(); gbase.rs for the ioctl argument), and the hub hands
 # it guest addresses of its receive buffer.
 local BLIBC32B="$X86_ROOT/apex/com.android.runtime/lib/bionic/libc.so" i386_ok=0
 grep -aq lxrt-i386-bionic "$X86_ROOT/usr/lib/lxrt-emu/FEX" && i386_ok=1
@@ -685,7 +685,7 @@ for _ in $(seq 1 60); do
 done
 [ -n "$hready" ] && ok "x86_64 hwservicemanager set hwservicemanager.ready=true" || bad "x86_64 hwservicemanager.ready" "not set"
 out=$(xg 40 /system/bin/lshal list)
-# lshal prints guest pids (small ids under LXRT_SMALL_IDS=1, runtime/ids.c).
+# lshal prints guest pids (small ids under LXRT_SMALL_IDS=1, runtime/ids.rs).
 local ghpid gapid
 ghpid=$(python3 tests/android/guest_pid.py "$hpid")
 grep -qE "android\.hidl\.manager@1\.0::IServiceManager/default +N/A +$ghpid" <<<"$out" &&
@@ -807,7 +807,7 @@ else bad "android-boot: system_server" "$(grep -aE 'FatalError|Fatal signal' "$l
 if grep -aq lxrt-i386-bionic "$X86_ROOT/usr/lib/lxrt-emu/FEX"; then
     local zs
     zs=$(sed -n 's/.*started zygote_secondary (pid \([0-9]*\).*/\1/p' "$il" | head -1)
-    # init.log has the host pid, logcat the guest's (runtime/ids.c), and
+    # init.log has the host pid, logcat the guest's (runtime/ids.rs), and
     # the process is gone by now: both zygotes' "Accepting" lines instead.
     if [ -n "$zs" ] && [ "$(grep -ac 'Zygote: Accepting command socket connections' "$lc")" -ge 2 ] &&
        ! grep -aq 'Failed to connect to Zygote through socket zygote_secondary' "$lc" &&

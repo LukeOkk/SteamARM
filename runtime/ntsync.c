@@ -8,7 +8,7 @@
 // ("ntsync: up and running", PROTON_NO_NTSYNC turns it off), so it is offered
 // only when the launcher asks for it: LXRT_NTSYNC=1 (Settings ->
 // Sincronización -> NTSYNC). Without it, opening /dev/ntsync fails with ENOENT
-// as before and Proton keeps fsync (futex_waitv.c).
+// as before and Proton keeps fsync (futex_waitv.rs).
 //
 // A device is a directory of the user's (/tmp/lxrt-ntsync-UID/d-PID-N):
 //
@@ -622,7 +622,7 @@ static void signal_obj(struct nt_hdr *h, uint32_t s)
 static void *gptr(uint64_t a)
 {
     uint64_t base = lxrt_gbase();
-    if (base && a && a < (1ull << 32))          // FEX's low window (gbase.c)
+    if (base && a && a < (1ull << 32))          // FEX's low window (gbase.rs)
         a += base;
     return (void *)(uintptr_t)a;
 }

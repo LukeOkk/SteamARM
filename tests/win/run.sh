@@ -111,14 +111,14 @@ for t in ${@:-tick tick_32 tone tone_32 regwin d3d11 d3d12 d3d9 d3d9_32 d3d11_32
     fi
     if [ "$api" = modeset ]; then
         # "Escala de resolución": Wine's display-mode emulation (EmulateModeset,
-        # scripts/wine-prefix-options.py) in this prefix for this run. The
+        # steamarm-wine-prefix-options) in this prefix for this run. The
         # program asks 1280x720 full screen; it must draw at 1280x720 while its
         # X window covers the whole screen (Wine stretches it).
         $cc -O2 -mconsole -o "$exe" tests/win/modeset.c -ld3d11 -ldxgi -luser32 -lgdi32 -luuid -ldxguid ||
             { FAIL=$((FAIL + 1)); continue; }
         reg="$ROOT$PFX_GUEST/user.reg"
         for _ in $(seq 1 60); do pgrep -f "[b]in/wineserver" >/dev/null || break; sleep 1; done
-        python3 scripts/wine-prefix-options.py emulate-modeset on "$reg" >/dev/null
+        "$ROOT/build/steamarm-wine-prefix-options" emulate-modeset on "$reg" >/dev/null
         log="$LOGS/win-$t.log"
         env DISPLAY=:2 WINEPREFIX=$PFX_GUEST WINEDEBUG="${WIN_DEBUG:--all}" LXRT_VK_DEBUG=1 \
             LXRT_VK_SCALER="$scaler" LXRT_VK_SCALER_PROBE=1 WINE_DISABLE_FULLSCREEN_HACK=1 LXRT_VK_PADDED_FULLSCREEN=1 \
@@ -135,11 +135,11 @@ for t in ${@:-tick tick_32 tone tone_32 regwin d3d11 d3d12 d3d9 d3d9_32 d3d11_32
         wait $pid 2>/dev/null
         pkill -9 -f wineserver 2>/dev/null
         for _ in $(seq 1 60); do pgrep -f "[b]in/wineserver" >/dev/null || break; sleep 1; done
-        python3 scripts/wine-prefix-options.py emulate-modeset off "$reg" >/dev/null
+        "$ROOT/build/steamarm-wine-prefix-options" emulate-modeset off "$reg" >/dev/null
         screen=$(DISPLAY=:2 xdpyinfo 2>/dev/null | awk '/dimensions:/ {print $2}')
         # What reaches the window (the shim's probe, LXRT_VK_SCALER_PROBE),
         # with Proton's fullscreen hack off and the game shown on its
-        # full-screen toplevel (LXRT_VK_PADDED_FULLSCREEN, settings-env.py):
+        # full-screen toplevel (LXRT_VK_PADDED_FULLSCREEN, steamarm-settings-env):
         # red in the left half, blue in the right one (B8G8R8A8: 0,0,255 and
         # 255,0,0). With a filter of the shim's own, the image its pass wrote
         # at the window's size; without one, the game's 1280x720 image, which
@@ -203,7 +203,7 @@ for t in ${@:-tick tick_32 tone tone_32 regwin d3d11 d3d12 d3d9 d3d9_32 d3d11_32
     fi
     log="$LOGS/win-$t.log"
     if [ $wined3d = 1 ]; then
-        # As scripts/settings-env.py sets it: OpenGL 4.5 (stage 39).
+        # As steamarm-settings-env sets it: OpenGL 4.5 (stage 39).
         dll=(WINEDLLOVERRIDES="d3d9,d3d11,dxgi,d3d10core=b" GALLIUM_DRIVER=zink
              "MESA_EXTENSION_OVERRIDE=+GL_ARB_vertex_type_2_10_10_10_rev +GL_ARB_texture_buffer_object_rgb32")
     else

@@ -1,0 +1,8 @@
+[package]
+name = "steamarm-wine-builtin-mark"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "steamarm-wine-builtin-mark"
+path = "src/main.rs"

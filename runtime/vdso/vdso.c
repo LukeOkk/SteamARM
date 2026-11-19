@@ -10,7 +10,7 @@
 // refreshes; anything not handled here falls back to the real syscall.
 //
 // Built as a Linux aarch64 shared object (vdso.lds), embedded in lxrun
-// (vdso_blob.S), mapped per process by runtime/vdso_map.c. Must not touch x18.
+// (vdso_blob.S), mapped per process by runtime/vdso_map.rs. Must not touch x18.
 #include <stdint.h>
 
 struct lx_timespec { int64_t tv_sec; int64_t tv_nsec; };

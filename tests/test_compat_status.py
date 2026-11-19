@@ -9,7 +9,7 @@ from unittest.mock import patch
 
 REPO = Path(__file__).resolve().parents[1]
 spec = importlib.util.spec_from_file_location(
-    "compat_status", REPO / "scripts/compat-status.py")
+    "compat_status", REPO / "tests/compat_status_legacy.py")
 compat = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(compat)
 

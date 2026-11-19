@@ -32,24 +32,30 @@ malloc+stdio+snprintf ok, strlen=27
 
 | file | does |
 |---|---|
-| `elf.c` | maps `PT_LOAD` segments, refuses what it cannot honour |
+| `elf.rs` | maps supported `PT_LOAD` segments and applies segment protections |
+| `memlog.rs` | records address-space operations and guest file mappings for fault reports |
 | `rewrite.c` | rewrites every `svc #0` into a branch to a per-site trampoline |
 | `trampoline.S` | the trampoline template, and the thunk that enters the guest |
 | `dispatch.c` | the Linux syscall table |
-| `tls.c` | the guest thread pointer, in a Darwin TSD slot |
+| `arena.rs` | reserved address space for Windows fixed mappings and the guest break |
+| `elf.rs` | maps supported aarch64 PIE ELF images and applies segment protections |
+| `gbase.rs` | rebases 32-bit guest syscall pointers and repairs low-pointer faults |
+| `props.rs` | maps Android property paths to the per-root service directory and starts the service on demand |
+| `shmirror.rs` | mirrors changing file-backed data into a sub-page composite |
+| `tls.rs` | the guest thread pointer, in a Darwin TSD slot |
 | `thread.c` | `clone`/`clone3`, `futex`, thread exit |
 | `signal.c` | signal numbers, the Linux frame, delivery and return |
-| `errno_map.c` | Darwin errno → Linux errno |
-| `fsflags.c` | `open()` and `*at()` flag values |
+| `errno_map.rs` | Darwin errno → Linux errno; host values generated from macOS SDK headers |
+| `fsflags.rs` | `open()` and `*at()` flag values, fcntl lock commands and flock layouts |
 | `socket.c` | `sockaddr` layout, address families, `SOCK_*` flags |
-| `sysreg.c` | `CTR_EL0`, which Darwin traps even for its own code |
+| `sysreg.rs` | `CTR_EL0`, which Darwin traps even for its own code |
 | `window.m` | the `NSWindow` + `CAMetalLayer` the guest presents into |
 | `include/lxrt_host.h` | the host bridge, for guest code to include |
-| `stack.c` | argc/argv/envp and the auxiliary vector, as glibc expects them |
+| `stack.rs` | argc/argv/envp and the auxiliary vector, as glibc expects them |
 | `main.c` | `lxrun`, with `--trace` and `--dry-run` |
 | `binder.c` | `/dev/binder`, `/dev/hwbinder`, `/dev/vndbinder` for the guest: open, ioctl, mmap, poll, fd passing |
 | `binder_hub.c` | the binder driver's state as a host process, `lxrun --binder-hub <dir>` (`docs/ANDROID_RUNTIME_ARCHITECTURE.md`, "Binder") |
-| `props.c` | `/dev/__properties__` and `/dev/socket/property_service` for Android guests: the service's directory, started on demand; the area files look root-owned |
+| `props.rs` | `/dev/__properties__` and `/dev/socket/property_service` for Android guests: the service's directory, started on demand; the area files look root-owned |
 | `propsvc.c` | Android's system property service as a host process, `lxrun --property-service <dir> <root>`: the areas built from the image, setprop (`docs/ANDROID_RUNTIME_ARCHITECTURE.md`, "Properties") |
 
 Guest absolute paths resolve inside `LXRT_ROOT` when it is set;
@@ -191,13 +197,13 @@ rewriter cannot reach is poisoned with `brk #1` instead of being left alone.
   Each has its own translation module; nothing is passed through.
 - **Never return a host errno.** Darwin and Linux disagree on the numbers —
   `EAGAIN`/`EDEADLK` are swapped, `ENOSYS` is 78 against 38 — so every return
-  path goes through `errno_map.c`. Getting this wrong killed glibc's
+  path goes through `errno_map.rs`. Getting this wrong killed glibc's
   `clone3` → `clone` fallback and surfaced as
   `pthread_create: Remote address changed`.
 - **Do not advertise capabilities the runtime lacks.** `HWCAP_CPUID` in the
   auxiliary vector means "the kernel emulates `mrs` of the ID registers".
   Darwin does not, and glibc took SIGILL on `mrs x0, midr_el1` before its first
-  syscall. `stack.c` now leaves it out, with a comment saying why.
+  syscall. `stack.rs` now leaves it out, with a comment saying why.
 - **The syscall table is the measured head of the distribution**, not Linux.
   Anything else returns `-ENOSYS` and is recorded so a failing run names the
   call it lacked.

@@ -48,6 +48,7 @@
 set -euo pipefail
 CANON_BASE=$PWD
 cd "$(dirname "$0")/.." || exit 1
+REPO=$PWD
 . scripts/roots.sh
 
 STATE="${STEAMARM_STATE:-$(d="$HOME/Developer/SteamARM-roots"; [ -d "$d" ] || [ ! -d "$HOME/SteamARM-roots" ] || d="$HOME/SteamARM-roots"; echo "$d")}"
@@ -57,7 +58,6 @@ BUNDLE="${ANDROID_BUNDLE:-$STATE/android.sparsebundle}"
 MOUNT="${ANDROID_MOUNT:-/Volumes/SteamARMAndroid}"
 DEBUGFS="${DEBUGFS:-/opt/homebrew/opt/e2fsprogs/sbin/debugfs}"
 FSCK_EROFS="${FSCK_EROFS:-/opt/homebrew/opt/erofs-utils/bin/fsck.erofs}"
-PY=scripts/androidroot.py
 # The emulator side of the x86_64 root: FEX-emu has PT_INTERP
 # /usr/lib/lxrt-emu/ld-linux-aarch64.so.1 and DT_RPATH /usr/lib/lxrt-emu
 # (scripts/build-fex-host.sh); FEXServer is the plain build, started through
@@ -115,6 +115,17 @@ VENDOR_URL="$SF/vendor/waydroid_$ARCH/$VENDOR_ZIP/download"
 say() { echo "mkandroidroot: $*"; }
 die() { echo "mkandroidroot: $*" >&2; exit 1; }
 
+androidroot() {
+    local bin="${STEAMARM_ANDROIDROOT_BIN:-$REPO/build/steamarm-androidroot-tools}"
+    if [ ! -x "$bin" ]; then
+        cargo build --offline --locked --release \
+            --manifest-path "$REPO/tools/androidroot/Cargo.toml" \
+            --target-dir "$REPO/build/rust-androidroot"
+        install -m 755 "$REPO/build/rust-androidroot/release/steamarm-androidroot-tools" "$bin"
+    fi
+    "$bin" "$@"
+}
+
 sha_ok() { [ "$(shasum -a 256 "$1" | awk '{print $1}')" = "$2" ]; }
 
 fetch() {   # fetch NAME SHA URL
@@ -150,10 +161,10 @@ unpack_img() {  # unpack_img ZIP NAME.img
     local out="$RAW/$2" kind
     [ -f "$out" ] && { say "$2: already extracted"; return 0; }
     unzip -o -q -d "$RAW" "$IMAGES/$1" "$2"
-    kind=$(python3 $PY image-kind "$out")
+    kind=$(androidroot image-kind "$out")
     if [ "$kind" = sparse ]; then
-        python3 $PY unsparse "$out" "$out.raw" && mv "$out.raw" "$out"
-        kind=$(python3 $PY image-kind "$out")
+        androidroot unsparse "$out" "$out.raw" && mv "$out.raw" "$out"
+        kind=$(androidroot image-kind "$out")
     fi
     chmod 444 "$out"
     say "$2: $kind"
@@ -161,7 +172,7 @@ unpack_img() {  # unpack_img ZIP NAME.img
 
 extract_fs() {  # extract_fs IMG DEST
     local kind
-    kind=$(python3 $PY image-kind "$1")
+    kind=$(androidroot image-kind "$1")
     mkdir -p "$2"
     case "$kind" in
         ext4)
@@ -237,7 +248,7 @@ extract_fs "$RAW/vendor.img" "$NEW/vendor"
 # at /apex/<name from apex_manifest.pb> (com.android.art.release ->
 # com.android.art). Real directories, not links: bionic's linker checks a
 # library's real path against its namespace's permitted paths (/apex/...).
-python3 $PY apex-names "$NEW" > "$NEW/apex/.names"
+androidroot apex-names "$NEW" > "$NEW/apex/.names"
 while read -r dir name _ver; do
     if [ "$name" = ZIP ]; then
         die "/system/apex/$dir is a packed APEX; this image was expected flattened"

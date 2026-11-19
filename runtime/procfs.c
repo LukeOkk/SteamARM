@@ -65,7 +65,7 @@ bool lxrt_fd_hidden(int fd)
 // A descriptor the runtime keeps for itself inside the guest's table: moved
 // above the numbers a guest expects next (Linux hands out the lowest free
 // one), close-on-exec, and left out of /proc/self/fd. getdents64's duplicate
-// of a directory the guest reads (dirents.c) was not: Android's zygote, which
+// of a directory the guest reads (dirents.rs) was not: Android's zygote, which
 // checks every descriptor before it forks, found "Unsupported st_mode for FD
 // 40: DIR" and aborted, one boot in about ten (MEASURED: zygote exit status
 // 1 right at sys.boot_completed, the framework restarted).

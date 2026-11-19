@@ -473,14 +473,14 @@ struct SettingsView: View {
     }
 
     private var graphicsOrder: [GraphicsBackend] {
-        [.auto, .vulkanMoltenVK, .vulkanKosmicKrisp, .openGLWineD3D]
+        [.auto, .vulkanKosmicKrisp, .vulkanMoltenVK, .openGLWineD3D]
     }
 
-    /// The backend games get with the "Motor" chosen, as scripts/settings-env.py
-    /// decides it: AUTO is MoltenVK there, and a backend that cannot run falls
-    /// back (only KosmicKrisp has the MetalFX paths of "Escalado del juego").
+    /// The backend games get with the "Motor" chosen, as steamarm-settings-env
+    /// decides it: AUTO prefers detected KosmicKrisp, then MoltenVK; a backend
+    /// that cannot run falls back.
     private var gameGraphics: GraphicsBackend {
-        draft.graphics == .auto ? .vulkanMoltenVK : model.capabilities.effectiveGraphics(draft.graphics)
+        model.capabilities.effectiveGraphics(draft.graphics)
     }
 
     private var runtimeSection: some View {
@@ -489,6 +489,26 @@ struct SettingsView: View {
                 LabeledContent("Sesión", value: "ZERO-VM")
                 Text("SteamARM no usa ninguna máquina virtual: lxrun ejecuta aarch64 directamente y x86 con FEX.")
                     .font(.caption).foregroundStyle(.secondary)
+            }
+            Section("Actualizaciones de SteamARM") {
+                Button {
+                    model.checkForUpdates()
+                } label: {
+                    if model.releaseCheckInProgress {
+                        Label("Buscando…", systemImage: "arrow.triangle.2.circlepath")
+                    } else {
+                        Label("Buscar actualizaciones", systemImage: "arrow.down.circle")
+                    }
+                }
+                .disabled(model.releaseCheckInProgress)
+                if let message = model.releaseCheckMessage {
+                    Text(message).font(.caption).foregroundStyle(.secondary)
+                }
+                if let version = model.latestReleaseVersion {
+                    Link("Descargar SteamARM \(version)", destination: URL(string: "https://github.com/LukeOkk/SteamARM/releases/latest")!)
+                    Text("Abre el archivo descargado y reemplaza SteamARM en Aplicaciones. La biblioteca y los ajustes se conservan.")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
             }
             Section("Presentación") {
                 ForEach(PresentationMode.allCases, id: \.self) { mode in

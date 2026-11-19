@@ -17,13 +17,13 @@
 # shared one (scripts/run-fex.sh) serves the Ubuntu x86 rootfs. This root has
 # a server of its own, on its own socket name (FEX_SERVERSOCKETPATH) and with
 # its own lock (HOME=/data/local/tmp), so neither can see or replace the
-# other. It is started here if it is not running, detached (scripts/session.py).
+# other. It is started here if it is not running, detached (steamarm-session).
 # It does NOT exit by itself when idle: FEXServer ignores --persistent's
 # timeout when it runs with --foreground (FEX's ProcessPipe.cpp waits with no
 # timeout when Foreground is set; MEASURED, three servers idle for 7-10 min,
 # benchmarks/stage28-android-reliability.txt), and --foreground is what keeps
 # it from daemonizing away from the PID file. Stop it with --server-stop; each
-# one left counts toward scripts/safeguard.sh's 80 lxrun processes.
+# one left counts toward the Rust safeguard's 80 lxrun processes.
 #
 # Environment:
 #   ANDROID_X86_ROOT   the root         (/Volumes/SteamARMAndroid/root-x86_64)
@@ -36,7 +36,17 @@
 #   FEX_SMCCHECKS      mtrack (default, FEX's page tracking), full, none
 #   ANDROID_X86_SERVER_IDLE  FEXServer's --persistent (60; no effect with --foreground, above)
 set -u
-cd "$(dirname "$0")/.." || exit 1
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+cd "$SCRIPT_DIR/.." || exit 1
+PROJECT_ROOT="${STEAMARM_PROJECT_ROOT:-$PWD}"
+SAFEGUARD_BIN="${STEAMARM_SAFEGUARD_BIN:-}"
+if [ ! -x "$SAFEGUARD_BIN" ]; then
+    if [ -x "$PROJECT_ROOT/build/steamarm-safeguard" ]; then
+        SAFEGUARD_BIN="$PROJECT_ROOT/build/steamarm-safeguard"
+    else
+        SAFEGUARD_BIN="$SCRIPT_DIR/../steamarm-safeguard"
+    fi
+fi
 . scripts/roots.sh
 ROOT="${ANDROID_X86_ROOT:-/Volumes/SteamARMAndroid/root-x86_64}"
 LXRUN="${LXRUN:-build/lxrun}"
@@ -64,7 +74,9 @@ esac
 [ -x "$ROOT/usr/lib/lxrt-emu/FEX" ] || {
     echo "run-android-x86: no x86_64 Android root with FEX at $ROOT (scripts/mkandroidroot.sh --arch x86_64)" >&2; exit 1; }
 [ -x "$LXRUN" ] || { echo "run-android-x86: no $LXRUN (make lxrt)" >&2; exit 1; }
-[ -n "${STEAMARM_NO_SAFEGUARD:-}" ] || scripts/safeguard.sh start >/dev/null
+if [ -z "${STEAMARM_NO_SAFEGUARD:-}" ] && [ -x "$SAFEGUARD_BIN" ]; then
+    STEAMARM_PROJECT_ROOT="$PROJECT_ROOT" "$SAFEGUARD_BIN" start >/dev/null
+fi
 
 BCP=$(sed -n 's/^ *export BOOTCLASSPATH //p' "$ROOT/init.environ.rc")
 DBCP=$(sed -n 's/^ *export DEX2OATBOOTCLASSPATH //p' "$ROOT/init.environ.rc")
@@ -81,7 +93,7 @@ base_env=(
     # The runtime's informational lines off Android's stderr (lxrt_info_stream).
     LXRT_QUIET="${LXRT_QUIET:-1}"
     # Process and thread ids below 65536 for every process of the stack
-    # (runtime/ids.c): 32-bit bionic keeps them in 16 bits and aborted with
+    # (runtime/ids.rs): 32-bit bionic keeps them in 16 bits and aborted with
     # the Mac's pids past 65535 (LXRT_SMALL_IDS=0 turns it off).
     LXRT_SMALL_IDS="${LXRT_SMALL_IDS:-1}"
 )
@@ -97,7 +109,7 @@ if [ -z "$(server_pids)" ]; then
     # In a subshell, so the server is no child of the guest this script
     # becomes (scripts/run-fex.sh says why); detach gives it its own session.
     ( env -i "${base_env[@]}" FEX_SILENTLOG=0 PYTHONCOERCECLOCALE=0 STEAMARM_SESSION_PY=1 \
-        /usr/bin/python3 scripts/session.py detach \
+        build/steamarm-session detach \
         "$LXRUN" /usr/lib/lxrt-emu/ld-linux-aarch64.so.1 --library-path /usr/lib/lxrt-emu \
         /usr/lib/lxrt-emu/FEXServer --foreground --persistent="${ANDROID_X86_SERVER_IDLE:-60}" \
         >"$ROOT/data/local/tmp/fexserver.log" 2>&1 &

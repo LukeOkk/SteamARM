@@ -15,7 +15,7 @@ class SettingsEnvironmentTests(unittest.TestCase):
         cls.temp = tempfile.TemporaryDirectory(prefix="steamarm-settings-test-")
         with patch.dict(os.environ, {"STEAMARM_STATE": cls.temp.name}):
             spec = importlib.util.spec_from_file_location(
-                "settings_env_test", REPO / "scripts/settings-env.py")
+                "settings_env_test", REPO / "tests/settings_env_legacy.py")
             cls.settings = importlib.util.module_from_spec(spec)
             spec.loader.exec_module(cls.settings)
 
@@ -78,7 +78,8 @@ class SettingsEnvironmentTests(unittest.TestCase):
                                  (esync, fsync))
 
     def test_graphics_backend(self):
-        with patch.object(self.settings, "shim_selects_icd", return_value=True):
+        with patch.object(self.settings, "shim_selects_icd", return_value=True), \
+                patch.object(self.settings, "kosmickrisp_available", return_value=False):
             self.assertEqual(self.env({"graphicsBackend": "vulkanKosmicKrisp"})[
                 "STEAMARM_VK_ICD"], "kosmickrisp")
             for backend in ("auto", "vulkan", "vulkanMoltenVK"):
@@ -130,8 +131,11 @@ class SettingsEnvironmentTests(unittest.TestCase):
             self.assertEqual(out.getvalue().strip(), want)
 
     def test_steam_ui_acceleration(self):
-        self.assertNotIn("LXRT_EXEC_ARGS", self.settings.env_from_settings({"steamUIAcceleration": False}))
-        env = self.settings.env_from_settings({})
+        software = "steamwebhelper!--type=:--disable-gpu"
+        self.assertEqual(self.settings.env_from_settings({"steamUIAcceleration": False})[
+            "LXRT_EXEC_ARGS"], software)
+        self.assertEqual(self.settings.env_from_settings({})["LXRT_EXEC_ARGS"], software)
+        env = self.settings.env_from_settings({"steamUIAcceleration": True})
         self.assertTrue(env["LXRT_EXEC_ARGS"].startswith("steamwebhelper!--type=:--use-gl=angle --use-angle=vulkan"))
         self.assertNotIn(";", env["LXRT_EXEC_ARGS"])
 
@@ -202,11 +206,12 @@ class SettingsEnvironmentTests(unittest.TestCase):
         # MoltenVK (AUTO graphics) and WineD3D have no FSR-to-MetalFX path:
         # nothing for the FidelityFX DLLs, the game's DLL loads untouched.
         # KK_FSR_METALFX is exported anyway (only KosmicKrisp reads it).
-        for gfx in ({}, {"graphicsBackend": "vulkanMoltenVK"}, {"graphicsBackend": "openGLWineD3D"}):
-            env = self.env(gfx)
-            self.assertEqual(env["KK_FSR_METALFX"], "1")
-            self.assertNotIn("STEAMARM_WIN_UPSCALER", env)
-            self.assertEqual(self.env(dict(gfx, gameUpscaler="fsr"))["KK_FSR_METALFX"], "0")
+        with patch.object(self.settings, "kosmickrisp_available", return_value=False):
+            for gfx in ({}, {"graphicsBackend": "vulkanMoltenVK"}, {"graphicsBackend": "openGLWineD3D"}):
+                env = self.env(gfx)
+                self.assertEqual(env["KK_FSR_METALFX"], "1")
+                self.assertNotIn("STEAMARM_WIN_UPSCALER", env)
+                self.assertEqual(self.env(dict(gfx, gameUpscaler="fsr"))["KK_FSR_METALFX"], "0")
         # KosmicKrisp asked for, but a shim that cannot load it: MoltenVK.
         with patch.object(self.settings, "shim_selects_icd", return_value=False):
             self.assertNotIn("STEAMARM_WIN_UPSCALER", self.env(kk))

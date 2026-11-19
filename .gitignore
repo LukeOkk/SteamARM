@@ -1,7 +1,9 @@
 build/
 .build/
+**/target/
 graphify-out/
 *.new
+steamframe-oobe-repair-*.img*
 *.o
 runtime/vdso/vdso.so
 launcher/tests/artifacts/

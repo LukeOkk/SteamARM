@@ -1,6 +1,6 @@
 #!/bin/bash
-# Heroic Games Launcher for linux-arm64, into the Fedora ARM64 root
-# (scripts/mkarmroot.sh) at opt/apps/heroic: no FEX, no VM.
+# Heroic Games Launcher for linux-arm64, into the Steam Frame ARM64 root
+# (scripts/mkframeroot.sh) at opt/apps/heroic: no FEX, no VM.
 #
 #   scripts/install-heroic-arm64.sh [--dest DIR] [--root DIR] [--downloads DIR]
 #
@@ -13,7 +13,7 @@
 #     with `electron` named `heroic`, as electron-builder names it;
 #   - resources/ of the official Heroic 2.22.3 linux-x64 tarball, whose
 #     app.asar is re-pointed from its x64 helpers to arm64 ones
-#     (scripts/heroic-asar.py; only the archive's header changes);
+#     (tools/heroic-asar; only the archive's header changes);
 #   - the arm64 helpers Heroic's own build fetches (meta/downloadHelperBinaries.ts
 #     at v2.22.3): legendary, gogdl, nile, comet from their releases, and
 #     vulkan-helper from Heroic's repository at the tag.
@@ -21,12 +21,11 @@
 # byte-identical to the one `electron-builder --linux dir --arm64` makes from
 # Heroic's source tag, and the Electron files are the same as in that build.
 #
-# The root needs GTK 3, libsecret, libnotify and python3 (scripts/mkarmroot.sh
-# seeds them; rebuild the root if they are missing). A rebuild of the root
-# keeps opt/apps and tmp/, so the install survives it.
+# The Steam Frame root image already has GTK 3, libsecret, libnotify and
+# python3. Rebuilding its derived root keeps opt/apps and tmp/.
 #   --dest DIR       install into DIR/Heroic-<version>-linux-arm64
 #                    (default <root>/opt/apps/heroic)
-#   --root DIR       the ARM64 root (default $STEAMARM_STATE/armroot)
+#   --root DIR       the ARM64 root (default $STEAMARM_STATE/arm64root)
 #   --downloads DIR  download cache (default $STEAMARM_BUILD/downloads/heroic-<version>)
 # Progress lines start with "[n/6]"; the last line is "installed: <guest program>".
 set -euo pipefail
@@ -36,7 +35,7 @@ STATE="${STEAMARM_STATE:-$(d="$HOME/Developer/SteamARM-roots"; [ -d "$d" ] || [ 
 BUILD="${STEAMARM_BUILD:-$(d="$HOME/Developer/SteamARM-build"; [ -d "$d" ] || [ ! -d "$HOME/SteamARM-build" ] || d="$HOME/SteamARM-build"; echo "$d")}"
 VERSION=2.22.3
 ELECTRON=43.1.1
-ROOT="$STATE/armroot"
+ROOT="$STATE/arm64root"
 DEST=""
 DL=""
 while [ $# -gt 0 ]; do
@@ -51,6 +50,17 @@ done
 DEST="${DEST:-$ROOT/opt/apps/heroic}"
 DL="${DL:-$BUILD/downloads/heroic-$VERSION}"
 NAME="Heroic-$VERSION-linux-arm64"
+ASAR_TOOL="${STEAMARM_HEROIC_ASAR_BIN:-$REPO/build/steamarm-heroic-asar}"
+
+if [ ! -x "$ASAR_TOOL" ]; then
+    cargo build --offline --locked --release \
+        --manifest-path "$REPO/tools/heroic-asar/Cargo.toml" \
+        --target-dir "$REPO/build/rust-heroic-asar" >&2 \
+        || die "cannot build the bundled Rust ASAR tool; run make heroic-asar"
+    install -m 755 "$REPO/build/rust-heroic-asar/release/steamarm-heroic-asar" \
+        "$REPO/build/steamarm-heroic-asar"
+    ASAR_TOOL="$REPO/build/steamarm-heroic-asar"
+fi
 
 # file  url  sha256  (licence)
 FILES="
@@ -70,12 +80,12 @@ sha() { shasum -a 256 "$1" | cut -d' ' -f1; }
 # The root must be able to run it: an Electron binary needs libgtk-3 (and
 # Chromium dlopens libsecret and libnotify); legendary and gogdl are python3
 # zipapps.
-[ -d "$ROOT" ] || die "no ARM64 root at $ROOT (scripts/mkarmroot.sh)"
+[ -d "$ROOT" ] || die "no Steam Frame ARM64 root at $ROOT (scripts/mkframeroot.sh)"
 missing=""
 for f in usr/lib64/libgtk-3.so.0 usr/lib64/libsecret-1.so.0 usr/lib64/libnotify.so.4 usr/bin/python3; do
     [ -e "$ROOT/$f" ] || missing="$missing /$f"
 done
-[ -z "$missing" ] || die "the ARM64 root at $ROOT lacks$missing: rebuild it with scripts/mkarmroot.sh (it keeps opt/apps and tmp/)"
+[ -z "$missing" ] || die "the Steam Frame root at $ROOT lacks$missing: rebuild it with scripts/mkframeroot.sh from the official image"
 
 echo "[1/6] downloading to $DL"
 mkdir -p "$DL"
@@ -118,13 +128,13 @@ for h in $HELPERS; do
 done
 
 echo "[4/6] re-pointing app.asar at the arm64 helpers"
-/usr/bin/python3 scripts/heroic-asar.py retarget "$X64/app.asar" "$OUT/resources/app.asar" "$BIN"
+"$ASAR_TOOL" retarget "$X64/app.asar" "$OUT/resources/app.asar" "$BIN"
 
 echo "[5/6] checking the result"
 file "$OUT/heroic" | grep -q 'ARM aarch64' || die "$OUT/heroic is not an aarch64 ELF"
-listed=$(/usr/bin/python3 scripts/heroic-asar.py list "$OUT/resources/app.asar" build/bin/arm64/linux/ | awk '{print $1}' | sed 's|.*/||' | sort | tr '\n' ' ')
+listed=$("$ASAR_TOOL" list "$OUT/resources/app.asar" build/bin/arm64/linux/ | awk '{print $1}' | sed 's|.*/||' | sort | tr '\n' ' ')
 [ "$listed" = "$(echo $HELPERS | tr ' ' '\n' | sort | tr '\n' ' ')" ] || die "app.asar lists [$listed] under build/bin/arm64/linux"
-if /usr/bin/python3 scripts/heroic-asar.py list "$OUT/resources/app.asar" build/bin/x64/linux/ | grep -q .; then
+if "$ASAR_TOOL" list "$OUT/resources/app.asar" build/bin/x64/linux/ | grep -q .; then
     die "app.asar still lists x64 helpers"
 fi
 

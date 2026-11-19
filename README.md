@@ -4,21 +4,20 @@ The Linux Steam client, and the Windows games Steam runs through Proton, on
 an Apple Silicon Mac, **without a virtual machine**.
 
 ```
-Steam (x86 / i386 Linux)  ─┐
-Proton / Wine (x86)        ├─ FEX (x86 → ARM64 JIT) ─┐
-DXVK / VKD3D-Proton        ┘                         ├─ lxrun (Linux on Darwin) ─ macOS
-aarch64 Linux programs, no FEX ──────────────────────┘
+Steam (native ARM64, Steam Frame / Holo) ────────────┐
+aarch64 Linux programs, no FEX ──────────────────────┼─ lxrun (Linux on Darwin) ─ macOS
+x86 / i386 compatibility apps ─ FEX (x86 → ARM64 JIT)┘
   (experimental: Valve's native arm64 Steam client, up to its sign-in window)
 
-Vulkan: x86 through FEX's thunks, aarch64 directly ─ Vulkan shim ─ MoltenVK ─ Metal
-                                         (or KosmicKrisp, experimental)
+Vulkan: x86 through FEX's thunks, aarch64 directly ─ Vulkan shim ─ Metal
+             AUTO: KosmicKrisp / Metal 4 on macOS 26+; MoltenVK fallback
 X11 windows ─ native X server (XQuartz, rootless) + quartz-wm ─ real macOS windows
 ```
 
-> **Experimental.** Steam itself works (store, library, downloads, login).
-> Windows programs run with Direct3D 9/11/12, sound and controllers in the
-> test probes, including through Steam's own Proton launch path. **Real games
-> are not verified yet.** Some will not start, and some will be slow.
+> **Experimental.** The native Steam client comes from the licensed Steam
+> Frame SteamOS image. Login, downloads and games still need validation.
+> Windows programs run with Direct3D 9/11/12, sound and controllers in test
+> probes. **Real games are not verified yet.**
 
 *Guía en español: [docs/es/GUIA.md](docs/es/GUIA.md).*
 
@@ -30,8 +29,16 @@ it, and click **Instalar**. Full instructions, including the first open of
 an app that isn't notarized, are in [docs/INSTALL.md](docs/INSTALL.md).
 
 Requirements: Apple Silicon, macOS 14+, Xcode Command Line Tools, Homebrew,
-about 25 GB free. The first install takes 20–60 minutes: it builds the
-runtime and FEX and downloads the Linux packages and Steam.
+about 25 GB free, and Valve's Steam Frame recovery image downloaded after
+accepting its license. The first install takes 20–60 minutes plus image
+extraction: it builds the runtime and FEX against the Steam Frame root and
+downloads the x86 compatibility root and Steam bootstrap. The image is used
+locally and is not redistributed by SteamARM.
+
+Rust dependencies are included in `vendor/`; Cargo builds use offline mode,
+so setup does not fetch crates from a registry. Homebrew formulae, upstream
+source projects and Linux packages are separate dependencies and may still
+be downloaded during setup.
 
 ## What you get
 
@@ -149,24 +156,22 @@ Working (measured, see `benchmarks/`):
 Experimental (measured, not ready for players):
 
 - Valve's native arm64 Steam client under lxrun, with no FEX, reaches its
-  "Sign in to Steam" window with V8's JIT on, on a Fedora aarch64 root and
-  on a root derived from the Steam Frame image; the launcher has it as
-  **Steam ARM64 (experimental)** and **Steam ARM64 · Steam Frame
-  (experimental)** (`benchmarks/stage22-native-arm64-bringup.txt`,
+  "Sign in to Steam" window with V8's JIT on, on the Steam Frame root; that
+  Arch-based root is the installer's sole ARM64 base (`benchmarks/stage23-frame-root.txt`,
   `benchmarks/stage23-native-arm64-jit.txt`,
-  `benchmarks/stage23-frame-root.txt`,
   [docs/STEAM_ARM64_BRINGUP.md](docs/STEAM_ARM64_BRINGUP.md)). Sign-in was
-  not attempted; the library, downloads and games under it are not
-  verified. Its root and client are not set up by the installer.
+  not completed; the library, downloads and games under it are not
+  verified.
 - Heroic Games Launcher as a native linux-arm64 program (no FEX), installed
   by the launcher into the ARM64 root: its window, pages and a clean close
   and reopen are measured (`benchmarks/stage24-heroic.txt`,
   [docs/HEROIC_INTEGRATION.md](docs/HEROIC_INTEGRATION.md)); store sign-in,
   downloads and games are not verified, Amazon Games does not run, and V8's
   optimizing tier is off.
-- KosmicKrisp (Mesa's Vulkan driver for Metal) in place of MoltenVK:
-  D3D11/D3D12 probes at 158/154 fps (`benchmarks/stage22-kosmickrisp.txt`);
-  not tried through Steam's launch path or with games.
+- KosmicKrisp (Mesa's Vulkan driver for Metal 4) is AUTO's preferred path
+  when available on macOS 26+; MoltenVK remains the fallback. D3D11/D3D12
+  probes reached 158/154 fps (`benchmarks/stage22-kosmickrisp.txt`); games
+  are not verified.
 
 Not done yet:
 

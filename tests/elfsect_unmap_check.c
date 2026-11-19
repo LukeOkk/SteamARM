@@ -1,6 +1,6 @@
 /* Host-only check of what the runtime keeps per guest file mapping across
- * munmap: the x18 pass's function tables (runtime/elfsect.c) and the
- * LXRT_GUEST_FAULTS file names (runtime/memlog.c). No guest code runs.
+ * munmap: the x18 pass's function tables (runtime/elfsect.rs) and the
+ * LXRT_GUEST_FAULTS file names (runtime/memlog.rs). No guest code runs.
  *
  * The Steam client's controller thread dlopens and dlcloses libusb about four
  * times a second; each cycle left four 16 KiB function tables and three path
@@ -20,7 +20,7 @@
  *     while the live mapping's file name is found,
  *   - the cost of one lookup does not grow with the number of cycles.
  * "sig" lines hash the answers in the first mapping (and in a mapping that
- * starts inside .text): built against an older elfsect.c they must not
+ * starts inside .text): built against an older elfsect implementation they must not
  * change.
  *
  *   make build/elfsect_unmap_check
@@ -40,9 +40,9 @@
 #include <time.h>
 #include <unistd.h>
 
-bool lxrt_elf_in_function(uint64_t addr);       /* elfsect.c, for rewrite.c */
+bool lxrt_elf_in_function(uint64_t addr);       /* elfsect.rs, for rewrite.c */
 
-/* What elfsect.c and memlog.c take from the rest of the runtime. */
+/* What elfsect.rs and memlog.rs take from the rest of the runtime. */
 bool lxrt_tlskeep_enabled(void) { return false; }
 void lxrt_tlskeep_add(uint64_t s, uint64_t e, const char *why) { (void)s; (void)e; (void)why; }
 FILE *lxrt_trace_stream(void) { return stderr; }
@@ -254,7 +254,7 @@ int main(int argc, char **argv)
         fprintf(stderr, "usage: %s [-n CYCLES>=100] [--raw-len] LIB.so...\n", argv[0]);
         return 2;
     }
-    setenv("LXRT_GUEST_FAULTS", "1", 1);                     /* memlog.c reads it once */
+    setenv("LXRT_GUEST_FAULTS", "1", 1);                     /* memlog.rs reads it once */
     uint64_t stride = 0;
     for (; a < argc && g_nlibs < MAX_LIBS; a++) {
         struct lib *l = &g_libs[g_nlibs];
